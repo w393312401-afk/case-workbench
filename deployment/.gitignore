@@ -1,0 +1,5 @@
+node_modules/
+.wrangler/
+.text-site-build-*/
+.env*
+.dev.vars*

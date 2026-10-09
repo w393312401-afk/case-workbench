@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark"><title>案例工作台 · 视频参考库</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/directions.css"><link rel="stylesheet" href="/navigation.css"><link rel="stylesheet" href="/shell.css"><link rel="stylesheet" href="/settings.css"><link rel="stylesheet" href="/global-search.css"><link rel="stylesheet" href="/library.css"><link rel="stylesheet" href="/detail.css"><link rel="stylesheet" href="/inline-editor.css">
+  <script src="/shell.js" defer></script><script src="/settings.js" defer></script><script src="/directions.js" defer></script><script src="/navigation.js" defer></script><script src="/native.js" defer></script><script src="/library.js" defer></script><script src="/bulk.js" defer></script><script src="/detail.js" defer></script>
+  <link rel="stylesheet" href="/direction-picker.css"><script src="/direction-picker.js" defer></script>
+  <link rel="stylesheet" href="/reviews-layout.css"><link rel="stylesheet" href="/home.css"><link rel="stylesheet" href="/material-basket.css"><link rel="stylesheet" href="/scripts.css"><link rel="stylesheet" href="/writing.css">
+  <script src="/material-basket.js" defer></script><script src="/home.js" defer></script><script src="/scripts.js" defer></script>
+  <script src="/transcript-sync.js" defer></script><script src="/delete.js" defer></script><script src="/editor.js" defer></script><script src="/inline-editor.js" defer></script><script src="/app.js" defer></script><script src="/ai.js" defer></script><script src="/perf-dashboard.js" defer></script><script src="/performance.js" defer></script><script src="/reviews.js" defer></script><script src="/global-search.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#library"><span class="brand-mark">▰</span><span>案例工作台<small>CONTENT WORKSPACE</small></span></a>
+    <label class="global-product"><span>当前产品</span><select id="global-product" aria-label="全局产品"><option value="202H">SHARPAL 202H</option></select></label>
+    <div class="sidebar-label">内容工作流</div>
+    <nav class="workflow-nav" aria-label="内容工作流">
+      <button class="nav-item" id="home-nav" data-page="home"><span data-icon="clock"></span>本周</button>
+      <button class="nav-item" id="reviews-nav" data-page="reviews"><span data-icon="chat"></span>用户声音</button>
+      <button class="nav-item" id="directions-nav" data-page="directions"><span data-icon="layers"></span>卖点与方向</button>
+      <button class="nav-item" id="ai-nav" data-page="ai"><span data-icon="bot"></span>写稿<span class="nav-count" id="ai-active-count" hidden></span></button>
+      <button class="nav-item" id="videos-nav" data-page="videos"><span data-icon="chart"></span>视频数据</button>
+      <button class="nav-item" id="library-nav" data-page="library"><span data-icon="grid"></span>案例库</button>
+    </nav>
+    <details class="library-navigation" id="library-navigation" hidden><summary>原案例栏目</summary>
+    <nav aria-label="案例分类">
+      <button class="nav-item active" data-view="all"><span data-icon="grid"></span>全部案例<span class="nav-count" id="count-all">—</span></button>
+      <button class="nav-item" data-view="positive"><span data-icon="spark"></span>转化正向参考<span class="nav-count" id="count-positive">—</span></button>
+      <button class="nav-item" data-view="mixed"><span data-icon="chart"></span>高播放低转化<span class="nav-count" id="count-mixed">—</span></button>
+      <button class="nav-item" data-view="pending"><span data-icon="clock"></span>待验证与整理<span class="nav-count" id="count-pending">—</span></button>
+      <button class="nav-item" data-view="native"><span data-icon="globe"></span>本土表达参考<span class="nav-count" id="count-native">—</span></button>
+      <button class="nav-item" data-view="legacy"><span data-icon="layers"></span>旧库资料<span class="nav-count" id="count-legacy">—</span></button>
+      <button class="nav-item" data-view="archived"><span data-icon="archive"></span>已归档<span class="nav-count" id="count-archived">—</span></button>
+    </nav>
+    </details>
+    <button class="nav-item" id="materials-nav" data-material-open aria-label="打开素材篮"><span data-icon="folder"></span>素材篮<span class="nav-count" data-material-count>0</span></button>
+    <button class="nav-item" id="files-nav" data-page="settings"><span data-icon="folder"></span>设置</button>
+    <div class="sidebar-bottom"><div class="connection"><i id="connection-dot"></i><span id="connection-text">连接本地案例库</span></div><p id="sync-detail" class="sync-detail" role="status" aria-live="polite"></p><p>视频、文案与修订记录<br>都保存在这台电脑上。</p><button class="subtle dark" id="sync-button"><span data-icon="refresh"></span>重新同步</button></div>
+  </aside>
+  <main>
+    <header class="topbar"><div id="breadcrumb">工作空间 <span>/</span> 案例库</div><div class="topbar-right"><button type="button" class="global-search-trigger" id="global-search-open" aria-label="全局搜索（Ctrl+K）"><span data-icon="search"></span><span class="search-label">全局搜索</span><kbd>Ctrl K</kbd></button><button class="secondary compact" id="import-video-top"><span data-icon="video"></span>导入视频</button><button class="primary compact" id="add-top"><span data-icon="plus"></span>收录案例</button></div></header>
+    <div id="error-banner" class="banner error" role="alert" hidden></div>
+    <section id="content" class="content"><div class="skeleton-page" role="status" aria-label="正在读取本地案例"><div class="skeleton-heading"></div><div class="skeleton-line"></div><div class="skeleton-grid"><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div></div></div></section>
+  </main>
+  <dialog id="edit-dialog" aria-labelledby="edit-title"><form id="edit-form"><div class="dialog-heading"><div><span class="eyebrow">CASE EDITOR</span><h2 id="edit-title">编辑案例</h2></div><button type="button" class="icon-button" id="close-editor" aria-label="关闭编辑"><span data-icon="close"></span></button></div><div id="editor-fields"></div><div class="dialog-footer"><span id="save-hint">保存会新增一条修订，保留旧记录。</span><div><button type="button" class="secondary" id="cancel-editor">取消</button><button type="submit" class="primary" id="save-button"><span data-icon="check"></span>保存到本地案例库</button></div></div></form></dialog>
+  <dialog id="discard-dialog" aria-labelledby="discard-title"><div class="confirm-body"><h2 id="discard-title">保留这次编辑？</h2><p>还有未保存的修改。继续编辑可以保留这些内容。</p><div class="confirm-actions"><button class="secondary" id="discard-edits">放弃修改</button><button class="primary" id="keep-editing">继续编辑</button></div></div></dialog>
+  <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description"><form id="delete-form"><div class="dialog-heading"><div><span class="eyebrow">PERMANENT DELETE</span><h2 id="delete-title">彻底删除已归档案例</h2></div><button type="button" class="icon-button" id="close-delete" aria-label="关闭删除确认"><span data-icon="close"></span></button></div><div id="delete-fields"></div><div class="dialog-footer"><span id="delete-hint">先核对删除清单，再输入案例编号确认。</span><div><button type="button" class="secondary" id="cancel-delete">取消</button><button type="submit" class="danger" id="confirm-delete" disabled><span data-icon="trash"></span>彻底删除</button></div></div></form></dialog>
+  <dialog id="bulk-dialog" aria-labelledby="bulk-title"><form id="bulk-form"><div class="dialog-heading"><div><span class="eyebrow">SELECTED CASES</span><h2 id="bulk-title">批量操作</h2></div><button type="button" class="icon-button" id="close-bulk" aria-label="关闭批量操作"><span data-icon="close"></span></button></div><div id="bulk-fields"></div><div class="dialog-footer"><span id="bulk-hint">仅处理本次选定的案例。</span><div><button type="button" class="secondary" id="cancel-bulk">关闭</button><button type="submit" class="danger" id="confirm-bulk" hidden>彻底删除所选案例</button></div></div></form></dialog>
+  <div id="video-drop-overlay" class="video-drop-overlay" aria-hidden="true" hidden><div><span data-icon="video"></span><strong id="video-drop-label">松开鼠标，导入视频</strong><p>复制到案例库，原文件保持不变</p></div></div>
+  <dialog id="ai-create-dialog" aria-labelledby="ai-create-title"><form id="ai-create-form"><div class="dialog-heading"><div><span class="eyebrow">WORK WITH YOUR CASE</span><h2 id="ai-create-title">AI 协作</h2></div><button type="button" class="icon-button" id="close-ai-create" aria-label="关闭 AI 协作"><span data-icon="close"></span></button></div><div class="ai-create-content"><p id="ai-create-case" class="ai-case-context"></p><p id="ai-create-version" class="context-note"></p><div class="ai-service-row"><p id="ai-create-availability" class="ai-service-status" role="status"></p><button type="button" class="subtle" id="ai-create-check">重新检查</button></div><div id="ai-create-settings"></div><label class="field"><span>这次希望怎么做？</span><textarea id="ai-create-instruction" required maxlength="12000" placeholder="填写一句具体要求…"></textarea></label><p class="ai-candidate-note">结果保存在独立任务中，作为候选供你检查和继续修改。</p><div id="ai-create-error" class="ai-error" role="alert" hidden></div></div><div class="dialog-footer"><span id="ai-create-hint">提交后可在「AI 协作」查看进度与结果。</span><div><button type="button" class="secondary" id="cancel-ai-create">取消</button><button type="submit" class="primary" id="submit-ai-create">开始协作</button></div></div></form></dialog>
+  <dialog id="ai-delete-dialog" aria-labelledby="ai-delete-title" aria-describedby="ai-delete-description"><form id="ai-delete-form"><div class="dialog-heading"><div><span class="eyebrow">LOCAL RECORDS</span><h2 id="ai-delete-title">删除所选协作记录</h2></div><button type="button" class="icon-button" id="close-ai-delete" aria-label="关闭删除确认"><span data-icon="close"></span></button></div><div class="ai-delete-content"><p id="ai-delete-description">所选任务的要求、历轮回复和候选结果会从这台电脑删除。关联案例及其正式记录不会改变；删除后无法从工作台恢复。</p><p id="ai-delete-count"></p><div id="ai-delete-error" class="ai-error" role="alert" hidden></div></div><div class="dialog-footer"><span id="ai-delete-hint">请确认本次要删除的本地记录。</span><div><button type="button" class="secondary" id="cancel-ai-delete">取消</button><button type="submit" class="danger" id="confirm-ai-delete"><span data-icon="trash"></span>删除本地记录</button></div></div></form></dialog>
+  <div id="toast" role="status" hidden></div>
+</body></html>

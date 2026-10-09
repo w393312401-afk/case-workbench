@@ -1,0 +1,119 @@
+/* Scoped to the copied public front end; the local workbench is untouched. */
+.public-text-mode [data-public-hidden="true"],
+.public-text-mode .video-panel,
+.public-text-mode .card-media,
+.public-text-mode .archive-notice,
+.public-text-mode .detail-assets-inline,
+.public-text-mode .history-asset,
+.public-text-mode .video-drop-overlay,
+.public-text-mode img,
+.public-text-mode video,
+.public-text-mode audio,
+.public-text-mode iframe,
+.public-text-mode object,
+.public-text-mode embed {
+  display: none !important;
+}
+.public-text-mode .public-text-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 14px 32px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--line, #d9e2df);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+  color: var(--ink, #253b34);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.public-text-mode .public-text-banner strong {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 6px;
+  padding: 1px 8px;
+  background: var(--surface-tint, #e1eee7);
+  color: var(--green-ink, #265841);
+  font-size: 13px;
+}
+.public-text-mode .public-text-banner > span:last-child {
+  margin-left: auto;
+  color: var(--muted, #687971);
+}
+.public-text-mode .public-text-banner [data-public-sync-status] {
+  color: var(--green-ink, #3c6334);
+  font-size: 12px;
+}
+.public-text-mode #content .detail-layout {
+  grid-template-columns: minmax(0, 1fr) 218px !important;
+}
+.public-text-mode .detail-main {
+  min-width: 0;
+}
+.public-text-mode .case-card {
+  min-height: 0;
+}
+.public-text-mode .case-card .card-body {
+  padding-top: 20px;
+}
+.public-text-mode .sidebar-bottom .connection i {
+  background: #7caa94;
+}
+.public-text-mode [data-public-read-label="true"] {
+  cursor: default;
+  opacity: 1;
+  color: inherit;
+}
+.public-text-mode .perf-direction [data-public-read-label="true"] {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.public-text-mode .detail-tools:empty,
+.public-text-mode .ai-action-buttons:has(> [data-public-hidden="true"]),
+.public-text-mode .rev-actions:empty {
+  display: none;
+}
+.public-text-mode .ai-case-heading {
+  align-items: center;
+}
+.public-text-mode .sidebar-bottom {
+  padding-bottom: 16px;
+}
+@media (max-width: 1000px) {
+  .public-text-mode #content .detail-layout {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+@media (max-width: 650px) {
+  .public-text-mode .public-text-banner {
+    margin: 10px 14px 0;
+    padding: 10px 12px;
+    gap: 6px 10px;
+  }
+  .public-text-mode .public-text-banner > span:last-child {
+    margin-left: 0;
+  }
+}
+/* Phones: one compact line; the export time stays, the fixed notes drop out. */
+@media (max-width: 760px) {
+  .public-text-mode .public-text-banner {
+    margin: 8px 14px 0;
+    padding: 6px 10px;
+    gap: 2px 8px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    border-radius: 9px;
+  }
+  .public-text-mode .public-text-banner strong {
+    font-size: 11.5px;
+    padding: 0 6px;
+  }
+  .public-text-mode .public-text-banner [data-public-sync-status] {
+    font-size: 11px;
+  }
+  .public-text-mode .public-text-banner > span:last-child {
+    display: none;
+  }
+}

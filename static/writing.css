@@ -1,0 +1,154 @@
+/* Writing page: model providers, task cards and copyable title lines. */
+.ai-provider-badge{display:inline-flex;align-items:center;margin-right:8px;padding:2px 8px;border-radius:20px;font-size:11px;line-height:1.6;font-weight:600;letter-spacing:.2px;background:var(--surface-alt);color:var(--muted-soft);border:1px solid var(--line);white-space:nowrap;vertical-align:1px}
+.ai-provider-badge.claude{background:#f6e9e1;color:#a4502c;border-color:#ecd2c3}
+.ai-provider-badge.codex{background:#e8efe9;color:#35614c;border-color:#d2e0d5}
+@media(prefers-color-scheme:dark){.ai-provider-badge.claude{background:#3a2a22;color:#f0b393;border-color:#57392b}.ai-provider-badge.codex{background:#23332b;color:#a9d3bb;border-color:#33473b}}
+.ai-provider-hint{margin:8px 0 0;font-size:var(--font-micro);line-height:1.8;color:var(--warm-ink)}
+.ai-provider-hint a{color:inherit;text-decoration:underline;font-weight:600}
+.ai-task-card .ai-task-ask{color:var(--green-ink);margin:-4px 0 10px;line-height:1.7;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.ai-task-card small{display:flex;align-items:center;flex-wrap:wrap;gap:4px}
+.ai-group-choice select{appearance:auto;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--green-ink);font:inherit;font-size:13px}
+.ai-shortcut-hint{display:block;margin-top:6px;font-size:var(--font-micro);color:var(--muted-soft);text-align:right}
+.ai-title-lines{margin:0 0 22px;padding:16px 18px;border:1px solid var(--line);border-radius:10px;background:var(--surface-alt)}
+.ai-title-lines[hidden]{display:none}
+.ai-title-lines-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.ai-title-lines-head h3{font-size:13px;font-weight:650;color:var(--green-ink)}
+.ai-title-lines-head h3 small{font-weight:400;color:var(--muted-soft);margin-left:6px;font-size:var(--font-micro)}
+.ai-title-lines-head .subtle{font-size:var(--font-micro);white-space:nowrap}
+.ai-title-group+.ai-title-group{margin-top:12px}
+.ai-title-group h4{font-size:var(--font-micro);font-weight:600;color:var(--muted-soft);margin:0 0 6px}
+.ai-title-line{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;margin:0 0 6px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--green-ink);font:inherit;font-size:14px;line-height:1.6;text-align:left;cursor:pointer;transition:border-color .15s,background .15s}
+.ai-title-line span{min-width:0;overflow-wrap:anywhere}
+.ai-title-line svg{width:14px;height:14px;flex-shrink:0;opacity:.45}
+.ai-title-line:hover{border-color:var(--accent)}.ai-title-line:hover svg{opacity:1}
+.ai-title-line.copied{border-color:#7fae8f;background:#eef6f0}
+@media(prefers-color-scheme:dark){.ai-title-line.copied{background:#233a2c}}
+@media(max-width:720px){.ai-title-lines{padding:14px}.ai-title-line{font-size:13px;min-height:40px}}
+
+/* Phone layout (≤760px): top bar with product and search, bottom tab bar for the workflow pages.
+   Kept at the end of the last stylesheet index.html loads, so it settles the older narrow-screen rules
+   and is served by the existing static whitelist without a server change. */
+@media (max-width: 760px) {
+  :root { --sidebar-width: 0px; --mobile-top: 56px; --mobile-tabs: 60px; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { overflow-x: hidden; }
+
+  /* Bottom tab bar: the aside stays in place and is laid out along the bottom edge. */
+  body .sidebar {
+    position: fixed; inset: auto 0 0 0; width: 100%; height: calc(var(--mobile-tabs) + env(safe-area-inset-bottom));
+    padding: 0 2px env(safe-area-inset-bottom); display: flex; flex-direction: row; align-items: stretch;
+    overflow: visible; z-index: 30; border-top: 1px solid #39433d; box-shadow: 0 -4px 18px #0000001f;
+  }
+  body .sidebar .sidebar-label, body .sidebar .library-navigation, body .sidebar .sidebar-bottom,
+  body .sidebar .brand > span:last-child, body .sidebar .nav-count:not(#ai-active-count) { display: none !important; }
+  body .sidebar .workflow-nav { display: contents; }
+  body .sidebar .nav-item:not([hidden]),
+  body .sidebar > #materials-nav:not([hidden]) {
+    position: relative; flex: 1 1 0; min-width: 0; width: auto; height: auto; min-height: 0; margin: 0; padding: 7px 0 6px;
+    display: flex !important; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    font-size: 10.5px; line-height: 1.15; letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-radius: 10px; background: transparent; color: #b9c3ba; box-shadow: none;
+  }
+  body .sidebar .nav-item span[data-icon] { display: inline-flex !important; }
+  body .sidebar .nav-item svg { width: 21px; height: 21px; }
+  body .sidebar .nav-item.active { background: transparent; color: #fff; }
+  body .sidebar .nav-item.active span[data-icon] { background: var(--accent); color: #fff; border-radius: 999px; padding: 2px 13px; }
+  body .sidebar .nav-item #ai-active-count {
+    display: inline-flex; position: absolute; top: 3px; left: calc(50% + 8px); right: auto; min-width: 16px; height: 16px;
+    padding: 0 4px; font-size: 10px; line-height: 16px; border-radius: 8px;
+  }
+  body .sidebar .nav-item #ai-active-count[hidden] { display: none !important; }
+  body .sidebar > #materials-nav [data-material-count] {
+    display: inline-flex !important; position: absolute; top: 3px; left: calc(50% + 8px); padding: 0 4px; font-size: 10px; line-height: 15px;
+    border-radius: 8px; background: var(--accent); color: #fff;
+  }
+
+  /* Settings, brand and product leave the tab bar for the top bar (fixed, so they escape the aside). */
+  body .sidebar > #files-nav {
+    position: fixed; top: 8px; right: 10px; flex: none; width: 40px; height: 40px; padding: 0; font-size: 0; gap: 0;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); z-index: 31;
+  }
+  body .sidebar > #files-nav.active { border-color: var(--accent); color: var(--accent-text); }
+  body .sidebar > #files-nav.active span[data-icon] { background: none; color: inherit; padding: 0; }
+  body .sidebar > #files-nav span[data-icon] { display: none !important; }
+  body .sidebar > #files-nav::before { content: "⚙"; font-size: 21px; line-height: 1; }
+  body .sidebar .brand { display: none; }
+  body .sidebar .global-product {
+    position: fixed; top: 8px; left: 10px; width: min(52vw, 220px); max-width: none; padding: 0; margin: 0; z-index: 31; display: block;
+  }
+  body .sidebar .global-product > span { display: none; }
+  body .sidebar .global-product select {
+    height: 40px; padding: 0 24px 0 10px; font-size: 16px; font-weight: 600; border-color: var(--line); background-color: var(--surface); color: var(--ink);
+  }
+
+  /* The local workbench also shows 收录案例 in the top bar; video import stays a desktop task. */
+  #import-video-top { display: none !important; }
+  body:not(.public-text-mode) .sidebar .global-product { width: min(50vw, 200px); }
+
+  main { margin-left: 0; padding-bottom: calc(var(--mobile-tabs) + env(safe-area-inset-bottom) + 12px); min-width: 0; }
+  .topbar {
+    position: sticky; top: 0; z-index: 20; height: var(--mobile-top); min-height: 0; padding: 0 58px 0 10px; flex-wrap: nowrap;
+    justify-content: flex-end; gap: 6px; background: var(--paper); border-bottom: 1px solid var(--line);
+  }
+  #breadcrumb { display: none; }
+  .topbar-right { gap: 6px; flex-wrap: nowrap; }
+  .global-search-trigger { width: 40px; height: 40px; padding: 0; justify-content: center; }
+  .global-search-trigger .search-label, .global-search-trigger kbd { display: none; }
+  #add-top { height: 40px; padding: 0 10px; font-size: 0; gap: 0; }
+  #add-top svg { width: 19px; height: 19px; }
+  .content { padding: 18px 14px 24px; }
+  .banner { margin: 10px 14px 0; }
+  #toast { left: 50%; bottom: calc(var(--mobile-tabs) + env(safe-area-inset-bottom) + 12px); max-width: calc(100vw - 24px); }
+
+  /* Page headings: title first, actions wrap underneath instead of squeezing the description. */
+  .page-heading { flex-direction: column; align-items: flex-start; gap: 12px; margin-bottom: 20px; }
+  body .page-heading > *, body .page-heading > div:first-child { flex: 0 0 auto; max-width: 100%; }
+  .page-heading > div:first-child { width: 100%; }
+  .page-heading a svg, .page-heading button svg { width: 17px; height: 17px; flex-shrink: 0; }
+  .page-heading > a { display: inline-flex; align-items: center; gap: 6px; }
+  .page-heading h1, .ai-task-heading h1 { font-size: 24px; line-height: 1.3; }
+  .page-heading p { font-size: 12px; line-height: 1.7; margin-top: 8px; }
+  .page-heading .eyebrow { font-size: 10px; letter-spacing: 1.4px; }
+  .page-heading .perf-actions, .page-heading > div:last-child:not(:first-child) { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-start; }
+
+  /* Tab rows scroll sideways instead of wrapping into a second row. */
+  .direction-detail-links, .direction-page-tabs, .detail-tabs, .scripts-tabs, .perf-tabs {
+    display: flex; flex-wrap: nowrap !important; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  }
+  .direction-detail-links::-webkit-scrollbar, .direction-page-tabs::-webkit-scrollbar, .detail-tabs::-webkit-scrollbar,
+  .scripts-tabs::-webkit-scrollbar, .perf-tabs::-webkit-scrollbar { display: none; }
+  .direction-detail-links > *, .direction-page-tabs > *, .detail-tabs > *, .scripts-tabs > *, .perf-tabs > * { flex: 0 0 auto; white-space: nowrap; }
+
+  /* Comfortable taps and no iOS zoom on focus. */
+  input:not([type=checkbox]):not([type=radio]):not([type=range]), select, textarea { font-size: 16px; }
+  .content button:not(.nav-item):not(.ai-title-line), .content .button, dialog button { min-height: 38px; }
+  .content select, .content input[type=text], .content input[type=search], .content input:not([type]) { min-height: 42px; }
+
+  /* Cards breathe less so text gets the width. */
+  .section-card, .home-section { padding: 16px 14px; border-radius: 12px; }
+  .perf-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .perf-table-wrap, .perf-week-table, .case-table-wrap, .markdown-body table { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+  .markdown-body table { display: block; }
+  pre, code { overflow-wrap: anywhere; }
+
+  /* Writing page: whole row copies the 🔴 title line; icon stays visible on touch screens. */
+  .ai-title-lines { padding: 12px; margin-left: -2px; margin-right: -2px; }
+  .ai-title-lines-head { flex-wrap: wrap; }
+  .ai-title-lines-head .subtle { min-height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .ai-title-line { min-height: 48px; padding: 10px 12px; font-size: 14px; line-height: 1.55; }
+  .ai-title-line svg { width: 18px; height: 18px; opacity: .8; }
+  .ai-title-line:active { background: var(--surface-tint); }
+
+  /* Dialogs open as full-width sheets. */
+  dialog[open] { max-width: 100vw; width: 100vw !important; max-height: 92dvh; margin: auto 0 0; border-radius: 14px 14px 0 0; }
+  dialog .dialog-heading { padding: 16px; }
+  dialog .dialog-footer { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 760px) and (prefers-color-scheme: dark) {
+  .topbar { background: var(--paper); }
+}
+@media (max-width: 360px) {
+  body .sidebar .nav-item, body .sidebar > #materials-nav { font-size: 9.5px; }
+  body .sidebar .global-product { width: 48vw; }
+}

@@ -1,0 +1,30 @@
+# Keep the application source; local business materials remain outside Git.
+/*
+!/.gitignore
+!/*.py
+!/*.pyw
+!/config.json
+!/使用说明.md
+!/static/
+!/tests/
+!/deployment/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+.wrangler/
+.text-site-build-*/
+.env*
+.dev.vars*
+*.log
+*.new
+
+# Generated exports, snapshots, and deployment screenshots.
+/deployment/site/
+/deployment/*.zip
+/deployment/*.jpg
+/deployment/*.png
+/deployment/deployment-result.json
+/deployment/export-report.json
+/deployment/text-snapshot.json
