@@ -64,7 +64,7 @@ class DetailWorkspaceTests(unittest.TestCase):
         page.on("pageerror", lambda error: errors.append(str(error)))
         self.addCleanup(lambda: self.assertEqual(errors, [], "Browser JavaScript errors"))
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#case/{self.identifier}{tab}")
-        page.locator(".case-summary").wait_for()
+        page.locator(".case-dock").wait_for()
         return page
 
     def settle_layout(self, page):
@@ -96,42 +96,33 @@ class DetailWorkspaceTests(unittest.TestCase):
             self.assertGreaterEqual(geometry["top"], geometry["dockBottom"] - 1)
         return geometry
 
-    def test_portrait_video_and_summary_stay_visible_while_reading(self):
+    def section(self, page, heading):
+        return page.locator(".detail-info:not([hidden]) section.section-card").filter(
+            has=page.get_by_role("heading", name=heading, exact=True))
+
+    def test_portrait_video_stays_visible_while_reading(self):
         page = self.open_page(tab="/script")
         page.locator("#case-player").wait_for()
         page.wait_for_function("() => document.querySelector('#case-player').videoHeight > 0")
-        page.locator('.detail-nav').get_by_role("button", name="完整文案", exact=True).click()
+        self.section(page, "完整文案").evaluate("element => scrollTo(0, scrollY + element.getBoundingClientRect().top - 120)")
         page.wait_for_function("() => scrollY > 100")
         self.settle_layout(page)
         video = self.assert_fully_visible(page, "#case-player", below_dock=True)
         self.assertAlmostEqual(video["width"] / video["height"], 9 / 16, delta=0.03)
-        self.assert_fully_visible(page, ".case-summary")
-        page.locator('.detail-nav').get_by_role("button", name="问题与适用边界", exact=True).click()
-        page.wait_for_function("""() => {
-          const current = document.querySelector('.detail-nav [aria-current]');
-          return current && current.textContent.includes('问题与适用边界');
-        }""")
+        self.section(page, "问题与适用边界").scroll_into_view_if_needed()
         self.settle_layout(page)
         self.assert_fully_visible(page, "#case-player", below_dock=True)
-        self.assert_fully_visible(page, ".case-summary")
 
-    def test_summary_opens_current_content_from_a_history_deep_link(self):
+    def test_overview_tab_opens_current_content_from_a_history_deep_link(self):
         page = self.open_page(tab="/history")
         page.locator(".history-item").first.wait_for()
-        page.locator('.case-summary [data-summary="主要购买理由"]').click()
+        page.get_by_role("tab", name="概要", exact=True).click()
         page.wait_for_url(f"**/#/202H/case/{self.identifier}")
         page.locator('#detail-body').wait_for()
         section = page.locator('.detail-info section.section-card').filter(
             has=page.get_by_role("heading", name="主要购买理由", exact=True)
         )
         section.get_by_text("完整工具组合便于携带和收纳。", exact=True).wait_for()
-        page.wait_for_function("""() => {
-          const sections = [...document.querySelectorAll('.detail-info section.section-card')];
-          const section = sections.find(s => s.querySelector('h2')?.textContent.trim() === '主要购买理由');
-          const rect = section.getBoundingClientRect();
-          const dock = document.querySelector('.case-dock').getBoundingClientRect();
-          return rect.top >= dock.bottom - 1 && rect.top < innerHeight - 60;
-        }""")
         self.assertIn("active", page.get_by_role("tab", name="概要", exact=True).get_attribute("class"))
 
     def test_compact_player_modes_pause_and_restore_without_horizontal_overflow(self):
@@ -150,7 +141,7 @@ class DetailWorkspaceTests(unittest.TestCase):
         self.assertTrue(player.evaluate("video => video.paused"))
         self.assertTrue(page.locator("#video-panel-body").evaluate("element => element.hidden"))
         page.reload()
-        page.locator(".case-summary").wait_for()
+        page.locator(".case-dock").wait_for()
         self.assertTrue(page.locator("#video-panel-body").evaluate("element => element.hidden"))
         page.get_by_role("button", name="固定", exact=True).click()
         page.locator("#case-player").wait_for()
@@ -191,10 +182,11 @@ class DetailWorkspaceTests(unittest.TestCase):
         performance.get_by_role("link", name="查看销售数据表").wait_for()
         self.assertEqual(page.locator("#sales-import").count(), 0)
         self.assertEqual(performance.locator(".facts-grid, .evidence-block").count(), 0)
-        summary = page.locator('.case-summary [data-summary="表现数据"]')
+        page.get_by_role("tab", name="概要", exact=True).click()
+        summary = page.locator('.detail-overview-metrics [data-summary="表现数据"]')
         summary.get_by_text("销售数据表暂不可用", exact=True).wait_for()
         self.assertEqual(summary.locator(".case-summary-metrics, small").count(), 0)
-        summary.click()
+        summary.click()  # the overview's performance card opens the data tab at the sales section
         page.wait_for_function("""() => {
           const rect = document.querySelector('#detail-section-performance').getBoundingClientRect();
           const dock = document.querySelector('.case-dock').getBoundingClientRect();
@@ -225,8 +217,10 @@ class DetailWorkspaceTests(unittest.TestCase):
         self.assertEqual(performance.locator(".facts-grid").count(), 1)
         performance.locator(".metric-value").get_by_text("0", exact=True).first.wait_for()
         self.assertEqual(performance.locator(".evidence-block").count(), 0)
-        summary = page.locator('.case-summary [data-summary="表现数据"]')
+        page.get_by_role("tab", name="概要", exact=True).click()
+        summary = page.locator('.detail-overview-metrics [data-summary="表现数据"]')
         summary.locator(".case-summary-metrics").get_by_text("0", exact=True).first.wait_for()
+        page.get_by_role("tab", name="数据", exact=True).click()
 
         screenshot = self.root / "performance.png"
         screenshot.write_bytes(base64.b64decode(
@@ -238,10 +232,11 @@ class DetailWorkspaceTests(unittest.TestCase):
         })
         fake_rows.return_value = {}
         page.reload()
-        page.locator(".case-summary").wait_for()
+        page.locator(".case-dock").wait_for()
         performance.get_by_text("销售数据表未匹配到此视频", exact=True).wait_for()
         self.assertEqual(performance.locator(".facts-grid, .evidence-block").count(), 0)
         self.assertEqual(performance.get_by_alt_text("此案例的表现数据截图").count(), 0)
+        page.get_by_role("tab", name="概要", exact=True).click()
         summary.get_by_text("销售数据表未匹配到此视频", exact=True).wait_for()
         self.assertEqual(summary.locator(".case-summary-metrics").count(), 0)
 
@@ -342,35 +337,6 @@ class DetailWorkspaceTests(unittest.TestCase):
         expected = ["本土表达与场景", "完整文案", "问题与适用边界", "原始拆解"]
         headings = page.locator(".detail-info:not([hidden]) section.section-card h2").all_text_contents()
         self.assertEqual([heading.strip() for heading in headings], expected)
-        self.assertEqual(page.locator(".detail-nav button").all_text_contents(), expected[:-1])
-        groups = page.locator(".detail-nav-group")
-        self.assertEqual(groups.count(), 1)
-        self.assertEqual(groups.nth(0).locator("button").all_text_contents(), expected[:-1])
-
-    def test_small_outline_remains_navigable_and_uses_section_groups(self):
-        page = self.open_page(tab="/script")
-        # A compact detail variant can show fewer sections. Its outline still
-        # follows the rendered group metadata instead of hardcoded heading names.
-        page.evaluate("""() => {
-          const keep = ['当前结论', '完整文案', '问题与适用边界'];
-          for (const section of document.querySelectorAll('.detail-info section.section-card')) {
-            const title = section.querySelector('h2')?.textContent.trim();
-            if (!keep.includes(title)) section.remove();
-            else if (title === '完整文案') section.dataset.detailGroup = 'overview';
-          }
-          buildDetailNav();
-        }""")
-        nav = page.locator(".detail-nav")
-        self.assertEqual(nav.locator("button").all_text_contents(), ["完整文案", "问题与适用边界"])
-        self.assertEqual(nav.locator(".detail-nav-group").first.locator("button").all_text_contents(),
-                         ["完整文案"])
-        for button in nav.locator("button").all():
-            target = button.get_attribute("aria-controls")
-            self.assertTrue(target)
-            self.assertEqual(page.locator(f"#{target}").count(), 1)
-        nav.get_by_role("button", name="问题与适用边界", exact=True).click()
-        page.wait_for_function("""() => document.querySelector('.detail-nav [aria-current]')
-            ?.textContent === '问题与适用边界'""")
 
     def test_four_tabs_keep_player_translation_and_expanded_history_nodes(self):
         current = copy.deepcopy(self.store.read_case(self.identifier)["current"])
@@ -457,7 +423,6 @@ class DetailWorkspaceTests(unittest.TestCase):
           evidence:{as_of:'2026-10-08',window:'测试窗口'}, video:{}}})""")
         self.assertIn("0", page.locator(".detail-overview-metrics").inner_text())
         self.assertIn("250", page.locator(".detail-overview-metrics").inner_text())
-        self.assertIn("250", page.locator('.case-summary [data-summary="表现数据"]').inner_text())
         page.get_by_role("tab", name="数据", exact=True).click()
         self.assertIn("250", page.locator("#detail-section-performance").inner_text())
         self.assertEqual(page.locator('[data-inline-section="metrics"] [data-inline-edit="metrics"]').count(), 1)

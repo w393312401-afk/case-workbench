@@ -235,7 +235,6 @@ function refreshDetailSalesData(summary) {
     else release?.after(updated);
   } else consistency?.remove();
   bindDetailInlineEditors(item);
-  buildDetailNav();
 }
 
 function bindReleaseEditor(item) {
@@ -398,7 +397,7 @@ function detailCompletion(item) {
 }
 function renderDetailSide(item) {
   const tasks = detailCompletion(item), missing = tasks.filter(task => !task.ready).length;
-  return `<aside class="detail-side" aria-label="案例协作与完整度"><div id="detail-ai-panel"></div><section class="detail-completion"><div class="section-title-row"><h2>待补全</h2><span>${missing ? `${missing} 项` : "已齐备"}</span></div><ul>${tasks.map(task => `<li class="${task.ready ? "is-ready" : "is-missing"}"><span>${icon(task.ready ? "check" : "edit")}${esc(task.label)}</span><button type="button" class="subtle" data-completion-section="${task.section}" data-completion-tab="${task.tab}">${task.ready ? "查看" : "补充"}</button></li>`).join("")}</ul></section><div id="detail-outline"></div></aside>`;
+  return `<aside class="detail-side" aria-label="案例协作与完整度"><div id="detail-ai-panel"></div><section class="detail-completion"><div class="section-title-row"><h2>待补全</h2><span>${missing ? `${missing} 项` : "已齐备"}</span></div><ul>${tasks.map(task => `<li class="${task.ready ? "is-ready" : "is-missing"}"><span>${icon(task.ready ? "check" : "edit")}${esc(task.label)}</span><button type="button" class="subtle" data-completion-section="${task.section}" data-completion-tab="${task.tab}">${task.ready ? "查看" : "补充"}</button></li>`).join("")}</ul></section></aside>`;
 }
 function bindDetailInlineEditors(item) {
   $$("[data-inline-section]").forEach(section => {
@@ -526,7 +525,6 @@ function renderDetail(item) {
   );
   switchDetailTab(item);
 }
-let detailNavCleanup = null;
 let detailWorkspaceObserver = null;
 let detailVideoCleanup = null;
 
@@ -538,7 +536,6 @@ function scrollDetailSection(section) {
 }
 
 function mountDetailWorkspace(item) {
-  detailNavCleanup?.();
   detailVideoCleanup?.();
   detailWorkspaceObserver?.disconnect();
   const heading = $(".detail-heading"), title = heading.querySelector("h1");
@@ -574,19 +571,6 @@ function mountDetailWorkspace(item) {
     bar.append(link);
   }
   dock.append(bar);
-  if (item.current) {
-    const cur = item.current;
-    const summary = document.createElement("div");
-    summary.className = "case-summary";
-    summary.setAttribute("aria-label", "案例摘要");
-    summary.innerHTML = `<button class="case-summary-item" data-summary="当前结论" title="${esc(cur.conclusion || "未记录")}（点击查看全文）"><span class="case-summary-label">当前结论</span><p>${esc(cur.conclusion || "未记录")}</p></button><button class="case-summary-item" data-summary="主要购买理由" title="${esc(cur.purchase_reason || "未单独整理")}（点击查看全文）"><span class="case-summary-label">主要购买理由</span><p>${esc(cur.purchase_reason || "未单独整理")}</p></button>${renderPerformanceSummary(item)}`;
-    summary.querySelectorAll("button").forEach(button => button.onclick = () => {
-      activateDetailTab(item, button.dataset.summary === "表现数据" ? "data" : "current");
-      const section = $$(".detail-info section.section-card").find(section => section.querySelector("h2")?.textContent.trim() === button.dataset.summary);
-      scrollDetailSection(section);
-    });
-    dock.append(summary);
-  }
   // Tabs, case meta, AI entry points (mounted by ai.js) and case tools share one row.
   const actions = document.createElement("div");
   actions.className = "detail-action-row";
@@ -698,47 +682,9 @@ function mountVideoWorkspace(item) {
   };
 }
 
-function buildDetailNav() {
-  detailNavCleanup?.();
-  const sections = $$(`.detail-info:not([hidden]) section.section-card`).filter(section => section.dataset.detailLabel);
-  document.querySelector(".detail-nav")?.remove();
-  if (!sections.length) return;
-  const nav = document.createElement("nav");
-  nav.className = "detail-nav";
-  nav.setAttribute("aria-label", "本页内容目录");
-  nav.innerHTML = [["overview", "速览"], ["deep", "深读"]].map(([group, name]) => {
-    const buttons = sections.map((section, index) => section.dataset.detailGroup === group
-      ? `<button type="button" data-section="${index}" aria-controls="${esc(section.id)}">${esc(section.dataset.detailLabel)}</button>` : "").join("");
-    return buttons ? `<div class="detail-nav-group"><span>${name}</span>${buttons}</div>` : "";
-  }).join("");
-  ($("#detail-outline") || $(".detail-layout")).append(nav);
-  const buttons = $$("[data-section]", nav);
-  buttons.forEach(button => button.onclick = () => scrollDetailSection(sections[Number(button.dataset.section)]));
-  let frame = 0;
-  const update = () => {
-    frame = 0;
-    if (!nav.isConnected) { detailNavCleanup?.(); return; }
-    if ($("#detail-body")?.hidden) return;
-    const offset = (Number.parseFloat(getComputedStyle($("#content")).getPropertyValue("--detail-sticky-top")) || 150) + 24;
-    let active = 0;
-    sections.forEach((section, i) => { if (section.getBoundingClientRect().top <= offset) active = i; });
-    if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4) active = sections.length - 1;
-    buttons.forEach(button => {
-      const selected = Number(button.dataset.section) === active;
-      button.classList.toggle("active", selected);
-      if (selected) button.setAttribute("aria-current", "location"); else button.removeAttribute("aria-current");
-    });
-    // The outline never scrolls the document while updating its selected section.
-  };
-  const schedule = () => { if (!frame) frame = requestAnimationFrame(update); };
-  window.addEventListener("scroll", schedule, { passive: true });
-  window.addEventListener("resize", schedule);
-  detailNavCleanup = () => { window.removeEventListener("scroll", schedule); window.removeEventListener("resize", schedule); cancelAnimationFrame(frame); };
-  update();
-}
 function cleanupDetailWorkspace() {
-  detailNavCleanup?.(); detailVideoCleanup?.(); detailWorkspaceObserver?.disconnect();
-  detailNavCleanup = null; detailVideoCleanup = null; detailWorkspaceObserver = null;
+  detailVideoCleanup?.(); detailWorkspaceObserver?.disconnect();
+  detailVideoCleanup = null; detailWorkspaceObserver = null;
 }
 function switchDetailTab(item) {
   const current = $("#detail-body"),
@@ -769,7 +715,6 @@ function switchDetailTab(item) {
     renderHistory(item);
     other.dataset.caseRevision = item.revision;
   }
-  buildDetailNav();
   window.dispatchEvent(new Event("resize"));
 }
 async function setArchived(item, archived) {

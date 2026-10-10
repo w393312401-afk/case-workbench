@@ -89,10 +89,8 @@
 .detail-side .ai-case-actions,.detail-completion{border:0!important;box-shadow:0 1px 2px #0000000a;border-radius:14px!important}
 .detail-side .ai-action-buttons{grid-template-columns:repeat(3,minmax(0,1fr))}
 .detail-side .ai-action-buttons button{padding:8px 4px;font-size:12px}
-/* the sticky header: title row, then a one-line summary */
+/* the sticky header: title row only */
 #content:has(.detail-heading) .case-dock{border:0;box-shadow:0 1px 0 var(--line)}
-#content:has(.detail-heading) .case-summary{gap:0}
-#content:has(.detail-heading) .case-summary-item p{display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
 .case-step{font-size:12px}
 /* tabs as a segmented control */
 #content:has(.detail-heading) .detail-tabs{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--fill);border:0;margin:0}
