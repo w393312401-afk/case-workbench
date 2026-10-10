@@ -6,15 +6,9 @@
 .library-saved-row>label,.library-saved-row>div{display:flex;align-items:center;gap:10px}
 .library-saved-row>label>span{font-size:13px;color:var(--muted-soft);white-space:nowrap}
 .library-saved-row select{max-width:320px;min-width:160px;padding:9px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--ink)}
-.library-search-row.toolbar{margin:0 0 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.library-search-row .search{flex:1;min-width:200px}
 .library-filter-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
 .library-filter-field{display:flex;flex-direction:column;gap:6px;min-width:0;font-size:12px;color:var(--muted-soft)}
 .library-filter-field select{width:100%;padding:9px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--ink);min-width:0}
-.library-sort-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
-.library-sort-row>div{display:flex;gap:12px}.library-sort-row .library-filter-field{flex-direction:row;align-items:center;gap:8px;white-space:nowrap}
-.library-sort-row .library-filter-field select{width:auto;min-width:80px}
-.library-sort-row .result-count{margin-left:auto}
 .selectable-card{cursor:default}
 #library-save-view{width:min(460px,94vw)}.library-view-form{padding:24px}.library-view-form p,.library-view-manager-body small{color:var(--muted-soft);font-size:12px;line-height:1.8}
 #library-view-manager{width:min(740px,94vw)}.library-view-manager-body{padding:8px 24px;max-height:60vh;overflow:auto}
@@ -22,7 +16,7 @@
 .library-view-row>div:first-child{min-width:0;flex:1}.library-view-row input{padding:9px 10px;width:100%;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink)}
 .library-view-row small{display:block;margin-top:6px}.library-view-error{color:var(--danger-ink);font-size:13px;line-height:1.7}
 @media(max-width:900px){.library-filter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:570px){.library-filter-panel{padding:15px}.library-presets{gap:6px}.library-presets button{padding:7px 9px;font-size:12px}.library-saved-row>label{width:100%}.library-saved-row select{min-width:0;flex:1;width:100%}.library-saved-row>div{flex-wrap:wrap}.library-filter-grid{gap:10px}.library-search-row .search{min-width:0;flex-basis:100%}.library-sort-row .result-count{margin-left:0}.library-view-row{align-items:stretch;flex-direction:column;gap:10px}.library-view-manager-body{padding:8px 16px}}
+@media(max-width:570px){.library-filter-panel{padding:15px}.library-presets{gap:6px}.library-presets button{padding:7px 9px;font-size:12px}.library-saved-row>label{width:100%}.library-saved-row select{min-width:0;flex:1;width:100%}.library-saved-row>div{flex-wrap:wrap}.library-filter-grid{gap:10px}.library-search-row .search{min-width:0;flex-basis:100%}.library-view-row{align-items:stretch;flex-direction:column;gap:10px}.library-view-manager-body{padding:8px 16px}}
 
 /* ---- case library: one search row, a category segment, the rest in the drawer ---- */
 .lib-heading{align-items:flex-end;margin-bottom:20px}
