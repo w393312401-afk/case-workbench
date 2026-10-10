@@ -51,7 +51,7 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
 
     def test_manual_script_derivation_release_and_case_conclusion_preserve_old_version(self):
         page = self.open_page(width=390)
-        page.locator("#script-new").click()
+        page.locator("#add-top").click()  # the top bar "保存脚本" opens the manual editor
         dialog = page.locator("#script-editor-dialog")
         dialog.locator('[name="title"]').fill("一个明确角度")
         dialog.locator('[name="text"]').fill("Keep the same angle across each pass.")
@@ -90,7 +90,8 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
         task = self.create_task("请只处理临时案例。")
         before = self.store.read_case(self.identifier)
         page = self.open_page(f"#/202H/ai/{task['task_id']}")
-        page.get_by_role("button", name="写回案例", exact=True).click()
+        page.locator(".ai-candidate-actions .ai-menu summary").first.click()
+        page.get_by_role("menuitem", name="写回案例", exact=True).click()
         dialog = page.locator("#script-editor-dialog")
         self.assertEqual(dialog.locator('[name="text"]').input_value(), "")
         self.assertIn("临时候选结果", dialog.locator(".script-candidate-source").inner_text())
@@ -123,7 +124,7 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
 
     def test_unknown_save_response_retries_same_request_without_duplicate_script(self):
         page = self.open_page()
-        page.locator("#script-new").click()
+        page.locator("#add-top").click()  # the top bar "保存脚本" opens the manual editor
         dialog = page.locator("#script-editor-dialog")
         dialog.locator('[name="title"]').fill("保留请求标识")
         dialog.locator('[name="text"]').fill("One saved version, even after a lost response.")
@@ -155,6 +156,7 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
         page.locator("#ai-create-dialog[open]").wait_for()
         self.assertEqual(self.request("GET", "/api/ai/tasks")[2]["tasks"], [])
         page.locator("#ai-create-instruction").fill("围绕固定角度起草一条短稿。")
+        page.locator("#ai-create-advanced").evaluate("details => { details.open = true; }")  # model and skills are folded
         page.locator("#ai-create-skills").select_option("none")
         page.locator("#submit-ai-create").click()
         page.locator("#ai-rounds").wait_for()
@@ -166,7 +168,7 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
 
     def test_script_draft_survives_cancelled_navigation(self):
         page = self.open_page()
-        page.locator("#script-new").click()
+        page.locator("#add-top").click()  # the top bar "保存脚本" opens the manual editor
         page.locator('#script-editor-dialog [name="text"]').fill("Keep this draft until I choose.")
         page.evaluate("location.hash='#/202H/library'")
         page.locator("#script-discard-dialog[open]").wait_for()
@@ -201,6 +203,7 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator("#ai-create-instruction").input_value(), plan["note"])
         self.assertTrue(page.locator("#ai-include-basket").is_checked())
         self.assertEqual(self.request("GET", "/api/ai/tasks")[2]["tasks"], [])
+        page.locator("#ai-create-advanced").evaluate("details => { details.open = true; }")  # model and skills are folded
         page.locator("#ai-create-skills").select_option("none")
         page.locator("#submit-ai-create").click()
         page.locator("#ai-rounds").wait_for()
@@ -230,6 +233,7 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
         self.assertEqual(boxes.count(), 2)
         self.assertTrue(all(boxes.nth(index).is_checked() for index in range(2)))
         self.assertEqual(page.locator("#ai-create-instruction-label").inner_text(), "补充要求（选填）")
+        page.locator("#ai-create-advanced").evaluate("details => { details.open = true; }")  # model and skills are folded
         page.locator("#ai-create-skills").select_option("none")
         submit = page.locator("#submit-ai-create")
         self.assertTrue(submit.is_enabled())

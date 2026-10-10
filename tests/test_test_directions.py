@@ -13,6 +13,26 @@ import test_ui_regressions as browser
 import test_ai_tasks as tasks
 
 
+# The library's filters and sort live in a drawer; selection checkboxes appear in selection mode.
+def open_library_filters(page):
+    if not page.locator("#library-filter-drawer[open]").count():
+        page.locator("#library-filter-open").click()
+        page.locator("#library-filter-drawer[open]").wait_for()
+
+
+def close_library_filters(page):
+    if page.locator("#library-filter-drawer[open]").count():
+        page.locator("#library-drawer-done").click()
+        page.locator("#library-filter-drawer[open]").wait_for(state="detached")
+
+
+def start_library_selection(page):
+    if page.locator("#library-select-toggle").get_attribute("aria-pressed") != "true":
+        page.locator("#library-select-toggle").click()
+        page.locator("#selection-toolbar:not([hidden])").wait_for()
+
+
+
 DIRECTION = {
     "direction_id": "202H-lock-angle", "main_difference": "对比徒手磨石，把角度锁住",
     "concern": "推磨时会不会晃", "closing": "看连续推磨，再判断是否适合自己",
@@ -132,13 +152,16 @@ class DirectionBrowserTests(unittest.TestCase):
         self.store.add({"title": "执行改动测试", "product": "SHARPAL 202H", "original": {"text": "Test source"},
                         "feedback": {"kind": "editorial", "text": "隔离验证"}, "current": current})
         page = self.open_page()
+        open_library_filters(page)
         page.locator("#direction-filter").select_option(DIRECTION["direction_id"])
         page.locator("#variant-filter").select_option("execution")
         self.assertEqual(page.locator(".case-card").count(), 1)
         self.assertIn("variant=execution", page.url)
         page.locator("#variant-filter").select_option("all")
+        close_library_filters(page)
         page.get_by_role("button", name="列表", exact=True).click()
         self.assertEqual(page.locator(".table-direction").count(), 2)
+        start_library_selection(page)
         page.locator("#select-visible").check()
         page.locator("#compare-selected").click()
         page.locator("#case-comparison").get_by_text("只换钩子", exact=True).wait_for()

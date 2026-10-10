@@ -144,7 +144,7 @@
   const actions = {
     home: ["开始写稿", "plus", () => window.CaseAI?.startBlank()],
     library: ["收录案例", "plus", () => openEditor(null)],
-    case: ["编辑当前案例", "edit", editCurrentCase],
+    case: ["用这个案例写稿", "edit", () => { const id = state.detail?.case_id; if (id) void window.CaseAI?.startWriting(id); else editCurrentCase(); }],
     directions: ["新建方向", "plus", () => window.CaseDirections?.openCreate()],
     videos: ["同步数据", "refresh", () => document.querySelector("#perf-sync")?.click()],
     reviews: ["重新同步", "refresh", () => document.querySelector("#rev-sync")?.click()],

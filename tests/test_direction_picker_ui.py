@@ -152,6 +152,7 @@ class DirectionPickerBrowserTests(unittest.TestCase):
         form.locator("select").select_option("202H-S2")
         form.get_by_role("button", name="保存", exact=True).click()
         page.locator(f'[data-direction-video="{VIDEO}"] [data-video-direction]').get_by_text("202H-S2", exact=True).wait_for()
+        page.locator(f'[data-video-row="{VIDEO}"] td.perf-title').click()  # collect lives in the details drawer
         page.locator(f'[data-collect="{VIDEO}"]').click()
         page.locator('.direction-inherit-note').get_by_text("202H-S2", exact=False).wait_for()
         page.locator('[name="conclusion"]').fill("测试收录会继承视频已经确定的方向")

@@ -207,6 +207,7 @@ class HomeMaterialUITests(unittest.TestCase):
     def test_video_hook_starts_empty_and_saves_only_explicit_quote(self):
         page=self.open_page(route='#/202H/videos',ready='.perf-tabs')
         page.locator('[data-perf-tab=list]').first.click()
+        page.locator('[data-video-row] td.perf-title').first.click()  # the hook button lives in the details drawer
         page.locator('[data-video-hook]').first.click()
         dialog=page.locator('#material-hook-dialog')
         field=dialog.locator('[name=text]')

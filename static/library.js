@@ -58,10 +58,16 @@ function bindMoveControls() {
 function card(item) {
   const cur = item.current || {},
     m = { ...caseIdentity(item), ...salesMetrics(item) },
-    validVideo = item.assets?.video?.exists;
-  return `<a draggable="false" class="case-card" href="#case/${item.case_id}" aria-label="查看案例：${esc(shortTitle(item))}">
-    <div class="card-media">${validVideo ? `<div class="missing-media thumbnail-fallback">${icon("video")}<span>正在读取视频封面…</span></div><img data-card-thumbnail data-src="${mediaURL(item.case_id, "thumbnail", item.current_event_id)}" loading="lazy" decoding="async" alt=""><span class="play-mark">${icon("play")}</span>` : `<div class="missing-media">${icon("video")}<span>${item.assets?.video ? "视频文件暂不可用" : "尚未关联视频"}</span></div>`}<span class="media-label">${displayValue(item.product)}</span><div class="card-media-footer"><span class="${m.creator_handle ? "" : "missing-value"}">${displayValue(m.creator_handle)}</span><span>${esc(item.current?.source_case ? sourceTypeNames[sourceType(item)] || "旧库资料" : "视频案例")}</span></div></div>
-    <div class="card-body"><div class="card-topline"><span class="case-badges">${badge(item)}${sourceBadges(item)}${item.archived ? archiveBadge(item) : ""}</span><span class="product-tag">${esc(m.video_id ? "TikTok" : "本地收录")}</span></div><h2>${esc(shortTitle(item))}</h2><div class="home-video-id">视频 ID：<span class="${m.video_id ? "" : "missing-value"}">${displayValue(m.video_id)}</span></div><p class="card-description">${esc(cur.conclusion || "等待整理当前结论、有效视频和文案。")}</p><div class="card-metrics"><div><span class="metric-label">播放量</span><span class="metric-value ${m.views_display === undefined ? "missing-value" : ""}">${displayValue(m.views_display)}</span></div><div><span class="metric-label">CTOR</span><span class="metric-value accent ${m.ctor_display === undefined ? "missing-value" : ""}">${displayValue(m.ctor_display)}</span></div><div><span class="metric-label">售出件数</span><span class="metric-value ${m.items_sold === undefined ? "missing-value" : ""}">${displayValue(m.items_sold)}${m.items_sold !== undefined ? "<small>件</small>" : ""}</span></div></div><div class="card-foot"><span>${esc(salesStatusLabel(item))}</span><span class="read">查看案例 ${icon("arrow")}</span></div></div></a>`;
+    validVideo = item.assets?.video?.exists,
+    hasMetrics = [m.views_display, m.ctor_display, m.items_sold].some((value) => value !== undefined && value !== null && value !== "");
+  const media = validVideo
+    ? `<div class="card-media"><div class="missing-media thumbnail-fallback">${icon("video")}<span>正在读取视频封面…</span></div><img data-card-thumbnail data-src="${mediaURL(item.case_id, "thumbnail", item.current_event_id)}" loading="lazy" decoding="async" alt=""><span class="play-mark">${icon("play")}</span><span class="media-label">${displayValue(item.product)}</span><div class="card-media-footer"><span class="${m.creator_handle ? "" : "missing-value"}">${displayValue(m.creator_handle)}</span><span>${esc(item.current?.source_case ? sourceTypeNames[sourceType(item)] || "旧库资料" : "视频案例")}</span></div></div>`
+    : `<div class="card-media is-missing">${icon("video")}<span>${item.assets?.video ? "视频文件暂不可用" : "尚未关联视频"}</span><span class="card-media-meta">${esc([item.product, m.creator_handle].filter(Boolean).join(" · "))}</span></div>`;
+  const metric = (label, value, suffix = "", accent = false) => `<div><span class="metric-label">${label}</span><span class="metric-value${accent ? " accent" : ""}${value === undefined ? " missing-value" : ""}">${displayValue(value)}${value !== undefined && suffix ? `<small>${suffix}</small>` : ""}</span></div>`;
+  return `<a draggable="false" class="case-card" href="#case/${item.case_id}" aria-label="查看案例：${esc(shortTitle(item))}">${media}
+    <div class="card-body"><div class="card-topline"><span class="case-badges">${badge(item)}${sourceBadges(item)}${item.archived ? archiveBadge(item) : ""}</span></div><h2>${esc(shortTitle(item))}</h2><p class="card-description">${esc(cur.conclusion || "等待整理当前结论、有效视频和文案。")}</p>
+    ${hasMetrics ? `<div class="card-metrics">${metric("播放量", m.views_display)}${metric("CTOR", m.ctor_display, "", true)}${metric("售出", m.items_sold, "件")}</div>` : `<div class="card-metrics is-empty"><span>${esc(salesStatusLabel(item))}</span></div>`}
+    <div class="card-foot"><span class="card-direction-name" title="${esc(cur.test_direction?.main_difference || "")}">${esc(directionLabel(item))}</span><span>${esc(String(readableDate(item.updated_at)).split(" ")[0])}</span></div></div></a>`;
 }
 function libraryPerformance(item) {
   const current=item.current;
@@ -96,12 +102,24 @@ function renderLibrary() {
   $("#breadcrumb").innerHTML="工作空间 <span>/</span> 案例库";
   window.WorkbenchShell?.registerProducts(state.cases);
   const summary=content==="native"?nativeSummary(scope):"";
-  $("#content").innerHTML=`<div class="page-heading"><div><span class="eyebrow">CASE LIBRARY</span><h1>案例库</h1><p>按表现、来源和方向查找参考，把常用筛选保存成视图。</p></div><span class="total-note">${scope.length} 条范围内案例 · 本地保存</span></div>
-    <section class="library-filter-panel" aria-label="案例库筛选"><div class="library-presets" role="group" aria-label="快捷筛选">${Object.entries(presets).map(([id,label])=>`<button type="button" data-library-preset="${id}" aria-pressed="${libraryPresetSelected(id)}">${label}</button>`).join("")}</div>
-    <div class="library-saved-row"><label><span>保存的视图</span><select id="library-saved-view" aria-label="保存的视图"><option value="">当前筛选</option>${saved.map(item=>`<option value="${esc(item.id)}" ${state.view===item.id?"selected":""}>${esc(item.label)}</option>`).join("")}</select></label><div><button type="button" class="secondary compact" id="library-save-view-button">${icon("plus")}保存当前视图</button><button type="button" class="subtle" id="library-manage-views">管理视图</button></div></div>
-    <div class="toolbar library-search-row"><label class="search">${icon("search")}<input id="case-search" aria-label="搜索当前案例" placeholder="搜索场景、英文表达或结论…" value="${esc(state.query)}"></label><button type="button" class="subtle" id="library-clear-filters">清除筛选</button>${!archived?`<button type="button" class="secondary compact" id="library-video-import">${icon("video")}导入视频</button>`:""}</div>
-    <div class="library-filter-grid">${libraryFilterMarkup("archive-category-filter","表现分类",{all:"全部表现",positive:"转化正向参考",mixed:"高播放低转化",pending:"待验证与整理"},state.archiveCategory || "all")}${libraryFilterMarkup("content-origin-filter","内容来源",{all:"全部来源",self_produced:"自制内容",overseas_creator:"海外达人"},state.contentOrigin || "all")}${libraryFilterMarkup("source-type-filter","资料类型",sourceTypeNames,state.sourceType)}${libraryFilterMarkup("archive-status-filter","归档状态",{active:"使用中",archived:"已归档",all:"全部状态"},libraryArchiveStatus())}<label class="library-filter-field"><span>测试方向</span><select id="direction-filter" aria-label="筛选测试方向">${directionFilterOptions(scope)}</select></label>${libraryFilterMarkup("variant-filter","变体类型",{all:"全部变体",...directionVariantNames},state.variantType)}</div>
-    <div class="library-sort-row"><div>${libraryFilterMarkup("sort-filter","排序",{updated:"最近更新",views:"播放量",ctor:"CTOR",sold:"售出件数"},state.sort)}${libraryFilterMarkup("sort-direction","顺序",{desc:"降序",asc:"升序"},state.sortDir)}</div><span id="result-count" class="result-count" aria-live="polite"></span></div></section>${summary}<div id="selection-toolbar" class="selection-toolbar"></div><div id="bulk-last-result" class="bulk-last-result" hidden></div><div id="case-results"></div><p class="library-footnote">表现以案例已保存的判断筛选；数字按视频 ID 读取销售数据表。</p>`;
+  const field=(id,label,values,current)=>libraryFilterMarkup(id,label,values,current);
+  const drawerFields=`${field("archive-category-filter","表现分类",{all:"全部表现",positive:"转化正向参考",mixed:"高播放低转化",pending:"待验证与整理"},state.archiveCategory || "all")}${field("content-origin-filter","内容来源",{all:"全部来源",self_produced:"自制内容",overseas_creator:"海外达人"},state.contentOrigin || "all")}${field("source-type-filter","资料类型",sourceTypeNames,state.sourceType)}${field("archive-status-filter","归档状态",{active:"使用中",archived:"已归档",all:"全部状态"},libraryArchiveStatus())}<label class="library-filter-field"><span>测试方向</span><select id="direction-filter" aria-label="筛选测试方向">${directionFilterOptions(scope)}</select></label>${field("variant-filter","变体类型",{all:"全部变体",...directionVariantNames},state.variantType)}${field("sort-filter","排序",{updated:"最近更新",views:"播放量",ctor:"CTOR",sold:"售出件数"},state.sort)}${field("sort-direction","顺序",{desc:"降序",asc:"升序"},state.sortDir)}`;
+  $("#content").innerHTML=`<div class="page-heading lib-heading"><div><h1>案例库</h1><p>${scope.length} 条案例 · 按表现、来源和方向查找参考，常用筛选可以存成视图。</p></div><div class="layout-switch lib-layout" role="group" aria-label="案例显示方式"><button type="button" data-layout="cards" class="${state.layout === "cards" ? "active" : ""}" aria-pressed="${state.layout === "cards"}">${icon("grid")}卡片</button><button type="button" data-layout="list" class="${state.layout === "list" ? "active" : ""}" aria-pressed="${state.layout === "list"}">${icon("file")}列表</button></div></div>
+    <section class="library-filter-panel lib-toolbar" aria-label="案例库筛选"><div class="lib-search-row"><label class="search">${icon("search")}<input id="case-search" aria-label="搜索当前案例" placeholder="搜索场景、英文表达或结论…" value="${esc(state.query)}"></label><button type="button" class="secondary lib-filter-open" id="library-filter-open" aria-haspopup="dialog" aria-controls="library-filter-drawer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>筛选<span class="rev-filter-count" id="library-filter-count" hidden></span></button>
+      <div class="lib-views library-saved-row"><label><span>视图</span><select id="library-saved-view" aria-label="保存的视图"><option value="">当前筛选</option>${saved.map(item=>`<option value="${esc(item.id)}" ${state.view===item.id?"selected":""}>${esc(item.label)}</option>`).join("")}</select></label><button type="button" class="subtle" id="library-save-view-button">${icon("plus")}保存视图</button><button type="button" class="subtle" id="library-manage-views">管理</button></div>
+      <button type="button" class="subtle" id="library-select-toggle" aria-pressed="${!!state.selecting}">${state.selecting ? "完成" : "选择"}</button></div>
+      <div class="library-presets lib-presets" role="group" aria-label="快捷筛选">${Object.entries(presets).map(([id,label])=>`<button type="button" data-library-preset="${id}" aria-pressed="${libraryPresetSelected(id)}">${label}</button>`).join("")}</div>
+      <div class="lib-active-row"><div class="rev-active" id="library-active"></div><span id="result-count" class="result-count" aria-live="polite"></span><button type="button" class="subtle" id="library-clear-filters">清除筛选</button></div></section>${summary}
+    <div id="selection-toolbar" class="selection-toolbar"${state.selecting ? "" : " hidden"}></div><div id="bulk-last-result" class="bulk-last-result" hidden></div><div id="case-results"></div><p class="library-footnote">表现以案例已保存的判断筛选；数字按视频 ID 读取销售数据表。</p>
+    <dialog id="library-filter-drawer" class="rev-drawer" aria-labelledby="library-filter-title"><div class="rev-drawer-head"><h2 id="library-filter-title">筛选与排序</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭筛选">${icon("close")}</button></div><div class="rev-drawer-body"><div class="library-filter-grid lib-drawer-grid">${drawerFields}</div></div><div class="rev-drawer-foot"><button type="button" class="subtle" id="library-drawer-clear">清除全部</button><button type="button" class="primary" data-drawer-close id="library-drawer-done">显示结果</button></div></dialog>`;
+  $("#content").classList.toggle("lib-selecting",!!state.selecting);
+  const drawer=$("#library-filter-drawer");
+  $("#library-filter-open").onclick=()=>{state.libraryDrawer=true;drawer.showModal();};
+  drawer.addEventListener("click",event=>{if(event.target===drawer||event.target.closest("[data-drawer-close]"))drawer.close();});
+  drawer.addEventListener("close",()=>{state.libraryDrawer=false;});
+  if(state.libraryDrawer)drawer.showModal();
+  $("#library-select-toggle").onclick=()=>{state.selecting=!state.selecting;if(!state.selecting)state.selection.clear();renderLibrary();};
+  $$(".lib-layout [data-layout]").forEach(button=>button.onclick=()=>{state.layout=button.dataset.layout;try{localStorage.setItem("case-library-layout",state.layout);}catch{}$$(".lib-layout [data-layout]").forEach(item=>{const on=item===button;item.classList.toggle("active",on);item.setAttribute("aria-pressed",String(on));});renderCards();});
   $("#library-video-import")?.addEventListener("click",()=>openVideoPicker(null));
   $("#library-save-view-button").onclick=()=>window.LibraryViews?.saveCurrent();
   $("#library-manage-views").onclick=()=>window.LibraryViews?.openManager();
@@ -121,6 +139,13 @@ function renderLibrary() {
   });
   const reset=()=>Object.assign(state,{view:"reference-all",query:"",direction:"",archiveCategory:"all",sourceType:"all",contentOrigin:"all",archiveStatus:"active",variantType:"all",sort:"updated",sortDir:"desc"});
   $("#library-clear-filters").onclick=()=>{reset();writeLibraryHash();updateNav();renderLibrary();};
+  $("#library-drawer-clear").onclick=()=>{reset();writeLibraryHash();updateNav();renderLibrary();};
+  $("#library-active").addEventListener("click",event=>{
+    const token=event.target.closest("[data-lib-clear]");if(!token)return;
+    const key=token.dataset.libClear,defaults={query:"",contentOrigin:"all",sourceType:"all",archiveStatus:"active",direction:"",variantType:"all",sort:"updated",archiveCategory:"all"};
+    window.LibraryViews?.detach();state[key]=defaults[key];if(key==="sort")state.sortDir="desc";if(key==="archiveStatus")state.view="reference-all";
+    writeLibraryHash();updateNav();renderLibrary();
+  });
   $$("[data-library-preset]").forEach(button=>button.onclick=()=>{
     const preset=button.dataset.libraryPreset;
     Object.assign(state,{view:["native","legacy"].includes(preset)?`reference-${preset}`:"reference-all",archiveCategory:["positive","mixed","pending"].includes(preset)?preset:"all",archiveStatus:preset==="archived"?"archived":"active",contentOrigin:"all",sourceType:"all"});
@@ -128,8 +153,24 @@ function renderLibrary() {
   });
   bindNativeMode();renderCards();
 }
+// The filters in force that the drawer holds, each removable on its own; the category stays in the segment above.
+function libraryActiveTokens() {
+  const tokens=[], names={self_produced:"自制内容",overseas_creator:"海外达人"};
+  if(state.query.trim())tokens.push(["query",`“${state.query.trim()}”`]);
+  if((state.contentOrigin||"all")!=="all")tokens.push(["contentOrigin",names[state.contentOrigin]||state.contentOrigin]);
+  if(state.sourceType&&state.sourceType!=="all")tokens.push(["sourceType",sourceTypeNames[state.sourceType]||state.sourceType]);
+  if(libraryArchiveStatus()!=="active"&&!libraryPresetSelected("archived"))tokens.push(["archiveStatus",libraryArchiveStatus()==="all"?"含已归档":"已归档"]);
+  if(state.direction)tokens.push(["direction",state.direction==="__unclassified__"?"未记录方向":state.direction]);
+  if(state.variantType&&state.variantType!=="all")tokens.push(["variantType",directionVariantNames[state.variantType]||state.variantType]);
+  if(state.sort!=="updated"||state.sortDir!=="desc")tokens.push(["sort",`按${{updated:"最近更新",views:"播放量",ctor:"CTOR",sold:"售出件数"}[state.sort]}${state.sortDir==="asc"?"升序":"降序"}`]);
+  return tokens;
+}
 function renderCards() {
   if (!$("#case-results")) return;
+  const tokens = libraryActiveTokens(), active = $("#library-active");
+  if (active) active.innerHTML = tokens.map(([key,label]) => `<button type="button" class="rev-token" data-lib-clear="${key}" aria-label="去掉筛选：${esc(label)}">${esc(label)}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M7 17 17 7"/></svg></button>`).join("");
+  const count = $("#library-filter-count"), drawerCount = tokens.filter(([key]) => key !== "query").length;
+  if (count) { count.hidden = !drawerCount; count.textContent = drawerCount; }
   const content = navigationContent(),
     archived = libraryArchiveStatus() === "archived",
     scope = scopedCases(),
@@ -152,6 +193,7 @@ function renderCards() {
   $("#result-count").textContent = nativeRows
     ? `${nativeRows.length} 条表达 · ${items.length} 条视频`
     : `${items.length} 条案例`;
+  if ($("#library-drawer-done")) $("#library-drawer-done").textContent = `显示 ${items.length} 条结果`;
   let emptyTitle, emptyText, action, actionLabel;
   if (scope.length && (query || state.product || state.sourceType !== "all" || state.direction || state.variantType !== "all")) {
     emptyTitle = "没有找到匹配的案例";
@@ -335,7 +377,7 @@ function selectControl(item) {
   return `<label class="case-select"><input type="checkbox" data-case-select="${esc(item.case_id)}" ${state.selection.has(item.case_id) ? "checked" : ""} ${state.bulk ? "disabled" : ""} aria-label="选择案例：${esc(shortTitle(item))}"><span>选择</span></label>`;
 }
 function selectableCard(item) {
-  return `<article class="selectable-card ${state.selection.has(item.case_id) ? "is-selected" : ""}" data-selection-card="${esc(item.case_id)}">${selectControl(item)}${card(item)}<div class="card-direction" title="${esc(item.current?.test_direction?.main_difference || "")}">${esc(directionLabel(item))}</div></article>`;
+  return `<article class="selectable-card ${state.selection.has(item.case_id) ? "is-selected" : ""}" data-selection-card="${esc(item.case_id)}">${selectControl(item)}${card(item)}</article>`;
 }
 function sortHeading(key, label) {
   const active = state.sort === key;
@@ -378,7 +420,7 @@ function renderSelectionToolbar(items = filteredCases()) {
   const busy = !!state.bulk || !!state.bulkOperation,
     allArchived = count > 0 && selected.every((item) => item.archived),
     allActive = count > 0 && selected.every((item) => !item.archived);
-  box.innerHTML = `<div class="selection-main"><label class="select-all"><input type="checkbox" id="select-visible" ${items.length && count === items.length ? "checked" : ""} ${!items.length || busy ? "disabled" : ""}><span>全选当前结果</span></label><span class="selection-count" role="status">已选 ${count} 条</span><button type="button" class="subtle" id="clear-selection" ${!count || busy ? "disabled" : ""}>清空选择</button><button type="button" class="secondary" id="compare-selected" ${count < 2 || count > 4 || busy ? "disabled" : ""}>并排对比（2–4条）</button><div class="bulk-actions">${libraryArchiveStatus() === "archived" || allArchived ? `<button type="button" class="secondary" id="bulk-restore" ${!allArchived || busy ? "disabled" : ""}>${icon("restore")}批量恢复</button><button type="button" class="danger-outline" id="bulk-delete" ${!allArchived || busy ? "disabled" : ""}>${icon("trash")}彻底删除所选</button>` : `<button type="button" class="secondary" id="bulk-archive" ${!allActive || busy ? "disabled" : ""}>${icon("archive")}批量归档</button>`}</div></div><div class="layout-switch" role="group" aria-label="案例显示方式"><button type="button" data-layout="cards" class="${state.layout === "cards" ? "active" : ""}" aria-pressed="${state.layout === "cards"}" ${busy ? "disabled" : ""}>${icon("grid")}卡片</button><button type="button" data-layout="list" class="${state.layout === "list" ? "active" : ""}" aria-pressed="${state.layout === "list"}" ${busy ? "disabled" : ""}>${icon("file")}列表</button></div>`;
+  box.innerHTML = `<div class="selection-main"><label class="select-all"><input type="checkbox" id="select-visible" ${items.length && count === items.length ? "checked" : ""} ${!items.length || busy ? "disabled" : ""}><span>全选当前结果</span></label><span class="selection-count" role="status">已选 ${count} 条</span><button type="button" class="subtle" id="clear-selection" ${!count || busy ? "disabled" : ""}>清空选择</button><button type="button" class="secondary" id="compare-selected" ${count < 2 || count > 4 || busy ? "disabled" : ""}>并排对比（2–4条）</button><div class="bulk-actions">${libraryArchiveStatus() === "archived" || allArchived ? `<button type="button" class="secondary" id="bulk-restore" ${!allArchived || busy ? "disabled" : ""}>${icon("restore")}批量恢复</button><button type="button" class="danger-outline" id="bulk-delete" ${!allArchived || busy ? "disabled" : ""}>${icon("trash")}彻底删除所选</button>` : `<button type="button" class="secondary" id="bulk-archive" ${!allActive || busy ? "disabled" : ""}>${icon("archive")}批量归档</button>`}</div></div>`;
   $("#select-visible").indeterminate = count > 0 && count < items.length;
   $("#select-visible").onchange = (event) => {
     state.selection = event.target.checked
@@ -394,16 +436,6 @@ function renderSelectionToolbar(items = filteredCases()) {
   $("#bulk-archive")?.addEventListener("click", () => startBulk("archive"));
   $("#bulk-restore")?.addEventListener("click", () => startBulk("restore"));
   $("#bulk-delete")?.addEventListener("click", () => startBulk("delete"));
-  $$("[data-layout]").forEach(
-    (button) =>
-      (button.onclick = () => {
-        state.layout = button.dataset.layout;
-        try {
-          localStorage.setItem("case-library-layout", state.layout);
-        } catch {}
-        renderCards();
-      }),
-  );
   const summary = $("#bulk-last-result");
   if (summary) {
     summary.hidden = !state.lastBulkResult;

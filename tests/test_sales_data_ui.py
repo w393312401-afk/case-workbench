@@ -11,6 +11,26 @@ import test_server as fixture
 import test_ui_regressions as browser
 
 
+# The library's filters and sort live in a drawer; selection checkboxes appear in selection mode.
+def open_library_filters(page):
+    if not page.locator("#library-filter-drawer[open]").count():
+        page.locator("#library-filter-open").click()
+        page.locator("#library-filter-drawer[open]").wait_for()
+
+
+def close_library_filters(page):
+    if page.locator("#library-filter-drawer[open]").count():
+        page.locator("#library-drawer-done").click()
+        page.locator("#library-filter-drawer[open]").wait_for(state="detached")
+
+
+def start_library_selection(page):
+    if page.locator("#library-select-toggle").get_attribute("aria-pressed") != "true":
+        page.locator("#library-select-toggle").click()
+        page.locator("#selection-toolbar:not([hidden])").wait_for()
+
+
+
 def sales(case, *, status="matched", sold=42):
     identity = (case.get("current") or {}).get("metrics") or case.get("metrics") or {}
     video_id = identity.get("video_id", "")
@@ -112,6 +132,7 @@ class SalesDataBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator(".card-foot").get_by_text("客单价背景", exact=False).count(), 0)
         page.get_by_role("button", name="列表", exact=True).click()
         self.assertEqual(page.locator(".case-table tbody").get_by_text("4.20%", exact=True).count(), 2)
+        start_library_selection(page)
         page.locator("#select-visible").check()
         page.locator("#compare-selected").click()
         page.locator("#case-comparison").get_by_text("100,001", exact=True).first.wait_for()

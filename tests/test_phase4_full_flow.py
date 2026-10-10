@@ -47,6 +47,7 @@ class PhaseFourFullFlowTests(unittest.TestCase):
         page.wait_for_url("**/directions/202H-S1")
         page.locator("#direction-write").click()
         page.locator("#ai-create-instruction").fill("为临时方向生成一条测试稿。")
+        page.locator("#ai-create-advanced").evaluate("details => { details.open = true; }")  # model and skills are folded
         page.locator("#ai-create-skills").select_option("none")
         page.locator("#submit-ai-create").click()
         page.get_by_role("button", name="采纳为脚本版本", exact=True).click()

@@ -59,7 +59,7 @@ class ShellBrowserTests(unittest.TestCase):
         routes = [
             ("#library", "library", "#case-search", "收录案例", "", {}),
             ("#native", "library", "#case-search", "收录案例", "", {"view": "native"}),
-            (f"#case/{self.identifier}/history", "case", ".history-item", "编辑当前案例", f"/{self.identifier}/history", {}),
+            (f"#case/{self.identifier}/history", "case", ".history-item", "用这个案例写稿", f"/{self.identifier}/history", {}),
             ("#files", "settings", ".settings-page", "重新检查", "", {}),
             ("#videos", "videos", ".perf-tabs", "同步数据", "", {}),
             ("#directions", "directions", "#direction-filters", "新建方向", "", {}),

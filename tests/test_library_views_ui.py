@@ -8,6 +8,26 @@ import test_server as fixture
 import test_ui_regressions as browser
 
 
+# The library's filters and sort live in a drawer; selection checkboxes appear in selection mode.
+def open_library_filters(page):
+    if not page.locator("#library-filter-drawer[open]").count():
+        page.locator("#library-filter-open").click()
+        page.locator("#library-filter-drawer[open]").wait_for()
+
+
+def close_library_filters(page):
+    if page.locator("#library-filter-drawer[open]").count():
+        page.locator("#library-drawer-done").click()
+        page.locator("#library-filter-drawer[open]").wait_for(state="detached")
+
+
+def start_library_selection(page):
+    if page.locator("#library-select-toggle").get_attribute("aria-pressed") != "true":
+        page.locator("#library-select-toggle").click()
+        page.locator("#selection-toolbar:not([hidden])").wait_for()
+
+
+
 class LibraryViewsTests(unittest.TestCase):
     setUpClass = classmethod(browser.WorkbenchBrowserTests.setUpClass.__func__)
     tearDownClass = classmethod(browser.WorkbenchBrowserTests.tearDownClass.__func__)
@@ -62,6 +82,7 @@ class LibraryViewsTests(unittest.TestCase):
         self.assertEqual(set(self.ids(page)),{self.identifier,self.own})
         self.assertEqual(page.locator("[data-move-case],[draggable=true][data-selection-card]").count(),0)
         page.locator('[data-library-preset="positive"]').click()
+        open_library_filters(page)
         page.locator("#content-origin-filter").select_option("overseas_creator")
         self.assertEqual(self.ids(page),[self.identifier])
         page.locator("#direction-filter").select_option("202H-S1")
@@ -70,6 +91,8 @@ class LibraryViewsTests(unittest.TestCase):
         self.assertEqual(self.ids(page),[])
         page.locator("#archive-status-filter").select_option("all")
         self.assertEqual(self.ids(page),[self.archived])
+        close_library_filters(page)
+        start_library_selection(page)
         page.locator(f'[data-case-select="{self.archived}"]').check()
         self.assertFalse(page.locator("#bulk-restore").is_disabled())
         self.assertFalse(page.locator("#bulk-delete").is_disabled())
@@ -83,9 +106,11 @@ class LibraryViewsTests(unittest.TestCase):
         before={case:self.store.read_case(case) for case in [self.identifier,self.own,self.archived,self.other]}
         assignment=(self.runtime/"navigation-assignments.json").read_bytes()
         page=self.open_page(width=390)
+        open_library_filters(page)
         page.locator("#content-origin-filter").select_option("overseas_creator")
         page.locator("#archive-category-filter").select_option("positive")
         page.locator("#direction-filter").select_option("202H-S1")
+        close_library_filters(page)
         page.locator("#library-save-view-button").click()
         page.locator('#library-save-view [name="view_name"]').fill("达人正向筛选")
         page.get_by_role("button",name="保存视图",exact=True).click()

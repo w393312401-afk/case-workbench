@@ -96,6 +96,7 @@ class AISelectionBrowserTests(unittest.TestCase):
         page.wait_for_function("() => document.querySelectorAll('.ai-task-entry').length === 3")
         self.assertEqual(entries.count(), 3)
         self.assertTrue(page.locator("#ai-delete-selected").is_disabled())
+        page.locator("#ai-select-toggle").click()  # checkboxes and delete appear in selection mode
 
         page.locator(f'[data-ai-task-id="{ids[0]}"] input[type="checkbox"]').check()
         self.assertEqual(page.locator("#ai-selected-count").inner_text(), "已选 1 条")

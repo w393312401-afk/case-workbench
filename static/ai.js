@@ -152,11 +152,16 @@ window.CaseAI = (() => {
     const models = modelChoices(), selected = selectedModel(settings), efforts = allowedEfforts(settings);
     const loading = !ai.options || !!ai.optionsLoading;
     const unknown = settings.model && !models.some(model => model.id === settings.model);
-    return `<fieldset class="ai-run-settings" id="${prefix}-fieldset"><div class="ai-settings-grid"><label class="field"><span>模型</span><select id="${prefix}-model" ${loading ? 'disabled aria-busy="true"' : ''}><option value="">${loading ? '正在读取模型…' : '本机默认（运行后确认）'}</option>${loading ? '' : modelOptionGroups(models,settings)}${!loading && unknown ? `<option value="${esc(settings.model)}" selected disabled>当前不可选 · ${esc(modelLabel(settings.model))}</option>` : ''}</select></label><label class="field"><span>思考强度</span><select id="${prefix}-effort" ${!efforts.length ? 'disabled' : ''}><option value="">${esc(selected?.default_reasoning_effort ? `默认（${effortNames[selected.default_reasoning_effort] || selected.default_reasoning_effort}）` : '本机默认（运行后确认）')}</option>${efforts.map(value => `<option value="${esc(value)}" ${settings.reasoning_effort === value ? 'selected' : ''}>${esc(effortNames[value] || value)}</option>`).join('')}</select></label><label class="field"><span>使用技能</span><select id="${prefix}-skills">${Object.entries(skillNames).map(([id,label]) => {const known = ai.options?.skills.find(skill => skill.id === id);const available = skillAvailable(id);return `<option value="${id}" ${settings.skill_selection === id ? 'selected' : ''} ${available ? '' : 'disabled'}>${esc(known?.label || label)}${available ? '' : ' · 不可用'}</option>`;}).join('')}</select></label></div><p class="ai-model-description">${selected ? `<span class="ai-provider-badge ${esc(providerOf(selected))}">${esc(providerNames[providerOf(selected)] || '模型')}</span>` : ''}${esc(loading ? '正在读取可用模型和客户端设置。' : selected?.description || '使用本机配置；本轮实际模型会在回复中显示。选择具体模型后可调整思考强度。')}</p>${claudeHint()}<p class="ai-options-note" ${ai.options?.models_error ? '' : 'hidden'}>${esc(ai.options?.models_error || '')} 可以使用本机默认，不提供未经确认的模型选项。</p><p class="ai-settings-issue" role="status" ${settingsIssue(settings) ? '' : 'hidden'}>${esc(settingsIssue(settings))}</p></fieldset>`;
+    return `<fieldset class="ai-run-settings" id="${prefix}-fieldset"><div class="ai-settings-grid"><label class="field"><span>模型</span><select id="${prefix}-model" ${loading ? 'disabled aria-busy="true"' : ''}><option value="">${loading ? '正在读取模型…' : '本机默认（运行后确认）'}</option>${loading ? '' : modelOptionGroups(models,settings)}${!loading && unknown ? `<option value="${esc(settings.model)}" selected disabled>当前不可选 · ${esc(modelLabel(settings.model))}</option>` : ''}</select></label><label class="field"><span>思考强度</span><select id="${prefix}-effort" ${!efforts.length ? 'disabled' : ''}><option value="">${esc(selected?.default_reasoning_effort ? `默认（${effortNames[selected.default_reasoning_effort] || selected.default_reasoning_effort}）` : '本机默认（运行后确认）')}</option>${efforts.map(value => `<option value="${esc(value)}" ${settings.reasoning_effort === value ? 'selected' : ''}>${esc(effortNames[value] || value)}</option>`).join('')}</select></label><label class="field"><span>使用技能</span><select id="${prefix}-skills">${Object.entries(skillNames).map(([id,label]) => {const known = ai.options?.skills.find(skill => skill.id === id);const available = skillAvailable(id);return `<option value="${id}" ${settings.skill_selection === id ? 'selected' : ''} ${available ? '' : 'disabled'}>${esc(known?.label || label)}${available ? '' : ' · 不可用'}</option>`;}).join('')}</select></label></div><p class="ai-model-description">${selected ? `<span class="ai-provider-badge ${esc(providerOf(selected))}">${esc(providerNames[providerOf(selected)] || '模型')}</span>` : ''}${esc(loading ? '正在读取可用模型和客户端设置。' : selected?.description || '使用本机配置；本轮实际模型会在回复中显示。选择具体模型后可调整思考强度。')}</p>${claudeHint()}<p class="ai-options-note" ${ai.options?.models_error && (selected?.provider || (String(selected?.id || '').startsWith('claude-') ? 'claude' : '')) === 'codex' ? '' : 'hidden'}>${esc(ai.options?.models_error || '')} 可以使用本机默认，不提供未经确认的模型选项。</p><p class="ai-settings-issue" role="status" ${settingsIssue(settings) ? '' : 'hidden'}>${esc(settingsIssue(settings))}</p></fieldset>`;
   }
   const providerNames = {claude:'Claude',codex:'本机 Codex'};
+
   const providerOf = model => model?.provider || (String(model?.id || '').startsWith('claude-') ? 'claude' : 'codex');
-  function modelOptionGroups(models,settings) {
+  function settingsSummary(settings) {
+    const model = selectedModel(settings)?.name || (settings.model ? modelLabel(settings.model) : '本机默认模型');
+    const effort = settings.reasoning_effort ? `思考${effortNames[settings.reasoning_effort] || settings.reasoning_effort}` : '默认思考强度';
+    return [model,effort,skillNames[settings.skill_selection] || '自动使用统一技能'].join(' · ');
+  }  function modelOptionGroups(models,settings) {
     const option = model => {const off = model.available === false;return `<option value="${esc(model.id)}" ${settings.model === model.id ? 'selected' : ''} ${off && settings.model !== model.id ? 'disabled' : ''}>${esc(model.name || model.id)}${model.is_default && providerOf(model) === 'claude' ? ' · 推荐' : ''}${off ? ' · 未就绪' : ''}</option>`;};
     const groups = [['claude','本机 Claude Code'],['codex','本机 Codex']].map(([key,label]) => [label,models.filter(model => providerOf(model) === key)]).filter(([,items]) => items.length);
     return groups.length > 1 ? groups.map(([label,items]) => `<optgroup label="${esc(label)}">${items.map(option).join('')}</optgroup>`).join('') : models.map(option).join('');
@@ -201,6 +206,11 @@ window.CaseAI = (() => {
     const codex = /^gpt-(\d+(?:\.\d+)?)(?:-(sol|astra|luna|terra))?$/.exec(String(id || ''));
     return codex ? `GPT-${codex[1]}${codex[2] ? '-' + codex[2][0].toUpperCase() + codex[2].slice(1) : ''}` : id;
   }
+  function paintService() {
+    const pill = $('#ai-check-service.ai-service-pill');
+    setText('#ai-service-label',pill && ai.status && !ai.status.available ? 'AI 暂不可用' : availabilityText());
+    if (pill) {pill.dataset.state = !ai.status ? 'checking' : ai.status.available ? 'ok' : 'off';pill.title = `${availabilityText()}（点一下重新检查）`;}
+  }
   function serviceMarkup() {return `<div class="ai-service-row"><p class="ai-service-status ${ai.status?.available ? 'available' : 'unavailable'}" id="ai-service-label">${esc(availabilityText())}</p><button type="button" class="subtle" id="ai-check-service">${icon('refresh')}重新检查</button></div>`;}
   function connectServiceButton() {$('#ai-check-service')?.addEventListener('click',async () => {await Promise.all([checkStatus(true),loadOptions(true)]);setText('#ai-service-label',availabilityText());if (ai.task) renderSettings('ai-continue',settingsForTask(ai.task));updateTaskControls();});}
   async function mountCaseActions(item) {
@@ -231,7 +241,8 @@ window.CaseAI = (() => {
     const modal = {key,caseId:item.case_id,product,directionId:pending?.payload.direction_id || item.direction_id || '',caseTitle:item.current?.title || item.title || item.direction_id || item.case_id || `${product} · 空白写稿`,revision:pending?.payload.revision || item.revision,planId:pending?.payload.plan_id || item.plan_id || '',action,instruction:pending?.payload.instruction || item.plan_note || '',includeBasket:pending ? !!(pending.payload.include_basket || pending.payload.material_ids?.length) : !!(materialIds?.length || item.direction_id),materialIds,materials:[],directions:item.direction_id ? [item] : [],variantSel:pending?.payload.variants ? pending.payload.variants.map(item => item.index) : pending ? [] : null,newVariants:pending?.payload.new_variant_count || 0,carousel:!!pending?.payload.carousel,settings:{model:pending?.payload.model || null,reasoning_effort:pending?.payload.reasoning_effort || null,skill_selection:pending?.payload.skill_selection || 'auto'},busy:false,blocked:false,error:pending ? '上次提交结果尚未确认。请重试同一请求核对，不会重复创建任务。' : ''};
     ai.modal = modal;
     setText('#ai-create-title',actions[action]);setText('#ai-create-case',modal.caseTitle);
-    setText('#ai-create-version',item.case_id ? '基于当前案例版本，提交后固定这次协作使用的资料。' : item.direction_id ? '基于当前方向定义，提交后固定方向与选定素材。' : '填写创作要求，提交后固定本次使用的产品与素材。');
+    setText('#ai-create-version',item.case_id ? '基于当前案例版本' : item.direction_id ? '基于当前方向定义' : '空白写稿');
+    if ($('#ai-create-advanced')) $('#ai-create-advanced').open = false;
     if (!$('#ai-basket-choice')) $('#ai-create-settings').insertAdjacentHTML('afterend','<div id="ai-basket-choice" class="ai-basket-choice"></div>');
     renderBasketChoice(modal);
     $('#ai-create-instruction').value = modal.instruction;
@@ -241,10 +252,11 @@ window.CaseAI = (() => {
   }
   function renderBasketChoice(modal) {
     const host = $('#ai-basket-choice');if (!host) return;
-    host.innerHTML = `${!modal.caseId ? `<label class="field"><span>本次方向</span><select id="ai-create-direction"><option value="">空白写稿，不指定方向</option>${modal.directions.filter(item => item.status !== 'archived').map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === modal.directionId ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>` : ''}<label><input id="ai-include-basket" type="checkbox" ${modal.includeBasket ? 'checked' : ''} ${ai.pending.has(modal.key) ? 'disabled' : ''}> 携带${modal.materialIds ? '已选择的素材' : '当前产品的素材篮'}（${modal.materialIds?.length ?? modal.materials.length} 条）</label><p class="context-note">${esc(modal.basketError ? `素材篮暂不可用：${modal.basketError}。可取消携带素材，或关闭后重试。` : '提交时固定选中的素材；以后修改素材篮不会改动此任务。')}</p><div id="ai-variant-plan"></div>${modal.action === 'variants' ? `<label class="ai-carousel-toggle"><input id="ai-carousel" type="checkbox" ${modal.carousel ? 'checked' : ''}> 同时出图文版（每条稿附 5 张挂车图文与 copy.json）</label>` : ''}`;
+    host.innerHTML = `${!modal.caseId ? `<div class="ai-source-row"><label class="field"><span>本次方向</span><select id="ai-create-direction"><option value="">空白写稿，不指定方向</option>${modal.directions.filter(item => item.status !== 'archived').map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === modal.directionId ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>${!modal.materialIds ? '<button type="button" class="subtle" id="ai-create-from-case">改为从案例写稿</button>' : ''}</div>` : ''}<label class="ai-check"><input id="ai-include-basket" type="checkbox" ${modal.includeBasket ? 'checked' : ''} ${ai.pending.has(modal.key) ? 'disabled' : ''}> 携带${modal.materialIds ? '已选择的素材' : '当前产品的素材篮'}（${modal.materialIds?.length ?? modal.materials.length} 条）</label><p class="context-note">${esc(modal.basketError ? `素材篮暂不可用：${modal.basketError}。可取消携带素材，或关闭后重试。` : '提交时固定选中的素材；以后修改素材篮不会改动此任务。')}</p><div id="ai-variant-plan"></div>${modal.action === 'variants' ? `<label class="ai-carousel-toggle"><input id="ai-carousel" type="checkbox" ${modal.carousel ? 'checked' : ''}> 同时出图文版（每条稿附 5 张挂车图文与 copy.json）</label>` : ''}`;
     $('#ai-include-basket').onchange = event => {modal.includeBasket = event.target.checked;updateCreateControls();};
     if ($('#ai-create-direction')) $('#ai-create-direction').onchange = event => {modal.directionId = event.target.value;modal.variantSel = null;renderVariantPlan(modal);updateCreateControls();};
     if ($('#ai-carousel')) $('#ai-carousel').onchange = event => {modal.carousel = event.target.checked;updateCreateControls();};
+    if ($('#ai-create-from-case')) $('#ai-create-from-case').onclick = () => {if (modal.busy) return;closeCreate();void window.WorkbenchShell?.chooseWritingCase();};
     renderVariantPlan(modal);
   }
   // Writing from a direction: each ticked recorded variant becomes one script; new ones are only proposals.
@@ -294,6 +306,11 @@ window.CaseAI = (() => {
     const modal = ai.modal;if (!modal) return;
     const pending = ai.pending.get(modal.key), busy = modal.busy;
     setText('#ai-create-availability',availabilityText());
+    // The folded settings open by themselves when something there needs attention.
+    const issue = !pending && settingsIssue(modal.settings) && ai.options && !ai.optionsLoading;
+    setText('#ai-create-settings-summary',issue ? '需要处理' : ai.status?.available === false ? 'AI 暂不可用' : settingsSummary(modal.settings));
+    $('#ai-create-settings-summary')?.classList.toggle('is-warn',!!issue || ai.status?.available === false);
+    if ((issue || ai.status?.available === false) && $('#ai-create-advanced')) $('#ai-create-advanced').open = true;
     $('#ai-create-availability').classList.toggle('unavailable',ai.status?.available === false);
     $('#ai-create-instruction').readOnly = busy || !!pending;
     const plan = planActive(modal), selected = (modal.variantSel || []).length;
@@ -334,9 +351,15 @@ window.CaseAI = (() => {
       if (error.status === 503) {ai.status = {available:false,error:message(error)};}
     } finally {pending.busy = false;modal.busy = false;if (ai.modal === modal) updateCreateControls();void loadTaskList(0,true).catch(() => {});}
   }
+  // One task per row: kind, title, the first line of the request, then model, time and status.
   function taskCard(task) {
     const busy = active(task), title = contextTitle(task);
-    return `<div class="ai-task-entry" data-ai-task-id="${esc(task.task_id)}"><div class="ai-task-select" ${busy ? 'title="任务正在处理，结束后可删除"' : ''}><input type="checkbox" aria-label="选择 ${esc(title)} 的协作记录" ${busy ? 'disabled' : ''}></div><a class="ai-task-card" href="#ai/${encodeURIComponent(task.task_id)}"><div><span class="ai-action-kind">${esc(actions[task.action] || 'AI 协作')}</span><span class="ai-status ${esc(task.status)}">${esc(statusText(task))}</span></div><h2>${esc(title)}</h2>${task.instruction ? `<p class="ai-task-ask">${esc(task.instruction)}</p>` : ''}<p${task.last_error ? ' class="ai-task-reason"' : ''}>${esc(task.last_error ? '原因：' + task.last_error : typeof task.progress === 'string' ? task.progress : task.stale ? '基于案例的较早版本' : '独立候选 · 可继续修改')}</p><small>${task.model ? `<span class="ai-provider-badge ${String(task.model).startsWith('claude-') ? 'claude' : 'codex'}">${esc(modelLabel(task.model))}</span>` : ''}${esc(readableDate(task.updated_at))}${task.round_count > 1 ? ` · ${task.round_count} 轮` : ''}${task.stale ? ' · 案例已更新' : ''}</small></a></div>`;
+    const detail = task.last_error ? '原因：' + task.last_error : typeof task.progress === 'string' && busy ? task.progress : task.instruction || (task.stale ? '基于案例的较早版本' : '');
+    return `<div class="ai-task-entry" data-ai-task-id="${esc(task.task_id)}"><div class="ai-task-select" ${busy ? 'title="任务正在处理，结束后可删除"' : ''}><input type="checkbox" aria-label="选择 ${esc(title)} 的协作记录" ${busy ? 'disabled' : ''}></div><a class="ai-task-card" href="#ai/${encodeURIComponent(task.task_id)}"><span class="ai-action-kind">${esc(actions[task.action] || 'AI 协作')}</span><span class="ai-row-main"><strong>${esc(title)}</strong>${detail ? `<small${task.last_error ? ' class="ai-task-reason"' : ''}>${esc(detail)}</small>` : ''}</span><span class="ai-row-meta">${task.model ? `<span>${esc(modelLabel(task.model))}</span>` : ''}<span>${esc(readableDate(task.updated_at))}${task.round_count > 1 ? ` · ${task.round_count} 轮` : ''}${task.stale ? ' · 案例已更新' : ''}</span></span><span class="ai-status ${esc(task.status)}">${esc(statusText(task))}</span></a></div>`;
+  }
+  const listFilters = {all:['全部',() => true],active:['进行中',task => active(task)],completed:['已完成',task => task.status === 'completed'],stopped:['未完成',task => ['failed','cancelled','interrupted'].includes(task.status)]};
+  function startOptions() {
+    return `<div class="ai-start"><h3>开始写稿</h3><p>结果都是独立候选，检查后再采纳为脚本版本。</p><div class="ai-start-options"><button type="button" class="ai-start-card" id="ai-start-blank"><strong>空白写稿</strong><small>只写这次的要求</small></button><button type="button" class="ai-start-card" data-ai-start="direction"><strong>从方向写稿</strong><small>选一个测试方向和它的变体</small></button><button type="button" class="ai-start-card" data-ai-start="case"><strong>从案例写稿</strong><small>基于已收录的参考案例</small></button></div></div>`;
   }
   function selectableTasks(tasks = ai.taskList?.tasks || []) {return scopedTasks(tasks).filter(task => !active(task));}
   function updateListSelection(tasks = ai.taskList?.tasks || []) {
@@ -405,12 +428,26 @@ window.CaseAI = (() => {
     if (ai.page !== 'list' || !$('#ai-task-list')) {
       ai.page = 'list';ai.task = null;ai.lastList = '';
       $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 写稿';
-      $('#content').innerHTML = `<div class="page-heading"><div><span class="eyebrow">WRITING WORKSPACE</span><h1>写稿</h1><p>从方向、案例或空白要求开始，检查候选后采纳为脚本版本。</p></div></div><nav class="scripts-tabs" aria-label="写稿内容"><a href="${esc(pageURL('#ai'))}" aria-current="page">协作任务</a><a href="${esc(pageURL('#scripts'))}">脚本版本</a><a href="${esc(pageURL('#production'))}">制作视频</a></nav><div class="scripts-start-actions"><a class="secondary" href="${esc(pageURL('#directions'))}">从方向开始</a><a class="secondary" href="${esc(pageURL('#library'))}">从案例开始</a><button type="button" class="primary" id="ai-start-blank">空白写稿</button></div>${serviceMarkup()}<label class="ai-group-choice">任务分组 <select id="ai-group-by"><option value="direction">按方向</option><option value="case">按案例</option></select></label><div class="ai-selection-toolbar"><div class="ai-selection-main"><label class="select-all"><input type="checkbox" id="ai-select-all">全选</label><span id="ai-selected-count" class="selection-count">已选 0 条</span><span id="ai-selection-note" class="selection-count"></span></div><button type="button" class="danger-outline" id="ai-delete-selected" disabled>${icon('trash')}删除本地记录</button></div><div id="ai-list-error" class="ai-error" role="alert" hidden></div><div id="ai-task-list">${skeletonMarkup(2)}</div>`;
-      connectServiceButton();
-      $('#ai-start-blank').onclick = () => startBlank();
+      $('#content').innerHTML = `<div class="page-heading ai-list-heading"><div><h1>写稿</h1><p>从方向、案例或空白要求开始，检查候选后采纳为脚本版本。</p></div><button type="button" class="ai-service-pill" id="ai-check-service" title="重新检查 AI 服务"><i></i><span id="ai-service-label">${esc(availabilityText())}</span></button></div><nav class="scripts-tabs" aria-label="写稿内容"><a href="${esc(pageURL('#ai'))}" aria-current="page">协作任务</a><a href="${esc(pageURL('#scripts'))}">脚本版本</a><a href="${esc(pageURL('#production'))}">制作视频</a></nav>
+        <div class="ai-list-toolbar"><div class="ai-segment" role="group" aria-label="按状态筛选">${Object.entries(listFilters).map(([key,[label]]) => `<button type="button" data-ai-filter="${key}" aria-pressed="${(ai.filter || 'all') === key}">${label}<small data-ai-filter-count="${key}"></small></button>`).join('')}</div><label class="ai-group-choice"><span>分组</span><select id="ai-group-by"><option value="direction">按方向</option><option value="case">按案例</option></select></label><button type="button" class="subtle" id="ai-select-toggle" aria-pressed="false">选择</button></div>
+        <div class="ai-selection-toolbar" id="ai-selection-toolbar" hidden><div class="ai-selection-main"><label class="select-all"><input type="checkbox" id="ai-select-all">全选</label><span id="ai-selected-count" class="selection-count">已选 0 条</span><span id="ai-selection-note" class="selection-count"></span></div><button type="button" class="danger-outline" id="ai-delete-selected" disabled>${icon('trash')}删除本地记录</button></div><div id="ai-list-error" class="ai-error" role="alert" hidden></div><div id="ai-task-list">${skeletonMarkup(2)}</div>`;
+      $('#ai-check-service').onclick = async () => {await Promise.all([checkStatus(true),loadOptions(true)]);paintService();};
       $('#ai-group-by').onchange = () => {ai.lastList = '';void renderList(true,ai.sequence);};
+      $$('[data-ai-filter]').forEach(button => button.onclick = () => {ai.filter = button.dataset.aiFilter;$$('[data-ai-filter]').forEach(item => item.setAttribute('aria-pressed',String(item === button)));ai.lastList = '';void renderList(true,ai.sequence);});
+      $('#ai-select-toggle').onclick = event => {
+        const on = event.currentTarget.getAttribute('aria-pressed') !== 'true';
+        event.currentTarget.setAttribute('aria-pressed',String(on));event.currentTarget.textContent = on ? '完成' : '选择';
+        $('#content').classList.toggle('ai-selecting',on);$('#ai-selection-toolbar').hidden = !on;
+        if (!on) {ai.selected.clear();updateListSelection();}
+      };
       $('#ai-select-all').addEventListener('change',event => {const tasks = selectableTasks();ai.selected = new Set(event.target.checked ? tasks.map(task => task.task_id) : []);updateListSelection();});
       $('#ai-task-list').addEventListener('change',event => {const input = event.target;if (!input.matches('.ai-task-select input')) return;const id = input.closest('.ai-task-entry')?.dataset.aiTaskId;if (!id) return;if (input.checked) ai.selected.add(id);else ai.selected.delete(id);updateListSelection();});
+      $('#ai-task-list').addEventListener('click',event => {
+        if (event.target.closest('#ai-start-blank')) {void startBlank();return;}
+        const start = event.target.closest('[data-ai-start]');
+        if (start?.dataset.aiStart === 'direction') void startBlank().then(opened => {if (opened) setTimeout(() => $('#ai-create-direction')?.focus(),300);});
+        else if (start?.dataset.aiStart === 'case') void window.WorkbenchShell?.chooseWritingCase();
+      });
       $('#ai-delete-selected').onclick = openDeleteDialog;
       if (!keepScroll) window.scrollTo(0,0);
     }
@@ -418,20 +455,20 @@ window.CaseAI = (() => {
       // Client discovery can take seconds. Saved writing records are usable
       // immediately while the service indicator updates independently.
       void checkStatus().then(() => {
-        if (sequence === ai.sequence && pageHash() === '#ai') setText('#ai-service-label',availabilityText());
+        if (sequence === ai.sequence && pageHash() === '#ai') paintService();
       });
       const data = await loadTaskList(2500);
       if (sequence !== ai.sequence || pageHash() !== '#ai') return;
-      setText('#ai-service-label',availabilityText());const tasks = scopedTasks(data.tasks || []);
+      paintService();const all = scopedTasks(data.tasks || []), tasks = all.filter(listFilters[ai.filter || 'all'][1]);
+      for (const [key,[,keep]] of Object.entries(listFilters)) setText(`[data-ai-filter-count="${key}"]`,key === 'all' ? '' : String(all.filter(keep).length || ''));
       updateNavCount(data.tasks || []);
-      const html = groupedTaskMarkup(tasks,$('#ai-group-by')?.value || 'direction');
+      const html = !all.length ? startOptions() : !tasks.length ? '<div class="empty"><h3>没有符合筛选的任务</h3><p>换一个状态看看。</p></div>' : groupedTaskMarkup(tasks,$('#ai-group-by')?.value || 'direction');
       if (html !== ai.lastList) {$('#ai-task-list').innerHTML = html;ai.lastList = html;}
       updateListSelection(tasks);
       $('#ai-list-error').hidden = true;
     } catch (error) {if (sequence === ai.sequence && $('#ai-list-error')) {setText('#ai-list-error',`暂时无法读取任务：${message(error)}`);$('#ai-list-error').hidden = false;}}
   }
   function groupedTaskMarkup(tasks,by) {
-    if (!tasks.length) return '<div class="empty"><h3>当前产品还没有写稿记录</h3><p>选择上方入口，填写这次的创作要求。</p></div>';
     const groups = new Map();
     for (const task of tasks) {
       const caseItem = (state.cases || []).find(item => item.case_id === task.case_id);
@@ -442,7 +479,7 @@ window.CaseAI = (() => {
       if (!groups.has(key)) groups.set(key,{label,product:taskProduct(task),tasks:[]});
       groups.get(key).tasks.push(task);
     }
-    return [...groups.values()].map(group => `<section class="ai-task-group"><h2 class="ai-group-heading">${esc(group.label)} <small>${esc(group.product)} · ${group.tasks.length} 项</small></h2><div class="ai-task-grid">${group.tasks.map(taskCard).join('')}</div></section>`).join('');
+    return [...groups.values()].map(group => `<section class="ai-task-group"><h2 class="ai-group-heading">${esc(group.label)} <small>${esc(group.product)} · ${group.tasks.length} 项</small></h2><div class="ai-task-rows">${group.tasks.map(taskCard).join('')}</div></section>`).join('');
   }
   // Whether this round was shown a digest of the user-review library (writing and review rounds on a product it covers).
   function reviewContextText(context) {
@@ -461,7 +498,8 @@ window.CaseAI = (() => {
     const requested = round.requested_model ? modelLabel(round.requested_model) : '本机默认';
     const names = skills.map(skill => skill.label || skill.name).filter(Boolean).join('、');
     const skillState = round.skills_status === 'unavailable' ? `未加载技能${unavailableText ? `：${unavailableText}` : '：技能资料当前不可用。'}` : round.skill_selection === 'none' ? '未使用技能' : round.skills_status === 'submitted' ? `已提交技能资料${names ? `：${names}` : ''}` : round.skills_status === 'prepared' ? `已准备技能资料${names ? `：${names}` : ''}，等待提交` : `技能选择：${skillNames[round.skill_selection] || legacySkillNames[round.skill_selection] || '未记录'}，等待执行记录`;
-    return `<div class="ai-round-model"><span>实际模型：<strong>${esc(actual)}</strong></span><span>思考强度：${esc(effort)}</span></div><p class="ai-skill-status ${round.skills_status === 'submitted' ? 'submitted' : ''}">${esc(skillState)}</p>${round.review_context ? `<p class="ai-skill-status">${esc(reviewContextText(round.review_context))}</p>` : ''}${round.migration_notice ? `<p class="ai-options-note">${esc(round.migration_notice)}</p>` : ''}<details class="ai-execution-details"><summary>查看本轮设置与技能来源</summary><p>请求模型：${esc(requested)} · 请求思考强度：${esc(round.requested_reasoning_effort ? effortNames[round.requested_reasoning_effort] || round.requested_reasoning_effort : '默认')}</p>${skills.map(skill => `<div><strong>${esc(skill.label || skill.name)}</strong><code>${esc(skill.path || '未记录路径')}</code>${skill.sha256 ? `<small>文件校验：${esc(skill.sha256)}</small>` : ''}</div>`).join('')}</details>${stageMetadata(round)}`;
+    const line = [actual,effort === '尚未回报' ? '' : `思考${effort}`,round.skill_selection === 'none' ? '未用技能' : names ? `技能：${names}` : '',round.review_context?.status === 'attached' ? `附评论摘要 ${round.review_context.reviews || '?'} 条` : ''].filter(Boolean).join(' · ');
+    return `<p class="ai-run-line">${esc(line)}</p>${round.skills_status === 'unavailable' || round.review_context?.status === 'unavailable' ? `<p class="ai-skill-status">${esc(round.skills_status === 'unavailable' ? skillState : reviewContextText(round.review_context))}</p>` : ''}${round.migration_notice ? `<p class="ai-options-note">${esc(round.migration_notice)}</p>` : ''}<details class="ai-execution-details"><summary>本轮设置</summary><p>${esc(skillState)}</p>${round.review_context ? `<p>${esc(reviewContextText(round.review_context))}</p>` : ''}<p>请求模型：${esc(requested)} · 请求思考强度：${esc(round.requested_reasoning_effort ? effortNames[round.requested_reasoning_effort] || round.requested_reasoning_effort : '默认')}</p>${skills.map(skill => `<div><strong>${esc(skill.label || skill.name)}</strong><code>${esc(skill.path || '未记录路径')}</code>${skill.sha256 ? `<small>文件校验：${esc(skill.sha256)}</small>` : ''}</div>`).join('')}</details>${stageMetadata(round)}`;
   }
   function stageMetadata(round) {
     if (!round.stages) return '';
@@ -484,11 +522,9 @@ window.CaseAI = (() => {
     return entries.length ? entries.map(entry => entry.text).join('\n\n') : round.output || '';
   }
   function writeResponseBody(body,text,settled) {
-    const mode = settled ? 'markdown' : 'text';
+    const mode = settled ? 'markdown' : 'live';
     if ((body.dataset.source === text && body.dataset.mode === mode) || selectionInside(body)) return;
-    if (settled) body.innerHTML = renderMarkdown(text);
-    else if (body.dataset.mode === 'text' && body.firstChild?.nodeType === 3 && text.startsWith(body.dataset.source || '')) body.firstChild.appendData(text.slice((body.dataset.source || '').length));
-    else body.textContent = text;
+    body.innerHTML = renderMarkdown(text);
     body.dataset.source = text;body.dataset.mode = mode;
     body.classList.toggle('ai-streaming-text',!settled);
   }
@@ -512,7 +548,7 @@ window.CaseAI = (() => {
     const groups = settled ? titleLineGroups(text) : [], total = groups.reduce((sum,group) => sum + group.lines.length,0);
     if (!total) {if (panel) panel.hidden = true;return;}
     const source = JSON.stringify(groups);
-    if (!panel) {panel = document.createElement('section');panel.className = 'ai-title-lines';$('.ai-output-heading',node).before(panel);}
+    if (!panel) {panel = document.createElement('section');panel.className = 'ai-title-lines';$('.ai-round-output',node).after(panel);}
     panel.hidden = false;
     if (panel.dataset.source === source) return;
     panel.dataset.source = source;
@@ -528,9 +564,10 @@ window.CaseAI = (() => {
     const items = Array.isArray(round.read_estimates) ? round.read_estimates : [];
     let line = $('.ai-read-estimates',node);
     if (!items.length) {if (line) line.hidden = true;return;}
-    if (!line) {line = document.createElement('p');line.className = 'ai-read-estimates';$('.ai-output-heading',node).before(line);}
+    if (!line) {line = document.createElement('p');line.className = 'ai-read-estimates';$('.ai-output-heading',node).after(line);}
     line.hidden = false;
-    line.textContent = `估读（工作台按每分钟 150 词计算）：${items.map(item => `${item.label} 约 ${item.seconds} 秒（${item.words} 词）`).join(' · ')}`;
+    line.textContent = `估读：${items.map(item => `${item.label} 约 ${item.seconds} 秒（${item.words} 词）`).join(' · ')}`;
+    line.title = '工作台按每分钟 150 词计算';
   }
   function updateRoundMessages(node,round) {
     const container = $('.ai-round-messages',node), entries = Array.isArray(round.messages) ? round.messages : [];
@@ -563,7 +600,7 @@ window.CaseAI = (() => {
     const title = $('.ai-output-title',node);if (title) title.textContent = final ? '候选结果' : active(round) ? '实时回复' : '本轮回复（未完成）';
     copy.innerHTML = icon('copy') + (final ? '复制结果' : '复制当前文本');copy.onclick = () => copyText(text,final ? '候选结果已复制' : '当前回复文本已复制');
     let adoption = $('.ai-candidate-actions',node);
-    if (!adoption) {adoption = document.createElement('div');adoption.className = 'ai-candidate-actions';adoption.innerHTML = '<button type="button" class="primary" data-adopt-script>采纳为脚本版本</button><button type="button" class="secondary" data-write-case>写回案例</button><button type="button" class="secondary" data-produce-video>制作视频</button>';node.append(adoption);}
+    if (!adoption) {adoption = document.createElement('div');adoption.className = 'ai-candidate-actions';adoption.innerHTML = `<button type="button" class="primary compact" data-adopt-script>采纳为脚本版本</button><details class="ai-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-write-case>写回案例</button><button type="button" role="menuitem" data-produce-video>制作视频</button></div></details>`;$('.ai-output-actions',node).prepend(adoption);}
     adoption.hidden = !canonical;
     $('[data-adopt-script]',adoption).onclick = () => window.CaseScripts?.adoptCandidate(ai.task,round,false);
     $('[data-write-case]',adoption).onclick = () => window.CaseScripts?.adoptCandidate(ai.task,round,true);
@@ -575,17 +612,37 @@ window.CaseAI = (() => {
     return `${link}<span>基于发起时固定的${task.case_id ? '案例版本' : context.direction_id ? '方向资料' : '创作要求'}</span><details class="ai-version-details"><summary>查看本次资料</summary><div>${task.case_id ? `<span>案例版本</span><code>${esc(task.base_revision || '未提供')}</code><span>来源记录</span><code>${esc(task.base_event_id || '首次原始资料')}</code>` : `<span>产品</span><code>${esc(taskProduct(task))}</code>`}${context.materials?.length ? `<span>随任务固定的素材（${context.materials.length} 条）</span>${context.materials.map(item => `<p>${esc(item.title || item.text || item.source_id || item.kind || '素材')}</p>`).join('')}` : '<span>未附素材篮条目</span>'}</div></details>`;
   }
   function roundMarkup(round,index) {
-    return `<article class="ai-round" data-round-id="${esc(round.round_id || String(index))}"><div class="ai-round-heading"><h2>第 ${index+1} 轮</h2><span class="ai-round-status ai-status ${esc(round.status)}">${esc(statusText(round))}</span></div><div class="ai-round-execution">${roundMetadata(round)}</div><section class="ai-user-request"><h3>你的要求</h3><p>${esc(round.instruction || '')}</p></section><div class="ai-output-heading"><h3 class="ai-output-title">实时回复</h3><button type="button" class="subtle ai-copy-round" hidden>${icon('copy')}复制当前文本</button></div><div class="ai-round-messages"></div><div class="ai-round-output markdown-body"></div><p class="ai-round-error ai-error" ${round.error ? '' : 'hidden'}>${esc(typeof round.error === 'string' ? round.error : round.error ? JSON.stringify(round.error) : '')}</p><small class="ai-round-time">${esc(readableDate(round.completed_at || round.created_at))}</small></article>`;
+    return `<article class="ai-round" data-round-id="${esc(round.round_id || String(index))}"><div class="ai-round-heading"><button type="button" class="ai-round-toggle" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><h2>第 ${index+1} 轮</h2><span class="ai-round-summary">${esc(round.instruction || '')}</span></button><span class="ai-round-status ai-status ${esc(round.status)}">${esc(statusText(round))}</span><small class="ai-round-time">${esc(readableDate(round.completed_at || round.created_at))}</small></div>
+      <div class="ai-round-body"><section class="ai-user-request"><h3 class="sr-only">你的要求</h3><p>${esc(round.instruction || '')}</p></section><div class="ai-round-execution"></div>
+      <div class="ai-output-heading"><h3 class="ai-output-title">实时回复</h3><div class="ai-output-actions"><button type="button" class="subtle ai-copy-round" hidden>${icon('copy')}复制当前文本</button></div></div><div class="ai-round-messages"></div><div class="ai-round-output markdown-body"></div><p class="ai-round-error ai-error" ${round.error ? '' : 'hidden'}>${esc(typeof round.error === 'string' ? round.error : round.error ? JSON.stringify(round.error) : '')}</p></div></article>`;
   }
   function renderTaskShell(task,keepScroll) {
     ai.page = task.task_id;
     $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 写稿 <span>/</span> 任务详情';
-    $('#content').innerHTML = `<a class="back-link" href="#ai">${icon('back')}全部协作任务</a><div class="page-heading ai-task-heading"><div><span class="eyebrow">INDEPENDENT DRAFT</span><h1>${esc(actions[task.action] || 'AI 协作')}</h1><p>${esc(contextTitle(task))}</p></div><span class="ai-status" id="ai-task-status"></span></div><div class="ai-task-context">${taskContextMarkup(task)}</div><p id="ai-stale-warning" class="ai-stale-warning" hidden>案例已经更新。这个任务继续使用开始时的案例版本；若要基于新版讨论，请回到案例重新发起任务。</p><p class="ai-candidate-note">这里的内容是独立候选，可以继续修改；案例正文与当前评价保持原样。</p><div class="ai-task-progress"><div><p id="ai-task-progress" role="status"></p><small id="ai-stream-status" class="ai-stream-status"></small></div><button type="button" class="secondary" id="ai-cancel-task">取消处理</button></div><p class="ai-error" id="ai-task-error" role="alert" hidden></p><div id="ai-rounds"></div><section class="section-card ai-continue-card"><h2>${icon('edit')}继续一起修改</h2>${serviceMarkup()}<form id="ai-continue-form"><div id="ai-continue-settings"></div><label class="field"><span>下一步要求</span><textarea id="ai-continue-instruction" maxlength="12000" required placeholder="例如：保留第二版的推进结构，把正文压缩到 30 秒，并加强最后的购买理由。"></textarea><small class="ai-shortcut-hint">Ctrl + Enter 提交</small></label><div class="ai-continue-footer"><p class="ai-muted" id="ai-continue-note"></p><button type="submit" class="primary" id="ai-continue-submit">继续修改</button></div></form></section>`;
+    $('#content').innerHTML = `<a class="back-link" href="#ai">${icon('back')}全部协作任务</a><div class="page-heading ai-task-heading"><div><p class="ai-task-meta"><span class="ai-status" id="ai-task-status"></span><span>${esc(actions[task.action] || 'AI 协作')}</span></p><h1>${esc(contextTitle(task))}</h1></div><button type="button" class="secondary compact" id="ai-cancel-task">取消处理</button></div>
+      <div class="ai-task-context">${taskContextMarkup(task)}<span>独立候选，不改动案例正文</span></div><p id="ai-stale-warning" class="ai-stale-warning" hidden>案例已经更新。这个任务继续使用开始时的案例版本；若要基于新版讨论，请回到案例重新发起任务。</p>
+      <div class="ai-task-progress"><p id="ai-task-progress" role="status"></p><small id="ai-stream-status" class="ai-stream-status"></small></div><p class="ai-error" id="ai-task-error" role="alert" hidden></p><div id="ai-rounds"></div>
+      <section class="ai-continue-card ai-composer" aria-label="继续一起修改"><form id="ai-continue-form"><label class="sr-only" for="ai-continue-instruction">下一步要求</label><textarea id="ai-continue-instruction" maxlength="12000" rows="2" required placeholder="继续一起修改：例如保留第二版的推进结构，把正文压缩到 30 秒。"></textarea>
+        <details class="ai-advanced" id="ai-continue-advanced"><summary><span>模型与技能</span><span class="ai-advanced-summary" id="ai-continue-settings-summary"></span></summary>${serviceMarkup()}<div id="ai-continue-settings"></div></details>
+        <div class="ai-continue-footer"><p class="ai-muted" id="ai-continue-note"></p><small class="ai-shortcut-hint">Ctrl + Enter 提交</small><button type="submit" class="primary compact" id="ai-continue-submit">继续修改</button></div></form></section>`;
     $('#ai-continue-instruction').value = ai.drafts.get(task.task_id) || ai.pending.get(`continue:${task.task_id}`)?.payload.instruction || '';
     renderSettings('ai-continue',settingsForTask(task));
     $('#ai-continue-instruction').addEventListener('input',event => {ai.drafts.set(task.task_id,event.target.value);updateTaskControls();});
     $('#ai-continue-form').addEventListener('submit',submitContinue);$('#ai-cancel-task').onclick = cancelTask;connectServiceButton();
+    // Older rounds fold to one line; a click opens any of them.
+    $('#ai-rounds').addEventListener('click',event => {
+      const toggle = event.target.closest('.ai-round-toggle');
+      if (toggle) {const node = toggle.closest('.ai-round'), key = `${task.task_id}:${node.dataset.roundId}`;(ai.openRounds ||= new Map()).set(key,node.classList.contains('is-collapsed'));paintRoundFolding();return;}
+      const menu = event.target.closest('.ai-menu');if (menu && event.target.closest('[role=menuitem]')) menu.open = false;
+    });
     if (!keepScroll) window.scrollTo(0,0);
+  }
+  function paintRoundFolding() {
+    const nodes = $$('#ai-rounds > .ai-round');
+    nodes.forEach((node,index) => {
+      const chosen = ai.openRounds?.get(`${ai.task?.task_id}:${node.dataset.roundId}`), open = chosen ?? index === nodes.length - 1;
+      node.classList.toggle('is-collapsed',!open);$('.ai-round-toggle',node).setAttribute('aria-expanded',String(open));
+    });
   }
   function updateTask(task,keepScroll = true) {
     ai.task = task;
@@ -594,7 +651,7 @@ window.CaseAI = (() => {
     const badge = $('#ai-task-status');badge.className = `ai-status ${task.status}`;setText('#ai-task-status',statusText(task));
     $('#ai-stale-warning').hidden = !task.stale;
     const progress = typeof task.progress === 'string' ? task.progress : task.progress?.message || '';
-    setText('#ai-task-progress',(task.stopping || ai.cancelWaiting.has(task.task_id)) && active(task) ? '已请求取消，正在等待处理进程停止…' : progress || (active(task) ? '任务已进入处理队列，结果会自动更新。' : statusText(task)));
+    setText('#ai-task-progress',(task.stopping || ai.cancelWaiting.has(task.task_id)) && active(task) ? '已请求取消，正在等待处理进程停止…' : progress || (active(task) ? '任务已进入处理队列，结果会自动更新。' : ''));
     const container = $('#ai-rounds'), rounds = task.rounds || [];
     rounds.forEach((round,index) => {
       const key = String(round.round_id || index);let node = [...container.children].find(child => child.dataset.roundId === key);
@@ -607,6 +664,7 @@ window.CaseAI = (() => {
       error.hidden = !reason;if (error.textContent !== reason) error.textContent = reason;
       const time = $('.ai-round-time',node), value = readableDate(round.completed_at || round.created_at);if (time.textContent !== value) time.textContent = value;
     });
+    paintRoundFolding();
     if (!active(task)) {ai.cancelWaiting.delete(task.task_id);ai.pending.delete(`cancel:${task.task_id}`);}
     updateTaskControls();syncStream(task);
   }
@@ -621,6 +679,9 @@ window.CaseAI = (() => {
     button.textContent = cancel?.busy ? '正在请求取消…' : waiting ? '等待取消完成…' : cancel ? '重试取消请求' : '取消处理';
     setText('#ai-continue-note',pending ? '上次提交尚待核对；重试会使用相同要求，避免重复增加一轮。' : active(task) ? '本轮处理期间可以先写下一步要求，完成后再提交。' : ['failed','interrupted','cancelled'].includes(task.status) ? '任务已停止。填写要求并提交，会明确开启新一轮尝试。' : '继续使用任务开始时固定的资料，并保留此前每轮记录。');
     setText('#ai-service-label',availabilityText());
+    const issue = !pending && ai.options && !ai.optionsLoading && settingsIssue(settingsForTask(task));
+    setText('#ai-continue-settings-summary',issue ? '需要处理' : ai.status?.available === false ? 'AI 暂不可用' : settingsSummary(settingsForTask(task)));
+    $('#ai-continue-settings-summary')?.classList.toggle('is-warn',!!issue || ai.status?.available === false);
     const error = ai.errors.get(task.task_id) || '';setText('#ai-task-error',error);$('#ai-task-error').hidden = !error;
   }
   async function submitContinue(event) {
@@ -787,5 +848,7 @@ window.CaseAI = (() => {
   },2500);
   void loadTaskList().catch(() => {});
   if (state.detail && pageHash() === `#case/${state.detail.case_id}` && !$('.ai-case-actions')) void mountCaseActions(state.detail);
+  const closeMenus = event => $$('.ai-menu[open]').forEach(menu => {if (event.key === 'Escape' || !menu.contains(event.target)) menu.open = false;});
+  window.addEventListener('click',closeMenus,true);window.addEventListener('keydown',event => {if (event.key === 'Escape') closeMenus(event);});
   return {mountCaseActions,startWriting,startFromDirection,startBlank,startWithMaterials,modalOpen,hasUnsavedInput,refreshAvailability,route:routeAI};
 })();

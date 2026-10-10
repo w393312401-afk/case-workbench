@@ -78,3 +78,50 @@
   .detail-overview-metrics { padding: 16px; }
   .detail-overview-metrics .case-summary-metrics strong { font-size: 19px; }
 }
+
+/* ---- case detail: video and collaboration share a sticky left rail; content takes the rest ---- */
+#content:has(.detail-heading) .detail-layout{grid-template-columns:clamp(250px,21vw,310px) minmax(0,1fr);gap:24px;align-items:start}
+#content:has(.detail-heading) .detail-rail{position:sticky;top:var(--detail-sticky-top);display:flex;flex-direction:column;gap:14px;min-width:0;max-height:calc(100dvh - var(--detail-sticky-top) - 16px);overflow-y:auto;scrollbar-width:thin}
+#content:has(.detail-heading) .detail-rail>.video-panel:not([data-mode="floating"]){position:static}
+#content:has(.detail-heading) .detail-rail .player-wrap video{max-height:min(var(--detail-video-height,52dvh),52dvh)}
+#content:has(.detail-heading) .detail-rail>.detail-side{position:static;max-height:none;overflow:visible}
+#content:has(.detail-heading) .detail-rail .video-panel[data-mode="collapsed"]{grid-column:auto}
+.detail-side .ai-case-actions,.detail-completion{border:0!important;box-shadow:0 1px 2px #0000000a;border-radius:14px!important}
+.detail-side .ai-action-buttons{grid-template-columns:repeat(3,minmax(0,1fr))}
+.detail-side .ai-action-buttons button{padding:8px 4px;font-size:12px}
+/* the sticky header: title row, then a one-line summary */
+#content:has(.detail-heading) .case-dock{border:0;box-shadow:0 1px 0 var(--line)}
+#content:has(.detail-heading) .case-summary{gap:0}
+#content:has(.detail-heading) .case-summary-item p{display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+.case-step{font-size:12px}
+/* tabs as a segmented control */
+#content:has(.detail-heading) .detail-tabs{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--fill);border:0;margin:0}
+#content:has(.detail-heading) .detail-tabs .tab{padding:6px 14px;border:0;border-radius:8px;color:var(--muted);font-size:13px;font-weight:500}
+#content:has(.detail-heading) .detail-tabs .tab.active{background:var(--surface);color:var(--ink);box-shadow:0 1px 3px #0000001f}
+@media(prefers-color-scheme:dark){#content:has(.detail-heading) .detail-tabs .tab.active{background:#636366}}
+.detail-tools{display:flex;align-items:center;gap:6px}
+.detail-menu{position:relative}
+.detail-menu>summary{list-style:none;cursor:pointer;width:34px;height:34px}
+.detail-menu>summary::-webkit-details-marker{display:none}
+.detail-menu>summary svg{width:18px;height:18px}
+.detail-menu[open]>summary{background:var(--fill)}
+.detail-menu>div{position:absolute;right:0;top:calc(100% + 4px);z-index:20;min-width:160px;padding:5px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 30px #00000024}
+.detail-menu>div>button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:transparent;color:var(--ink);font-size:13px;padding:7px 10px;border-radius:6px}
+.detail-menu>div>button svg{width:15px;height:15px}
+.detail-menu>div>button:hover:not(:disabled){background:var(--accent);color:#fff}
+.detail-menu>div>button.is-danger{color:var(--danger-ink)}
+.detail-menu>div>button.is-danger:hover:not(:disabled){background:var(--danger);color:#fff}
+#content:has(.detail-heading) .detail-main .section-card{border:0}
+@media(max-width:1180px){#content:has(.detail-heading) .detail-layout{grid-template-columns:minmax(200px,26%) minmax(0,1fr)}}
+@media(max-width:900px){
+  #content:has(.detail-heading) .detail-layout{grid-template-columns:minmax(0,1fr)}
+  #content:has(.detail-heading) .detail-rail{position:static;max-height:none;overflow:visible}
+}
+#content:has(.detail-heading) .detail-rail .player-wrap:has(> .missing-media){background:var(--surface-alt);min-height:0}
+#content:has(.detail-heading) .detail-rail .player-wrap>.missing-media{color:var(--muted-soft);padding:28px 16px;font-size:12px}
+@media(max-width:900px){
+  #content:has(.detail-heading) .detail-rail{display:contents}
+  #content:has(.detail-heading) .detail-rail>.video-panel{order:0}
+  #content:has(.detail-heading) .detail-main{order:1}
+  #content:has(.detail-heading) .detail-rail>.detail-side{order:2}
+}

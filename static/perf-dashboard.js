@@ -53,7 +53,7 @@
     const n = periods[f.period]?.[1];
     if (n) weeks = weeks.slice(-n);
     const empty = () => ({ videos: 0, views: 0, impressions: 0, clicks: 0, orders: 0, items: 0, gmv: 0 });
-    const byWeek = new Map(weeks.map((w) => [w.week, Object.assign(w, empty(), { byAccount: new Map(), posted: 0, postedBy: new Map() })]));
+    const byWeek = new Map(weeks.map((w) => [w.week, Object.assign(w, empty(), { byAccount: new Map(), acc: new Map(), posted: 0, postedBy: new Map() })]));
     const total = empty(), seen = new Set(), products = new Map(), videos = new Map(), accountGmv = new Map();
     const add = (target, r) => { target.views += r[2]; target.impressions += r[3]; target.clicks += r[4]; target.orders += r[5]; target.items += r[6]; target.gmv += r[7]; };
     for (const r of a.weekly) {
@@ -65,6 +65,8 @@
       add(bucket, r);
       add(total, r);
       bucket.byAccount.set(attr.account, (bucket.byAccount.get(attr.account) || 0) + r[7]);
+      if (!bucket.acc.has(attr.account)) bucket.acc.set(attr.account, empty());
+      add(bucket.acc.get(attr.account), r);
       accountGmv.set(attr.account, (accountGmv.get(attr.account) || 0) + r[7]);
       seen.add(r[0]);
       if (!products.has(attr.product)) products.set(attr.product, Object.assign(empty(), { ids: new Set() }));
@@ -96,8 +98,15 @@
   }
 
   // ---- svg ---------------------------------------------------------------
-  const W = 300, H = 140, L = 40, R = 8, T = 18, B = 22;
-  const plotW = W - L - R, plotH = H - T - B, base = T + plotH;
+  const L = 40, R = 8, T = 18, B = 22;
+  let W = 300, H = 140, plotW = W - L - R, plotH = H - T - B, base = T + plotH;
+  // Draws with a wider canvas so text keeps its size when a chart spans the page.
+  function sized(width, height, draw) {
+    const saved = [W, H];
+    const set = (w, h) => { W = w; H = h; plotW = W - L - R; plotH = H - T - B; base = T + plotH; };
+    set(width, height);
+    try { return draw(); } finally { set(...saved); }
+  }
   let registry = new Map(), serial = 0;
 
   function grid(max, tick) {
@@ -127,7 +136,7 @@
   }
 
   function columns(id, label, values, o) {
-    const n = values.length, band = plotW / n, barW = Math.min(18, Math.max(2, band * 0.66));
+    const n = values.length, band = plotW / n, barW = Math.min(W > 400 ? 44 : 18, Math.max(2, band * (W > 400 ? 0.56 : 0.66)));
     const max = niceMax(Math.max(0, ...values.filter((v) => v != null)));
     const y = (v) => base - (v / max) * plotH;
     const last = values.findLastIndex((v) => v != null);
@@ -142,7 +151,7 @@
   }
 
   function stacked(id, label, series, o) {
-    const n = o.n, band = plotW / n, barW = Math.min(18, Math.max(2, band * 0.66));
+    const n = o.n, band = plotW / n, barW = Math.min(W > 400 ? 44 : 18, Math.max(2, band * (W > 400 ? 0.56 : 0.66)));
     const totals = Array.from({ length: n }, (_, i) => (o.gap(i) ? null : series.reduce((sum, s) => sum + s.values[i], 0)));
     const max = niceMax(Math.max(0, ...totals.filter((v) => v != null)));
     const scale = plotH / max;
@@ -313,7 +322,7 @@
     const byId = new Map(ctx.videos.map((v) => [v.video_id, v]));
     const rows = [...S.videos].sort((x, y) => y[1].gmv - x[1].gmv).slice(0, 10).map(([index, m]) => {
       const attr = S.P.attrs[index], video = byId.get(attr.id);
-      const title = video ? `<a href="https://www.tiktok.com/@${encodeURIComponent(attr.account)}/video/${esc(attr.id)}" target="_blank" rel="noopener noreferrer">${esc(video.headline || attr.id)}</a>` : esc(attr.id);
+      const title = video ? `<button type="button" class="perf-link" data-perf-video="${esc(attr.id)}">${esc(video.headline || attr.id)}</button>` : esc(attr.id);
       return [esc(attr.account), esc(attr.product), esc(attr.posted || "—"), `<span class="perf-cell-title" title="${esc(video?.title || "")}">${title}</span>`, count(m.views), count(m.clicks), count(m.orders), money2(m.gmv), money2(ratio(m.gmv, m.views, 1000))];
     });
     return table([["账号"], ["产品"], ["发布"], ["标题"], ["播放量", 1], ["商品点击", 1], ["归因订单", 1], ["归因 GMV", 1], ["GPM", 1]], rows);
@@ -343,6 +352,65 @@
       ["有数据视频数", count(t.videos), t.videos ? `平均每条 ${money(t.gmv / t.videos)}` : ""],
     ];
     return `<div class="perf-kpis">${tiles.map(([label, value, sub]) => `<div class="perf-kpi"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(sub)}</small></div>`).join("")}</div>`;
+  }
+
+  const metrics = {
+    gmv: ["归因 GMV", (m) => m.gmv, money, (v) => compact(v, "$"), "columns", true],
+    orders: ["归因订单", (m) => m.orders, count, (v) => compact(v), "columns", true],
+    views: ["播放量", (m) => m.views, count, (v) => compact(v), "columns", true],
+    gpm: ["GPM（$/千次播放）", (m) => ratio(m.gmv, m.views, 1000), money2, (v) => compact(v, "$"), "line", false],
+    ctr: ["商品点击率", (m) => ratio(m.clicks, m.views, 100), pct, percentTick, "line", false],
+    ctor: ["CTOR（订单 / 商品点击）", (m) => ratio(m.orders, m.clicks, 100), pct, percentTick, "line", false],
+  };
+  function metricTiles(S, chosen) {
+    const ws = S.weeks.filter((w) => w.complete), t = S.total;
+    return `<div class="perf-kpis perf-kpi-picker" role="group" aria-label="选择主图指标">${Object.entries(metrics).map(([key, [label, read, fmt]]) => {
+      const move = change(ws.map(read), fmt);
+      return `<button type="button" class="perf-kpi${key === chosen ? " is-selected" : ""}" data-perf-metric="${key}" aria-pressed="${key === chosen}"><span>${esc(label)}</span><strong>${esc(fmt(read(t)))}</strong><small>${esc(move ? `最近一周 ${move[0]} · ${move[1]}` : "没有完整周")}</small></button>`;
+    }).join("")}</div>`;
+  }
+  // The chosen measure, week by week, then the same measure split by account (additive measures only).
+  function mainCharts(S, chosen) {
+    const [label, read, fmt, tick, kind, additive] = metrics[chosen], ws = S.weeks;
+    const id = `c${serial++}`, values = ws.map((w) => (w.complete ? read(w) : null));
+    tipFor(id, ws.map((w, i) => ({ value: w.complete ? fmt(values[i]) : "数据不全", when: `${w.week} 起一周`,
+      lines: w.complete ? [["订单", count(w.orders)], ["GMV", money(w.gmv)], ["播放", count(w.views)], ["商品点击", count(w.clicks)]].filter(([name]) => !label.includes(name)) : [["", "该周导出有缺口，不计入走势"]] })));
+    const main = sized(900, 250, () => (kind === "line" ? line : columns)(id, `每周${label}`, values, { tick, x: (i) => weekLabel(ws[i]) }));
+    const head = change(values, fmt);
+    let split = "";
+    if (additive && S.accountsShown.length > 1) {
+      const sid = `c${serial++}`, names = S.accountsShown;
+      const series = names.map((name) => ({ name, slot: S.P.slot.get(name), values: ws.map((w) => (w.acc.get(name) ? read(w.acc.get(name)) : 0)) }));
+      tipFor(sid, ws.map((w, i) => ({ value: w.complete ? fmt(read(w)) : "数据不全", when: `${w.week} 起一周 · 合计`,
+        lines: w.complete ? series.filter((x) => x.values[i] > 0).sort((x, y) => y.values[i] - x.values[i]).map((x) => [x.name, fmt(x.values[i]), x.slot]) : [["", "该周导出有缺口，不计入走势"]] })));
+      const totalOf = (name) => ws.reduce((sum, w) => sum + (w.acc.get(name) ? read(w.acc.get(name)) : 0), 0);
+      split = `<div class="perf-mini perf-split"><div class="perf-mini-head"><span>按账号拆分</span><small>颜色固定对应账号</small></div>${sized(900, 200, () => stacked(sid, `各账号每周${label}`, series, { n: ws.length, gap: (i) => !ws[i].complete, tick, x: (i) => weekLabel(ws[i]) }))}${legendFor(names, S, totalOf, fmt)}<div class="perf-tooltip" role="status" hidden></div></div>`;
+    }
+    return `<section class="section-card perf-trend-card perf-main-card"><div class="perf-mini perf-main"><div class="perf-mini-head"><span>每周${esc(label)}</span>${head ? `<strong>${esc(head[0])}</strong><small>${esc(head[1])}</small>` : ""}</div>${main}<div class="perf-tooltip" role="status" hidden></div></div>${split}</section>`;
+  }
+  function fold(title, hint, body) {
+    return `<details class="perf-fold section-card"><summary><span>${esc(title)}</span>${hint ? `<small>${esc(hint)}</small>` : ""}</summary><div class="perf-fold-body">${body}</div></details>`;
+  }
+  function board(ctx) {
+    registry = new Map();
+    serial = 0;
+    const a = ctx.analytics;
+    if (!a) return `<div class="empty"><h3>看板数据暂时读不到</h3><p>服务端还没有新的看板接口：请重启「案例工作台」服务后刷新页面。</p></div>`;
+    if (!ctx.summary.weeks.length) return `<div class="empty"><h3>还没有可画的数据</h3><p>先同步或导入后台导出表格。</p></div>`;
+    const S = scope(ctx);
+    S.shopRatio = shopTotalRatio(a, S);
+    if (!S.total.videos) return `<div class="empty"><h3>当前筛选下没有数据</h3><p>换个账号、产品或周期试试，或点「清除筛选」。</p></div>`;
+    const chosen = metrics[ctx.filters.metric] ? ctx.filters.metric : "gmv", w = weeklyCards(S);
+    const monthly = monthlyTable(S, a), shop = shopCards(S);
+    return `${metricTiles(S, chosen)}${mainCharts(S, chosen)}
+      ${section("视频排行 Top 10", "按归因 GMV，点一行看详情", `${topVideos(S, ctx)}<button type="button" class="secondary perf-more" data-perf-tab="list">查看全部视频明细</button>`)}
+      <div class="perf-folds">${fold("发布节奏", "每周新发布视频数，按账号", `<div class="perf-trend perf-trend-wide">${w.posted}${accountCards(S).split('<div class="perf-mini">').slice(2).map((part) => '<div class="perf-mini">' + part).join("")}</div>`)}
+      ${fold("转化效率三项", "GPM、点击率、CTOR 各用各的刻度", `<div class="perf-trend">${w.gpm}${w.ctr}${w.ctor}</div>`)}
+      ${shop ? fold("店铺每日汇总", "另一份导出，口径更大，不与视频明细相加", shop) : ""}
+      ${monthly.includes("<tbody>") && !monthly.includes("当前筛选下没有数据") ? fold("月度汇总", "按每月最全的报表口径，不受周期影响", monthly) : ""}
+      ${S.products.size > 1 ? fold("产品型号表现", "按归因 GMV 从高到低", productTable(S)) : ""}
+      ${fold("每周数据表", "", weekTable(S))}
+      ${fold("各账号每周数据表", "", accountTable(S))}</div>`;
   }
 
   function section(title, hint, body) {
@@ -450,5 +518,5 @@
     const charts = weeklyCards(S);
     return `<div class="home-weekly-charts">${charts.gmv}${charts.items}${charts.views}${charts.posted}</div>`;
   }
-  window.PerfDashboard = { markup, bind, periods, homeMarkup };
+  window.PerfDashboard = { markup, board, bind, periods, homeMarkup, metrics };
 })();

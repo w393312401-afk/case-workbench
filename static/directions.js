@@ -11,7 +11,9 @@ function directionChain(d) {
 }
 function directionLabel(item) {
   const d = item.current?.test_direction;
-  return d ? `${d.direction_id} · ${directionVariantNames[d.variant_type] || d.variant_type}` : "未记录测试方向";
+  if (!d) return "未记录测试方向";
+  const variant = directionVariantNames[d.variant_type] || d.variant_type;
+  return variant ? `${d.direction_id} · ${variant}` : d.direction_id;
 }
 function directionEditor(current) {
   const d = current.test_direction || {};

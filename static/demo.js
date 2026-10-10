@@ -45,7 +45,12 @@
     const end = new Date(monday0); end.setDate(end.getDate() + 13);
     const window_end = iso(end), later = window_end > iso(today);
     const [status, status_label] = later ? statuses[3] : statuses[i % statuses.length];
-    return { video_id, account, product: prod, posted_on, window_end, status, status_label,
+    const rowsOf = weekly.filter((r) => r[0] === i), sum = (k) => rowsOf.reduce((total, r) => total + r[k], 0);
+    const views = sum(2), clicks = sum(4), orders = sum(5), gmv = +sum(7).toFixed(2), windowViews = later ? null : Math.round(views * 0.6);
+    return { video_id, account, product: prod, posted_on, posted_at: `${posted_on}T12:00:00`, window_end, status, status_label, views, impressions: sum(3), clicks, orders, items: sum(6), gmv,
+      window_views: windowViews, ctr_pct: views ? +(clicks * 100 / views).toFixed(2) : null, ctor_pct: clicks ? +(orders * 100 / clicks).toFixed(2) : null, gpm: views ? +(gmv * 1000 / views).toFixed(2) : null,
+      this_week_gmv: rowsOf.find((r) => r[1] === day(-7))?.[7] || 0, first_data: rowsOf[0]?.[1] || null, last_data: day(-1),
+      review_comments: i === 1 ? 3 : i === 4 ? 12 : 0, review_open: i === 1 ? 1 : 0, case_id: i === 6 ? "PVR-000000000001" : null,
       headline: pad(titles[i % titles.length], "：这是一个特别长的视频标题，用来检查换行、截断和窄屏下的排版是否还能看清楚"),
       title: titles[i % titles.length] };
   });
@@ -57,8 +62,13 @@
     title: pad(title, "，附带一段很长的案例名称说明用于测试布局"),
     updated_at: `${day(-i)}T10:00:00`, event_count: 1, search_text: title, assets: {}, sales_data: null, resolved_direction: null,
     current: {
-      title: pad(title, "，附带一段很长的案例名称说明用于测试布局"), product, category: ["转化正向参考", "高播放低转化", "待验证与整理"][i % 3], assessments: [],
-      transcript: i % 3 === 0 ? undefined : { text: "示例文案" },
+      title: pad(title, "，附带一段很长的案例名称说明用于测试布局"), product, category: ["转化正向参考", "高播放低转化", "待验证与整理"][i % 3],
+      kind: "performance", conclusion: ["开场 3 秒的失败画面留住了人，切纸对比是下单的转折点。", "播放很高但点击偏低，评论集中在价格，购买理由没有讲到。", "数据还不全，先保留开场和角度刻度两个可复用的点。"][i % 3],
+      assessments: [{ dimension: "conversion", polarity: ["positive", "negative", "unknown"][i % 3], reason: ["CTOR 高于同期均值", "点击率低于 1%", "观察窗未结束"][i % 3] }],
+      metrics: { video_id: videos[i][0], creator_handle: `@${videos[i][1]}`, published_title: titles[i % titles.length], views_display: ["48.6K", "126K", "9.8K", "31.2K", "15.4K", "7.1K"][i], product_clicks_display: ["1.28K", "980", "210", "860", "402", "160"][i], items_sold: [46, 12, 3, 28, 9, 2][i], ctor_display: ["3.6%", "1.2%", "1.4%", "3.3%", "2.2%", "1.3%"][i], ticket_value: "89.9" },
+      evidence: { status: ["source_checked", "user_reported", "unverified"][i % 3], source: "后台导出", window: "发布当周 + 下一周", as_of: day(-1) },
+      transcript: i % 3 === 0 ? undefined : { text: "My knife couldn't even cut a tomato.\nThirty seconds on this sharpener — and now it slices paper clean.\nThe angle is locked, so you can't mess it up.", status: "checked", source: "人工核对" },
+      limitations: ["只有一个统计窗口，不能推断因果"], purchase_reason: "30 秒出锋 + 不用练手感", history_note: "",
       highlights: i % 2 ? ["开场钩子"] : [],
       test_direction: i % 4 === 1 ? undefined : { direction_id: ["D-锋利感", "D-省时", "D-耐用"][i % 3] },
       publish: i % 3 === 2 ? { published_on: day(-3) } : undefined,
@@ -142,6 +152,50 @@
     new_recent: reviews.filter((r) => r.first_seen >= day(-14)).length, new_since: day(-14), new_days: 14, tag_edits: 0, picks: reviews.filter((r) => r.pick).length, state_error: null, labels,
   });
 
+  // ---- writing: the AI service shown as connected, and full task records behind the list ----
+  const answer = `## 变体 A · 问题-解决
+
+🔴 钝刀 30 秒变锋利？现场切纸给你看 #磨刀 #厨房好物 #SHARPAL
+
+**口播（配音用）**
+My knife couldn't even cut a tomato. Thirty seconds on this sharpener — and now it slices paper clean. The angle is locked, so you can't mess it up.
+
+**画面**
+1. 钝刀压烂番茄特写（0–3 秒）
+2. 夹刀、看刻度、来回 6 次（3–20 秒）
+3. 切纸、切番茄对比（20–30 秒）
+
+## 变体 B · 结果倒叙
+
+🔴 这把刀 30 秒前还切不开番茄 #磨刀石 #开箱
+
+**口播（配音用）**
+This paper cut? Thirty seconds ago, this knife was useless. Here's the trick: a fixed angle that does the hard part for you.`;
+  const roundDone = (id, instruction, output, extra = {}) => ({ round_id: id, status: "completed", instruction, output, created_at: `${day(-1)}T10:00:00`, completed_at: `${day(-1)}T10:02:10`,
+    model: "claude-opus", requested_model: "claude-opus", reasoning_effort: "high", requested_reasoning_effort: "high", skill_selection: "auto", skills_status: "submitted",
+    skills: [{ label: "产品视频脚本复盘", path: "skills/product-video-script-review/SKILL.md" }], review_context: { status: "attached", reviews: 14, synced_at: `${day(-1)}T09:30:00` },
+    messages: [{ item_id: `${id}-c`, phase: "commentary", text: "读取方向链和 14 条用户评论摘要，按两种推进结构起草。", complete: true }, { item_id: `${id}-a`, phase: "final_answer", text: output, complete: true }],
+    read_estimates: [{ label: "变体 A", seconds: 14, words: 35 }, { label: "变体 B", seconds: 10, words: 25 }], ...extra });
+  const taskDetail = (summary) => {
+    const base = { ...summary, product, instruction: "按 D-锋利感 写 2 个变体，30 秒内，开头 3 秒必须出现钝刀失败画面。", updated_at: `${day(0)}T09:12:00`, created_at: `${day(-1)}T10:00:00`,
+      model: "claude-opus", context: { direction_id: "D-锋利感", materials: [{ title: "That's a lot of wobble for a $90 sharpener" }] }, base_revision: "demo", round_count: 1 };
+    if (summary.status === "running") return { ...base, round_count: 2, progress: "正在起草第 2 轮…", rounds: [
+      roundDone("r1", base.instruction, answer),
+      { round_id: "r2", status: "running", instruction: "保留变体 A，把口播压到 20 秒，结尾加一句评论区互动。", created_at: `${day(0)}T09:10:00`, model: "claude-opus", reasoning_effort: "high", skill_selection: "auto", skills_status: "submitted",
+        messages: [{ item_id: "r2-c", phase: "commentary", text: "保留变体 A 的推进，压缩口播。", complete: true }, { item_id: "r2-a", phase: "final_answer", text: "## 变体 A（20 秒版）\n\n🔴 钝刀 30 秒变锋利？现场切纸给你看 #磨刀\n\n**口播（配音用）**\nMy knife couldn't cut a tomato. Thirty seconds later — paper. Drop your dullest knife in the comments", complete: false }] }] };
+    if (summary.status === "queued") return { ...base, progress: "排队中，前面还有 1 个任务", rounds: [{ round_id: "r1", status: "queued", instruction: base.instruction, created_at: `${day(0)}T09:11:00`, messages: [] }] };
+    return { ...base, rounds: [roundDone("r1", base.instruction, answer)] };
+  };
+
+  tasks.forEach((t, i) => Object.assign(t, { updated_at: `${day(-i)}T09:${String(12 - i).padStart(2, "0")}:00`, model: "claude-opus", round_count: t.status === "running" ? 2 : 1,
+    instruction: ["按 D-锋利感 写 2 个变体，30 秒内，开头 3 秒必须出现钝刀失败画面。", "帮我审一下这版口播：节奏是不是太慢？", "复盘：为什么播放 2 万但只出了 3 单？", "换成厨师朋友出镜，写一个身份认同版本。"][i] }));
+
+  const demoScripts = [
+    { id: "SCR-000000000001", product, direction_id: "D-锋利感", title: "钝刀 30 秒变锋利 · 问题-解决", version: 2, status: "published", video_id: videos[0][0], updated_at: `${day(-2)}T15:00:00`, text: "My knife couldn't even cut a tomato. Thirty seconds on this sharpener — and now it slices paper clean." },
+    { id: "SCR-000000000002", product, direction_id: "D-锋利感", title: "30 秒前还切不开番茄 · 结果倒叙", version: 1, status: "adopted", updated_at: `${day(-1)}T11:00:00`, text: "This paper cut? Thirty seconds ago, this knife was useless. Here's the trick: a fixed angle." },
+    { id: "SCR-000000000003", product, direction_id: "D-省时", title: "厨师朋友不信 · 身份认同", version: 1, status: "draft", updated_at: `${day(0)}T09:00:00`, text: "My chef friend said guided sharpeners are for beginners. So we raced." },
+    { id: "SCR-000000000004", product, direction_id: null, title: "露营刀开刃前后", version: 3, status: "reviewed", updated_at: `${day(-6)}T10:00:00`, text: "Same knife, two weeks apart. One trip with a dull edge was enough." },
+  ];
   const json = (body, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }));
   window.fetch = async (input, init = {}) => {
     const url = new URL(typeof input === "string" ? input : input.url, location.origin);
@@ -153,7 +207,22 @@
       if (path === "/api/performance/analytics") return json({ videos, weekly, monthly: [], months: {}, shop_daily: [] });
       if (path === "/api/performance/videos") return json({ videos: videoList });
       if (path === "/api/ai/tasks") return json({ tasks });
-      if (path === "/api/creation") return json({ plans: plans.filter((p) => ["pending", "working"].includes(p.status)), scripts: [], revision: `demo-${revision}` });
+      if (path === "/api/creation") return json({ plans: plans.filter((p) => ["pending", "working"].includes(p.status)), scripts: demoScripts, revision: `demo-${revision}` });
+      const oneCase = path.match(/^\/api\/cases\/(PVR-\d{12})$/);
+      if (oneCase) {
+        const c = cases.find((x) => x.case_id === oneCase[1]);
+        if (!c) return json({ error: "案例不存在" }, 404);
+        const events = [
+          { event_id: `${c.case_id}-E1`, created_at: `${day(-20)}T10:00:00`, kind: "original", text: "首次收录：从视频数据收为案例", current: c.current },
+          { event_id: `${c.case_id}-E2`, created_at: `${day(-6)}T15:20:00`, kind: "fact", text: "补充一周后的数据和结论", current: c.current },
+        ];
+        return json({ ...c, original: { text: c.current.transcript?.text || "", source: "后台导出" }, events, current_event_id: events.at(-1).event_id, created_at: events[0].created_at,
+          assets: {}, paths: { record: `cases/${c.case_id}`, reading: `library/${c.case_id}/case.md` } });
+      }
+      if (path === "/api/ai/status") return json({ available: true, label: "Claude 订阅已连接", providers: { claude: { available: true, label: "Claude 订阅已连接" } } });
+      if (path === "/api/ai/options") { const real = await (await realFetch(input, init)).json(); return json({ ...real, models: (real.models || []).map((m) => ({ ...m, available: true })), skills: (real.skills || []).map((s) => ({ ...s, available: true })) }); }
+      const aiTask = path.match(/^\/api\/ai\/tasks\/(AIT-[0-9a-f]{12})$/);
+      if (aiTask) { const summary = tasks.find((t) => t.task_id === aiTask[1]); return summary ? json({ task: taskDetail(summary) }) : json({ error: "任务不存在" }, 404); }
       if (path === "/api/reviews/summary") return json(reviewSummary());
       if (path === "/api/reviews") return json(reviewSearch(url.searchParams));
       const one = path.match(/^\/api\/reviews\/([0-9a-z]{16})$/);

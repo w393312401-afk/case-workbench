@@ -15,3 +15,15 @@
 @media(max-width:720px){.timeline-card{flex-direction:column}.timeline-card .secondary{width:100%;min-height:40px}}
 .material-picker{border:1px solid var(--line);border-radius:10px;padding:10px 14px 12px;margin:0 0 14px}.material-picker legend{padding:0 6px;font-size:var(--font-meta);color:var(--muted-soft)}.material-options{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:var(--font-meta)}.material-options label{display:flex;align-items:center;gap:6px}.material-picker input[name=material_text]{width:100%;border:1px solid var(--line);border-radius:7px;padding:8px 10px;background:var(--surface);color:var(--ink)}
 .edit-card{border:1px solid var(--line);border-radius:10px;padding:16px;margin-top:12px}.edit-card.completed{border-color:var(--success)}.edit-card.failed,.edit-card.interrupted{border-color:var(--warn)}.edit-card h3{font-size:var(--font-meta);margin:14px 0 6px}.edit-facts{font-size:var(--font-meta);color:var(--ink);margin:8px 0 0}.edit-gaps{margin:0;padding-left:18px;font-size:var(--font-meta);line-height:1.8}.edit-gaps p{margin:2px 0 6px;color:var(--muted-soft);white-space:pre-wrap;overflow-wrap:anywhere}.edit-live,.edit-output{font:inherit;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface-alt);padding:10px 12px;border-radius:8px;max-height:260px;overflow:auto;margin:8px 0 0}.edit-card details{margin-top:12px;font-size:var(--font-meta)}.edit-card summary{cursor:pointer;color:var(--link)}
+
+/* production: orders as rows; voices, readings and DaVinci settings live in the drawer */
+.production-main{min-width:0}
+.production-drawer{width:min(460px,100vw)}
+.production-drawer .rev-drawer-body{gap:26px}
+.production-setting h2{font-size:14px;font-weight:600;margin:0 0 8px}
+.production-setting+.production-setting{border-top:1px solid var(--line);padding-top:22px}
+.production-setting .context-note{background:none;padding:0;font-size:12px;color:var(--muted-soft)}
+.production-setting .inline-form{display:flex;flex-direction:column;gap:10px}
+.production-setting .inline-form .field{margin:0}
+.production-setting .inline-form button[type=submit]{align-self:flex-start}
+#content .production-eleven{border:0;border-radius:12px}

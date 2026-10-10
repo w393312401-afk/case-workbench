@@ -29,7 +29,8 @@
   };
   const perf = {
     videos: null, summary: null, analytics: null, catalog: null, loading: null, coreLoading: null, analyticsReady: null, catalogReady: null, loadSequence: 0, routeSequence: 0, analyticsLoading: false, catalogLoading: false, shown: 200,
-    filters: { q: "", account: "", product: "", status: "", range: "recent", sort: "posted", dir: "desc", tab: "board", period: "all" },
+    filters: { q: "", account: "", product: "", status: "", range: "recent", sort: "posted", dir: "desc", tab: "board", period: "all", metric: "gmv" },
+    openVideo: "",
   };
   try {
     Object.assign(perf.filters, JSON.parse(sessionStorage.getItem("video-data-filters") || "{}"));
@@ -117,14 +118,35 @@
       const active = perf.filters.sort === key, asc = perf.filters.dir === "asc", label = sortColumns[key][0];
       return `<th class="${cls}" aria-sort="${active ? (asc ? "ascending" : "descending") : "none"}"><button type="button" class="perf-sort${active ? " is-active" : ""}" data-sort="${key}" title="按${esc(label)}排序">${esc(label)}<span class="perf-sort-arrow" aria-hidden="true">${active ? (asc ? "↑" : "↓") : "↕"}</span></button></th>`;
     };
-    return `<div class="perf-table-wrap"><table class="perf-table"><thead><tr>${th("posted")}<th>账号</th><th>标题</th><th>产品</th><th>测试方向</th>${th("window", "num")}${th("status")}${th("views", "num")}${th("items", "num")}${th("gmv", "num")}${th("ctor", "num")}${th("week", "num")}${th("reviews")}<th>案例</th></tr></thead><tbody>${visible.map((v) => `<tr>
-      <td>${esc(v.posted_on || "—")}</td><td>${esc(v.account || "—")}</td>
-      <td class="perf-title" title="${esc(v.title || "")}"><a href="https://www.tiktok.com/@${encodeURIComponent(v.account || "_")}/video/${esc(v.video_id)}" target="_blank" rel="noopener noreferrer">${esc(v.headline || v.video_id)}</a><button type="button" class="subtle" data-video-hook="${esc(v.video_id)}">摘录钩子</button></td>
-      <td>${esc(v.product)}</td>${window.CaseDirectionPicker.videoCell(v, perf.catalog)}<td class="num">${v.window_views == null ? "—" : count(v.window_views)}</td><td>${badge(v)}</td>
-      <td class="num">${count(v.views)}</td><td class="num">${count(v.items)}</td><td class="num">${money(v.gmv)}</td><td class="num">${pct(v.ctor_pct)}</td><td class="num">${v.this_week_gmv ? money(v.this_week_gmv) : "—"}</td>
-      <td class="perf-reviews">${v.review_comments ? `<a class="perf-case-link" href="#reviews?video=${esc(v.video_id)}" title="在用户评论库里只看这条视频下的评论">${count(v.review_comments)} 条</a>${v.review_open ? ` <span class="rev-badge rev-badge-open" title="提问没人回复">${count(v.review_open)} 个没人回复</span>` : ""}` : "—"}</td>
-      <td>${v.case_id ? `<a class="perf-case-link" href="#case/${esc(v.case_id)}">查看案例</a>` : `<button type="button" class="subtle" data-collect="${esc(v.video_id)}">收为案例</button>`}</td>
+    return `<div class="perf-table-wrap"><table class="perf-table perf-video-table"><thead><tr>${th("posted", "perf-col-video")}<th>测试方向</th>${th("status")}${th("window", "num")}${th("views", "num")}${th("items", "num")}${th("gmv", "num")}${th("ctor", "num")}</tr></thead><tbody>${visible.map((v) => `<tr data-video-row="${esc(v.video_id)}" tabindex="0" aria-label="查看 ${esc(v.headline || v.video_id)} 的详情"${perf.openVideo === v.video_id ? ' class="is-open"' : ""}>
+      <td class="perf-title" title="${esc(v.title || "")}"><strong>${esc(v.headline || v.video_id)}</strong><small>${esc(v.account || "账号未记录")} · ${esc(v.posted_on || "—")}${v.case_id ? " · 已收为案例" : ""}${v.review_comments ? ` · ${count(v.review_comments)} 条评论` : ""}</small></td>
+      ${window.CaseDirectionPicker.videoCell(v, perf.catalog)}<td>${badge(v)}</td><td class="num">${v.window_views == null ? "—" : count(v.window_views)}</td>
+      <td class="num">${count(v.views)}</td><td class="num">${count(v.items)}</td><td class="num">${money(v.gmv)}</td><td class="num">${pct(v.ctor_pct)}</td>
     </tr>`).join("")}</tbody></table></div>${rows.length > visible.length ? `<button type="button" class="secondary perf-more" id="perf-more">再显示 ${Math.min(200, rows.length - visible.length)} 条（共 ${rows.length} 条）</button>` : ""}`;
+  }
+
+  // Everything about one video that the table leaves out, with its actions.
+  function videoDetail(v) {
+    const link = `https://www.tiktok.com/@${encodeURIComponent(v.account || "_")}/video/${encodeURIComponent(v.video_id)}`;
+    const fact = (label, value) => `<dt>${esc(label)}</dt><dd>${value}</dd>`;
+    const hooks = window.MaterialBasket?.count({ type: "hook", source_id: v.video_id }) || 0;
+    return `<div class="rev-drawer-head"><h2 id="perf-video-title">${esc(v.headline || v.video_id)}</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭视频详情">${icon("close")}</button></div>
+      <div class="rev-drawer-body perf-video-body"><p class="perf-video-meta">${esc(v.account || "账号未记录")} · 发布 ${esc(v.posted_on || "—")} · ${esc(v.product || "产品未记录")}</p>
+        <section class="perf-video-status">${badge(v)}<p>${esc(statusHints[v.status] || "")}${v.window_end ? `（观察窗到 ${esc(v.window_end)}）` : ""}</p></section>
+        <dl class="perf-video-facts">${fact("首两周播放", v.window_views == null ? "—" : count(v.window_views))}${fact("累计播放", count(v.views))}${fact("曝光", count(v.impressions))}${fact("商品点击", count(v.clicks))}${fact("点击率", pct(v.ctr_pct))}${fact("订单", count(v.orders))}${fact("售出件数", count(v.items))}${fact("归因 GMV", money(v.gmv))}${fact("GPM", v.gpm == null ? "—" : "$" + v.gpm.toFixed(2))}${fact("CTOR", pct(v.ctor_pct))}${fact("本周 GMV", v.this_week_gmv ? money(v.this_week_gmv) : "—")}${fact("数据覆盖", v.first_data ? `${esc(v.first_data)} 至 ${esc(v.last_data || "—")}` : "—")}</dl>
+        <section class="perf-video-section"><h3>用户评论</h3><p class="perf-reviews">${v.review_comments ? `<a class="perf-case-link" href="#reviews?video=${esc(v.video_id)}">${count(v.review_comments)} 条</a>${v.review_open ? ` <span class="rev-badge rev-badge-open" title="提问没人回复">${count(v.review_open)} 个没人回复</span>` : ""}` : "评论库里还没有这条视频的评论。"}</p></section>
+        <section class="perf-video-section"><h3>案例与素材</h3><div class="perf-video-actions">${v.case_id ? `<a class="secondary compact perf-case-link" href="#case/${esc(v.case_id)}">查看案例</a>` : `<button type="button" class="secondary compact" data-collect="${esc(v.video_id)}">收为案例</button>`}<button type="button" class="secondary compact" data-video-hook="${esc(v.video_id)}">${hooks ? `摘录钩子 · 已有 ${hooks}` : "摘录钩子"}</button><a class="subtle" href="${esc(link)}" target="_blank" rel="noopener noreferrer">${icon("link")}在 TikTok 打开</a></div></section>
+        <p class="perf-video-id">视频 ID <code>${esc(v.video_id)}</code></p></div>`;
+  }
+  function openVideo(id) {
+    const v = perf.videos?.find((item) => item.video_id === id), drawer = $("#perf-video-drawer");
+    if (!v || !drawer) return;
+    perf.openVideo = id;
+    drawer.innerHTML = videoDetail(v);
+    $$("[data-video-row]").forEach((row) => row.classList.toggle("is-open", row.dataset.videoRow === id));
+    $("[data-collect]", drawer)?.addEventListener("click", () => {drawer.close();collect(id);});
+    $("[data-video-hook]", drawer).onclick = () => window.MaterialBasket?.openHook(v);
+    if (!drawer.open) drawer.showModal();
   }
 
   function render() {
@@ -134,25 +156,26 @@
     const accounts = [...new Set(perf.videos.map((v) => v.account).filter(Boolean))].sort();
     const gaps = s.coverage.gaps.map(([a, b]) => (a === b ? a : `${a} 至 ${b}`)).join("、");
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 视频数据";
-    $("#content").innerHTML = `<div class="page-heading"><div><span class="eyebrow">TIKTOK SHOP VIDEO DATA</span><h1>视频数据</h1><p>${s.coverage.first ? `后台导出覆盖 ${s.coverage.first} 至 ${s.coverage.last}${gaps ? `，缺 ${gaps}` : ""}。` : "还没有导入后台数据。"}跟进状态按${esc(s.rule.window)}判断。</p></div><div class="perf-actions"><button type="button" class="secondary" id="perf-copy">${icon("copy")}复制复盘材料</button><button type="button" class="secondary" id="perf-upload">${icon("plus")}导入表格</button><button type="button" class="primary" id="perf-sync">${icon("refresh")}同步数据文件夹</button><input type="file" id="perf-file" accept=".xlsx" multiple hidden></div></div>
-      <p class="perf-sources">数据文件夹：${s.sources.length ? s.sources.map((p) => `<code>${esc(p)}</code>`).join("、") : "未设置"} · 已导入 ${s.imports.files} 个文件${s.imports.last ? `，最近一次 ${esc(s.imports.last.replace("T", " "))}` : ""}</p>
+    $("#content").innerHTML = `<div class="page-heading perf-heading"><div><h1>视频数据</h1><p>${s.coverage.first ? `后台导出覆盖 ${s.coverage.first} 至 ${s.coverage.last}${gaps ? `，缺 ${gaps}` : ""}。` : "还没有导入后台数据。"}跟进状态按${esc(s.rule.window)}判断。</p></div>
+      <div class="perf-actions"><button type="button" class="secondary" id="perf-upload">${icon("plus")}导入表格</button><details class="perf-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" id="perf-copy">复制复盘材料</button><button type="button" role="menuitem" id="perf-sync">同步数据文件夹</button></div></details><input type="file" id="perf-file" accept=".xlsx" multiple hidden></div></div>
+      <details class="perf-about"><summary>数据来源与口径</summary><p>数据文件夹：${s.sources.length ? s.sources.map((p) => `<code>${esc(p)}</code>`).join("、") : "未设置"} · 已导入 ${s.imports.files} 个文件${s.imports.last ? `，最近一次 ${esc(s.imports.last.replace("T", " "))}` : ""}。</p><p>视频指标是后台导出里逐条视频的归因数据加总；店铺每日汇总来自另一份导出，口径更大，单独展示不与视频明细相加。点击率 = 商品点击 ÷ 播放，CTOR = 订单 ÷ 商品点击，GPM = 每千次播放的归因 GMV。${gaps ? `导出缺口：${esc(gaps)}，缺口所在周在走势里以短横表示。` : ""}</p></details>
       <div id="perf-import-result" role="status"></div>
       <div class="perf-tabs" role="tablist" aria-label="视频数据视图">${[["board", "数据看板"], ["list", "视频明细"]].map(([k, label]) => `<button type="button" role="tab" id="perf-tab-${k}" data-perf-tab="${k}" aria-selected="${k === f.tab}" class="${k === f.tab ? "is-active" : ""}">${label}</button>`).join("")}</div>
-      <div class="toolbar perf-toolbar">${board ? "" : `<label class="search">${icon("search")}<input id="perf-q" aria-label="搜索视频标题或 ID" placeholder="搜索标题或视频 ID…" value="${esc(f.q)}"></label>
+      <div class="toolbar perf-toolbar">${board ? `<div class="perf-segment" role="group" aria-label="统计周期">${Object.entries(PerfDashboard.periods).map(([k, [label]]) => `<button type="button" data-perf-period="${k}" aria-pressed="${k === f.period}">${label}</button>`).join("")}</div>`
+        : `<label class="search">${icon("search")}<input id="perf-q" aria-label="搜索视频标题或 ID" placeholder="搜索标题或视频 ID…" value="${esc(f.q)}"></label>
         <select id="perf-range" aria-label="发布时间">${Object.entries(ranges).map(([k, [label]]) => `<option value="${k}" ${k === f.range ? "selected" : ""}>${label}</option>`).join("")}</select>`}
-        ${board ? `<select id="perf-period" aria-label="统计周期">${Object.entries(PerfDashboard.periods).map(([k, [label]]) => `<option value="${k}" ${k === f.period ? "selected" : ""}>${label}</option>`).join("")}</select>` : ""}
         <select id="perf-account" aria-label="账号">${options(accounts, f.account, "全部账号")}</select>
-        ${board ? "" : `<select id="perf-status" aria-label="跟进状态"><option value="">全部状态</option>${statusOrder.map((k) => `<option value="${k}" ${k === f.status ? "selected" : ""}>${esc(statusNames[k])}</option>`).join("")}</select>`}
         <button type="button" class="subtle perf-reset" id="perf-reset" hidden>清除筛选</button>
         ${board ? "" : `<span class="result-count">${rows.length} 条</span>`}</div>
       ${board ? `<div id="perf-board" class="perf-board" role="tabpanel" aria-labelledby="perf-tab-board">${boardMarkup()}</div>`
-        : `<div id="perf-status-slot">${statusMarkup(filtered(true))}</div><div id="perf-results" role="tabpanel" aria-labelledby="perf-tab-list">${tableMarkup(rows)}</div>`}`;
+        : `<div id="perf-status-slot">${statusMarkup(filtered(true))}</div><div id="perf-results" role="tabpanel" aria-labelledby="perf-tab-list">${tableMarkup(rows)}</div>`}
+      <dialog id="perf-video-drawer" class="rev-drawer perf-video-drawer" aria-labelledby="perf-video-title"></dialog>`;
     bind();
     syncToolbar();
   }
 
   const boardContext = () => ({ filters: { ...perf.filters, product: currentProduct() }, summary: perf.summary, analytics: perf.analytics, videos: perf.videos });
-  const boardMarkup = () => perf.analyticsLoading ? '<p class="context-note" role="status">正在读取看板数据…</p>' : PerfDashboard.markup(boardContext());
+  const boardMarkup = () => perf.analyticsLoading ? '<p class="context-note" role="status">正在读取看板数据…</p>' : PerfDashboard.board(boardContext());
 
   // The dashboard redraws as a whole; the list only redraws its table.
   function refresh() {
@@ -175,6 +198,8 @@
 
   function bindBoardLinks() {
     $$("#perf-board [data-perf-tab]").forEach((button) => (button.onclick = () => setTab(button.dataset.perfTab)));
+    $$("#perf-board [data-perf-metric]").forEach((button) => (button.onclick = () => { perf.filters.metric = button.dataset.perfMetric; saveFilters(); refresh(); }));
+    $$("#perf-board [data-perf-video]").forEach((button) => (button.onclick = () => openVideo(button.dataset.perfVideo)));
   }
 
   // Controls that narrow the table are outlined, and one button puts everything back.
@@ -182,7 +207,7 @@
     const f = perf.filters, q = f.q.trim(), board = f.tab === "board";
     const set = (selector, on) => $(selector)?.classList.toggle("is-set", on);
     set("#perf-range", f.range !== "recent");
-    set("#perf-period", f.period !== "all");
+    $$("[data-perf-period]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.perfPeriod === f.period)));
     set("#perf-account", !!f.account);
     set("#perf-status", !!f.status);
     set(".perf-toolbar .search", !!q);
@@ -202,7 +227,6 @@
     $("#perf-results").innerHTML = tableMarkup(rows);
     $(".perf-toolbar .result-count").textContent = `${rows.length} 条`;
     $("#perf-status-slot").innerHTML = statusMarkup(filtered(true));
-    $("#perf-status").value = perf.filters.status;
     syncToolbar();
     bindResults();
   }
@@ -218,10 +242,10 @@
 
   function bindResults() {
     if ($("#perf-results")) window.CaseDirectionPicker.bindVideos($("#perf-results"), perf.videos, () => perf.catalog, catalog => {perf.catalog = catalog;});
-    $$("[data-collect]").forEach((button) => (button.onclick = () => collect(button.dataset.collect)));
-    $$("[data-video-hook]").forEach(button => button.onclick = () => {
-      const video = perf.videos.find(item => item.video_id === button.dataset.videoHook);
-      if (video) window.MaterialBasket?.openHook(video);
+    $$("[data-video-row]").forEach((row) => {
+      const open = (event) => { if (event.target.closest("a,button,select,input,form,.perf-direction")) return; openVideo(row.dataset.videoRow); };
+      row.onclick = open;
+      row.onkeydown = (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(event); } };
     });
     syncHooks();
     $$("[data-sort]").forEach((button) => (button.onclick = () => {
@@ -253,7 +277,12 @@
       clearTimeout(timer);
       timer = setTimeout(() => { perf.shown = 200; saveFilters(); rerenderResults(); }, 150);
     });
-    [["#perf-range", "range"], ["#perf-period", "period"], ["#perf-account", "account"], ["#perf-status", "status"]].forEach(([selector, key]) =>
+    $$("[data-perf-period]").forEach((button) => (button.onclick = () => { perf.filters.period = button.dataset.perfPeriod; saveFilters(); refresh(); }));
+    const drawer = $("#perf-video-drawer");
+    drawer.addEventListener("click", (event) => { if (event.target === drawer || event.target.closest("[data-drawer-close]")) drawer.close(); });
+    drawer.addEventListener("close", () => { perf.openVideo = ""; $$("[data-video-row].is-open").forEach((row) => row.classList.remove("is-open")); });
+    $(".perf-menu")?.addEventListener("click", (event) => { if (event.target.closest("[role=menuitem]")) event.currentTarget.open = false; });
+    [["#perf-range", "range"], ["#perf-account", "account"]].forEach(([selector, key]) =>
       $(selector)?.addEventListener("change", (event) => { perf.filters[key] = event.target.value; perf.shown = 200; saveFilters(); refresh(); }));
     $$(".perf-tabs [data-perf-tab]").forEach((button) => (button.onclick = () => setTab(button.dataset.perfTab)));
     $("#perf-reset").onclick = () => {
@@ -373,6 +402,7 @@
     const videoId = new URLSearchParams(hash.split("?")[1] || "").get("video");
     if (videoId) {
       Object.assign(perf.filters, { q: videoId, account: "", status: "", range: "all", tab: "list" });
+      perf.pendingVideo = videoId;
       perf.shown = 200;
     }
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 视频数据";
@@ -385,6 +415,7 @@
         needsAnalytics = perf.analyticsLoading;
         needsCatalog = perf.catalogLoading;
         render();
+        if (perf.pendingVideo) { const id = perf.pendingVideo; perf.pendingVideo = ""; openVideo(id); }
       });
       // Attach both rejection handlers immediately, including when the core read fails first.
       await Promise.all([loading,
@@ -396,6 +427,10 @@
       $("#content").innerHTML = `<div class="empty">${icon("chart")}<h3>视频数据暂不可用</h3><p>${esc(error.message)}</p></div>`;
     }
   }
+
+  const closeMenus = (event) => $$(".perf-menu[open]").forEach((menu) => { if (event.key === "Escape" || !menu.contains(event.target)) menu.open = false; });
+  window.addEventListener("click", closeMenus, true);
+  window.addEventListener("keydown", (event) => { if (event.key === "Escape") closeMenus(event); });
 
   window.CasePerformance = { route, reviewMaterial: () => reviewMaterial() };
 })();

@@ -72,7 +72,7 @@ window.CaseScripts = (() => {
     } else setError(modal,definitive(error) ? fail(error) : `保存结果尚未确认：${fail(error)}。请重试同一请求核对。`);
   }
   function scriptCard(script) {
-    return `<a class="script-card" href="${esc(scriptLink(script))}"><div><span class="script-status ${esc(script.status || 'draft')}">${esc(labels[script.status] || script.status || '草稿')}</span><small>${esc(script.version ? `版本 ${script.version}` : scriptId(script))}</small></div><h3>${esc(script.title || '未命名脚本')}</h3><p>${esc(String(script.text || '').slice(0,170))}</p><small>${esc(script.direction_id || '未指定方向')} · ${esc(readableDate(script.updated_at || script.created_at))}${script.video_id ? ' · 已关联视频' : ''}</small></a>`;
+    return `<a class="script-card" href="${esc(scriptLink(script))}"><span class="script-row-main"><strong>${esc(script.title || '未命名脚本')}</strong><small>${esc(String(script.text || '').replace(/\s+/g,' ').slice(0,120))}</small></span><span class="script-row-meta"><span>${esc(script.version ? `第 ${script.version} 版` : scriptId(script))}${script.video_id ? ' · 已关联视频' : ''}</span><span>${esc(readableDate(script.updated_at || script.created_at))}</span></span><span class="script-status ${esc(script.status || 'draft')}">${esc(labels[script.status] || script.status || '草稿')}</span></a>`;
   }
   async function route(keepScroll = false) {
     const hash = pageHash(), seq = ++workspace.sequence, tail = hash.replace(/^#scripts\/?/,'').split('?')[0];
@@ -94,14 +94,14 @@ window.CaseScripts = (() => {
   }
   function renderList(data) {
     const scripts = data.scripts || [];
-    $('#content').innerHTML = `<div class="page-heading"><div><span class="eyebrow">SCRIPT VERSIONS</span><h1>脚本版本</h1><p>采纳的正文与每次改稿分别保存，登记视频后连接销售表现和案例结论。</p></div><button class="primary" id="script-new">手动保存脚本</button></div><nav class="scripts-tabs" aria-label="写稿内容"><a href="${esc(url('#ai'))}">协作任务</a><a href="${esc(url('#scripts'))}" aria-current="page">脚本版本</a><a href="${esc(url('#production'))}">制作视频</a></nav><div class="script-list-filters"><label class="field"><span>状态</span><select id="script-status-filter"><option value="">全部状态</option>${Object.entries(labels).map(([key,value]) => `<option value="${key}">${value}</option>`).join('')}</select></label><label class="field"><span>搜索脚本</span><input id="script-query" type="search" placeholder="标题、正文或方向编号"></label></div><div id="script-list"></div>`;
+    $('#content').innerHTML = `<div class="page-heading"><div><h1>脚本版本</h1><p>采纳的正文与每次改稿分别保存，登记视频后连接销售表现和案例结论。新增一份用顶栏的「保存脚本」。</p></div></div><nav class="scripts-tabs" aria-label="写稿内容"><a href="${esc(url('#ai'))}">协作任务</a><a href="${esc(url('#scripts'))}" aria-current="page">脚本版本</a><a href="${esc(url('#production'))}">制作视频</a></nav><div class="script-list-filters"><label class="search">${icon('search')}<input id="script-query" type="search" placeholder="搜索标题、正文或方向编号" aria-label="搜索脚本"></label><label class="script-status-choice"><span>状态</span><select id="script-status-filter"><option value="">全部</option>${Object.entries(labels).map(([key,value]) => `<option value="${key}">${value}</option>`).join('')}</select></label></div><div id="script-list"></div>`;
     const show = () => {
       const status = $('#script-status-filter').value, query = $('#script-query').value.trim().toLocaleLowerCase();
       const visible = scripts.filter(script => (!status || script.status === status) && (!query || `${script.title} ${script.text} ${script.direction_id}`.toLocaleLowerCase().includes(query)));
       const groups = new Map();for (const script of visible) {const key = `${script.product} · ${script.direction_id || '独立脚本'}`;if (!groups.has(key)) groups.set(key,[]);groups.get(key).push(script);}
-      $('#script-list').innerHTML = visible.length ? [...groups].map(([title,items]) => `<section class="script-list-group"><h2>${esc(title)} <small>${items.length} 个版本</small></h2><div class="script-grid">${items.map(scriptCard).join('')}</div></section>`).join('') : '<div class="empty"><h3>还没有符合条件的脚本版本</h3><p>可以从已完成的 AI 候选采纳，或手动保存一份正文。</p></div>';
+      $('#script-list').innerHTML = visible.length ? [...groups].map(([title,items]) => `<section class="script-list-group"><h2>${esc(title)} <small>${items.length} 个版本</small></h2><div class="script-rows">${items.map(scriptCard).join('')}</div></section>`).join('') : '<div class="empty"><h3>还没有符合条件的脚本版本</h3><p>可以在协作任务里把完成的候选采纳为脚本版本，或用顶栏的「保存脚本」手动保存一份正文。</p></div>';
     };
-    $('#script-status-filter').onchange = show;$('#script-query').oninput = show;$('#script-new').onclick = () => openManual();show();
+    $('#script-status-filter').onchange = show;$('#script-query').oninput = show;show();
   }
   function renderDetail(data) {
     const script = data.script, id = scriptId(script), source = script.source || {};

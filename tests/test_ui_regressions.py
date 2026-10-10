@@ -17,6 +17,26 @@ from playwright.sync_api import sync_playwright
 import test_server as fixture
 
 
+# The library's filters and sort live in a drawer; selection checkboxes appear in selection mode.
+def open_library_filters(page):
+    if not page.locator("#library-filter-drawer[open]").count():
+        page.locator("#library-filter-open").click()
+        page.locator("#library-filter-drawer[open]").wait_for()
+
+
+def close_library_filters(page):
+    if page.locator("#library-filter-drawer[open]").count():
+        page.locator("#library-drawer-done").click()
+        page.locator("#library-filter-drawer[open]").wait_for(state="detached")
+
+
+def start_library_selection(page):
+    if page.locator("#library-select-toggle").get_attribute("aria-pressed") != "true":
+        page.locator("#library-select-toggle").click()
+        page.locator("#selection-toolbar:not([hidden])").wait_for()
+
+
+
 class WorkbenchBrowserTests(unittest.TestCase):
     stop_server = fixture.WorkbenchHTTPTests.stop_server
     request = fixture.WorkbenchHTTPTests.request
@@ -311,8 +331,10 @@ class WorkbenchBrowserTests(unittest.TestCase):
         page.locator('[data-library-preset="positive"]').click()
         page.locator("#case-search").fill("SHARPAL")
         page.locator("#result-count").get_by_text("10 条案例").wait_for()
+        open_library_filters(page)
         sold_option = next(label for label in page.locator("#sort-filter option").all_text_contents() if "售出" in label)
         page.locator("#sort-filter").select_option(label=sold_option)
+        close_library_filters(page)
         self.assertIn("category=positive", page.url)
         self.assertIn("q=", page.url)
         page.reload()
@@ -483,6 +505,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
         self.assertEqual(status, 200)
         page = self.open_page()
         self.assertEqual(page.locator("[data-move-case]").count(), 0)
+        open_library_filters(page)
         picker = page.locator("#archive-category-filter")
         picker.focus()
         picker.press("ArrowDown")
