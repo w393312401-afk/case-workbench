@@ -1055,7 +1055,7 @@ class Handler(BaseHTTPRequestHandler):
                     file = self.app.asset_path(parts[1], parts[2], query.get("event", [None])[0])
                     return self.file(file, download="download" in query)
                 files = {"/": "index.html", "/app.js": "app.js", "/navigation.js": "navigation.js", "/library.js": "library.js", "/bulk.js": "bulk.js", "/detail.js": "detail.js", "/transcript-sync.js": "transcript-sync.js", "/delete.js": "delete.js", "/directions.js": "directions.js", "/editor.js": "editor.js", "/native.js": "native.js", "/ai.js": "ai.js", "/performance.js": "performance.js", "/perf-dashboard.js": "perf-dashboard.js", "/reviews.js": "reviews.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
-                files.update({"/" + name: name for name in ("shell.js", "shell.css", "settings.js", "settings.css", "global-search.js", "global-search.css", "navigation.css", "library.css", "detail.css", "inline-editor.js", "inline-editor.css", "direction-picker.js", "direction-picker.css", "home.js", "home.css", "material-basket.js", "material-basket.css", "scripts.js", "scripts.css", "writing.css", "reviews-layout.css")})
+                files.update({"/" + name: name for name in ("shell.js", "shell.css", "settings.js", "settings.css", "global-search.js", "global-search.css", "navigation.css", "library.css", "detail.css", "inline-editor.js", "inline-editor.css", "direction-picker.js", "direction-picker.css", "home.js", "home.css", "material-basket.js", "material-basket.css", "scripts.js", "scripts.css", "writing.css", "reviews-layout.css", "demo.js")})
                 if path in files:
                     return self.file(APP_ROOT / "static" / files[path])
                 if path == "/directions.css":

@@ -162,28 +162,32 @@ window.CaseDirections = (() => {
     return `${variant.baseline?"基准稿":variant.variant_type==="direction"?"方向定义":"执行变体 "+index}${variant.progression?` · ${variant.progression}`:" · 推进结构未标注"}`;
   }
   function messageMarkup(text) { return `<p class="context-note">${esc(text)}</p>`; }
-  function routeTabs(tab) {
-    return `<div class="direction-page-tabs" role="tablist" aria-label="卖点与方向视图"><button type="button" role="tab" data-direction-tab="directions" aria-selected="${tab!=="points"}">测试方向</button><button type="button" role="tab" data-direction-tab="points" aria-selected="${tab==="points"}">S / A / B 卖点分级</button></div>`;
+  const statusTone={active:"good",testing:"",paused:"warn",archived:""};
+  const statusChip=status=>`<span class="dir-status${statusTone[status]?" is-"+statusTone[status]:""}">${esc(statusNames[status] || "已有案例")}</span>`;
+  const tierRank=code=>"SAB".indexOf(String(code)[0]),codeNo=code=>Number(String(code).slice(1))||0;
+  // Selling-point codes inside a chain become small tags; hovering one shows the point it stands for.
+  function chainText(text,points=[]) {
+    return esc(text||"").replace(/(?<![A-Za-z0-9])([SAB][1-9]\d*)(?!\d)/g,code=>{const point=points.find(item=>item.code===code);return `<span class="dir-ref tier-${code[0]}"${point?` title="${esc(point.title)}"`:""}>${code}</span>`;});
   }
-  function bindTabs(params) {
-    $$("[data-direction-tab]").forEach(button=>button.onclick=()=>{
-      const next=new URLSearchParams(params);button.dataset.directionTab==="points"?next.set("tab","points"):next.delete("tab");
-      location.hash=pageURL("#directions"+(next.size?"?"+next:""));
-    });
+  function chainSteps(item,points) {
+    return [["主打",item.main_difference],["顾虑",item.concern],["收口",item.closing]].filter(([,value])=>String(value||"").trim())
+      .map(([label,value])=>`<div class="dir-step"><span>${label}</span><p>${chainText(value,points)}</p></div>`).join("");
   }
-  function pointTable(points,directions) {
-    if(!points.length)return messageMarkup("当前产品还没有卖点。先新增一个明确的主打卖点，再规划测试方向。");
-    return `<div class="selling-point-table-wrap" tabindex="0" role="region" aria-label="卖点分级表"><table class="selling-point-table"><thead><tr><th>分级 / 编号</th><th>卖点与理由</th><th>证据与边界</th><th>测试方向</th><th>主打视频数据</th><th>操作</th></tr></thead><tbody>${points.map(point=>{
-      const linked=directions.filter(item=>item.product===point.product&&item.selling_point_id===point.id);
-      return `<tr data-point-id="${esc(point.id)}"><td><span class="selling-tier tier-${esc(point.tier)}">${esc(point.code)}</span></td><td><strong>${esc(point.title)}</strong>${point.rationale?`<p>${esc(point.rationale)}</p>`:""}</td><td>${point.evidence?`<p class="point-evidence">${esc(point.evidence)}</p>`:'<span class="missing-value">待补充证据</span>'}${point.grading_mismatch?`<p class="data-warning point-grading-mismatch">与分级表不一致 <button type="button" class="subtle" data-adopt-grading="${esc(point.id)}">核对并采用分级表写法</button></p>`:""}</td><td>${linked.length?linked.map(item=>`<a href="${esc(directionURL(item.product,item.direction_id))}">${esc(item.direction_id)}</a>`).join("<br>"):'<span class="missing-value">尚未建立</span>'}</td><td>${point.performance?.video_count?`<span class="point-performance">${esc(performanceText(point.performance))}</span>`:'<span class="missing-value">暂无视频</span>'}</td><td><button type="button" class="subtle" data-edit-point="${esc(point.id)}">编辑卖点</button><button type="button" class="subtle" data-use-point="${esc(point.id)}">选为主打</button></td></tr>`;
-    }).join("")}</tbody></table></div>`;
-  }
-  function directionCard(direction,group) {
-    const rows=group?.observations || [];
-    const videoIds=new Set(rows.map(item=>caseIdentity(item).video_id).filter(Boolean));
-    const soldVideoIds=new Set(rows.filter(item=>Number(salesMetrics(item).items_sold)>0).map(item=>caseIdentity(item).video_id).filter(Boolean));
-    const variants=direction.variants || [];
-    return `<article class="direction-overview-card" data-direction-id="${esc(direction.direction_id)}"><div class="direction-card-top"><span class="selling-tier">${esc(direction.direction_id)}</span><span class="direction-status">${esc(statusNames[direction.status] || "已有案例")}</span></div><h2><a href="${esc(directionURL(direction.product,direction.direction_id))}">${esc(direction.main_difference || group?.definitions?.[0]?.main_difference || direction.direction_id)}</a></h2><p class="direction-card-chain">${esc(directionChain(direction) || "方向链待补充")}</p><div class="direction-card-counts"><span><strong>${direction.case_count ?? group?.case_count ?? 0}</strong>关联案例</span><span><strong>${direction.video_count ?? videoIds.size}</strong>关联视频</span><span><strong>${variants.length}</strong>执行变体</span>${direction.script_count?`<span><strong>${direction.script_count}</strong>脚本版本</span>`:""}</div><p class="direction-card-note">${direction.performance?.matched_count?esc(performanceText(direction.performance)):`${soldVideoIds.size} 个案例视频记录过出单 · 各自数据窗口`}</p>${direction.lead_tier&&direction.lead_tier!=="S"?`<p class="data-warning">主打是 ${esc(direction.lead_tier)} 级卖点，不是 S</p>`:""}${(direction.chain_issues||[]).length?`<p class="data-warning">${esc(direction.chain_issues.join("；"))}</p>`:""}<a class="direction-card-link" href="${esc(directionURL(direction.product,direction.direction_id))}">查看方向 ${icon("arrow")}</a></article>`;
+  // One selling point with the direction built on it (a point has at most one), or a direction whose point is gone.
+  function pointRow(point,direction) {
+    const href=direction?directionURL(direction.product,direction.direction_id):"";
+    const facts=direction?[`方向 ${direction.direction_id}`,`${(direction.variants||[]).length} 个变体`,direction.performance?.video_count?performanceText(direction.performance):""]:[point.evidence?"":"待补充证据"];
+    if(point?.evidence)facts.push(point.evidence);
+    const flags=[direction?.lead_tier&&direction.lead_tier!=="S"?`<span class="dir-flag" title="${esc(direction.notes||"方向应由 S 级卖点主打")}">${esc(direction.lead_tier)} 级主打</span>`:"",
+      (direction?.chain_issues||[]).length?`<span class="dir-flag" title="${esc(direction.chain_issues.join("；"))}">方向链待修改</span>`:"",
+      point?.grading_mismatch?`<span class="dir-flag" title="与分级表写法不一致">分级表不一致</span>`:""].join("");
+    const title=point?point.title:(direction.main_difference||direction.direction_id);
+    const menu=point?`<details class="dir-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-edit-point="${esc(point.id)}">编辑卖点</button>${point.grading_mismatch?`<button type="button" role="menuitem" data-adopt-grading="${esc(point.id)}">采用分级表写法</button>`:""}</div></details>`:"";
+    return `<li class="dir-row${direction?" has-direction":""}"${point?` data-point-id="${esc(point.id)}"`:""}${direction?` data-direction-id="${esc(direction.direction_id)}"`:""}>
+      <span class="dir-code tier-${esc(point?point.tier:(direction.direction_id.split("-").pop()||"?")[0])}">${esc(point?point.code:"—")}</span>
+      <div class="dir-main">${direction?`<a class="dir-title direction-card-link" href="${esc(href)}">${esc(title)}</a>`:`<span class="dir-title">${esc(title)}</span>`}
+        <p class="dir-sub">${facts.filter(Boolean).map(esc).join(" · ")}</p>${flags?`<div class="dir-flags">${flags}</div>`:""}</div>
+      <div class="dir-side">${direction?statusChip(direction.status):`<button type="button" class="subtle dir-build" data-use-point="${esc(point.id)}">建立方向 ›</button>`}${menu}</div></li>`;
   }
   function decorateGroupWarnings(root,groups) {
     $$(".direction-group",root).forEach((node,index)=>{
@@ -194,32 +198,43 @@ window.CaseDirections = (() => {
   }
   let refocusFilter="";
   function renderCatalog(catalog,summary,values) {
-    const {params,product,archive}=values, tab=params.get("tab")==="points"?"points":"directions";
+    const {params,product,archive}=values;
     const tier=["S","A","B"].includes(params.get("tier"))?params.get("tier"):"";
     const query=params.get("q") || "", direction=params.get("direction") || "";
     const status=Object.hasOwn(statusNames,params.get("status"))?params.get("status"):"";
-    const allDirections=catalog.directions || [], allPoints=catalog.selling_points || [];
-    const groups=summary.groups || [], matchGroup=item=>groups.find(group=>group.direction_id===item.direction_id&&(!product||window.WorkbenchShell.matchesProduct(group.product,item.product)));
-    const items=allDirections.filter(item=>(!direction||item.direction_id===direction)&&(!status||item.status===status)&&(!tier||(item.direction_id.split("-").pop() || "").startsWith(tier))&&(!query||`${item.direction_id} ${directionChain(item)} ${item.notes || ""}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())));
-    const tierRank=code=>"SAB".indexOf(String(code)[0]),codeNo=code=>Number(String(code).slice(1))||0,points=[...allPoints].sort((a,b)=>tierRank(a.code)-tierRank(b.code)||codeNo(a.code)-codeNo(b.code)).filter(item=>(!tier||item.tier===tier)&&(!query||`${item.code} ${item.title} ${item.rationale} ${item.evidence}`.toLocaleLowerCase().includes(query.toLocaleLowerCase())));
+    const allDirections=catalog.directions || [], allPoints=[...(catalog.selling_points || [])].sort((a,b)=>tierRank(a.code)-tierRank(b.code)||codeNo(a.code)-codeNo(b.code));
+    const directionOf=point=>allDirections.find(item=>item.product===point.product&&item.selling_point_id===point.id);
+    const orphans=allDirections.filter(item=>!item.selling_point_id||!allPoints.some(point=>point.id===item.selling_point_id));
+    const text=(point,item)=>`${point?`${point.code} ${point.title} ${point.rationale} ${point.evidence}`:""} ${item?`${item.direction_id} ${directionChain(item)} ${item.notes || ""}`:""}`.toLocaleLowerCase();
+    const keep=(point,item)=>(!tier||(point?point.tier:(item.direction_id.split("-").pop()||"")[0])===tier)&&(!status||item?.status===status)
+      &&(!direction||item?.direction_id===direction)&&(!query||text(point,item).includes(query.toLocaleLowerCase()));
+    const rows=allPoints.map(point=>[point,directionOf(point)]).filter(([point,item])=>keep(point,item));
+    const orphanRows=orphans.filter(item=>keep(null,item));
+    const groups=[["S","S 级","主打候选"],["A","A 级","支撑卖点"],["B","B 级","加分项"]].map(([key,label,hint])=>[label,hint,rows.filter(([point])=>point.tier===key)]).filter(([,,list])=>list.length);
+    const count=filter=>allPoints.filter(filter).length;
+    const segment=(name,options,value)=>`<div class="dir-segment" role="group">${options.map(([key,label,n])=>`<button type="button" data-${name}-filter="${key}" aria-pressed="${value===key}">${label}${n!=null?`<small>${n}</small>`:""}</button>`).join("")}</div>`;
     const reset=new URLSearchParams(params);reset.delete("direction");
     const libraryParams=new URLSearchParams({direction:"__unclassified__"});if(archive!=="active")libraryParams.set("archive",archive);
-    $("#content").innerHTML=`<div class="page-heading direction-page-heading"><div><span class="eyebrow">SELLING POINTS & DIRECTIONS</span><h1>卖点与方向</h1><p>从主打卖点出发，串起顾虑、收口和每次执行。</p></div><span class="total-note">${allDirections.length} 个方向 · ${allPoints.length} 个卖点</span></div>${routeTabs(tab)}
-      <form id="direction-filters" class="direction-catalog-filters"><label><span>查找</span><input name="q" value="${esc(query)}" placeholder="卖点、顾虑或收口"></label><div class="tier-filter-field"><span>分级</span><div class="tier-segment" role="group" aria-label="按分级筛选">${[["","全部"],["S","S"],["A","A"],["B","B"]].map(([value,label])=>`<button type="button" data-tier-filter="${value}" aria-pressed="${tier===value}">${label}<small>${tab==="points"?allPoints.filter(item=>!value||item.tier===value).length:allDirections.filter(item=>!value||(item.direction_id.split("-").pop()||"").startsWith(value)).length}</small></button>`).join("")}</div><input type="hidden" name="tier" value="${tier}"></div>${tab==="directions"?`<label><span>状态</span><select name="status"><option value="">全部状态</option>${Object.entries(statusNames).map(([value,label])=>`<option value="${value}" ${value===status?"selected":""}>${label}</option>`).join("")}</select></label><label><span>方向</span><input name="direction" list="direction-candidates" value="${esc(direction)}" placeholder="完整编号"><datalist id="direction-candidates">${allDirections.map(item=>`<option value="${esc(item.direction_id)}"></option>`).join("")}</datalist></label><label><span>案例范围</span><select name="archive">${Object.entries({active:"使用中",archived:"已归档",all:"全部"}).map(([value,label])=>`<option value="${value}" ${value===archive?"selected":""}>${label}</option>`).join("")}</select></label>`:""}</form>
-      <div class="direction-section-heading"><p class="context-note">${tab==="points"?"S / A / B 保留产品已有分级与依据。":"同一主打卖点共用方向编号；改变顾虑或收口，保留为执行变体。"}</p><button type="button" class="secondary compact" id="${tab==="points"?"new-selling-point":"new-direction"}">${icon("plus")}${tab==="points"?"新增卖点":"新建方向"}</button></div>
-      ${tab==="points"?pointTable(points,allDirections):items.length?`<div class="direction-card-grid">${items.map(item=>directionCard(item,matchGroup(item))).join("")}</div>`:`<section class="section-card empty direction-empty"><h3>${direction?"当前筛选没有匹配的方向":query||tier||status?"当前筛选没有匹配的方向":"当前产品与范围内没有已记录方向"}</h3><p>可清除筛选，或从一个主打卖点开始建立方向。</p>${direction?`<a class="secondary" href="${esc(pageURL("#directions"+(reset.size?"?"+reset:"")))}">清除方向筛选</a>`:""}</section>`}
-      <div class="direction-summary-notes">${leadTierLine(summary.lead_tier_counts)}<p>范围内未记录方向 ${summary.unclassified_case_ids?.length || 0} 条${summary.unclassified_case_ids?.length?` · <a href="${esc(pageURL("#library?"+libraryParams))}">查看案例</a>`:""}。</p><details><summary>数据与复盘说明</summary><ul>${(summary.limitations || []).map(note=>`<li>${esc(note)}</li>`).join("")}</ul><p>关联视频去重计数；出单视频只表示其自身窗口内有售出记录，不累计不同窗口的出单量。</p></details></div>`;
-    bindTabs(params);
-    $("#direction-filters").onsubmit=event=>{
+    const empty=!rows.length&&!orphanRows.length;
+    $("#content").innerHTML=`<div class="page-heading dir-heading"><div><h1>卖点与方向</h1><p>${allPoints.length} 个卖点 · ${allDirections.length} 个方向。从 S 级卖点出发，串起顾虑和收口，每次换执行记为变体。</p></div><button type="button" class="secondary" id="new-selling-point">${icon("plus")}新增卖点</button></div>
+      <form id="direction-filters" class="dir-filters"><label class="search">${icon("search")}<input name="q" value="${esc(query)}" placeholder="搜索卖点、顾虑、收口或方向编号" aria-label="搜索"></label>
+        ${segment("tier",[["","全部",allPoints.length],["S","S",count(item=>item.tier==="S")],["A","A",count(item=>item.tier==="A")],["B","B",count(item=>item.tier==="B")]],tier)}
+        ${segment("status",[["","全部状态"],...Object.entries(statusNames).map(([key,label])=>[key,label])],status)}
+        <label class="dir-archive"><span>案例范围</span><select name="archive">${Object.entries({active:"使用中",archived:"已归档",all:"全部"}).map(([value,label])=>`<option value="${value}" ${value===archive?"selected":""}>${label}</option>`).join("")}</select></label>
+        <input type="hidden" name="tier" value="${tier}"><input type="hidden" name="status" value="${status}">${direction?`<input type="hidden" name="direction" value="${esc(direction)}">`:""}</form>
+      ${direction?`<p class="dir-scope">只看方向 <strong>${esc(direction)}</strong> · <a href="${esc(pageURL("#directions"+(reset.size?"?"+reset:"")))}">看全部</a></p>`:""}
+      ${empty?`<section class="section-card empty direction-empty"><h3>${query||tier||status||direction?"当前筛选没有匹配的卖点":"当前产品还没有卖点"}</h3><p>${query||tier||status||direction?"换个关键词，或清除筛选。":"先新增一个明确的主打卖点，再从它建立测试方向。"}</p></section>`
+        :groups.map(([label,hint,list])=>`<section class="dir-group"><h2>${label}<small>${hint} · ${list.length}</small></h2><ul class="dir-list">${list.map(([point,item])=>pointRow(point,item)).join("")}</ul></section>`).join("")
+        +(orphanRows.length?`<section class="dir-group"><h2>未关联卖点的方向<small>旧记录 · ${orphanRows.length}</small></h2><ul class="dir-list">${orphanRows.map(item=>pointRow(null,item)).join("")}</ul></section>`:"")}
+      <div class="direction-summary-notes">${leadTierLine(summary.lead_tier_counts)}<p>范围内未记录方向的案例 ${summary.unclassified_case_ids?.length || 0} 条${summary.unclassified_case_ids?.length?` · <a href="${esc(pageURL("#library?"+libraryParams))}">查看案例</a>`:""}。</p><details><summary>数据与复盘说明</summary><ul>${(summary.limitations || []).map(note=>`<li>${esc(note)}</li>`).join("")}</ul><p>关联视频去重计数；出单视频只表示其自身窗口内有售出记录，不累计不同窗口的出单量。</p></details></div>`;
+    const filterForm=$("#direction-filters");
+    filterForm.onsubmit=event=>{
       event.preventDefault();const next=new URLSearchParams(),form=new FormData(event.currentTarget);
-      if(tab==="points")next.set("tab","points");
       for(const [key,value] of form){const text=String(value).trim();if(text&&!(key==="archive"&&text==="active"))next.set(key,text);}
       const target=pageURL("#directions"+(next.size?"?"+next:""));if(location.hash===target)void route();else location.hash=target;
     };
-    $$("[data-tier-filter]").forEach(button=>button.onclick=()=>{
-      const form=$("#direction-filters");form.elements.tier.value=button.dataset.tierFilter;form.requestSubmit();
-    });
-    const filterForm=$("#direction-filters");let filterTimer=0,composing=false;
+    for(const name of ["tier","status"])$$(`[data-${name}-filter]`).forEach(button=>button.onclick=()=>{filterForm.elements[name].value=button.dataset[name+"Filter"];filterForm.requestSubmit();});
+    let filterTimer=0,composing=false;
     const applyFilters=(delay=0)=>{clearTimeout(filterTimer);filterTimer=setTimeout(()=>{if(composing)return;refocusFilter=document.activeElement?.name||"";filterForm.requestSubmit();},delay);};
     filterForm.addEventListener("compositionstart",()=>{composing=true;});
     filterForm.addEventListener("compositionend",()=>{composing=false;applyFilters(300);});
@@ -227,32 +242,46 @@ window.CaseDirections = (() => {
     filterForm.addEventListener("change",event=>{if(event.target.matches("select"))applyFilters();});
     filterForm.addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.isComposing){event.preventDefault();applyFilters();}});
     if(refocusFilter){const field=filterForm.elements[refocusFilter];refocusFilter="";if(field?.focus){field.focus();if(field.setSelectionRange){const end=field.value.length;field.setSelectionRange(end,end);}}}
-    $$(".point-evidence").forEach(box=>{
-      if(box.scrollHeight<=box.clientHeight+2)return;
-      const toggle=document.createElement("button");toggle.type="button";toggle.className="subtle point-evidence-toggle";toggle.textContent="展开";
-      toggle.onclick=()=>{const open=box.classList.toggle("expanded");toggle.textContent=open?"收起":"展开";};
-      box.after(toggle);
-    });
-    $("#new-direction")?.addEventListener("click",()=>openCreate());
-    $("#new-selling-point")?.addEventListener("click",()=>openPointEditor());
+    $("#new-selling-point").onclick=()=>openPointEditor();
     $$("[data-edit-point]").forEach(button=>button.onclick=()=>openPointEditor(button.dataset.editPoint));
     $$("[data-adopt-grading]").forEach(button=>button.onclick=()=>openPointEditor(button.dataset.adoptGrading,true));
     $$("[data-use-point]").forEach(button=>button.onclick=()=>openCreate(button.dataset.usePoint));
   }
-  function renderDetail(data,values) {
+  function renderDetail(data,values,points=[]) {
     const d=data.direction,p=data.selling_point,group=data.group;
-    const variants=d.variants || [], scripts=data.scripts || [],videos=data.videos || [],tasks=data.tasks || [],cases=data.cases || [];
-    const section=(id,title,body)=>`<section class="section-card direction-detail-section" id="${id}"><h2>${title}</h2>${body}</section>`;
+    const variants=d.variants || [], scripts=data.scripts || [],videos=data.videos || [],tasks=data.tasks || [],cases=data.cases || [],plans=data.plans || [];
+    const planNames={scale:"加码",execution:"换执行",stop:"停测"},planStatus={pending:"待处理",working:"进行中",done:"已完成",cancelled:"已取消"};
+    const related=[
+      ["scripts","文案版本",scripts,scripts.map(script=>script.script_id || script.id?`<a class="direction-related-item" href="${esc(pageURL("#scripts/"+(script.script_id || script.id)))}"><strong>${esc(script.title)}</strong><span>第 ${esc(script.version || 1)} 版 · ${esc({draft:"草稿",adopted:"已采纳",filmed:"已拍摄",published:"已发布",reviewed:"已复盘",archived:"已归档"}[script.status] || script.status || "")}</span></a>`:`<details class="direction-script"><summary><strong>${esc(script.script_version || "版本未标记")}</strong> ${esc(script.title || script.case_id)}</summary><pre>${esc(script.text || "未记录文案")}</pre><a href="${esc(pageURL("#case/"+script.case_id+"/script"))}">查看案例文案</a></details>`).join(""),"还没有关联的文案版本。"],
+      ["videos","关联视频",videos,videos.map(video=>`<a class="direction-related-item" href="${esc(pageURL("#videos?video="+encodeURIComponent(video.video_id)))}"><strong>${esc(video.title || video.video_id)}</strong><span>${esc(video.video_id)}</span></a>`).join(""),"还没有关联视频。"],
+      ["tasks","AI 任务",tasks,tasks.map(task=>`<a class="direction-related-item" href="${esc(pageURL("#ai/"+encodeURIComponent(task.task_id)))}"><strong>${esc(task.case_title || task.case_id || task.task_id)}</strong><span>${esc(taskStatusNames[task.status] || task.status || "状态未提供")} · ${esc(readableDate(task.updated_at))}</span></a>`).join(""),"还没有关联的 AI 协作任务。"],
+      ["cases","关联案例",cases,cases.map(item=>`<a class="direction-related-item" href="${esc(pageURL("#case/"+item.case_id))}"><strong>${esc(item.current?.title || item.title || item.case_id)}</strong><span>${esc(item.case_id)}${item.archived?" · 已归档":""}</span></a>`).join(""),"方向已经独立保存，后续案例可以使用这个编号。"],
+    ];
+    const firstRelated=(related.find(([, ,list])=>list.length)||related[0])[0];
+    const progressionSelect=(variant,index)=>`<label class="dir-progression"><span class="sr-only">推进结构</span><select data-variant-progression="${index}" aria-label="第 ${index+1} 条的推进结构"><option value="">推进结构未标注</option>${progressions.map(item=>`<option ${variant.progression===item?"selected":""}>${esc(item)}</option>`).join("")}${variant.progression&&!progressions.includes(variant.progression)?`<option selected>${esc(variant.progression)}</option>`:""}</select></label>`;
     $("#breadcrumb").innerHTML=`工作空间 <span>/</span> 卖点与方向 <span>/</span> ${esc(d.direction_id)}`;
-    $("#content").innerHTML=`<a class="back-link" href="${esc(directionURL(d.product))}">${icon("back")}全部方向</a><div class="page-heading direction-page-heading"><div><span class="eyebrow">${esc(d.product)} · ${esc(statusNames[d.status] || "已有案例")}</span><h1>${esc(d.direction_id)}</h1><p>${esc(d.main_difference)}</p></div><div class="direction-dialog-actions"><button type="button" class="primary" id="direction-write">${icon("edit")}用这个方向写稿</button><button type="button" class="secondary" id="direction-edit">${icon("edit")}编辑方向</button><button type="button" class="secondary" id="direction-add-variant">${icon("plus")}新增执行变体</button></div></div>
-      <nav class="direction-detail-links" aria-label="方向详情内容">${[["direction-definition","方向与变体"],["direction-scripts","文案版本"],["direction-videos","关联视频"],["direction-tasks","AI 任务"],["direction-cases","关联案例"]].map(([id,label])=>`<button type="button" class="subtle" data-direction-section="${id}">${label}</button>`).join("")}</nav>
-      ${section("direction-definition","方向与执行变体",`<p class="direction-chain">${esc(directionChain(d))}</p>${p?`<p class="context-note">主打卖点 ${esc(p.code)} · ${esc(p.title)}</p>${p.evidence?`<p class="direction-point-evidence">${esc(p.evidence)}</p>`:""}`:""}${d.notes?`<p>${esc(d.notes)}</p>`:""}${(d.chain_issues||[]).length?`<p class="data-warning">方向链需要修改：${esc(d.chain_issues.join("；"))}</p>`:""}${d.lead_tier&&d.lead_tier!=="S"?`<p class="data-warning">主打是 ${esc(d.lead_tier)} 级卖点。方向应由 S 级卖点主打。</p>`:""}${!variants.some(item=>item.baseline)&&variants.length?'<p class="data-warning">还没有基准稿。选一条设为基准，其他变体才有比较对象。</p>':""}<div class="direction-variant-list">${variants.map((variant,index)=>`<div class="direction-definition${variant.baseline?" is-baseline":""}"><strong>${esc(variantLabel(variant,index+1))}</strong><p class="direction-chain">${esc(directionChain(variant))}</p>${variant.execution_change?`<p>${esc(variant.execution_change)}</p>`:""}${(variant.chain_issues||[]).length?`<p class="context-note">${esc(variant.chain_issues.join("；"))}（已发布的记录保持原样）</p>`:""}<div class="direction-variant-actions">${variant.baseline?"":`<button type="button" class="subtle" data-variant-baseline="${index}">设为基准稿</button>`}<label class="subtle">推进结构 <select data-variant-progression="${index}"><option value="">未标注</option>${progressions.map(item=>`<option ${variant.progression===item?"selected":""}>${esc(item)}</option>`).join("")}${variant.progression&&!progressions.includes(variant.progression)?`<option selected>${esc(variant.progression)}</option>`:""}</select></label></div></div>`).join("")}</div>${!variants.length?messageMarkup("暂未追加执行变体。已有案例仍保留各自的完整方向链。"):""}${(d.history||[]).length?`<details class="direction-history"><summary>旧定义 · ${d.history.length}</summary>${d.history.map(item=>`<div class="direction-definition"><small>${esc(readableDate(item.replaced_at))} 前</small><p class="direction-chain">${esc(directionChain(item))}</p></div>`).join("")}</details>`:""}`)}
-      ${section("direction-plans","下一轮安排",`<div class="direction-dialog-actions">${[["scale","加码"],["execution","换执行"],["stop","停测"]].map(([action,label])=>`<button type="button" class="secondary" data-direction-plan="${action}">${label}</button>`).join("")}</div><p class="context-note">把本轮判断保存为下一轮安排，开始写稿时再明确提交。</p><div class="direction-related-list">${(data.plans || []).map(plan=>`<div class="direction-related-item"><strong>${esc({scale:"加码",execution:"换执行",stop:"停测"}[plan.action] || plan.action)}</strong><span>${esc({pending:"待处理",working:"进行中",done:"已完成",cancelled:"已取消"}[plan.status] || plan.status)}</span>${plan.note?`<small>${esc(plan.note)}</small>`:""}</div>`).join("")}</div>`)}
-      ${section("direction-scripts",`文案版本 · ${scripts.length}`,scripts.length?`<div class="direction-related-list">${scripts.map(script=>script.script_id || script.id?`<a class="direction-related-item" href="${esc(pageURL("#scripts/"+(script.script_id || script.id)))}"><strong>${esc(script.title)}</strong><span>第 ${esc(script.version || 1)} 版 · ${esc({draft:"草稿",adopted:"已采纳",filmed:"已拍摄",published:"已发布",reviewed:"已复盘",archived:"已归档"}[script.status] || script.status || "")}</span><small>${esc(script.script_id || script.id)}</small></a>`:`<details class="direction-script"><summary><strong>${esc(script.script_version || "版本未标记")}</strong> ${esc(script.title || script.case_id)}</summary><pre>${esc(script.text || "未记录文案")}</pre><a href="${esc(pageURL("#case/"+script.case_id+"/script"))}">查看案例文案</a></details>`).join("")}</div>`:messageMarkup("还没有关联的案例文案版本。"))}
-      ${section("direction-videos",`关联视频 · ${videos.length}`,videos.length?`<div class="direction-related-list">${videos.map(video=>`<a class="direction-related-item" href="${esc(pageURL("#videos?video="+encodeURIComponent(video.video_id)))}"><strong>${esc(video.title || video.video_id)}</strong><span>${esc(video.video_id)}</span><small>查看销售数据与统计窗口</small></a>`).join("")}</div>`:messageMarkup("还没有关联视频。"))}
-      ${section("direction-tasks",`AI 任务 · ${tasks.length}`,tasks.length?`<div class="direction-related-list">${tasks.map(task=>`<a class="direction-related-item" href="${esc(pageURL("#ai/"+encodeURIComponent(task.task_id)))}"><strong>${esc(task.case_title || task.case_id || task.task_id)}</strong><span>${esc(taskStatusNames[task.status] || task.status || "状态未提供")}</span><small>${esc(readableDate(task.updated_at))}</small></a>`).join("")}</div>`:messageMarkup("还没有关联的 AI 协作任务。"))}
-      ${section("direction-cases",`关联案例 · ${cases.length}`,cases.length?`<div class="direction-related-list">${cases.map(item=>`<a class="direction-related-item" href="${esc(pageURL("#case/"+item.case_id))}"><strong>${esc(item.current?.title || item.title || item.case_id)}</strong><span>${esc(item.case_id)}${item.archived?" · 已归档":""}</span></a>`).join("")}</div>`:messageMarkup("方向已经独立保存，可以在后续案例中使用这个编号。"))}
-      <div class="direction-summary-notes"><details><summary>数据与复盘说明</summary><p>各案例保留各自文案版本、统计窗口与数据来源，不累计不同窗口的售出量。重复登记的视频也保留原始归属提示。</p></details></div>${group?`<div class="direction-section-heading"><h2>案例执行与表现</h2><p class="context-note">每条案例保留自己的方向链、文案版本与统计窗口。</p></div>${groupCard(group)}`:""}`;
+    $("#content").innerHTML=`<a class="back-link" href="${esc(directionURL(d.product))}">${icon("back")}卖点与方向</a>
+      <div class="page-heading dir-detail-heading"><div><p class="dir-meta">${p?`<span class="dir-code tier-${esc(p.tier)}">${esc(p.code)}</span>`:""}<span>${esc(d.direction_id)}</span>${statusChip(d.status)}${d.lead_tier&&d.lead_tier!=="S"?`<span class="dir-flag" title="${esc(d.notes||"方向应由 S 级卖点主打")}">${esc(d.lead_tier)} 级主打</span>`:""}</p><h1>${esc(p?.title || d.main_difference)}</h1></div>
+        <div class="dir-detail-actions"><button type="button" class="secondary" id="direction-edit">${icon("edit")}编辑方向</button><button type="button" class="primary" id="direction-write">${icon("edit")}用这个方向写稿</button></div></div>
+      <div class="dir-layout"><div class="dir-primary">
+        <section class="section-card dir-card" id="direction-definition"><h2>方向链</h2><div class="direction-chain dir-chain">${chainSteps(d,points)}</div>
+          ${(d.chain_issues||[]).length?`<p class="dir-note is-warn">方向链需要修改：${esc(d.chain_issues.join("；"))}</p>`:""}${d.notes?`<p class="dir-note">${esc(d.notes)}</p>`:""}</section>
+        <section class="section-card dir-card" id="direction-variants"><div class="dir-card-head"><h2>执行变体<small>${variants.length}</small></h2><button type="button" class="subtle" id="direction-add-variant">${icon("plus")}新增执行变体</button></div>
+          ${!variants.some(item=>item.baseline)&&variants.length?'<p class="dir-note is-warn">还没有基准稿。选一条设为基准，其他变体才有比较对象。</p>':""}
+          <div class="direction-variant-list">${variants.map((variant,index)=>`<div class="direction-definition dir-variant${variant.baseline?" is-baseline":""}"><div class="dir-variant-head"><strong>${variant.baseline?"基准稿":variant.variant_type==="direction"?"方向定义":"执行变体 "+(index+1)}</strong>${variant.baseline?'<span class="dir-badge">基准</span>':""}${progressionSelect(variant,index)}${variant.baseline?"":`<button type="button" class="subtle" data-variant-baseline="${index}">设为基准稿</button>`}</div>
+            <div class="dir-variant-chain">${chainSteps({concern:variant.concern,closing:variant.closing},points)}</div>${variant.execution_change?`<p class="dir-change">改动：${esc(variant.execution_change)}</p>`:""}${(variant.chain_issues||[]).length?`<p class="dir-note">${esc(variant.chain_issues.join("；"))}（已发布的记录保持原样）</p>`:""}</div>`).join("")}</div>
+          ${!variants.length?messageMarkup("暂未追加执行变体。已有案例仍保留各自的完整方向链。"):""}
+          ${(d.history||[]).length?`<details class="direction-history"><summary>旧定义 · ${d.history.length}</summary>${d.history.map(item=>`<div class="direction-definition"><small>${esc(readableDate(item.replaced_at))} 前</small><p class="direction-chain">${esc(directionChain(item))}</p></div>`).join("")}</details>`:""}</section>
+        <section class="section-card dir-card dir-related"><div class="dir-tabs" role="tablist" aria-label="关联内容">${related.map(([key,label,list])=>`<button type="button" role="tab" id="direction-${key}" aria-controls="direction-${key}-panel" aria-selected="${key===firstRelated}" data-related-tab="${key}">${label}<small>${list.length}</small></button>`).join("")}</div>
+          ${related.map(([key,,list,markup,emptyText])=>`<div class="dir-related-panel" role="tabpanel" id="direction-${key}-panel" aria-labelledby="direction-${key}"${key===firstRelated?"":" hidden"}>${list.length?`<div class="direction-related-list">${markup}</div>`:`<p class="dir-empty">${esc(emptyText)}</p>`}</div>`).join("")}</section>
+        ${group?`<div class="direction-section-heading"><h2>案例执行与表现</h2><p class="context-note">每条案例保留自己的方向链、文案版本与统计窗口。</p></div>${groupCard(group)}`:""}
+      </div><aside class="dir-aside">
+        <section class="dir-card dir-aside-card"><h2>主打卖点</h2>${p?`<p class="dir-aside-title"><span class="dir-code tier-${esc(p.tier)}">${esc(p.code)}</span>${esc(p.title)}</p>${p.rationale?`<p class="dir-aside-text">${esc(p.rationale)}</p>`:""}<dl class="dir-facts"><dt>证据</dt><dd>${esc(p.evidence || "待补充")}</dd></dl>`:'<p class="dir-aside-text">这个方向没有关联卖点。</p>'}</section>
+        <section class="dir-card dir-aside-card" id="direction-plans"><h2>下一轮安排</h2><div class="dir-plan-buttons">${[["scale","加码"],["execution","换执行"],["stop","停测"]].map(([action,label])=>`<button type="button" class="secondary compact" data-direction-plan="${action}">${label}</button>`).join("")}</div>
+          ${plans.length?`<ul class="dir-plans">${plans.map(plan=>`<li><strong>${esc(planNames[plan.action] || plan.action)}</strong><span>${esc(planStatus[plan.status] || plan.status)}</span>${plan.note?`<small>${esc(plan.note)}</small>`:""}</li>`).join("")}</ul>`:'<p class="dir-aside-text">选一个写下判断，会出现在「本周」的下一轮待写里。</p>'}</section>
+        <section class="dir-card dir-aside-card"><h2>记录</h2><dl class="dir-facts"><dt>产品</dt><dd>${esc(d.product)}</dd><dt>案例</dt><dd>${cases.length} 条</dd><dt>视频</dt><dd>${videos.length} 条</dd>${d.performance?.matched_count?`<dt>表现</dt><dd>${esc(performanceText(d.performance))}</dd>`:""}</dl>
+          <details class="dir-aside-more"><summary>数据与复盘说明</summary><p>各案例保留各自文案版本、统计窗口与数据来源，不累计不同窗口的售出量。重复登记的视频也保留原始归属提示。</p></details></section>
+      </aside></div>`;
     if(group)decorateGroupWarnings($("#content"),[group]);
     $("#direction-add-variant").onclick=()=>openCreate(d.selling_point_id);
     $("#direction-edit").onclick=()=>openDirectionEditor(data);
@@ -265,7 +294,10 @@ window.CaseDirections = (() => {
     $$("[data-variant-progression]").forEach(select=>select.onchange=()=>{if(select.value)saveMeta({index:Number(select.dataset.variantProgression),progression:select.value});});
     $("#direction-write").onclick=()=>window.CaseAI?.startFromDirection(d);
     $$("[data-direction-plan]").forEach(button=>button.onclick=()=>openPlan(data,button.dataset.directionPlan));
-    $$("[data-direction-section]").forEach(button=>button.onclick=()=>document.getElementById(button.dataset.directionSection)?.scrollIntoView({behavior:"smooth",block:"start"}));
+    $$("[data-related-tab]").forEach(tab=>tab.onclick=()=>{
+      $$("[data-related-tab]").forEach(item=>item.setAttribute("aria-selected",String(item===tab)));
+      $$(".dir-related-panel").forEach(panel=>panel.hidden=panel.id!==`direction-${tab.dataset.relatedTab}-panel`);
+    });
   }
   async function openPlan(data,action) {
     const labels={scale:"加码",execution:"换执行",stop:"停测"}, d=data.direction;
@@ -386,9 +418,10 @@ window.CaseDirections = (() => {
     $("#content").innerHTML='<p role="status">正在读取卖点与方向…</p>';
     try {
       if(values.id){
-        const data=await api(catalogURL(values.product,values.id));
+        // The whole catalog too, only to name the selling-point codes that appear inside the chain.
+        const [data,catalog]=await Promise.all([api(catalogURL(values.product,values.id)),api(catalogURL(values.product)).catch(()=>null)]);
         if(sequence!==requestSequence||pageHash()!==values.hash)return;
-        renderDetail(data,values);return;
+        renderDetail(data,values,catalog?.selling_points || []);return;
       }
       const query=new URLSearchParams({archive:values.archive});if(values.product)query.set("product",values.product);
       const [catalog,summary]=await Promise.all([api(catalogURL(values.product)),api("/api/directions?"+query)]);
@@ -397,6 +430,8 @@ window.CaseDirections = (() => {
       renderCatalog(catalog,summary,values);
     }catch(error){if(sequence===requestSequence&&pageHash()===values.hash)showError(error.message);}
   }
+  const closeMenus=event=>$$(".dir-menu[open]").forEach(menu=>{if(event.key==="Escape"||!menu.contains(event.target)||event.target.closest("[role=menuitem]"))menu.open=false;});
+  window.addEventListener("click",closeMenus,true);window.addEventListener("keydown",event=>{if(event.key==="Escape")closeMenus(event);});
   window.addEventListener("workbench:directionchange",()=>{if(state.routeKind==="directions"&&!modalOpen())void route();});
   return {route,openCreate,openPointEditor,modalOpen,beforeNavigate};
 })();

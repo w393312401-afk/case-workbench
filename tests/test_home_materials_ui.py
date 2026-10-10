@@ -157,12 +157,12 @@ class HomeMaterialUITests(unittest.TestCase):
         page=self.open_page()
         card=self.card(page,'That’s a lot of wobble')
         identifier=card.get_attribute('data-id')
-        card.get_by_role('button',name='关联主题').click()
+        review.ReviewPageTests.card_action(self,card,'关联主题')
         dialog=page.locator('#material-theme-dialog')
         dialog.locator('select[name=target]').select_option(point['id'])
         dialog.get_by_role('button',name='保存主题关联').click()
         dialog.wait_for(state='hidden')
-        card.get_by_role('button',name='关联主题').click()
+        review.ReviewPageTests.card_action(self,card,'关联主题')
         dialog.locator('select[name=role]').select_option('concern')
         dialog.locator('select[name=target]').select_option('202H-S1')
         dialog.get_by_role('button',name='保存主题关联').click()
@@ -212,7 +212,7 @@ class HomeMaterialUITests(unittest.TestCase):
     def test_theme_unknown_response_retries_identical_request_without_duplicate(self):
         direction=creation_fixture.CreationHTTPTests.direction(self)
         page=self.open_page()
-        self.card(page,'That’s a lot of wobble').get_by_role('button',name='关联主题').click()
+        review.ReviewPageTests.card_action(self,self.card(page,'That’s a lot of wobble'),'关联主题')
         dialog=page.locator('#material-theme-dialog')
         dialog.locator('select[name=target]').wait_for()
         payloads=[]

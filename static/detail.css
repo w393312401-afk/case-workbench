@@ -35,7 +35,7 @@
 .detail-completion li { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0; padding: 5px 0; font-size: 12px; }
 .detail-completion li > span { display: inline-flex; align-items: center; gap: 7px; }
 .detail-completion svg { width: 14px; height: 14px; }
-.detail-completion .is-ready > span { color: var(--green-ink); }
+.detail-completion .is-ready > span { color: var(--success-ink); }
 .detail-completion .is-missing > span { color: var(--warm-ink); }
 .detail-completion button { font-size: 12px; padding: 4px 6px; }
 #content:has(.detail-heading) .detail-side .detail-nav { position: static; display: flex; flex-direction: column; padding: 0; margin: 0; border: 0; }

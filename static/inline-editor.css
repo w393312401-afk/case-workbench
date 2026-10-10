@@ -14,7 +14,7 @@
 .inline-editor-fields textarea.script-input { min-height: 210px; }
 .inline-revision-note { margin-top: 18px; }
 .inline-editor-status { margin: 16px 0 12px; color: var(--muted); font-size: 13px; }
-.inline-editor-status.is-error { color: #a52c31; }
+.inline-editor-status.is-error { color: var(--danger-ink); }
 .inline-editor-actions { justify-content: flex-end; flex-wrap: wrap; }
 .inline-editor-actions [data-inline-copy] { margin-right: auto; }
 .is-editing-inline > .section-title-row > [data-inline-edit] { display: none; }

@@ -1,7 +1,7 @@
 .library-filter-panel{padding:20px;margin-bottom:20px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
 .library-presets{display:flex;flex-wrap:wrap;gap:7px;padding-bottom:18px;border-bottom:1px solid var(--line)}
 .library-presets button{border:1px solid transparent;padding:8px 12px;border-radius:7px;background:var(--surface-alt);color:var(--muted-soft);font-size:13px}
-.library-presets button[aria-pressed="true"]{border-color:var(--green);color:var(--green-ink);background:var(--surface-tint);font-weight:600}
+.library-presets button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent);background:var(--surface-tint);font-weight:600}
 .library-saved-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin:18px 0}
 .library-saved-row>label,.library-saved-row>div{display:flex;align-items:center;gap:10px}
 .library-saved-row>label>span{font-size:13px;color:var(--muted-soft);white-space:nowrap}

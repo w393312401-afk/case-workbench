@@ -3,12 +3,12 @@
 .brand{padding:0 9px 24px}
 .brand small{font-size:9px;letter-spacing:1px;white-space:nowrap}
 .global-product{display:grid;gap:7px;padding:0 10px 21px}
-.global-product>span{color:#a9b3aa;font-size:12px}
-.global-product select{width:100%;min-width:0;border:1px solid #526056;border-radius:8px;background:#333e37;color:#fff;padding:10px 8px;font-size:13px}
+.global-product>span{color:var(--sidebar-muted);font-size:12px}
+.global-product select{width:100%;min-width:0;border:1px solid var(--sidebar-line);border-radius:8px;background:var(--sidebar-control);color:var(--sidebar-ink);padding:10px 8px;font-size:13px}
 .sidebar-label{margin:0 0 8px}
 .workflow-nav .nav-item{padding:11px 13px;margin-bottom:4px}
-.library-navigation{margin:4px 0 13px;padding:0 0 9px 10px;border-left:1px solid #4a554c}
-.library-navigation>summary{padding:7px 11px;color:#a9b3aa;cursor:pointer;font-size:12px}
+.library-navigation{margin:4px 0 13px;padding:0 0 9px 10px;border-left:1px solid var(--sidebar-line)}
+.library-navigation>summary{padding:7px 11px;color:var(--sidebar-muted);cursor:pointer;font-size:12px}
 .library-navigation .nav-item{padding:7px 11px;font-size:12px;margin-bottom:2px}
 .library-navigation .nav-item svg{width:14px;height:14px}
 .sidebar-bottom{padding:15px 9px 0;margin-top:auto}

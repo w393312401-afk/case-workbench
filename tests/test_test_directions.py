@@ -185,13 +185,13 @@ class DirectionBrowserTests(unittest.TestCase):
             self.store.add({"title": "别名对照", "product": label, "original": {"text": "Fixture source"},
                             "feedback": {"kind": "editorial", "text": "隔离别名验证"}, "current": current})
         page = self.open_page("#directions?product=202H")
-        page.locator(".direction-overview-card").first.wait_for()
+        page.locator(".dir-row.has-direction").first.wait_for()
         self.assertEqual(page.locator('#direction-filters [name="product"]').count(), 0)
         self.assertEqual(page.locator('#global-product option').all_text_contents(),
                          ["全部产品", "SHARPAL 202H"])
         self.assertEqual(page.locator('#global-product').input_value(), "202H")
         self.assertTrue(page.url.endswith("#/202H/directions"), page.url)
-        self.assertEqual(page.locator(".direction-overview-card").count(), 2)
+        self.assertEqual(page.locator(".dir-row.has-direction").count(), 2)
         page.locator(f'[data-direction-id="{DIRECTION["direction_id"]}"] .direction-card-link').click()
         page.locator(".direction-duplicate").first.get_by_text("同一视频跨方向登记", exact=False).wait_for()
         self.assertEqual(page.locator(".direction-duplicate").first.locator("li").count(), 4)
@@ -250,13 +250,12 @@ class DirectionBrowserTests(unittest.TestCase):
     def test_exact_direction_filter_has_candidates_and_clear_action(self):
         self.add_direction()
         page = self.open_page("#directions?product=202H&direction=missing-direction")
-        page.get_by_role("heading", name="当前筛选没有匹配的方向", exact=True).wait_for()
-        self.assertEqual(page.locator(".direction-overview-card").count(), 0)
-        self.assertEqual(page.locator("#direction-candidates option").first.get_attribute("value"), DIRECTION["direction_id"])
+        page.get_by_role("heading", name="当前筛选没有匹配的卖点", exact=True).wait_for()
+        self.assertEqual(page.locator(".dir-row.has-direction").count(), 0)
         self.assertEqual(page.locator('#direction-filters [name="direction"]').input_value(), "missing-direction")
-        page.get_by_role("link", name="清除方向筛选", exact=True).click()
-        page.locator(".direction-overview-card").wait_for()
-        self.assertEqual(page.locator('#direction-filters [name="direction"]').input_value(), "")
+        page.locator(".dir-scope").get_by_role("link", name="看全部", exact=True).click()
+        page.locator(".dir-row.has-direction").first.wait_for()
+        self.assertEqual(page.locator('#direction-filters [name="direction"]').count(), 0)
 
 
 class DirectionFrozenTaskTests(unittest.TestCase):

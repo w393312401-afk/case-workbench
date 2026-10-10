@@ -226,28 +226,34 @@
     const manual = (kind, t) => r.manual?.[kind]?.[t] === true;
     const tags = [["nature", r.tags.nature], ["topic", r.tags.topic], ["competitor", r.tags.competitor || []]]
       .flatMap(([kind, list]) => list.map((t) => `<span class="rev-tag rev-tag-${kind}${manual(kind, t) ? " is-manual" : ""}">${esc(labelOf(kind, t))}</span>`)).join("");
-    const likes = r.likes != null ? `<span title="${r.platform === "amazon" ? "觉得有帮助的人数" : "点赞"}">${r.platform === "amazon" ? "有帮助" : "点赞"} ${num(r.likes)}</span>` : "";
+    const likes = r.likes != null ? `<span class="rev-meta rev-likes" title="${r.platform === "amazon" ? "觉得有帮助的人数" : "点赞"}">${r.platform === "amazon" ? "有帮助" : "赞"} ${num(r.likes)}</span>` : "";
     const long = r.text.length > 520, excerpt = long ? excerptAround(r.text, terms) : null;
     // A long review shows its head; when the search word sits further down, show the passage around it instead.
     const body = r.text
       ? `<div class="rev-body${excerpt ? " has-excerpt" : ""}">${excerpt ? `<p class="rev-text rev-excerpt">${highlight(excerpt, terms)}</p>` : ""}<p class="rev-text rev-full${long && !excerpt ? " is-clamped" : ""}">${highlight(r.text, terms)}</p>${long ? '<button type="button" class="subtle rev-expand" data-expand>展开全文</button>' : ""}</div>`
       : '<p class="rev-text rev-muted">（只打了星，没写文字）</p>';
     const editing = rev.editing.has(r.id), picked = Boolean(r.pick);
+    const meta = [r.posted_on, r.sku, r.is_reply ? "回复" : "", r.language === "other" ? "其他语言" : ""].filter(Boolean).map(esc).join(" · ");
     return `<article class="rev-card${r.role === "brand_account" ? " is-brand" : ""}" data-id="${esc(r.id)}">
-      <header class="rev-head"><span class="rev-platform rev-platform-${r.platform}">${esc(labelOf("platform", r.platform))}</span><span class="rev-role rev-role-${r.role}" title="${esc(roleHints[r.role] || "")}">${esc(labelOf("role", r.role))}</span>${stars(r.rating)}${replyBadge(r)}${isNew(r) ? '<span class="rev-badge rev-badge-new" title="最近一次同步新增的评论">新</span>' : ""}
-        <span class="rev-meta">${esc(r.posted_on || "")}${r.sku ? ` · ${esc(r.sku)}` : ""}${r.is_reply ? " · 回复" : ""}${r.language === "other" ? " · 其他语言" : ""}</span>${likes ? `<span class="rev-meta rev-likes">${likes}</span>` : ""}</header>
+      <header class="rev-head"><span class="rev-platform rev-platform-${r.platform}">${esc(labelOf("platform", r.platform))}</span><span class="rev-role rev-role-${r.role}" title="${esc(roleHints[r.role] || "")}">${esc(labelOf("role", r.role))}</span>${stars(r.rating)}${replyBadge(r)}${isNew(r) ? '<span class="rev-badge rev-badge-new" title="最近一次同步新增的评论">新</span>' : ""}<span class="rev-meta rev-date">${meta}</span>${likes}</header>
       ${r.title ? `<h3 class="rev-title">${highlight(r.title, terms)}</h3>` : ""}${body}
       ${r.context ? `<p class="rev-context">在帖子「${esc(r.context.slice(0, 80))}」下</p>` : ""}${videoLine(r)}
-      <footer class="rev-foot"><div class="rev-tags">${tags}</div><div class="rev-actions">${threadButton(r)}<button type="button" class="subtle" data-edit-tags="${esc(r.id)}" aria-expanded="${editing}">改标签</button><button type="button" class="subtle rev-pick${picked ? " is-on" : ""}" data-pick="${esc(r.id)}" aria-pressed="${picked}" title="放进全局素材篮，写稿时带入">${picked ? "★ 已摘录" : "☆ 摘录"}</button><button type="button" class="subtle" data-review-theme="${esc(r.id)}">关联主题</button><button type="button" class="subtle" data-copy="${esc(r.id)}">${icon("copy")}复制引用</button>${r.url ? `<a class="subtle" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${icon("link")}原帖</a>` : ""}</div></footer>
+      <footer class="rev-foot"><div class="rev-tags">${tags}</div><div class="rev-actions">${threadButton(r)}<button type="button" class="subtle rev-pick${picked ? " is-on" : ""}" data-pick="${esc(r.id)}" aria-pressed="${picked}" title="放进全局素材篮，写稿时带入">${picked ? "已摘录" : "摘录"}</button><button type="button" class="subtle" data-copy="${esc(r.id)}">复制引用</button><details class="rev-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-edit-tags="${esc(r.id)}" aria-expanded="${editing}">改标签</button><button type="button" role="menuitem" data-review-theme="${esc(r.id)}">关联主题</button>${r.url ? `<a role="menuitem" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">打开原帖</a>` : ""}</div></details></div></footer>
       <div class="rev-tag-editor" id="rev-tags-${esc(r.id)}"${editing ? "" : " hidden"}>${editing ? tagEditor(r) : ""}</div>
       <div class="rev-thread" id="rev-thread-${esc(r.id)}" hidden></div></article>`;
   }
 
   // ---- the filters above the list ----
+  // The source switch above the list: one source at a time, or all of them.
+  function sourceBar() {
+    const f = rev.filters, facets = rev.data.facets, all = rev.summary.platforms.reduce((sum, p) => sum + (facets.platform[p.platform] || 0), 0);
+    const button = (code, label, count, on) => `<button type="button" class="rev-source${on ? " is-active" : ""}"${code ? ` data-chip="platform" data-code="${code}"` : " data-platform-all"} aria-pressed="${on}">${esc(label)}<span>${num(count)}</span></button>`;
+    return button("", "全部", all, !f.platform.length) + rev.summary.platforms.map((p) => button(p.platform, p.label, facets.platform[p.platform] || 0, f.platform.includes(p.platform))).join("");
+  }
+
+  // The tag groups inside the filter drawer. "未归类" comes last: the reviews the rules found nothing to say about.
   function filterRows() {
     const f = rev.filters, facets = rev.data.facets, s = rev.summary;
-    const platformChips = s.platforms.map((p) => `<button type="button" class="rev-filter rev-platform-filter${f.platform.includes(p.platform) ? " is-active" : ""}" data-chip="platform" data-code="${p.platform}" aria-pressed="${f.platform.includes(p.platform)}"><span>${esc(p.label)}</span><strong>${num(facets.platform[p.platform] || 0)}</strong></button>`).join("");
-    // "未归类" comes last: the reviews the rules found nothing to say about, listed so they can be read and tagged by hand.
     const group = (kind, title, active, withNone = true) => {
       const counts = facets[kind] || {};
       const codes = Object.keys(s.labels[kind]).filter((c) => (counts[c] || 0) > 0 || active.includes(c)).sort((a, b) => (counts[b] || 0) - (counts[a] || 0));
@@ -255,7 +261,44 @@
       if (!codes.length && kind === "competitor") return "";
       return `<div class="rev-chip-group"><span class="rev-chip-title">${title}</span><div class="rev-chip-row">${codes.length ? codes.map((c) => chip(kind, c, num(counts[c] || 0), active.includes(c))).join("") : '<span class="rev-muted">当前筛选下没有</span>'}</div></div>`;
     };
-    return `<div class="rev-chip-group"><span class="rev-chip-title">来源</span><div class="rev-chip-row">${platformChips}</div></div>${group("nature", "性质", f.nature)}${group("topic", "主题", f.topic)}${group("competitor", "竞品", f.competitor, false)}`;
+    return `${group("nature", "性质", f.nature)}${group("topic", "主题", f.topic)}${group("competitor", "竞品", f.competitor, false)}`;
+  }
+
+  // Every filter in force, each removable on its own. [key, code, label]; code is set for the list filters.
+  function activeFilters() {
+    const f = rev.filters, out = [];
+    f.platform.forEach((c) => out.push(["platform", c, labelOf("platform", c)]));
+    if (f.q.trim()) out.push(["q", "", `“${f.q.trim()}”`]);
+    if (f.rating) out.push(["rating", "", ratings[f.rating]]);
+    if (f.role) out.push(["role", "", labelOf("role", f.role)]);
+    if (f.language) out.push(["language", "", languages[f.language]]);
+    if (f.replied) out.push(["replied", "", repliedOptions[f.replied].replace("（仅 TikTok）", "")]);
+    if (f.video) out.push(["video", "", "视频：" + clip(videoName(rev.data.videos?.[f.video], f.video), 16)]);
+    if (f.sku) out.push(["sku", "", "款式：" + f.sku]);
+    if (f.since) out.push(["since", "", `近 ${rev.summary.new_days || 14} 天新增`]);
+    for (const kind of ["nature", "topic", "competitor"]) f[kind].forEach((c) => out.push([kind, c, labelOf(kind, c)]));
+    if (f.brand) out.push(["brand", "", "含品牌回复"]);
+    if (f.empty) out.push(["empty", "", "含只打星评价"]);
+    if (f.irrelevant) out.push(["irrelevant", "", "含没提到产品的评论"]);
+    return out;
+  }
+  // How many of the drawer's own filters are set, shown on the 筛选 button.
+  const drawerKeys = new Set(["rating", "role", "language", "replied", "video", "sku", "nature", "topic", "competitor", "brand", "empty", "irrelevant"]);
+  function activeMarkup(items) {
+    if (!items.length) return "";
+    return items.map(([key, code, label]) => `<button type="button" class="rev-token" data-clear="${key}" data-code="${esc(code)}" aria-label="去掉筛选：${esc(label)}">${esc(label)}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M7 17 17 7"/></svg></button>`).join("")
+      + '<button type="button" class="subtle rev-clear-all" data-reset>清除全部</button>';
+  }
+  // The quick filters: each is one click on, one click off.
+  const quick = {
+    low: { on: (f) => f.rating === "low", set: (on) => ({ rating: on ? "low" : "" }) },
+    questions: { on: (f) => f.replied === "no" && f.nature.includes("question") && f.platform.join() === "tiktok_video",
+      set: (on, f) => on ? { platform: ["tiktok_video"], nature: [...new Set([...f.nature, "question"])], replied: "no" } : { platform: [], nature: f.nature.filter((c) => c !== "question"), replied: "" } },
+    defects: { on: (f) => f.nature.includes("defect"), set: (on, f) => ({ nature: on ? [...f.nature, "defect"] : f.nature.filter((c) => c !== "defect") }) },
+  };
+  function paintQuick() {
+    const f = rev.filters;
+    for (const [key, item] of Object.entries(quick)) { const button = $(`[data-quick="${key}"]`); if (button) button.setAttribute("aria-pressed", String(item.on(f))); }
   }
 
   // The words to mark in the text: what was typed, plus the English words a Chinese search word was also searched as.
@@ -283,8 +326,8 @@
   function coverageMarkup() {
     const s = rev.summary, notes = s.coverage || {};
     const rows = s.platforms.map((p) => `<tr><td>${esc(p.label)}</td><td class="num">${num(p.total)}</td><td class="num">${num(p.with_text)}</td><td class="num">${p.avg_rating == null ? "—" : p.avg_rating}</td><td>${esc(p.first || "—")} 至 ${esc(p.last || "—")}</td><td class="rev-note">${esc(notes[p.platform] || "")}</td></tr>`).join("");
-    return `<details class="rev-coverage section-card"><summary>各来源抓了多少、缺什么、哪些要小心用</summary><div class="perf-table-wrap"><table class="perf-table"><thead><tr><th>来源</th><th class="num">总数</th><th class="num">有文字</th><th class="num">平均星级</th><th>评论日期</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <p class="rev-muted">默认已隐藏：品牌/达人账号自己的回复、没提到产品的评论、只打星没写字的评价。标签是规则自动打的，可能有误判；星级为 1–3 的评价和标「具体缺陷」的评论最值得先读。</p></details>`;
+    return `<section class="rev-coverage section-card" id="rev-coverage" hidden><h2>各来源抓了多少、缺什么、哪些要小心用</h2><div class="perf-table-wrap"><table class="perf-table"><thead><tr><th>来源</th><th class="num">总数</th><th class="num">有文字</th><th class="num">平均星级</th><th>评论日期</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="rev-muted">默认已隐藏：品牌/达人账号自己的回复、没提到产品的评论、只打星没写字的评价。标签是规则自动打的，可能有误判；星级为 1–3 的评价和标「具体缺陷」的评论最值得先读。</p></section>`;
   }
 
   // The two selects that only make sense when the library has something to choose from.
@@ -304,23 +347,27 @@
   }
 
   function render() {
-    const f = rev.filters, s = rev.summary;
+    const f = rev.filters, s = rev.summary, sources = s.platforms.filter((p) => p.total).length;
+    const select = (id, label, options, value) => `<label class="rev-field"><span>${label}</span><select id="${id}">${options.map(([k, v]) => `<option value="${esc(k)}" ${String(k) === String(value) ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>`;
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 用户声音";
-    $("#content").innerHTML = `<div id="rev-page"><div class="page-heading"><div><span class="eyebrow">REAL USER REVIEWS</span><h1>用户声音</h1><p>评论库共有 ${num(s.default_visible)} 条默认可见评论，来自 TikTok 视频评论、TikTok Shop、亚马逊、Reddit、Facebook（共收录 ${num(s.total)} 条，另有品牌账号回复等默认隐藏）。不含评论者姓名；评论里的说法都未核实。</p></div><div class="perf-actions"><button type="button" class="secondary" id="rev-copy-all">${icon("copy")}复制当前结果</button><button type="button" class="primary" id="rev-sync">${icon("refresh")}重新同步</button></div></div>
-      <p class="perf-sources">数据文件夹：<code>reviews/sources</code> · 已导入 ${s.imports.length} 个文件${s.synced_at ? `，最近一次 ${esc(s.synced_at.replace("T", " "))}` : ""}</p>
+    $("#content").innerHTML = `<div id="rev-page"><div class="page-heading rev-heading"><div><h1>用户声音</h1><p>${num(s.default_visible)} 条真实评论，来自 ${sources} 个来源${s.synced_at ? ` · 最近同步 ${esc(s.synced_at.slice(0, 16).replace("T", " "))}` : ""}。评论里的说法都未核实，不含评论者姓名。<button type="button" class="subtle rev-coverage-link" id="rev-coverage-toggle" aria-expanded="false" aria-controls="rev-coverage">数据来源说明</button></p></div><div class="perf-actions"><button type="button" class="subtle" id="rev-basket-toggle"></button><button type="button" class="secondary" id="rev-copy-all">${icon("copy")}复制当前结果</button><button type="button" id="rev-sync" hidden>重新同步</button></div></div>
       <div id="rev-sync-result" role="status"></div><p class="rev-records" id="rev-records"></p>${coverageMarkup()}
-      <div class="toolbar perf-toolbar rev-toolbar"><label class="search">${icon("search")}<input id="rev-q" aria-label="搜索评论" placeholder="搜索评论内容：英文原词，或常用中文词（夹具、晃动、价格…会一并按英文搜）" value="${esc(f.q)}"></label><span class="result-count" id="rev-count"></span></div><p class="rev-query-note" id="rev-query-note" role="status"></p>
-      <div class="rev-workspace"><details class="rev-filter-sidebar" open><summary>筛选条件</summary><div class="toolbar perf-toolbar rev-sidebar-controls">
-        <select id="rev-rating" aria-label="星级">${Object.entries(ratings).map(([k, v]) => `<option value="${k}" ${k === String(f.rating) ? "selected" : ""}>${v}</option>`).join("")}</select>
-        <select id="rev-role" aria-label="评论者角色"><option value="">全部角色（不含品牌账号）</option>${Object.keys(s.labels.role).map((k) => `<option value="${k}" ${k === f.role ? "selected" : ""}>${esc(s.labels.role[k])}</option>`).join("")}</select>
-        <select id="rev-language" aria-label="语言">${Object.entries(languages).map(([k, v]) => `<option value="${k}" ${k === f.language ? "selected" : ""}>${v}</option>`).join("")}</select>
-        <select id="rev-replied" aria-label="回复情况">${Object.entries(repliedOptions).map(([k, v]) => `<option value="${k}" ${k === f.replied ? "selected" : ""}>${v}</option>`).join("")}</select>
-        ${videoSelect()}${skuSelect()}
-        <select id="rev-sort" aria-label="排序">${Object.entries(sorts).map(([k, v]) => `<option value="${k}" ${k === f.sort ? "selected" : ""}>${v}</option>`).join("")}</select>
-      </div></details><div class="rev-main-column">
-      <div class="rev-toggles"><label><input type="checkbox" id="rev-brand" ${f.brand ? "checked" : ""}> 显示品牌/达人账号的回复</label><label><input type="checkbox" id="rev-empty" ${f.empty ? "checked" : ""}> 显示只打星没写字的评价</label><label><input type="checkbox" id="rev-irrelevant" ${f.irrelevant ? "checked" : ""}> 显示没提到产品的评论</label><button type="button" class="subtle" id="rev-open-questions" title="TikTok 视频评论里，库里没有任何回复的提问：可以用真实画面回答的选题">只看没人回复的提问</button><button type="button" class="subtle" id="rev-new" title="最近几次同步新增的评论"></button><button type="button" class="subtle" id="rev-basket-toggle" aria-expanded="false"></button><button type="button" class="subtle" id="rev-reset">清除所有筛选</button></div>
-      <div id="rev-video-bar"></div>
-      <section class="section-card rev-filters" id="rev-filters"></section><div id="rev-results"></div></div></div></div>`;
+      <div class="rev-searchbar"><label class="search">${icon("search")}<input id="rev-q" aria-label="搜索评论" placeholder="搜索评论：英文原词，或夹具、晃动、价格等中文词" value="${esc(f.q)}"></label><button type="button" class="secondary rev-filter-open" id="rev-filter-open" aria-haspopup="dialog" aria-controls="rev-drawer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>筛选<span class="rev-filter-count" id="rev-filter-count" hidden></span></button></div>
+      <div class="rev-sources" id="rev-sources" role="group" aria-label="来源"></div>
+      <div class="rev-quick" role="group" aria-label="快捷筛选"><button type="button" class="rev-quick-btn" data-quick="low">低星评价</button><button type="button" class="rev-quick-btn" data-quick="questions" id="rev-open-questions" title="TikTok 视频评论里，库里没有任何回复的提问：可以用真实画面回答的选题">没人回复的提问</button><button type="button" class="rev-quick-btn" id="rev-new" title="最近几次同步新增的评论"></button><button type="button" class="rev-quick-btn" data-quick="defects">具体缺陷</button></div>
+      <p class="rev-query-note" id="rev-query-note" role="status"></p>
+      <div class="rev-resultbar"><div class="rev-active" id="rev-active"></div><span class="result-count" id="rev-count"></span><label class="rev-sort"><span>排序</span><select id="rev-sort" aria-label="排序">${Object.entries(sorts).map(([k, v]) => `<option value="${k}" ${k === f.sort ? "selected" : ""}>${v}</option>`).join("")}</select></label></div>
+      <div id="rev-video-bar"></div><div id="rev-results"></div>
+      <dialog id="rev-drawer" class="rev-drawer" aria-labelledby="rev-drawer-title"><div class="rev-drawer-head"><h2 id="rev-drawer-title">筛选</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭筛选">${icon("close")}</button></div>
+        <div class="rev-drawer-body"><div class="rev-field-grid">
+          ${select("rev-rating", "星级", Object.entries(ratings), f.rating)}
+          ${select("rev-role", "评论者", [["", "全部角色（不含品牌账号）"], ...Object.entries(s.labels.role)], f.role)}
+          ${select("rev-language", "语言", Object.entries(languages), f.language)}
+          ${select("rev-replied", "回复情况", [["", "不限"], ...Object.entries(repliedOptions).slice(1)], f.replied)}
+          ${videoSelect() ? `<label class="rev-field"><span>视频</span>${videoSelect()}</label>` : ""}${skuSelect() ? `<label class="rev-field"><span>款式</span>${skuSelect()}</label>` : ""}
+        </div><section class="rev-filters" id="rev-filters" aria-label="标签"></section>
+        <fieldset class="rev-toggles"><legend>默认隐藏的内容</legend><label><input type="checkbox" id="rev-brand" ${f.brand ? "checked" : ""}> 品牌或达人账号的回复</label><label><input type="checkbox" id="rev-empty" ${f.empty ? "checked" : ""}> 只打星没写字的评价</label><label><input type="checkbox" id="rev-irrelevant" ${f.irrelevant ? "checked" : ""}> 没提到产品的评论</label></fieldset></div>
+        <div class="rev-drawer-foot"><button type="button" class="subtle" id="rev-reset">清除全部</button><button type="button" class="primary" data-drawer-close id="rev-drawer-done">显示结果</button></div></dialog></div>`;
     bindToolbar();
     paintResults();
     paintNotes();
@@ -335,15 +382,21 @@
     $("#rev-records").innerHTML = records.join(" ");
     const recent = $("#rev-new");
     recent.hidden = !(s.new_recent > 0 || f.since);
-    recent.textContent = `近 ${s.new_days || 14} 天新增（${num(s.new_recent)}）`;
-    recent.classList.toggle("is-on", Boolean(f.since));
+    recent.innerHTML = `近 ${s.new_days || 14} 天新增<span>${num(s.new_recent)}</span>`;
     recent.setAttribute("aria-pressed", String(Boolean(f.since)));
     const basket = $("#rev-basket-toggle");
-    basket.textContent = "打开素材篮";
+    basket.innerHTML = `${icon("folder")}素材篮`;
     basket.setAttribute("aria-haspopup", "dialog");
   }
 
   function paintResults() {
+    const active = activeFilters(), inDrawer = active.filter(([key]) => drawerKeys.has(key)).length;
+    $("#rev-sources").innerHTML = sourceBar();
+    $("#rev-active").innerHTML = activeMarkup(active);
+    $("#rev-filter-count").hidden = !inDrawer;
+    $("#rev-filter-count").textContent = inDrawer;
+    $("#rev-drawer-done").textContent = `显示 ${num(rev.data.total)} 条结果`;
+    paintQuick();
     $("#rev-filters").innerHTML = filterRows();
     $("#rev-video-bar").innerHTML = videoBar();
     $("#rev-results").innerHTML = resultsMarkup();
@@ -485,10 +538,20 @@
       $(selector)?.addEventListener("change", (event) => changed({ [key]: event.target.value })));
     [["#rev-brand", "brand"], ["#rev-empty", "empty"], ["#rev-irrelevant", "irrelevant"]].forEach(([selector, key]) =>
       $(selector).addEventListener("change", (event) => changed({ [key]: event.target.checked })));
-    $("#rev-reset").onclick = () => { rev.filters = fresh(); rev.shown = 50; save(); render(); refresh(); };
-    // The unanswered TikTok questions: things viewers asked that nobody replied to, in the order people liked them.
-    $("#rev-open-questions").onclick = () => { rev.filters = { ...fresh(), platform: ["tiktok_video"], nature: ["question"], replied: "no" }; rev.shown = 50; save(); render(); refresh(); };
+    // Clearing rebuilds the controls; the drawer stays open when it was.
+    const reset = () => { const open = $("#rev-drawer").open; rev.filters = fresh(); rev.shown = 50; save(); render(); refresh(); if (open) $("#rev-drawer").showModal(); };
+    $("#rev-reset").onclick = reset;
+    // Quick filters, e.g. the unanswered TikTok questions: things viewers asked that nobody replied to.
+    $$("[data-quick]").forEach((button) => button.onclick = () => { const item = quick[button.dataset.quick]; changed(item.set(!item.on(rev.filters), rev.filters)); });
     $("#rev-new").onclick = () => { changed({ since: rev.filters.since ? "" : rev.summary.new_since }); paintNotes(); };
+    const drawer = $("#rev-drawer");
+    $("#rev-filter-open").onclick = () => drawer.showModal();
+    drawer.addEventListener("click", (event) => { if (event.target === drawer || event.target.closest("[data-drawer-close]")) drawer.close(); });
+    $("#rev-coverage-toggle").onclick = (event) => {
+      const box = $("#rev-coverage"), open = box.hidden;
+      box.hidden = !open;
+      event.currentTarget.setAttribute("aria-expanded", String(open));
+    };
     $("#rev-basket-toggle").onclick = () => window.MaterialBasket?.open();
     $("#rev-sync").onclick = async () => {
       const hash = pageHash(), button = $("#rev-sync"), box = $("#rev-sync-result");
@@ -518,6 +581,24 @@
     // chips, copy, expand and the rest are delegated to this render's own wrapper, so repeated renders never stack listeners
     $("#rev-page").addEventListener("click", (event) => {
       const target = event.target;
+      const menu = target.closest(".rev-menu");
+      if (menu && target.closest("[role=menuitem]")) menu.open = false;
+      if (target.closest("[data-platform-all]")) { changed({ platform: [] }); return; }
+      const platform = target.closest("[data-chip='platform']");
+      if (platform) { const code = platform.dataset.code; changed({ platform: rev.filters.platform.length === 1 && rev.filters.platform[0] === code ? [] : [code] }); return; }
+      if (target.closest("[data-reset]")) { reset(); return; }
+      const clear = target.closest("[data-clear]");
+      if (clear) {
+        const key = clear.dataset.clear, code = clear.dataset.code;
+        if (listKeys.includes(key)) changed({ [key]: rev.filters[key].filter((c) => c !== code) });
+        else if (flagKeys.includes(key)) changed({ [key]: false });
+        else { changed({ [key]: "" }); if (key === "q") $("#rev-q").value = ""; }
+        const control = { rating: "#rev-rating", role: "#rev-role", language: "#rev-language", replied: "#rev-replied", video: "#rev-video", sku: "#rev-sku" }[key];
+        if (control && $(control)) $(control).value = "";
+        if (flagKeys.includes(key)) $(`#rev-${key}`).checked = false;
+        if (key === "since") paintNotes();
+        return;
+      }
       const chipButton = target.closest("[data-chip]");
       if (chipButton) {
         const kind = chipButton.dataset.chip, code = chipButton.dataset.code, list = rev.filters[kind];
@@ -560,6 +641,10 @@
     });
 
   }
+
+  const closeMenus = (event) => { document.querySelectorAll(".rev-menu[open]").forEach((menu) => { if (event.key === "Escape" || !menu.contains(event.target)) menu.open = false; }); };
+  window.addEventListener("click", closeMenus, true);
+  window.addEventListener("keydown", (event) => { if (event.key === "Escape") closeMenus(event); });
 
   let rendered = false, renderedProduct = null, filterProduct = null, routeSequence = 0;
   window.addEventListener("workbench:basketchange", event => {

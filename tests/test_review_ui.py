@@ -72,6 +72,19 @@ class ReviewPageTests(unittest.TestCase):
     def card(self, page, text):
         return page.locator(".rev-card", has_text=text).first
 
+    # The less common filters live in a drawer, and the less common card actions in a "···" menu.
+    def open_drawer(self, page):
+        page.locator("#rev-filter-open").click()
+        page.locator("#rev-drawer[open]").wait_for()
+
+    def close_drawer(self, page):
+        page.locator("#rev-drawer-done").click()
+        page.locator("#rev-drawer[open]").wait_for(state="detached")
+
+    def card_action(self, card, name):
+        card.locator(".rev-menu summary").click()
+        card.get_by_role("menuitem", name=name).click()
+
     def assert_review_route(self, page, **filters):
         path, _, query = page.evaluate("location.hash").partition("?")
         self.assertEqual(path, "#/202H/reviews")
@@ -90,14 +103,16 @@ class ReviewPageTests(unittest.TestCase):
 
     def test_unanswered_questions_and_conversations(self):
         page = self.open_page()
-        page.get_by_role("button", name="只看没人回复的提问").click()
+        page.get_by_role("button", name="没人回复的提问").click()
         self.count(page, "1 条")
         self.assertEqual(page.locator(".rev-badge-open").inner_text(), "没人回复")
         self.assertEqual(page.locator("[data-thread]").count(), 0)  # nothing to expand under a question nobody answered
         self.assertEqual(page.locator("#rev-replied").input_value(), "no")
 
-        page.get_by_role("button", name="清除所有筛选").click()
+        page.locator("[data-reset]").click()
+        self.open_drawer(page)
         page.select_option("#rev-replied", "yes")
+        self.close_drawer(page)
         self.count(page, "1 条")
         button = page.locator("[data-thread]")
         self.assertEqual(button.inner_text().strip(), "展开对话（1）")
@@ -112,7 +127,9 @@ class ReviewPageTests(unittest.TestCase):
 
     def test_a_reply_can_show_the_comment_it_answers(self):
         page = self.open_page()
-        page.get_by_label("显示品牌/达人账号的回复").check()
+        self.open_drawer(page)
+        page.get_by_label("品牌或达人账号的回复").check()
+        self.close_drawer(page)
         page.fill("#rev-q", "Thanks for watching")
         page.locator("[data-thread]:has-text('看上下文')").click()
         parent = page.locator(".rev-thread:not([hidden]) .rev-reply.is-parent")
@@ -210,12 +227,13 @@ class ReviewPageTests(unittest.TestCase):
 
     def test_untagged_reviews_and_competitor_tags_can_be_listed(self):
         page = self.open_page()
+        self.open_drawer(page)
         competitor = page.locator("[data-chip='competitor'][data-code='lansky']")
         self.assertEqual(competitor.inner_text().split()[-1], "1")
         competitor.click()
         self.count(page, "1 条")
         self.assertIn("Lansky", self.card(page, "I have a Lansky").inner_text())
-        page.get_by_role("button", name="清除所有筛选").click()
+        page.locator("#rev-reset").click()
         self.count(page, "10 条")  # the list is back to everything: the chips below are counted on that
         untagged = page.locator("[data-chip='topic'][data-code='none']")
         shown = int(untagged.inner_text().split()[-1])
@@ -227,7 +245,7 @@ class ReviewPageTests(unittest.TestCase):
         page = self.open_page()
         wobble = self.card(page, "That’s a lot of wobble")
         self.assertIn("晃动、不稳、底座", wobble.locator(".rev-tags").inner_text())
-        wobble.get_by_role("button", name="改标签").click()
+        self.card_action(wobble, "改标签")
         editor = wobble.locator(".rev-tag-editor")
         editor.wait_for()
         editor.locator("[data-kind='topic'][data-code='stability']").click()
@@ -238,7 +256,7 @@ class ReviewPageTests(unittest.TestCase):
         page.reload()  # kept on the server, not just in the page
         page.locator("#rev-records:has-text('手动改过 1 处标签')").wait_for()
         self.assertNotIn("晃动、不稳、底座", self.card(page, "That’s a lot of wobble").locator(".rev-tags").inner_text())
-        self.card(page, "That’s a lot of wobble").get_by_role("button", name="改标签").click()
+        self.card_action(self.card(page, "That’s a lot of wobble"), "改标签")
         self.card(page, "That’s a lot of wobble").locator("[data-kind='topic'][data-code='stability']").click()  # back to what the rules said
         page.locator("#rev-records:empty").wait_for(state="attached")  # an empty note is hidden, so only its presence can be awaited
         self.assertIn("晃动、不稳、底座", self.card(page, "That’s a lot of wobble").locator(".rev-tags").inner_text())
@@ -300,11 +318,13 @@ class ReviewPageTests(unittest.TestCase):
     def test_review_cards_fit_a_phone_screen(self):
         page = self.open_page(width=390)
         self.assertFalse(self.overflows(page))
+        self.open_drawer(page)
         page.select_option("#rev-replied", "yes")
+        self.close_drawer(page)
         page.locator("[data-thread]").first.wait_for()
         self.assertFalse(self.overflows(page))  # the extra conversation button must wrap, not widen the page
-        page.get_by_role("button", name="清除所有筛选").click()
-        self.card(page, "That’s a lot of wobble").get_by_role("button", name="改标签").click()
+        page.locator("[data-reset]").click()
+        self.card_action(self.card(page, "That’s a lot of wobble"), "改标签")
         self.card(page, "That’s a lot of wobble").locator(".rev-tag-editor").wait_for()
         page.locator(f".rev-video-chip[data-video='{performance.LINKED}']").first.click()
         page.locator(".rev-video-bar").wait_for()

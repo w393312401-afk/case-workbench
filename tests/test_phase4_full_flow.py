@@ -37,7 +37,7 @@ class PhaseFourFullFlowTests(unittest.TestCase):
         self.addCleanup(lambda: self.assertEqual(errors, []))
         base = f"http://127.0.0.1:{self.server.server_port}/"
         page.goto(base + "#/202H/directions?tab=points")
-        page.get_by_role("button", name="选为主打", exact=True).click()
+        page.locator("[data-use-point]").first.click()
         wizard = page.locator("#direction-create-dialog")
         wizard.get_by_role("button", name="下一步", exact=True).click()
         wizard.locator('[name="concern"]').fill("新手如何控制角度 → 夹持与导杆")

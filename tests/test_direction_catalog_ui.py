@@ -63,10 +63,10 @@ class DirectionCatalogBrowserTests(unittest.TestCase):
         page.locator('#selling-point-dialog [name="evidence"]').fill("隔离测试出处")
         page.get_by_role("button", name="保存卖点", exact=True).click()
         page.locator("#selling-point-dialog").wait_for(state="hidden")
-        page.locator(".selling-point-table").get_by_text("保留明确使用边界", exact=True).wait_for()
+        page.locator(".dir-list").get_by_text("保留明确使用边界", exact=True).wait_for()
         page.locator('[data-tier-filter="A"]').click()
         page.wait_for_function("()=>document.querySelectorAll('[data-point-id]').length===1")
-        self.assertIn("A8", page.locator(".selling-point-table tbody").inner_text())
+        self.assertIn("A8", page.locator(".dir-list").inner_text())
         page.locator("[data-use-point]").click()
         page.locator("#direction-create-dialog[open]").wait_for()
         self.assertEqual(page.locator("#direction-generated-id").inner_text(), "202H-A8")
@@ -83,7 +83,8 @@ class DirectionCatalogBrowserTests(unittest.TestCase):
         page.get_by_role("button", name="保存方向", exact=True).click()
         page.locator("#direction-definition").wait_for()
         self.assertIn("/202H/directions/202H-A8", page.url)
-        page.locator("#direction-cases").get_by_text("方向已经独立保存", exact=False).wait_for()
+        page.locator("#direction-cases").click()  # related records are tabs; cases is not the first one
+        page.locator("#direction-cases-panel").get_by_text("方向已经独立保存", exact=False).wait_for()
         page.locator("#direction-edit").click()
         page.locator('#direction-edit-dialog [name="concern"]').fill("更新后的默认顾虑")
         page.locator('#direction-edit-dialog [name="status"]').select_option("paused")
@@ -102,7 +103,7 @@ class DirectionCatalogBrowserTests(unittest.TestCase):
         page.locator(".back-link").click()
         card = page.locator('[data-direction-id="202H-A8"]')
         card.wait_for()
-        self.assertEqual(card.locator(".direction-card-counts strong").all_text_contents()[:2], ["0", "1"])
+        self.assertIn("1 条视频", card.locator(".dir-sub").inner_text())
         self.assertEqual(self.store.read_case(self.identifier), before)
 
     def test_existing_direction_keeps_short_main_and_old_execution_while_draft_guard_preserves_input(self):
