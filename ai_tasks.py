@@ -80,6 +80,47 @@ def _text(value, label):
     return value.strip()
 
 
+SPOKEN_HEADING = re.compile(r"口播\s*[（(]\s*配音用\s*[）)]")
+VARIANT_LABEL = re.compile(r"变体\s*#\s*\d+(?:\s*[·・]?\s*[^\n|｜*（(]{1,20})?")
+SPOKEN_WORD = re.compile(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*")
+WORDS_PER_MINUTE = 150
+
+
+def read_estimates(text):
+    """Count the words of each "口播（配音用）" code block; the model is never trusted with this arithmetic."""
+    lines, results, label = text.splitlines(), [], None
+    index = 0
+    while index < len(lines):
+        found = VARIANT_LABEL.search(lines[index])
+        if found:
+            label = found.group(0).strip(" *·・")
+        if SPOKEN_HEADING.search(lines[index]):
+            start = index + 1
+            while start < len(lines) and not lines[start].strip() and start - index <= 3:
+                start += 1
+            if start < len(lines) and lines[start].strip().startswith("```"):
+                end = start + 1
+                while end < len(lines) and not lines[end].strip().startswith("```"):
+                    end += 1
+                words = len(SPOKEN_WORD.findall("\n".join(lines[start + 1:end])))
+                if words:
+                    results.append({"label": label or f"第 {len(results) + 1} 条", "words": words,
+                                    "seconds": round(words * 60 / WORDS_PER_MINUTE)})
+                index = end
+        index += 1
+    return results
+
+
+def _plan_instruction(plan, carousel=False):
+    numbers = "、".join(f"#{item['number']}" for item in plan["variants"])
+    parts = [f"按所选 {len(plan['variants'])} 条已登记变体（{numbers}）各写一条"] if plan["variants"] else []
+    if plan["new_variant_count"]:
+        parts.append(f"另提出 {plan['new_variant_count']} 条建议新增变体")
+    if carousel:
+        parts.append("每条附图文版")
+    return "，".join(parts) + "。"
+
+
 def _source_expression_reference(snapshot):
     """Project original wording and provenance without merging or rewriting it."""
     current = snapshot.get("current") or {}
@@ -483,6 +524,26 @@ class AITaskManager:
                 "每条候选给简明测试方向及上述字段，编号仅为待采纳建议。用户要求同卖点执行变体时保留共同主要差异、顾虑与收口，"
                 "可以共用主体；只调整已说明的执行项，不为凑方向强行换购买主线。"
             )
+            if (task["snapshot"].get("creation_context") or {}).get("writing_plan"):
+                direction_rule += (
+                    "本轮按 creation_context.writing_plan 写稿：其中 variants 是用户发起时勾选的已登记变体，每条变体各写一条候选，"
+                    "按 number 顺序交付，沿用该变体的推进结构 progression、顾虑链 concern、收口 closing 与执行改动 execution_change，"
+                    "不合并、不跳过、不另编；每条稿外第一行写“变体 #number · 推进结构”。"
+                    "顾虑链与方向主打卖点冲突时（例如开场把产品摆到与主打相反的位置，或某一环拆掉了主打理由），"
+                    "以主打卖点为准修正那一环，并在稿外一行说明改了什么。"
+                    "new_variant_count 大于 0 时，另写相应条数的建议新增变体：推进结构不得与 used_progressions 重复，"
+                    "稿外标“建议新增变体”并写出推进结构、顾虑链、收口与执行改动，供用户确认后登记；它们不是已登记变体。"
+                    "方向备注 notes 中的“不能说”与“待核”证据要求按事实护栏处理，证据未补齐时不写对应的强声称。"
+                    "当前用户要求与所选变体冲突时，以用户要求为准并在稿外说明。"
+                )
+            if (task["snapshot"].get("creation_context") or {}).get("carousel"):
+                direction_rule += (
+                    "本轮用户打开了图文版：每条稿之后按写作参考“图文版”附一套 5 张挂车图文，含逐张作用、叠字、正文、中文、素材来源与禁写，"
+                    "以及与工作台图文制作 copy.json 同结构的 JSON 代码块和图文专用发布文案。效果证据图只用实拍，生成模型只做背景；"
+                    "活动话题只用用户本轮给出或资料已登记的当前活动，没有就不加。"
+                )
+            if draft is not None and (task["snapshot"].get("creation_context") or {}).get("writing_plan"):
+                direction_rule += "复核时逐条核对：所选变体是否各有一条候选、编号与推进结构是否对应、开头是否说出主打卖点。"
         if task["action"] == "retrospective":
             direction_rule += (
                 "snapshot.direction_summary 是发起任务时同产品使用中案例的冻结当前汇总，只作为只读对照；不另检索新版案例。"
@@ -506,7 +567,7 @@ class AITaskManager:
                 "不是需要效果证据的事实声称，不因证据不足删除或降级；只有亲历、数值、比较、寿命、经济回报、兼容范围和购买入口等具体声称按事实限制修正。"
                 "用户本轮或历史要求更有能量、更强语气或更像推荐时，复核稿的评价力度、直接推荐和口语推进不得低于初稿。"
                 "最终只给完整复核后候选和用户所需的简短说明，"
-                "不展示初稿或完整审查报告；适用的简明原生度评分按本轮实际加载的技能规范交付，保留用户要求的数量、语言、主题、时长和素材边界。"
+                "不展示初稿、完整审查报告、原生度评分或相对初稿的修改清单；保留用户要求的数量、语言、主题、时长和素材边界。"
                 "不得用默认模板补齐CTA或把屏显自动变成口播，不机械替换原片有效指代和短句。"
                 "本次是模型对内容的复核，不是本土达人认证、母语者审核或市场验证；工作台会在结果旁单独标注，正文无需重复。"
             )
@@ -530,8 +591,8 @@ class AITaskManager:
                 "起稿前辨明原片开头的期待、步骤的不同作用、数字与结果画面的证明任务、结尾行动；不能因局部承诺不成立而删去整个表达作用。"
                 "原片有明确CTA且本次确有相应入口时可保留直接行动，入口未核实时标待核。已核实且服务本条主线的具体数字不应无故丢失。"
                 "没有可用原文时如实说明参照缺口，仍按已知事实和用户要求完成候选，不拿改写补作原文。"
-                "交付正文以候选稿（原语言与对应中文）、技能要求的画面适配和各条的简短差异说明为主体；本轮实际加载评分规范时，按其适用范围附简明原生度评分。核对范围至多写一行（实际看了哪些画面、是否听审），"
-                "不重复认证、验证或“仅为候选”等声明。用户未指定时长、字数或未要求估时就不报告词数和估读时长；需要报告时用只读工具实际计数，不心算。"
+                "交付正文按写作参考“交付”的格式：每条给配音用口播、对应中文、开头画面与屏显、意群表、补拍清单与结尾 CTA，同批末尾共用一份发布前核对，各条只写必要差异；不附原生度评分。核对范围至多写一行（实际看了哪些画面、是否听审），"
+                "不重复认证、验证或“仅为候选”等声明。标题行不写估读时长：工作台会按每条“口播（配音用）”代码块自动计数并显示，所以口播必须整段放在紧跟该小标题的一个代码块里。用户另要求时长或字数时，用只读工具实际计数，不心算。"
             )
             source_reference = _source_expression_reference(task["snapshot"])
             if source_reference["has_original"]:
@@ -697,6 +758,8 @@ class AITaskManager:
                              "direction_id": (context.get("direction") or {}).get("direction_id") or
                                              ((task["snapshot"].get("current") or {}).get("test_direction") or {}).get("direction_id"),
                              "materials": copy.deepcopy(context.get("materials") or []),
+                             "writing_plan": copy.deepcopy(context.get("writing_plan")),
+                             "carousel": bool(context.get("carousel")),
                              "captured_at": task["snapshot"].get("captured_at")}
         result["busy"] = task["status"] in ACTIVE or self._executing == task["task_id"]
         result["stopping"] = task["status"] == "cancelled" and self._executing == task["task_id"]
@@ -720,6 +783,8 @@ class AITaskManager:
                     if public["status"] in ACTIVE or public["status"] == "completed":
                         stage.pop("messages", None)
                         stage.pop("output", None)
+            if task["action"] == "variants" and public["status"] == "completed" and isinstance(public.get("output"), str):
+                public["read_estimates"] = read_estimates(public["output"])
             result["rounds"].append(public)
         return result
 
@@ -729,8 +794,11 @@ class AITaskManager:
                 self._updates.wait(timeout=max(0, min(timeout, 10)))
             return {"version": self._stream_version, "task": self._detail(self._read(task_id))}
 
-    def options(self):
+    def options(self, refresh=False):
         try:
+            reset = getattr(self.bridge, "refresh_models", None)
+            if refresh and callable(reset):
+                reset()
             catalog = self.bridge.models() if hasattr(self.bridge, "models") else {"models": [], "error": "此连接暂不支持模型选择。"}
         except Exception:
             catalog = {"models": [], "error": "模型列表暂时不可用；可以保留本机默认配置。"}
@@ -835,7 +903,12 @@ class AITaskManager:
             action = body.get("action")
             if not isinstance(action, str) or action not in ACTIONS:
                 raise AITaskError("AI 行动只支持生成变体、审稿或复盘。")
-            instruction = _text(body.get("instruction"), "本次要求")
+            plan = (context or {}).get("writing_plan") if isinstance(context, dict) else None
+            if plan and action != "variants":
+                raise AITaskError("按变体写稿只用于生成变体。")
+            raw = body.get("instruction")
+            # Ticked variants already say what to write; the request text is then optional.
+            instruction = _plan_instruction(plan, bool(context.get("carousel"))) if plan and (raw is None or isinstance(raw, str) and not raw.strip()) else _text(raw, "本次要求")
             case = self._case(case_id) if case_id else None
             if case is not None and body.get("revision") != _hash(case):
                 raise AITaskError("案例已变化，请刷新后重新发起 AI 任务。", 409)

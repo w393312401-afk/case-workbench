@@ -209,6 +209,135 @@ class ClaudeBridgeTests(unittest.TestCase):
         return (bridge or self.bridge()).run(prompt, cwd=str(self.runtime), on_progress=self.progress.append,
                                              cancel_event=self.cancel, on_event=self.events.append, **options)
 
+    def catalog_bridge(self):
+        rows = [{"value": alias, "resolvedModel": f"claude-{alias}-5-5", "displayName": alias.title(),
+                 "supportsEffort": True, "supportedEffortLevels": ["low", "high", "not-an-effort"]}
+                for alias in ("opus", "sonnet", "haiku")]
+        rows.insert(0, {**rows[0], "value": "default", "displayName": "Default (recommended)"})
+        rows.append({"value": "claude-fable-5-1[1m]", "resolvedModel": "claude-fable-5-1", "displayName": "Fable"})
+        metadata, calls = {"models": rows}, []
+        bridge = self.bridge()
+
+        def runner(arguments, **options):
+            if "auth" in arguments:
+                return self.auth_runner(arguments, **options)
+            request = json.loads(options["input"])
+            calls.append({"arguments": arguments, "options": options, "request": request})
+            if metadata.get("timeout"):
+                raise subprocess.TimeoutExpired("fake-claude-models", 1, output=SECRET)
+            response = {"type": "control_response", "response": {
+                "request_id": metadata.get("request_id", request["request_id"]),
+                "subtype": metadata.get("subtype", "success"),
+                "response": {"models": metadata["models"], "accessToken": SECRET}, "error": SECRET}}
+            return subprocess.CompletedProcess(arguments, metadata.get("returncode", 0), json.dumps(response), SECRET)
+
+        bridge.command_runner = runner
+        return bridge, metadata, calls
+
+    def test_model_names_come_from_client_resolved_versions_and_keep_picker_values(self):
+        bridge, metadata, calls = self.catalog_bridge()
+        with patch.object(bridge, "_client_defaults", return_value={"model": "sonnet", "effortLevel": "medium"}):
+            models = {model["id"]: model for model in bridge.models()["models"]}
+        self.assertEqual(models["claude-default"]["name"], "Claude 客户端默认（Claude Sonnet 5.5）")
+        self.assertEqual(models["claude-opus"]["name"], "Claude Opus 5.5")
+        self.assertEqual(models["claude-sonnet"]["resolved_model"], "claude-sonnet-5-5")
+        self.assertEqual(models["claude-fable-5-1[1m]"]["name"], "Claude Fable 5.1（1M 上下文）")
+        self.assertEqual(models["claude-opus"]["reasoning_efforts"], ["low", "high"])
+        self.assertNotIn(SECRET, json.dumps(models))
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.launches, [])
+        request = calls[0]["request"]
+        self.assertEqual(request["type"], "control_request")
+        self.assertEqual(request["request"], {"subtype": "initialize", "hooks": None})
+        arguments = calls[0]["arguments"]
+        for flag in ("--safe-mode", "--restricted", "--no-session-persistence", "--no-chrome", "--strict-mcp-config"):
+            self.assertIn(flag, arguments)
+        self.assertEqual(arguments[arguments.index("--tools") + 1], "")
+        self.assertEqual(json.loads(arguments[arguments.index("--mcp-config") + 1]), {"mcpServers": {}})
+        settings = json.loads(arguments[arguments.index("--settings") + 1])
+        self.assertEqual(settings, {"model": "sonnet", "effortLevel": "medium", "disableAllHooks": True})
+        self.assertFalse(Path(calls[0]["options"]["cwd"]).exists())
+        self.assertEqual(self.run_bridge(bridge, model="claude-fable-5-1[1m]"), "🔴Stop guessing the angle#knifetok")
+        argv = self.launches[-1]["arguments"]
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-fable-5-1[1m]")
+
+    def test_model_catalog_cache_changes_with_settings_client_or_expiry(self):
+        bridge, metadata, calls = self.catalog_bridge()
+        defaults = {"model": "sonnet"}
+        with patch.object(bridge, "_client_defaults", side_effect=lambda: dict(defaults)):
+            self.assertIn("Sonnet 5.5", bridge.models()["models"][0]["name"])
+            bridge.models()
+            self.assertEqual(len(calls), 1)
+            defaults["model"] = "claude-opus-5-5"
+            self.assertIn("Opus 5.5", bridge.models()["models"][0]["name"])
+            self.assertEqual(len(calls), 2)
+            metadata["models"][1]["resolvedModel"] = "claude-opus-6-1"
+            bridge._model_cache_until = 0
+            self.assertEqual(bridge.models()["models"][1]["name"], "Claude Opus 6.1")
+            self.assertEqual(len(calls), 3)
+            other = self.runtime / "new-claude.exe"
+            other.write_bytes(b"fake client update")
+            bridge.executable = str(other)
+            bridge.models()
+            self.assertEqual(len(calls), 4)
+            bridge.refresh_models()
+            bridge.models()
+            self.assertEqual(len(calls), 5)
+            bridge.status(refresh=True)
+            bridge.models()
+            self.assertEqual(len(calls), 6)
+
+    def test_client_default_is_not_the_catalog_recommended_model_when_settings_differ(self):
+        for configured, expected in ((None, "Claude Opus 5.5"), ("default", "Claude Opus 5.5"),
+                                     ("haiku", "Claude Haiku 5.5"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+                                     ("unknown-alias", None)):
+            with self.subTest(configured=configured):
+                bridge, _, _ = self.catalog_bridge()
+                with patch.object(bridge, "_client_defaults", return_value={"model": configured} if configured else {}):
+                    default = bridge.models()["models"][0]
+                self.assertTrue(default["available"])
+                self.assertEqual(default["name"], f"Claude 客户端默认（{expected}）" if expected else "Claude 客户端默认")
+
+    def test_unreadable_catalog_never_guesses_a_version_or_blocks_subscription_calls(self):
+        for invalid in ({"timeout": True}, {"returncode": 1}, {"subtype": "error"},
+                        {"request_id": "unrelated"}, {"models": []}, {"models": None}):
+            with self.subTest(invalid=invalid):
+                bridge, metadata, _ = self.catalog_bridge()
+                metadata.update(invalid)
+                result = bridge.models()
+                self.assertTrue(result["available"])
+                self.assertEqual(result["models"][1]["name"], "Claude Opus")
+                self.assertIn("版本暂时无法读取", result["error"])
+                self.assertNotIn(SECRET, json.dumps(result))
+                self.assertTrue(result["models"][0]["available"])
+                self.assertEqual(self.run_bridge(bridge), "🔴Stop guessing the angle#knifetok")
+
+    def test_client_default_prefers_exact_picker_value_and_does_not_add_a_context_modifier(self):
+        bridge, metadata, _ = self.catalog_bridge()
+        with patch.object(bridge, "_client_defaults", return_value={"model": "claude-fable-5-1"}):
+            self.assertEqual(bridge.models()["models"][0]["name"], "Claude 客户端默认（Claude Fable 5.1）")
+            metadata["models"].append({"value": "claude-fable-5-1", "resolvedModel": "claude-fable-5-1",
+                                       "supportedEffortLevels": ["low"]})
+            bridge.refresh_models()
+            default = bridge.models()["models"][0]
+            self.assertEqual(default["name"], "Claude 客户端默认（Claude Fable 5.1）")
+            self.assertEqual(default["reasoning_efforts"], ["low"])
+        with patch.object(bridge, "_client_defaults", return_value={"model": "claude-fable-5-1[1m]"}):
+            self.assertEqual(bridge.models()["models"][0]["name"], "Claude 客户端默认（Claude Fable 5.1（1M 上下文））")
+
+    def test_catalog_filters_unverified_values_and_only_offered_models_are_selectable(self):
+        bridge, metadata, _ = self.catalog_bridge()
+        metadata["models"] = [None, {"value": "opus", "resolvedModel": SECRET},
+                              {"value": SECRET, "resolvedModel": "claude-opus-5-5"},
+                              {"value": "sonnet", "resolvedModel": "claude-sonnet-4-20250514", "supportsEffort": False}]
+        with patch.object(bridge, "_client_defaults", return_value={}):
+            models = {model["id"]: model for model in bridge.models()["models"]}
+        self.assertEqual(models["claude-sonnet"]["name"], "Claude Sonnet 4")
+        self.assertEqual(models["claude-sonnet"]["reasoning_efforts"], [])
+        self.assertFalse(models["claude-opus"]["available"])
+        self.assertTrue(models["claude-default"]["available"])
+        self.assertNotIn(SECRET, json.dumps(models))
+
     def test_subscription_client_is_available_without_api_key_or_sdk(self):
         with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": ""}):
             bridge = self.bridge()

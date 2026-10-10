@@ -25,7 +25,7 @@ function markdownImplementation(name) {
   assert.ok(start >= 0 && end > start, `Load actual ${name} function`);
   return detailSource.slice(start, end);
 }
-const helpers = ['refreshAvailability','settingsFromRound','modelChoices','selectedModel','allowedEfforts','skillAvailable','settingsIssue','settingsMarkup','modelOptionGroups','claudeHint','rememberedSettings','modelLabel','titleLineGroups','stageMetadata','roundCopyText','reviewContextText'];
+const helpers = ['taskModel','taskSummary','rememberTaskState','refreshAvailability','settingsFromRound','modelChoices','selectedModel','allowedEfforts','skillAvailable','settingsIssue','settingsMarkup','modelOptionGroups','claudeHint','rememberedSettings','modelLabel','titleLineGroups','stageMetadata','roundCopyText','reviewContextText'];
 const scope = vm.runInNewContext(`
   ${declaration('skillNames')}
   ${declaration('legacySkillNames')}
@@ -33,6 +33,9 @@ const scope = vm.runInNewContext(`
   ${declaration('statuses')}
   ${declaration('active')}
   ${declaration('statusText')}
+  ${declaration('taskProduct')}
+  const state = {cases:[]};
+  const updateNavCount = () => {};
   const pageURL = hash => hash;
   const localStorage = {value:null,getItem() {return this.value;}};
   const esc = value => String(value ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
@@ -175,6 +178,58 @@ test('current Claude aliases and historical version ids keep readable labels', (
   assert.equal(scope.modelLabel('claude-sonnet'),'Claude Sonnet');
   assert.equal(scope.modelLabel('claude-haiku'),'Claude Haiku');
   assert.equal(scope.modelLabel('claude-opus-5-5'),'Claude Opus 5.5');
+});
+
+test('recorded concrete model labels remain readable without a catalog and keep their original version', () => {
+  scope.ai.options.models = [];
+  assert.equal(scope.modelLabel('gpt-6.1-sol'),'GPT-6.1-Sol');
+  assert.equal(scope.modelLabel('gpt-6-astra'),'GPT-6-Astra');
+  assert.equal(scope.modelLabel('gpt-5.6-terra'),'GPT-5.6-Terra');
+  assert.equal(scope.modelLabel('custom-model-v2'),'custom-model-v2');
+  scope.ai.options.models = [{id:'claude-opus',name:'Claude Opus 5.5'}];
+  assert.equal(scope.modelLabel('claude-opus'),'Claude Opus 5.5');
+  assert.equal(scope.modelLabel('claude-opus-4-7'),'Claude Opus 4.7');
+  assert.equal(scope.modelLabel('claude-fable-5-1[1m]'),'Claude Fable 5.1（1M 上下文）');
+  assert.equal(scope.modelLabel('claude-sonnet-4-5-20250929'),'Claude Sonnet 4.5（2025-09-29）');
+  assert.equal(scope.modelLabel('claude-opus-4-20250514'),'Claude Opus 4（2025-05-14）');
+  assert.equal(scope.modelLabel('claude-3-5-sonnet-20241022'),'Claude Sonnet 3.5（2024-10-22）');
+  assert.equal(scope.modelLabel('claude-opus-latest'),'claude-opus-latest');
+  scope.ai.options.models = [];
+  const html = scope.stageMetadata({status:'completed',stages:{
+    draft:{status:'completed',model:'claude-opus-5-5'},
+    review:{status:'completed',model:'gpt-6.1-sol'},
+  }});
+  assert.match(html,/模型：Claude Opus 5\.5/);
+  assert.match(html,/模型：GPT-6\.1-Sol/);
+  assert.doesNotMatch(html,/claude-opus-5-5|gpt-6\.1-sol/);
+});
+
+test('task summaries retain the latest actual or requested model through detail updates', () => {
+  scope.ai.taskList = {tasks:[]};
+  scope.rememberTaskState({task_id:'test-model',product:'202H',status:'running',rounds:[
+    {model:'gpt-6-sol'}, {model:'claude-sonnet-5-5',requested_model:'claude-default'},
+  ]});
+  assert.equal(scope.ai.taskList.tasks[0].model,'claude-sonnet-5-5');
+  scope.rememberTaskState({task_id:'test-model',product:'202H',status:'running',rounds:[
+    {model:'claude-sonnet-5-5'}, {model:null,requested_model:'claude-opus'},
+  ]});
+  assert.equal(scope.ai.taskList.tasks[0].model,'claude-opus');
+  scope.rememberTaskState({task_id:'test-model',product:'202H',status:'running'});
+  assert.equal(scope.ai.taskList.tasks[0].model,'claude-opus');
+  assert.equal(scope.taskSummary({task_id:'test-summary',product:'202H',model:'gpt-6.1-sol'}).model,'gpt-6.1-sol');
+  scope.ai.taskList = null;
+});
+
+test('model loading is explicit and an unavailable catalog still permits the local default after failure', () => {
+  const settings = {model:null,reasoning_effort:null,skill_selection:'auto'};
+  scope.ai.options = null;
+  const html = scope.settingsMarkup('loading',settings);
+  assert.match(html,/<select id="loading-model" disabled aria-busy="true"><option value="">正在读取模型…<\/option><\/select>/);
+  assert.equal(scope.settingsIssue(settings),'正在读取模型，请稍候。');
+  scope.ai.options = {models:[],skills:[],models_error:'模型列表暂时无法读取'};
+  assert.equal(scope.settingsIssue(settings),'');
+  assert.match(scope.settingsMarkup('failed',settings),/本机默认（运行后确认）/);
+  scope.ai.options = {models:[],skills:[{id:'product-video-script-review',label:'统一技能',available:true}]};
 });
 
 test('checking client login clears unavailable cached models before returning to writing', () => {

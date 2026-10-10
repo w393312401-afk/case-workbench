@@ -9,7 +9,7 @@ const escape = value => String(value ?? '').replaceAll('&','&amp;').replaceAll('
 function harness(selected='202H') {
   let chosen=selected;
   const shell={product:()=>chosen,matchesProduct:value=>!chosen||String(value).replace('SHARPAL ','')===chosen,url:(hash)=>hash};
-  const context=vm.createContext({console,Date,Map,Set,URLSearchParams,crypto:{randomUUID:()=> 'request-1'},esc:escape,icon:()=>'',state:{cases:[]},window:{WorkbenchShell:shell},document:{querySelector:()=>null,querySelectorAll:()=>[]}});
+  const context=vm.createContext({console,Date,Map,Set,URLSearchParams,JSON,CustomEvent:class{constructor(type){this.type=type;}},crypto:{randomUUID:()=> 'request-1'},esc:escape,icon:()=>'',state:{cases:[]},window:{WorkbenchShell:shell,dispatchEvent:()=>true},document:{querySelector:()=>null,querySelectorAll:()=>[]}});
   return {context,setProduct:value=>chosen=value};
 }
 test('home calendar week handles Sunday and crossing year without using export dates',()=>{
@@ -47,4 +47,17 @@ test('material basket scopes server items and exports sources plus unverified bo
   const markdown=context.window.MaterialBasket.markdown();
   assert.ok(markdown.includes('review-1'));assert.ok(markdown.includes('未经核实'));assert.ok(markdown.includes('use actual footage'));assert.ok(!markdown.includes('Another product'));
   setProduct('129N');assert.equal(context.window.MaterialBasket.selection()[0].source_id,'case-2');
+});
+test('material basket tells source pages what is already in it and remembers unticked items',async()=>{
+  const {context}=harness();
+  context.localStorage={getItem:()=>JSON.stringify(['h:2','gone']),setItem:(key,value)=>{context.saved=value;}};
+  context.api=async()=>({revision:'r1',items:[{id:'e:1',type:'expression',product:'202H',source_id:'case-1',text:'Keep it right there.'},{id:'h:1',type:'hook',product:'202H',source_id:'v1',text:'A'},{id:'h:2',type:'hook',product:'202H',source_id:'v1',text:'B'}]});
+  vm.runInContext(read('material-basket.js'),context);
+  const basket=context.window.MaterialBasket;
+  await basket.refresh();
+  assert.equal(basket.has({type:'expression',source_id:'case-1',text:'Keep it right there.'}),true);
+  assert.equal(basket.has({type:'expression',source_id:'case-1',text:'Another line'}),false);
+  assert.equal(basket.count({type:'hook',source_id:'v1'}),2);
+  assert.deepEqual(basket.selection().map(item=>item.id),['e:1','h:1']);
+  assert.equal(context.saved,JSON.stringify(['h:2']));
 });

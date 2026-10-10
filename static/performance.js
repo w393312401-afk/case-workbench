@@ -28,7 +28,7 @@
     reviews: ["评论", (v) => v.review_comments || 0, "desc"],
   };
   const perf = {
-    videos: null, summary: null, analytics: null, catalog: null, loading: null, shown: 200,
+    videos: null, summary: null, analytics: null, catalog: null, loading: null, coreLoading: null, analyticsReady: null, catalogReady: null, loadSequence: 0, routeSequence: 0, analyticsLoading: false, catalogLoading: false, shown: 200,
     filters: { q: "", account: "", product: "", status: "", range: "recent", sort: "posted", dir: "desc", tab: "board", period: "all" },
   };
   try {
@@ -42,20 +42,34 @@
   const count = (v) => (v == null ? "—" : Math.round(v).toLocaleString("en-US"));
   const pct = (v) => (v == null ? "—" : v.toFixed(2) + "%");
   const badge = (v) => `<span class="perf-status perf-${v.status}" title="${esc(statusHints[v.status])}">${esc(v.status_label)}</span>`;
-  async function load(force = false) {
+  function load(force = false) {
     if (perf.loading && !force) return perf.loading;
-    perf.loading = Promise.all([api("/api/performance/summary"), api("/api/performance/videos"), api("/api/performance/analytics").catch(() => null), window.CaseDirectionPicker.fetchCatalog().catch(() => null)]).then(([summary, data, analytics, catalog]) => {
+    const sequence = ++perf.loadSequence;
+    perf.analyticsLoading = true;
+    perf.catalogLoading = true;
+    // The table and toolbar need only these two reads; the chart and direction catalog follow independently.
+    const core = Promise.all([api("/api/performance/summary"), api("/api/performance/videos")]).then(([summary, data]) => {
+      if (sequence !== perf.loadSequence) return;
       perf.summary = summary;
       perf.videos = data.videos;
       window.WorkbenchShell?.registerProducts(perf.videos.map(video => video.product));
-      perf.analytics = analytics;
-      perf.catalog = catalog;
     });
-    try {
-      await perf.loading;
-    } finally {
-      perf.loading = null;
-    }
+    const analytics = api("/api/performance/analytics").catch(() => null).then(data => {
+      if (sequence !== perf.loadSequence) return;
+      perf.analytics = data;
+      perf.analyticsLoading = false;
+    });
+    const catalog = window.CaseDirectionPicker.fetchCatalog().catch(() => null).then(data => {
+      if (sequence !== perf.loadSequence) return;
+      perf.catalog = data;
+      perf.catalogLoading = false;
+    });
+    perf.coreLoading = core;
+    perf.analyticsReady = analytics;
+    perf.catalogReady = catalog;
+    const loading = Promise.all([core,analytics,catalog]).finally(() => { if (perf.loading === loading) perf.loading = null; });
+    perf.loading = loading;
+    return loading;
   }
 
   // ignoreStatus: the status chart shows every status within the other filters, so choosing one keeps the rest visible.
@@ -131,20 +145,21 @@
         ${board ? "" : `<select id="perf-status" aria-label="跟进状态"><option value="">全部状态</option>${statusOrder.map((k) => `<option value="${k}" ${k === f.status ? "selected" : ""}>${esc(statusNames[k])}</option>`).join("")}</select>`}
         <button type="button" class="subtle perf-reset" id="perf-reset" hidden>清除筛选</button>
         ${board ? "" : `<span class="result-count">${rows.length} 条</span>`}</div>
-      ${board ? `<div id="perf-board" class="perf-board" role="tabpanel" aria-labelledby="perf-tab-board">${PerfDashboard.markup(boardContext())}</div>`
+      ${board ? `<div id="perf-board" class="perf-board" role="tabpanel" aria-labelledby="perf-tab-board">${boardMarkup()}</div>`
         : `<div id="perf-status-slot">${statusMarkup(filtered(true))}</div><div id="perf-results" role="tabpanel" aria-labelledby="perf-tab-list">${tableMarkup(rows)}</div>`}`;
     bind();
     syncToolbar();
   }
 
   const boardContext = () => ({ filters: { ...perf.filters, product: currentProduct() }, summary: perf.summary, analytics: perf.analytics, videos: perf.videos });
+  const boardMarkup = () => perf.analyticsLoading ? '<p class="context-note" role="status">正在读取看板数据…</p>' : PerfDashboard.markup(boardContext());
 
   // The dashboard redraws as a whole; the list only redraws its table.
   function refresh() {
     if (perf.filters.tab === "board") {
       const board = $("#perf-board");
-      board.innerHTML = PerfDashboard.markup(boardContext());
-      PerfDashboard.bind(board);
+      board.innerHTML = boardMarkup();
+      if (!perf.analyticsLoading) PerfDashboard.bind(board);
       bindBoardLinks();
       syncToolbar();
     } else rerenderResults();
@@ -192,6 +207,15 @@
     bindResults();
   }
 
+  // Hooks already in the basket are counted on the button; a click still adds another one.
+  function syncHooks() {
+    $$("[data-video-hook]").forEach(button => {
+      const count = window.MaterialBasket?.count({ type: "hook", source_id: button.dataset.videoHook }) || 0;
+      button.textContent = count ? `摘录钩子 · 已有 ${count}` : "摘录钩子";
+    });
+  }
+  window.addEventListener("workbench:basketitems", syncHooks);
+
   function bindResults() {
     if ($("#perf-results")) window.CaseDirectionPicker.bindVideos($("#perf-results"), perf.videos, () => perf.catalog, catalog => {perf.catalog = catalog;});
     $$("[data-collect]").forEach((button) => (button.onclick = () => collect(button.dataset.collect)));
@@ -199,6 +223,7 @@
       const video = perf.videos.find(item => item.video_id === button.dataset.videoHook);
       if (video) window.MaterialBasket?.openHook(video);
     });
+    syncHooks();
     $$("[data-sort]").forEach((button) => (button.onclick = () => {
       const key = button.dataset.sort, f = perf.filters;
       // Same column flips direction; a new column starts from its natural direction (numbers high-to-low, status strongest first).
@@ -246,7 +271,7 @@
     };
     $("#perf-copy").onclick = () => copyText(reviewMaterial(), "复盘材料已复制");
     if (perf.filters.tab === "board") {
-      PerfDashboard.bind($("#perf-board"));
+      if (!perf.analyticsLoading) PerfDashboard.bind($("#perf-board"));
       bindBoardLinks();
     } else bindResults();
   }
@@ -342,7 +367,8 @@
   }
 
   async function route() {
-    const hash = pageHash();
+    const hash = pageHash(), sequence = ++perf.routeSequence;
+    const isCurrent = () => sequence === perf.routeSequence && pageHash() === hash && hash.startsWith("#videos");
     perf.filters.product = currentProduct();
     const videoId = new URLSearchParams(hash.split("?")[1] || "").get("video");
     if (videoId) {
@@ -350,12 +376,23 @@
       perf.shown = 200;
     }
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 视频数据";
-    if (!perf.videos) $("#content").innerHTML = skeletonMarkup(3);
+    if (!perf.videos || (!$("#perf-board") && !$("#perf-results"))) $("#content").innerHTML = skeletonMarkup(3);
     try {
-      await load(true);
-      if (pageHash() === hash && hash.startsWith("#videos")) render();
+      const loading = load();
+      let needsAnalytics = false, needsCatalog = false;
+      const firstPaint = perf.coreLoading.then(() => {
+        if (!isCurrent()) return;
+        needsAnalytics = perf.analyticsLoading;
+        needsCatalog = perf.catalogLoading;
+        render();
+      });
+      // Attach both rejection handlers immediately, including when the core read fails first.
+      await Promise.all([loading,
+        Promise.all([firstPaint,perf.analyticsReady]).then(() => {if (needsAnalytics && isCurrent() && perf.filters.tab === "board") refresh();}),
+        Promise.all([firstPaint,perf.catalogReady]).then(() => {if (needsCatalog && isCurrent() && perf.filters.tab !== "board" && !window.CaseDirectionPicker.hasVideoEdits?.()) rerenderResults();}),
+      ]);
     } catch (error) {
-      if (pageHash() !== hash) return;
+      if (!isCurrent()) return;
       $("#content").innerHTML = `<div class="empty">${icon("chart")}<h3>视频数据暂不可用</h3><p>${esc(error.message)}</p></div>`;
     }
   }

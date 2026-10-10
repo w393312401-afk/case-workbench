@@ -59,16 +59,28 @@ window.WorkbenchHome = (() => {
     return `<div class="home-row home-case"><span class="home-row-main"><a href="${esc(url(`#case/${item.case_id}/${missing[0][1]}`))}"><strong>${esc(title)}</strong></a><span class="home-missing"><small>待补</small>${missing.map(([label, tab]) => `<a class="home-chip is-warn" href="${esc(url(`#case/${item.case_id}/${tab}`))}">${esc(label)}</a>`).join("")}</span></span></div>`;
   }
 
+  function weeklyMarkup(summary, analytics, videos, product, pending = false) {
+    const charts = pending ? '<p class="home-empty" role="status">正在读取周图…</p>'
+      : summary && analytics ? window.PerfDashboard?.homeMarkup({ summary, analytics, videos, filters:{ account:"",product,period:"8" } }) || empty("周图模块暂时不可用，请刷新页面。")
+      : empty("周图暂时无法读取。", `<button type="button" class="secondary compact" data-home-retry>${icon("refresh")}重新读取</button>`);
+    const noWeekly = summary && !summary.weeks?.length;
+    return `<div class="home-section-heading"><div><h2 id="home-weekly-title">最近 8 周</h2><p>后台数据截至 ${esc(summary?.coverage?.last || "尚未导入")}；以下为每周视频明细口径，数据缺口保留为空。</p></div>${more("#videos?tab=board", "完整视频看板")}</div>${noWeekly ? empty("尚无可用周数据，请先在视频数据中导入后台报表。", `<a class="secondary compact" href="${esc(url("#videos"))}">${icon("chart")}去导入后台报表</a>`) : charts}`;
+  }
+
+  function bindRetry(root) {
+    root.querySelectorAll("[data-home-retry]").forEach(button => button.onclick = () => void route());
+  }
+
   function render(data, results, product, week) {
     const root = $("#home-page"); if (!root) return;
     const [summary, analytics, videosData, tasksData, creation] = data;
     const failed = results.map((result,index) => result.status === "rejected" ? ["周数据概况","周图","视频列表","写稿任务","待写计划"][index] : null).filter(Boolean);
     const videos = videosData?.videos || [], due = dueVideos(videos,week);
     const pending = state.cases.filter(item => !item.archived && matches(item)).map(item => ({item,missing:missingCase(item)})).filter(row => row.missing.length).sort((a,b) => b.missing.length-a.missing.length);
-    const scopedTasks = (tasksData?.tasks || []).filter(task => matches({ product: task.product || state.cases.find(item => item.case_id === task.case_id)?.product }));
+    const caseProducts = new Map(state.cases.map(item => [item.case_id, item.product]));
+    const scopedTasks = (tasksData?.tasks || []).filter(task => matches({ product: task.product || caseProducts.get(task.case_id) }));
     const activeTasks = scopedTasks.filter(taskActive), recentTasks = scopedTasks.filter(task => !taskActive(task) && task.status === "completed").slice(0,3);
     const plans = (creation?.plans || []).filter(plan => matches(plan) && ["pending","working"].includes(plan.status));
-    const last = summary?.coverage?.last;
 
     const tabs = [
       { key: "due", id: "home-due-title", label: "观察窗到期", count: videosData ? due.length : null, hint: "观察窗为发布当周 + 下一周，按自然周计算。", link: more("#videos?tab=list", "视频明细"),
@@ -85,18 +97,15 @@ window.WorkbenchHome = (() => {
     // Open the tab chosen earlier in this session; otherwise the first one with work waiting.
     const active = tabs.find(tab => tab.key === chosenTab) || tabs.find(tab => tab.count) || tabs[0];
     const kpi = tab => `<button type="button" class="home-kpi${tab.count ? " has-work" : ""}${tab === active ? " is-selected" : ""}" data-home-kpi="${tab.key}"><strong>${tab.count ?? "—"}</strong><span>${esc(tab.label)}</span></button>`;
-    const charts = summary && analytics ? window.PerfDashboard?.homeMarkup({ summary, analytics, videos, filters:{ account:"",product,period:"8" } }) || empty("周图模块暂时不可用，请刷新页面。")
-      : empty("周图暂时无法读取。", `<button type="button" class="secondary compact" data-home-retry>${icon("refresh")}重新读取</button>`);
-    const noWeekly = summary && !summary.weeks?.length;
 
     root.innerHTML = `<div class="page-heading home-heading"><div><span class="eyebrow">THIS WEEK</span><h1>本周</h1><p><span>${week.start} — ${week.end}</span><span class="home-product">${esc(product || "全部产品")}</span></p></div><div class="home-heading-actions"><button type="button" class="subtle" data-material-open>${icon("folder")}素材篮</button><a class="secondary compact" href="${esc(url("#directions"))}">${icon("layers")}查看测试方向</a></div></div>`
       + (failed.length ? `<div class="data-warning">${esc(failed.join("、"))}暂时无法读取。<button type="button" class="subtle" data-home-retry>重新读取</button></div>` : "")
       + `<div class="home-kpis" role="group" aria-label="本周待办数量">${tabs.map(kpi).join("")}</div>`
       + `<section class="section-card home-section home-work" aria-label="本周要处理"><div class="home-tabs" role="tablist">${tabs.map(tab => `<button type="button" role="tab" id="${tab.id}" aria-controls="${tab.id}-panel" aria-selected="${tab === active}" tabindex="${tab === active ? 0 : -1}" data-home-tab="${tab.key}">${esc(tab.label)}<span class="home-tab-count">${tab.count ?? "—"}</span></button>`).join("")}</div>`
       + tabs.map(tab => `<div class="home-panel" role="tabpanel" id="${tab.id}-panel" aria-labelledby="${tab.id}"${tab === active ? "" : " hidden"}><div class="home-panel-head"><div><h2 class="home-panel-title">${esc(tab.label)}<span class="home-tab-count">${tab.count ?? "—"}</span></h2><p>${esc(tab.hint)}</p></div>${tab.link}</div>${tab.body}</div>`).join("") + `</section>`
-      + `<section class="section-card home-section" aria-labelledby="home-weekly-title"><div class="home-section-heading"><div><h2 id="home-weekly-title">最近 8 周</h2><p>后台数据截至 ${esc(last || "尚未导入")}；以下为每周视频明细口径，数据缺口保留为空。</p></div>${more("#videos?tab=board", "完整视频看板")}</div>${noWeekly ? empty("尚无可用周数据，请先在视频数据中导入后台报表。", `<a class="secondary compact" href="${esc(url("#videos"))}">${icon("chart")}去导入后台报表</a>`) : charts}</section>`;
+      + `<section id="home-weekly-section" class="section-card home-section" aria-labelledby="home-weekly-title">${weeklyMarkup(summary,analytics,videos,product,results[1]?.status === "pending")}</section>`;
 
-    window.PerfDashboard?.bind(root);
+    if (results[1]?.status !== "pending") window.PerfDashboard?.bind(root.querySelector("#home-weekly-section"));
     const select = (key, focus = false) => {
       chosenTab = key;
       root.querySelectorAll("[data-home-tab]").forEach(tab => { const on = tab.dataset.homeTab === key; tab.setAttribute("aria-selected", on); tab.tabIndex = on ? 0 : -1; if (on && focus) tab.focus(); });
@@ -143,7 +152,7 @@ window.WorkbenchHome = (() => {
       const close = event => { if (!menu.contains(event.target) || event.key === "Escape") { menu.open = false; document.removeEventListener("click", close, true); document.removeEventListener("keydown", close, true); } };
       document.addEventListener("click", close, true); document.addEventListener("keydown", close, true);
     }));
-    root.querySelectorAll("[data-home-retry]").forEach(button => button.addEventListener("click", () => void route()));
+    bindRetry(root);
   }
 
   // The change is already saved; undo saves the plan's earlier status back.
@@ -169,9 +178,22 @@ window.WorkbenchHome = (() => {
     const seq = ++sequence, product = selectedProduct(), week = currentWeek();
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 本周";
     if (!$("#home-page")) $("#content").innerHTML = '<div id="home-page"><div class="page-heading"><div><span class="eyebrow">THIS WEEK</span><h1>本周</h1><p role="status">正在汇总本周工作…</p></div></div></div>';
-    const results = await Promise.allSettled([api("/api/performance/summary"),api("/api/performance/analytics"),api("/api/performance/videos"),api("/api/ai/tasks"),api(`/api/creation?product=${encodeURIComponent(product)}`)]);
-    if (seq !== sequence || selectedProduct() !== product || window.WorkbenchShell?.parse().page !== "home") return;
+    const isCurrent = () => seq === sequence && selectedProduct() === product && window.WorkbenchShell?.parse().page === "home";
+    const results = Array.from({length:5}, () => ({status:"pending"}));
+    const read = (index,path) => api(path).then(value => { results[index] = {status:"fulfilled",value}; }, reason => { results[index] = {status:"rejected",reason}; });
+    const charts = read(1,"/api/performance/analytics");
+    await Promise.all([read(0,"/api/performance/summary"),read(2,"/api/performance/videos"),read(3,"/api/ai/tasks"),read(4,`/api/creation?product=${encodeURIComponent(product)}`)]);
+    if (!isCurrent()) return;
     render(results.map(result => result.status === "fulfilled" ? result.value : null),results,product,week);
+    if (results[1].status !== "pending") return;
+    await charts;
+    if (!isCurrent()) return;
+    // Only replace the charts: late analytics must not reset the selected tab or plan buttons.
+    const section = $("#home-weekly-section");
+    if (!section) return;
+    section.innerHTML = weeklyMarkup(results[0].value,results[1].value,results[2].value?.videos || [],product);
+    window.PerfDashboard?.bind(section);
+    bindRetry(section);
   }
   return { route, currentWeek, dueVideos, missingCase };
 })();

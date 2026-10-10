@@ -1,4 +1,5 @@
 """Phase four home/basket checks with isolated libraries and browser profiles."""
+import copy
 import json
 import unittest
 from uuid import uuid4
@@ -122,7 +123,7 @@ class HomeMaterialUITests(unittest.TestCase):
         page.evaluate('() => MaterialBasket.refresh()')
         held=[]
         def delay(route):
-            if route.request.method=='POST':
+            if route.request.method=='POST' and not held:
                 held.append(route)
             else:
                 route.continue_()
@@ -130,21 +131,53 @@ class HomeMaterialUITests(unittest.TestCase):
         field.fill('先保存这句')
         basket.locator('[data-material-save]').click()
         self.assertEqual(len(held),1)
+        self.assertEqual(held[0].request.post_data_json['item']['note'],'先保存这句')
         field.fill('先保存这句，继续输入还没保存')
-        # Move focus away so the completed request also exercises rerendering.
-        basket.locator('#material-basket-title').click()
         held[0].continue_()
         page.locator('#toast:has-text("备注已保存")').wait_for()
+        # The finished request saved only its own text; typing that followed is still a draft.
         self.assertEqual(field.input_value(),'先保存这句，继续输入还没保存')
         self.assertTrue(page.evaluate('MaterialBasket.hasUnsavedInput()'))
         self.assertEqual(self.request('GET','/api/materials')[2]['items'][0]['note'],'先保存这句')
-        basket.locator('[data-material-close]').click()
-        page.locator('#rev-basket-toggle').click()
-        self.assertEqual(field.input_value(),'先保存这句，继续输入还没保存')
-        page.unroute('**/api/materials',delay)
-        basket.locator('[data-material-save]').click()
+        # Leaving the field saves the rest on top of that save, without conflicting with it.
+        basket.locator('#material-basket-title').click()
         page.wait_for_function('() => !MaterialBasket.hasUnsavedInput()')
         self.assertEqual(self.request('GET','/api/materials')[2]['items'][0]['note'],'先保存这句，继续输入还没保存')
+        self.assertTrue(basket.locator('#material-basket-error').is_hidden())
+
+    def test_note_autosaves_on_blur_and_removal_or_clearing_can_be_undone(self):
+        page=self.open_page()
+        self.card(page,'That’s a lot of wobble').get_by_role('button',name='摘录').click()
+        self.card(page,'That’s a lot of wobble').get_by_role('button',name='已摘录').wait_for()
+        page.locator('#rev-basket-toggle').click()
+        basket=page.locator('#material-basket-dialog')
+        field=basket.locator('[data-material-note]')
+        field.fill('离开输入框就保存')
+        self.assertTrue(basket.locator('[data-material-unsaved]').is_visible())
+        self.assertIn('1 条备注未保存',basket.locator('#material-selection-count').inner_text())
+        basket.locator('#material-basket-title').click()
+        page.wait_for_function('() => !MaterialBasket.hasUnsavedInput()')
+        basket.locator('[data-material-unsaved]').wait_for(state='hidden')
+        self.assertEqual(self.request('GET','/api/materials')[2]['items'][0]['note'],'离开输入框就保存')
+        # Typing the saved text back is not an unsaved change.
+        field.fill('离开输入框就保存，再改一下')
+        field.fill('离开输入框就保存')
+        self.assertFalse(page.evaluate('MaterialBasket.hasUnsavedInput()'))
+        basket.locator('[data-material-remove]').click()
+        basket.get_by_role('heading',name='还没有素材').wait_for()
+        basket.get_by_role('button',name='撤销').click()
+        page.locator('#toast:has-text("已恢复 1 条素材")').wait_for()
+        self.assertEqual(field.input_value(),'离开输入框就保存')
+        clear=basket.locator('[data-material-clear]')
+        clear.click()
+        clear.click()
+        basket.get_by_role('heading',name='还没有素材').wait_for()
+        self.assertIn('已清空当前产品的 1 条素材',basket.locator('.material-undo').inner_text())
+        self.assertEqual(self.request('GET','/api/materials')[2]['items'],[])
+        basket.get_by_role('button',name='撤销').click()
+        basket.get_by_text('That’s a lot of wobble',exact=True).wait_for()
+        restored=self.request('GET','/api/materials')[2]['items']
+        self.assertEqual([item['note'] for item in restored],['离开输入框就保存'])
 
     def test_comment_theme_attaches_to_real_selling_point_and_direction(self):
         catalog=self.request('GET','/api/direction-catalog')[2]
@@ -186,6 +219,7 @@ class HomeMaterialUITests(unittest.TestCase):
         hooks=[item for item in items if item['type']=='hook']
         self.assertEqual(len(hooks),1)
         self.assertEqual(hooks[0]['text'],'原片开头用一个问题展示刀刃')
+        page.wait_for_function("() => document.querySelector('[data-video-hook]').textContent === '摘录钩子 · 已有 1'")
 
     def test_home_plan_writing_passes_explicit_plan_and_stop_has_no_ai_button(self):
         direction=creation_fixture.CreationHTTPTests.direction(self)
@@ -233,6 +267,177 @@ class HomeMaterialUITests(unittest.TestCase):
         self.assertEqual(len(payloads),2)
         self.assertEqual(payloads[0],payloads[1])
         self.assertEqual(len(self.request('GET','/api/materials')[2]['theme_links']),1)
+
+    def test_all_products_view_blocks_clear_and_keeps_mixed_selection_open(self):
+        page=self.open_page(route='#/all/home',ready='#home-page')
+        catalog={'revision':'mixed','items':[
+            {'id':'review:a','type':'review','source_id':'a','product':'202H','text':'Wobble from 202H','note':'','source_label':'tiktok_shop','unverified':True},
+            {'id':'MAT-b','type':'hook','source_id':'v1','product':'129N','text':'Hook from 129N','note':''}],'theme_links':[],'limits':{'note':2000,'hook_text':6000}}
+        page.route('**/api/materials',lambda route: route.fulfill(content_type='application/json',body=json.dumps(catalog)))
+        page.locator('#materials-nav').click()
+        basket=page.locator('#material-basket-dialog')
+        basket.get_by_text('Hook from 129N',exact=True).wait_for()
+        self.assertTrue(basket.locator('[data-material-clear]').is_disabled())
+        self.assertTrue(basket.locator('[data-material-write]').is_disabled())
+        self.assertIn('所选素材来自不同产品',basket.locator('#material-selection-count').inner_text())
+        self.assertEqual(basket.locator('[data-material-note]').first.get_attribute('maxlength'),'2000')
+        basket.locator('[data-material-select="MAT-b"]').uncheck()
+        self.assertFalse(basket.locator('[data-material-write]').is_disabled())
+        self.assertTrue(basket.locator('#material-selection-count').inner_text().startswith('已选 1 条 · 约 '))
+        self.assertNotIn('不同产品',basket.locator('#material-selection-count').inner_text())
+        basket.locator('[data-material-select="MAT-b"]').check()
+        # Even a stale enabled button must not close the basket before the product check.
+        basket.locator('[data-material-write]').evaluate('button => { button.disabled = false; button.click(); }')
+        self.assertTrue(basket.is_visible())
+
+    def test_escape_disarms_clear_and_mobile_footer_reaches_bottom(self):
+        page=self.open_page()
+        self.card(page,'That’s a lot of wobble').get_by_role('button',name='摘录').click()
+        self.card(page,'That’s a lot of wobble').get_by_role('button',name='已摘录').wait_for()
+        page.locator('#rev-basket-toggle').click()
+        basket=page.locator('#material-basket-dialog')
+        clear=basket.locator('[data-material-clear]')
+        clear.click()
+        self.assertEqual(clear.inner_text(),'再点一次，清空当前产品')
+        page.keyboard.press('Escape')
+        basket.wait_for(state='hidden')
+        page.set_viewport_size({'width':390,'height':844})
+        page.locator('#rev-basket-toggle').click()
+        basket.locator('[data-material-note]').wait_for()
+        self.assertEqual(clear.inner_text(),'清空当前产品')
+        gap=page.evaluate("() => { const d=document.querySelector('#material-basket-dialog'); return d.getBoundingClientRect().bottom - d.querySelector('.material-basket-footer').getBoundingClientRect().bottom; }")
+        self.assertLess(gap,2)
+        self.assertEqual(len(self.request('GET','/api/materials')[2]['items']),1)
+
+    def test_filters_and_select_all_act_on_shown_items_and_unticked_items_survive_reload(self):
+        page=self.open_page(route='#/202H/home',ready='#home-page')
+        catalog={'revision':'r','items':[
+            {'id':'review:a','type':'review','source_id':'a','product':'202H','text':'Wobble on the clamp','note':'','source_label':'tiktok_shop','unverified':True,'item_revision':'1'},
+            {'id':'review:b','type':'review','source_id':'b','product':'202H','text':'Edge came out mirror sharp','note':'','source_label':'amazon','unverified':True,'item_revision':'2'},
+            {'id':'MAT-c','type':'hook','source_id':'v1','product':'202H','text':'Stop guessing your angle','note':'','item_revision':'3'}],
+            'theme_links':[],'limits':{'note':2000,'hook_text':6000,'prompt_chars':180000}}
+        page.route('**/api/materials',lambda route: route.fulfill(content_type='application/json',body=json.dumps(catalog)))
+        page.locator('#materials-nav').click()
+        basket=page.locator('#material-basket-dialog')
+        basket.get_by_text('Stop guessing your angle',exact=True).wait_for()
+        basket.locator('[data-material-filter="review"]').click()
+        self.assertTrue(basket.get_by_text('Stop guessing your angle',exact=True).is_hidden())
+        basket.locator('[data-material-all="0"]').click()
+        self.assertTrue(basket.locator('#material-selection-count').inner_text().startswith('已选 1 条（1 条不在当前筛选中） · 约 '))
+        basket.locator('[data-material-filter=""]').click()
+        basket.locator('[data-material-search]').fill('mirror')
+        self.assertEqual(basket.locator('.material-item:visible').count(),1)
+        basket.locator('[data-material-search]').fill('nothing matches this')
+        basket.locator('[data-material-nomatch]').wait_for()
+        page.reload()
+        page.locator('#home-page').wait_for()
+        page.locator('#materials-nav').click()
+        basket.get_by_text('Stop guessing your angle',exact=True).wait_for()
+        self.assertEqual([basket.locator(f'[data-material-select="{identifier}"]').is_checked() for identifier in ('review:a','review:b','MAT-c')],[False,False,True])
+        self.assertEqual(basket.locator('[data-material-search]').input_value(),'')
+
+    def test_empty_basket_links_to_the_three_sources_and_closes_on_the_way(self):
+        page=self.open_page(route='#/202H/home',ready='#home-page')
+        page.locator('#materials-nav').click()
+        basket=page.locator('#material-basket-dialog')
+        basket.get_by_role('heading',name='还没有素材').wait_for()
+        self.assertEqual(basket.locator('.material-empty-links a').count(),3)
+        basket.get_by_role('link',name='视频数据 · 摘录钩子').click()
+        basket.wait_for(state='hidden')
+        page.locator('.perf-tabs').wait_for()
+
+    def test_case_expression_button_shows_it_is_already_in_the_basket(self):
+        current=copy.deepcopy(self.store.read_case(self.identifier)['current'])
+        current['native_reference']={'language':'en','market':'US','duration_sec':12,'scene':'现场演示','speaker':'演示者','audience':'磨刀用户',
+            'entries':[{'id':'phrase-1','channel':'speech','original':'Keep it right there.','meaning_zh':'保持在那里。','function':'动作提示','context':'当前演示','analysis':'短句','adaptation':'借用节奏','boundary':'不复制亲历','start_sec':1,'end_sec':3}]}
+        self.store.append(self.identifier,{'kind':'editorial','text':'记录表达','current':current})
+        page=self.open_page(route=f'#case/{self.identifier}/script',ready='[data-native-material]')
+        button=page.locator('[data-native-material]').first
+        self.assertEqual(button.inner_text(),'加入素材篮')
+        button.click()
+        page.locator('#toast:has-text("已加入素材篮")').wait_for()
+        page.wait_for_function("() => document.querySelector('[data-native-material]').textContent === '已在素材篮'")
+        button.click()
+        page.locator('#material-basket-dialog').get_by_text('Keep it right there.',exact=True).wait_for()
+        self.assertEqual(len(self.request('GET','/api/materials')[2]['items']),1)
+
+    def test_theme_links_can_be_removed_from_the_basket_and_the_theme_dialog_with_undo(self):
+        catalog=self.request('GET','/api/direction-catalog')[2]
+        status,_,data=self.request('POST','/api/selling-points',{'revision':catalog['revision'],'request_id':str(uuid4()),'point':{'product':'202H','code':'S1','title':'稳定角度'}})
+        self.assertEqual(status,200,data)
+        page=self.open_page()
+        card=self.card(page,'That’s a lot of wobble')
+        card.get_by_role('button',name='摘录').click()
+        card.get_by_role('button',name='已摘录').wait_for()
+        theme={'revision':self.request('GET','/api/materials')[2]['revision'],'request_id':str(uuid4()),'review_id':card.get_attribute('data-id'),'product':'202H','role':'selling_point','target_id':data['point']['id']}
+        self.assertEqual(self.request('POST','/api/material-themes',theme)[0],200)
+        page.locator('#rev-basket-toggle').click()
+        basket=page.locator('#material-basket-dialog')
+        chip=basket.get_by_role('button',name='删除主题关联：产品卖点 · S1 · 稳定角度')
+        chip.click()
+        basket.locator('.material-undo').get_by_text('已删除主题关联',exact=False).wait_for()
+        self.assertEqual(self.request('GET','/api/materials')[2]['theme_links'],[])
+        basket.get_by_role('button',name='撤销').click()
+        chip.wait_for()
+        self.assertEqual(len(self.request('GET','/api/materials')[2]['theme_links']),1)
+        # Taking the quote out keeps its link, says so, and leaves it manageable from the theme dialog.
+        basket.locator('[data-material-remove]').click()
+        self.assertIn('1 条主题关联仍保留',basket.locator('.material-undo').inner_text())
+        basket.locator('[data-material-close]').click()
+        review.ReviewPageTests.card_action(self,card,'关联主题')
+        dialog=page.locator('#material-theme-dialog')
+        dialog.get_by_role('button',name='删除').click()
+        dialog.get_by_text('已删除「产品卖点 · S1 · 稳定角度」',exact=True).wait_for()
+        self.assertEqual(self.request('GET','/api/materials')[2]['theme_links'],[])
+        dialog.get_by_role('button',name='撤销').click()
+        dialog.get_by_role('button',name='删除').wait_for()
+        self.assertEqual(len(self.request('GET','/api/materials')[2]['theme_links']),1)
+
+    def pick_every_review(self):
+        reviews=self.request('GET','/api/reviews')[2]['reviews']
+        for item in reviews:
+            self.server.app.reviews.set_pick(item['id'],True)
+        return reviews
+
+    def test_saving_or_removing_keeps_scroll_untouched_rows_and_focus(self):
+        self.assertGreaterEqual(len(self.pick_every_review()),4)
+        page=self.open_page()
+        page.set_viewport_size({'width':1080,'height':600})
+        page.locator('#rev-basket-toggle').click()
+        basket=page.locator('#material-basket-dialog')
+        notes=basket.locator('[data-material-note]')
+        notes.first.wait_for()
+        total=notes.count()
+        scroll=page.evaluate("() => { const body=document.querySelector('.material-basket-body'); body.scrollTop=body.scrollHeight; document.querySelectorAll('.material-item').forEach(node => { node.dataset.mark='1'; }); return body.scrollTop; }")
+        self.assertGreater(scroll,0)
+        notes.last.fill('滚动位置不变')
+        basket.locator('#material-basket-title').click()
+        page.wait_for_function('() => !MaterialBasket.hasUnsavedInput()')
+        # Only the saved row is rebuilt; the list keeps its place.
+        self.assertEqual(page.evaluate("() => document.querySelector('.material-basket-body').scrollTop"),scroll)
+        self.assertEqual(page.evaluate("() => document.querySelectorAll('.material-item[data-mark]').length"),total-1)
+        basket.locator('[data-material-remove]').first.focus()
+        page.keyboard.press('Enter')
+        basket.locator('.material-undo').wait_for()
+        page.wait_for_function("() => document.activeElement.matches('[data-material-undo]')")
+        self.assertEqual(basket.locator('[data-material-note]').count(),total-1)
+
+    def test_writing_saves_all_unsaved_notes_in_one_request(self):
+        self.pick_every_review()
+        page=self.open_page()
+        page.locator('#rev-basket-toggle').click()
+        basket=page.locator('#material-basket-dialog')
+        basket.locator('[data-material-note]').first.wait_for()
+        # Drafts typed without leaving a field would each be autosaved on blur; set two directly instead.
+        page.evaluate("() => [...document.querySelectorAll('[data-material-note]')].slice(0, 2).forEach((field, index) => { field.value = '一起保存 ' + index; field.dispatchEvent(new Event('input', {bubbles: true})); })")
+        self.assertIn('2 条备注未保存',basket.locator('#material-selection-count').inner_text())
+        posts=[]
+        page.on('request',lambda request: posts.append(request.url.split('/api/')[-1]) if request.method=='POST' and '/api/materials' in request.url else None)
+        basket.locator('[data-material-write]').click()
+        page.wait_for_function('() => !MaterialBasket.hasUnsavedInput()')
+        self.assertEqual(posts,['materials/notes'])
+        saved=sorted(item['note'] for item in self.request('GET','/api/materials')[2]['items'] if item['note'])
+        self.assertEqual(saved,['一起保存 0','一起保存 1'])
 
 
 if __name__=='__main__':

@@ -197,7 +197,7 @@ class SkillRuntime:
         if action == "retrospective":
             return [ANALYSIS]
         if action == "variants":
-            return [WRITING, AUDIT] if stage == "review" else [WRITING]
+            return [WRITING]
         return [AUDIT]
 
     def catalog(self):
@@ -219,9 +219,9 @@ class SkillRuntime:
         if action == "retrospective":
             return RETROSPECTIVE_REFERENCES
         # The variant review stage revises and delivers, so it keeps the writing
-        # references instead of the diagnostic review guide.
+        # references instead of the diagnostic review guide; scripts carry no score.
         if action == "variants":
-            return WRITING_REFERENCES + (SCORING_REFERENCES if stage == "review" else ())
+            return WRITING_REFERENCES
         return AUDIT_REFERENCES + SCORING_REFERENCES
 
     def _references(self, action, *, stage=None):
@@ -297,13 +297,12 @@ class SkillRuntime:
                     "已有可读取的原片视频且任务依赖原片时，先实际看相关画面；借鉴口播节奏或反应时核对音轨。再辨认口播、屏显文字、画面和原声分别承担什么，并确认本轮目标输出。"
                     "用户只说做变体时保留原片表达载体；只有用户要求口播时才将屏显转为口播。"
                     "遵守指定的共同主题、时长与素材，保留画面留白和指代悬念；不把整个片长乘读速当必须填满的词量。"
-                    "给中英对应稿；画面适配与剪辑交接只在用户要求时另行交付，不随稿附带；不强加营销模板、购物引导、默认时长或固定段数。"
+                    "按写作参考“交付”的格式给每条稿：配音用口播、对应中文、开头画面与屏显、意群表、补拍清单与结尾 CTA；完整逐镜头画面适配与剪辑交接文件只在用户要求时另行交付；不强加营销模板、购物引导、默认时长或固定段数。"
                 )
                 if stage == "review":
                     result["instructions"] += (
-                        "本调用同时加载创作与审稿两项技能：修订稿按创作技能完成，审稿技能只提供评分规范，评分附在成稿后、不夹带诊断清单。"
                         "本调用是变体的独立复核，并直接交付修订后的完整候选：按写作参考“成稿后的独立复核”执行，"
-                        "不是审稿诊断，不输出完整问题清单或审查报告；简明原生度评分按本轮加载的评分规范附在成稿后。只修能指出具体原因的问题；"
+                        "不是审稿诊断，不输出完整问题清单、审查报告、原生度评分或相对初稿的修改清单。只修能指出具体原因的问题；"
                         "主观评价、赞叹、直接推荐、指物和口语推进属于说话姿态，不因缺少效果证据删除或降级，"
                         "只有亲历、数值、比较、寿命、经济回报等具体声称按事实边界修正。"
                         "用户要求更有能量、更强语气或更像推荐时，修订稿的评价力度不得低于初稿。"
@@ -319,7 +318,7 @@ class SkillRuntime:
                     "本次是案例复盘，绑定已给版本及表现窗口，区分文案判断、可见证据、用户反馈与市场数据。"
                     "观察和推测分开，缺数据不可编造；结论留作候选，不把复盘意见自动升级为营销规则。"
                 )
-            if action == "review" or (action == "variants" and stage == "review"):
+            if action == "review":
                 result["instructions"] += (
                     "按已加载的 native-scoring.md 默认做简明原生度文本评估：完整审稿评输入稿，完整优化或变体评本轮最终稿，并注明对象。"
                     "用户明确只要成稿时可省略；局部修改、翻译或复盘不强制评分。"

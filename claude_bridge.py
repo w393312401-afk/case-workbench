@@ -30,6 +30,7 @@ DEFAULT_MODEL = "claude-default"
 DEFAULT_EFFORT = None
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 MODEL_ALIASES = {"claude-default": None, "claude-opus": "opus", "claude-sonnet": "sonnet", "claude-haiku": "haiku"}
+MODEL_ID = re.compile(r"claude-[a-z]+-[0-9][a-z0-9.-]{0,100}(?:\[1m\])?")
 MODELS = [
     {"id": "claude-default", "name": "Claude 客户端默认", "description": "沿用本机调用的模型与思考强度，使用已连接 Claude 账户的订阅额度。"},
     {"id": "claude-opus", "name": "Claude Opus", "description": "使用客户端当前提供的 Opus 模型。"},
@@ -168,6 +169,8 @@ class ClaudeBridge:
         self.frame_extractor = frame_extractor or extract_frames
         self._lock = threading.Lock()
         self._status_cache, self._status_until = None, 0.0
+        self._model_lock = threading.Lock()
+        self._model_cache, self._model_cache_key, self._model_cache_until = None, None, 0.0
         self._login_process = None
         self._login_attempt = None
         self._login_error = None
@@ -186,6 +189,8 @@ class ClaudeBridge:
         return state
 
     def status(self, refresh=False):
+        if refresh:
+            self.refresh_models()
         with self._lock:
             if not refresh and self._status_cache and time.monotonic() < self._status_until:
                 return self._login_state(self._status_cache)
@@ -338,6 +343,7 @@ class ClaudeBridge:
         for reader in attempt["readers"]:
             reader.join(timeout=1)
         self._close_login_pipes(process)
+        self.refresh_models()
 
     def _active_attempt(self, attempt_id):
         attempt = self._login_attempt
@@ -468,12 +474,112 @@ class ClaudeBridge:
         if process is not None:
             self._stop_login_process(process)
 
+    def refresh_models(self):
+        with self._model_lock:
+            self._model_cache_key, self._model_cache_until = None, 0.0
+
     def models(self):
         state = self.status()
-        return {"available": state["available"], "error": None if state["available"] else state.get("error"),
-                "models": [{**model, "provider": "claude", "available": state["available"],
-                            "is_default": model["id"] == DEFAULT_MODEL, "default_reasoning_effort": None,
-                            "reasoning_efforts": list(EFFORTS)} for model in MODELS]}
+        defaults = self._client_defaults()
+        executable = locate_claude(self.executable)
+        key = (executable, state["available"], state.get("auth_method"), state.get("subscription_type"),
+               json.dumps(defaults, sort_keys=True), os.environ.get("CLAUDE_CONFIG_DIR"))
+        with self._model_lock:
+            if self._model_cache is not None and key == self._model_cache_key and time.monotonic() < self._model_cache_until:
+                return copy.deepcopy(self._model_cache)
+            catalog, error = [], None
+            if state["available"] and executable:
+                try:
+                    catalog = self._read_model_catalog(executable, defaults)
+                except (OSError, ValueError, TypeError, subprocess.TimeoutExpired):
+                    error = "Claude 模型版本暂时无法读取，已保留客户端默认与模型系列；可点「重新检查」重试。"
+            models, seen = [], set()
+            configured = defaults.get("model")
+            default_row = next((row for row in catalog if configured and configured == row["value"]), None)
+            if not default_row:
+                default_row = next((row for row in catalog if configured and configured == row["resolved_model"]), None)
+                if default_row and not configured.endswith("[1m]") and not default_row["resolved_model"].endswith("[1m]"):
+                    default_row = {**default_row, "name": default_row["name"].removesuffix("（1M 上下文）")}
+            if not configured or configured == "default":
+                default_row = next((row for row in catalog if row["value"] == "default"), None)
+            for model in MODELS:
+                alias = MODEL_ALIASES[model["id"]]
+                row = default_row if model["id"] == DEFAULT_MODEL else next((row for row in catalog if row["value"] == alias), None)
+                name = model["name"]
+                if row:
+                    name = f"Claude 客户端默认（{row['name']}）" if model["id"] == DEFAULT_MODEL else row["name"]
+                description = model["description"]
+                if row and model["id"] == DEFAULT_MODEL:
+                    description = f"当前默认：{row['name']}。{description}"
+                offered = not catalog or row is not None or model["id"] == DEFAULT_MODEL
+                models.append({**model, "name": name, "description": description, "provider": "claude", "available": state["available"] and offered,
+                               "is_default": model["id"] == DEFAULT_MODEL, "resolved_model": row["resolved_model"] if row else None,
+                               "default_reasoning_effort": None, "reasoning_efforts": row["efforts"] if row else list(EFFORTS)})
+                seen.add(alias)
+            # Keep the client's exact explicit picker value (including context modifiers).
+            for row in catalog:
+                if row["value"] in seen or not MODEL_ID.fullmatch(row["value"]):
+                    continue
+                models.append({"id": row["value"], "name": row["name"], "description": "使用客户端提供的此版本模型与订阅额度。",
+                               "provider": "claude", "available": state["available"], "is_default": False,
+                               "resolved_model": row["resolved_model"], "default_reasoning_effort": None, "reasoning_efforts": row["efforts"]})
+                seen.add(row["value"])
+            result = {"available": state["available"], "error": error if state["available"] else state.get("error"), "models": models}
+            self._model_cache, self._model_cache_key = copy.deepcopy(result), key
+            self._model_cache_until = time.monotonic() + (45 if catalog else 5)
+            return result
+
+    def _read_model_catalog(self, executable, defaults):
+        """Initialize the official control protocol without sending a user/model turn."""
+        request_id = uuid4().hex
+        request = {"type": "control_request", "request_id": request_id, "request": {"subtype": "initialize", "hooks": None}}
+        with tempfile.TemporaryDirectory(prefix="pvr-claude-models-", ignore_cleanup_errors=True) as scratch:
+            args = [executable, "--safe-mode", "--restricted", "--print", "--input-format", "stream-json",
+                    "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--no-chrome",
+                    "--tools", "", "--permission-mode", "dontAsk", "--permission-prompts", "none",
+                    "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                    "--settings", json.dumps({**defaults, "disableAllHooks": True})]
+            result = self.command_runner(args, input=json.dumps(request) + "\n", cwd=scratch,
+                                         capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                         timeout=min(self.startup_timeout, 10), env=client_environment(),
+                                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        if result.returncode != 0 or not isinstance(result.stdout, str) or len(result.stdout) > MAX_LINE_BYTES:
+            raise ValueError()
+        for line in result.stdout.splitlines():
+            event = json.loads(line)
+            if not isinstance(event, dict) or event.get("type") != "control_response":
+                continue
+            response = event.get("response")
+            if not isinstance(response, dict) or response.get("request_id") != request_id:
+                continue
+            data = response.get("response")
+            if response.get("subtype") != "success" or not isinstance(data, dict) or not isinstance(data.get("models"), list):
+                raise ValueError()
+            models, seen = [], set()
+            for row in data["models"][:64]:
+                if not isinstance(row, dict):
+                    continue
+                value, resolved = row.get("value"), row.get("resolvedModel")
+                if not isinstance(value, str) or value in seen or not isinstance(resolved, str) or not MODEL_ID.fullmatch(resolved):
+                    continue
+                if value not in {"default", "opus", "sonnet", "haiku"} and not MODEL_ID.fullmatch(value):
+                    continue
+                match = re.fullmatch(r"claude-([a-z]+)-(\d{1,3})(?:-(\d{1,3}))?(?:-\d{8})?(?:\[1m\])?", resolved)
+                if not match:
+                    continue
+                name = f"Claude {match[1].capitalize()} {match[2]}" + (f".{match[3]}" if match[3] else "")
+                if value.endswith("[1m]") or resolved.endswith("[1m]"):
+                    name += "（1M 上下文）"
+                efforts = row.get("supportedEffortLevels")
+                efforts = [effort for effort in efforts if effort in EFFORTS] if isinstance(efforts, list) else list(EFFORTS)
+                if row.get("supportsEffort") is False:
+                    efforts = []
+                models.append({"value": value, "resolved_model": resolved, "name": name, "efforts": efforts})
+                seen.add(value)
+            if not models:
+                raise ValueError()
+            return models
+        raise ValueError()
 
     @staticmethod
     def _client_defaults():
@@ -519,11 +625,13 @@ class ClaudeBridge:
         return texts
 
     @staticmethod
-    def _system(skill_texts):
-        return "\n\n".join([SYSTEM_RULES, *(f'<skill name="{name}">\n{text}\n</skill>' for name, text in skill_texts)])
+    def _system(skill_texts, rules=SYSTEM_RULES):
+        return "\n\n".join([rules, *(f'<skill name="{name}">\n{text}\n</skill>' for name, text in skill_texts)])
 
     def run(self, prompt, *, cwd, on_progress, cancel_event, model=None, reasoning_effort=None, skills=None,
-            on_event=None, require_image_view=False, video_path=None):
+            on_event=None, require_image_view=False, video_path=None, profile=None):
+        """`profile` runs a tool-using task instead of read-only writing: its own system rules, built-in tools,
+        allowed tools, MCP servers, working directory (the process cwd), extra directories and time limit."""
         if not isinstance(prompt, str) or not prompt.strip():
             raise BridgeError("请填写本次 AI 分析的问题。")
         if cancel_event.is_set():
@@ -534,7 +642,7 @@ class ClaudeBridge:
         model = model or DEFAULT_MODEL
         if model in MODEL_ALIASES:
             cli_model = MODEL_ALIASES[model]
-        elif isinstance(model, str) and re.fullmatch(r"claude-[a-z]+-[0-9][a-z0-9.-]{0,100}", model):
+        elif isinstance(model, str) and MODEL_ID.fullmatch(model):
             cli_model = model  # Historical explicit model selections stay explicit.
         else:
             raise BridgeError("所选 Claude 模型无效，请重新选择。")
@@ -564,7 +672,7 @@ class ClaudeBridge:
                 content.extend([{"type": "text", "text": label}, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}])
         content.append({"type": "text", "text": prompt})
         payload = (json.dumps({"type": "user", "message": {"role": "user", "content": content}}, ensure_ascii=False) + "\n").encode("utf-8")
-        deadline = time.monotonic() + self.timeout
+        deadline = time.monotonic() + ((profile or {}).get("timeout") or self.timeout)
         process, readers, writer = None, [], None
         messages = queue.Queue(maxsize=128)
         closing = threading.Event()
@@ -651,8 +759,8 @@ class ClaudeBridge:
         with tempfile.TemporaryDirectory(prefix="pvr-claude-", ignore_cleanup_errors=True) as scratch:
             root = Path(scratch)
             rules_file = root / "system.txt"
-            rules_file.write_text(self._system(skill_texts), encoding="utf-8")
-            settings = {**effective, "disableAllHooks": True, "permissions": {"allow": ["Read"]}}
+            rules_file.write_text(self._system(skill_texts, *([profile["rules"]] if profile else [])), encoding="utf-8")
+            settings = {**effective, "disableAllHooks": True, "permissions": {"allow": profile["allowed"] if profile else ["Read"]}}
             settings_file = root / "settings.json"
             settings_file.write_text(json.dumps(settings), encoding="utf-8")
             args = [locate_claude(self.executable), "--safe-mode", "--restricted", "--print",
@@ -664,6 +772,18 @@ class ClaudeBridge:
             # Read tool can inspect selected skills and references, without write/exec tools.
             for path in dict.fromkeys([str(directory), *(str(Path(skill["path"]).parent) for skill in skills or [])]):
                 args.extend(["--add-dir", path])
+            if profile:
+                # --safe-mode would also switch off MCP servers. --restricted keeps command tools off and confines
+                # file tools to the process cwd (the task directory) plus the listed directories.
+                args = [locate_claude(self.executable), "--restricted", "--print",
+                        "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+                        "--include-partial-messages", "--no-session-persistence", "--no-chrome",
+                        "--tools", ",".join(profile["tools"]), "--allowedTools", ",".join(profile["allowed"]),
+                        "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config",
+                        "--mcp-config", json.dumps({"mcpServers": profile["mcp"]}),
+                        "--settings", str(settings_file), "--system-prompt-file", str(rules_file)]
+                for path in profile.get("dirs", []):
+                    args.extend(["--add-dir", str(path)])
             if cli_model:
                 args.extend(["--model", cli_model])
             if reasoning_effort:
@@ -671,7 +791,7 @@ class ClaudeBridge:
             try:
                 check()
                 progress("正在连接本机 Claude Code，使用客户端额度。")
-                process = self.process_factory(args, cwd=scratch, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                process = self.process_factory(args, cwd=str(directory) if profile else scratch, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                                stderr=subprocess.PIPE, env=child_env,
                                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
                 session()
@@ -713,6 +833,8 @@ class ClaudeBridge:
                         elif part_type == "content_block_start":
                             active_index = index
                             block_type = (part.get("content_block") or {}).get("type")
+                            if profile and block_type == "tool_use":
+                                progress(f"正在调用 {(part.get('content_block') or {}).get('name', '工具')}。")
                             if block_type in {"text", "thinking"}:
                                 blocks[index] = {"id": f"claude-{message_number}-{index}", "phase": "commentary" if block_type == "thinking" else "final_answer", "text": "", "done": False, "last": 0}
                         elif part_type == "content_block_delta" and index in blocks:
@@ -867,8 +989,16 @@ class ModelRouter:
         claude = self.claude.models()
         models = [{**model, "provider": model.get("provider", "codex")} for model in codex.get("models", [])]
         models += claude["models"]
-        return {"available": bool(models), "models": models, "error": codex.get("error") if not codex.get("models") else None,
+        errors = [codex.get("error") if not codex.get("models") else None,
+                  claude.get("error") if claude.get("available") else None]
+        return {"available": bool(models), "models": models, "error": "；".join(error for error in errors if error) or None,
                 "codex_error": codex.get("error"), "claude_error": claude.get("error")}
+
+    def refresh_models(self):
+        for bridge in (self.codex, self.claude):
+            refresh = getattr(bridge, "refresh_models", None)
+            if callable(refresh):
+                refresh()
 
     def _target(self, model):
         if self.is_claude(model):

@@ -208,6 +208,47 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
         self.assertEqual(saved_plan["status"], "working")
         self.assertTrue(saved_plan["task_id"])
 
+    def test_direction_writing_ticks_recorded_variants_and_request_is_optional(self):
+        directory = self.request("GET", "/api/direction-catalog?product=202H")[2]
+        status, _, point = self.request("POST", "/api/selling-points", {
+            "revision": directory["revision"], "request_id": uuid4().hex,
+            "point": {"product": "202H", "code": "S8", "tier": "S", "title": "临时整套", "evidence": "隔离测试"},
+        })
+        self.assertEqual(status, 200, point)
+        for extra in ({"concern": "基准顾虑", "closing": "基准收口"},
+                      {"progression": "逐件对照", "concern": "逐件顾虑", "closing": "逐件收口", "execution_change": "逐件替换"}):
+            directory = self.request("GET", "/api/direction-catalog?product=202H")[2]
+            status, _, result = self.request("POST", "/api/direction-catalog", {
+                "revision": directory["revision"], "request_id": uuid4().hex,
+                "direction": {"product": "202H", "direction_id": "202H-S8", "selling_point_id": point["point"]["id"], **extra}})
+            self.assertEqual(status, 200, result)
+        direction = result["direction"]
+        page = self.open_page("#/202H/ai")
+        page.evaluate("direction => window.CaseAI.startFromDirection(direction)", direction)
+        boxes = page.locator("[data-variant-index]")
+        boxes.first.wait_for()
+        self.assertEqual(boxes.count(), 2)
+        self.assertTrue(all(boxes.nth(index).is_checked() for index in range(2)))
+        self.assertEqual(page.locator("#ai-create-instruction-label").inner_text(), "补充要求（选填）")
+        page.locator("#ai-create-skills").select_option("none")
+        submit = page.locator("#submit-ai-create")
+        self.assertTrue(submit.is_enabled())
+        boxes.nth(0).uncheck()
+        boxes.nth(1).uncheck()
+        self.assertTrue(submit.is_disabled())
+        self.assertEqual(page.locator("#ai-create-instruction-label").inner_text(), "这次希望怎么做？")
+        page.locator('[data-variant-index="1"]').check()
+        self.assertFalse(page.locator("#ai-carousel").is_checked())
+        page.locator("#ai-carousel").check()
+        self.assertIn("将按 1 条变体各写一稿，每条附图文版", page.locator("#ai-create-hint").inner_text())
+        submit.click()
+        page.locator("#ai-rounds").wait_for()
+        task = self.request("GET", "/api/ai/tasks")[2]["tasks"][0]
+        detail = self.request("GET", "/api/ai/tasks/" + task["task_id"])[2]["task"]
+        self.assertEqual([item["number"] for item in detail["context"]["writing_plan"]["variants"]], [2])
+        self.assertEqual(detail["rounds"][0]["instruction"], "按所选 1 条已登记变体（#2）各写一条，每条附图文版。")
+        self.assertTrue(detail["context"]["carousel"])
+
 
 if __name__ == "__main__":
     unittest.main()

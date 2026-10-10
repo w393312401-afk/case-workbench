@@ -284,7 +284,13 @@ def _build_site(bundle, site, output):
     def save_json(path, value):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    save_json(site / "public-data.json", {"meta": bundle["meta"], "state": bundle["state"], "cases": {}, "split": True})
+    product_rows = [*bundle["state"].get("cases", []), *bundle["performance"].get("videos", []),
+                    *bundle["direction_catalog"].get("selling_points", []), *bundle["direction_catalog"].get("directions", []),
+                    *bundle["creation"].get("scripts", []), *bundle["creation"].get("materials", [])]
+    products = sorted({value for value in [*(row.get("product") for row in product_rows),
+                       *bundle["reviews"].get("summary", {}).get("products", [])]
+                       if isinstance(value, str) and value.strip()})
+    save_json(site / "public-data.json", {"meta": bundle["meta"], "state": bundle["state"], "products": products, "cases": {}, "split": True})
     save_json(site / "data" / "reviews.json", {"reviews": bundle["reviews"]})
     save_json(site / "data" / "performance.json", {"performance": {key: bundle["performance"][key] for key in ("summary", "analytics", "videos")}})
     shards = [{} for _ in range(32)]

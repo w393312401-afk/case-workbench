@@ -100,7 +100,7 @@ class ShellBrowserTests(unittest.TestCase):
                 page.locator("#rev-count").get_by_text("0 条", exact=False).wait_for()
                 self.assertEqual(page.locator(".rev-card").count(), 0)
             if name == "directions":
-                page.get_by_text("当前产品与范围内没有已记录方向", exact=True).wait_for()
+                page.get_by_text("当前产品还没有卖点", exact=True).wait_for()
                 self.assertNotIn("202H-S1", page.locator("#content").inner_text())
         page.reload()
         page.locator("#case-search").wait_for()

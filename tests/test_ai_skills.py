@@ -125,10 +125,12 @@ class SkillRuntimeTests(unittest.TestCase):
         review = self.runtime.prepare("variants", stage="review")
         diagnostic = self.runtime.prepare("review")
         self.assertEqual((draft["stage"], review["stage"]), ("main", "review"))
-        self.assertEqual([item["path"] for item in review["references"] if Path(item["path"]).name != "native-scoring.md"],
-                         [item["path"] for item in draft["references"]])
+        self.assertEqual([item["path"] for item in review["references"]], [item["path"] for item in draft["references"]])
         self.assertEqual([skill["name"] for skill in draft["skills"]], [WRITING])
-        self.assertEqual([skill["name"] for skill in review["skills"]], [WRITING, AUDIT])
+        self.assertEqual([skill["name"] for skill in review["skills"]], [WRITING])
+        self.assertNotIn("native-scoring.md", {Path(item["path"]).name for item in review["references"]})
+        self.assertNotIn("默认做简明原生度文本评估", review["instructions"])
+        self.assertIn("意群表", review["instructions"])
         self.assertNotIn("visual-handoff.md", {Path(item["path"]).name for item in review["references"] + draft["references"]})
         self.assertNotIn("review-guide.md", {Path(item["path"]).name for item in review["references"]})
         self.assertIn("review-guide.md", {Path(item["path"]).name for item in diagnostic["references"]})
@@ -162,7 +164,7 @@ class SkillRuntimeTests(unittest.TestCase):
     def test_scoring_file_is_actually_read_only_for_reviewing_stages(self):
         path = self.base / AUDIT / "references" / "native-scoring.md"
         original_read = ai_skills._read
-        for action, stage, expected in (("variants", None, False), ("variants", "review", True),
+        for action, stage, expected in (("variants", None, False), ("variants", "review", False),
                                         ("review", None, True), ("retrospective", None, False)):
             with self.subTest(action=action, stage=stage), patch.object(ai_skills, "_read", wraps=original_read) as reading:
                 result = self.runtime.prepare(action, stage=stage)
@@ -178,13 +180,13 @@ class SkillRuntimeTests(unittest.TestCase):
 
     def test_scoring_hash_refreshes_for_review_and_preserves_prepared_snapshot(self):
         path = self.base / AUDIT / "references" / "native-scoring.md"
-        prepared = self.runtime.prepare("variants", stage="review")
+        prepared = self.runtime.prepare("review")
         first = next(item for item in prepared["references"] if Path(item["path"]) == path)
         original_text, original_hash = first["text"], first["sha256"]
         replacement = "# Revised fixture\n版本：v1\nA changed explanatory example.\n"
         self.write(path, replacement)
         expected_text = path.read_bytes().decode("utf-8-sig")
-        for action, stage in (("review", None), ("variants", "review")):
+        for action, stage in (("review", None),):
             updated = self.runtime.prepare(action, stage=stage)
             item = next(item for item in updated["references"] if Path(item["path"]) == path)
             self.assertEqual(item["text"], expected_text)
@@ -195,9 +197,9 @@ class SkillRuntimeTests(unittest.TestCase):
 
     def test_missing_scoring_file_does_not_break_drafting_or_retrospective_or_leak_partial_bundle(self):
         (self.base / AUDIT / "references" / "native-scoring.md").unlink()
-        for action in ("variants", "retrospective"):
-            self.assertTrue(self.runtime.prepare(action)["ready"])
-        for action, stage in (("review", None), ("variants", "review")):
+        for action, stage in (("variants", None), ("variants", "review"), ("retrospective", None)):
+            self.assertTrue(self.runtime.prepare(action, stage=stage)["ready"])
+        for action, stage in (("review", None),):
             result = self.runtime.prepare(action, stage=stage)
             self.assertFalse(result["ready"])
             self.assertEqual((result["skills"], result["references"]), ([], []))

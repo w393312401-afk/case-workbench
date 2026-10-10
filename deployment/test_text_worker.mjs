@@ -76,6 +76,16 @@ async function body(path, env = environment()) {
   return result.json();
 }
 
+test('product discovery includes every module without requesting full datasets', async () => {
+  const env = environment({...fixture, products: ['202H', '129N', 'review-only', '202H']});
+  assert.deepEqual((await body('/api/products', env)).products, ['129N', '202H', 'review-only']);
+  assert.equal(env.calls.length, 1);
+  assert.equal(env.calls[0].path, '/public-data.json');
+  const legacy = await body('/api/products', environment());
+  assert.ok(legacy.products.includes('other'));
+  assert.ok(legacy.products.includes('SHARPAL 202H'));
+});
+
 test('only GET and HEAD can access the site', async () => {
   const env = environment();
   for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {

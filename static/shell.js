@@ -41,7 +41,7 @@
     let [page, ...tail] = raw.split("/");
     if (page === "case" && tail[1] === "analysis") tail[1] = "script";
     if (page === "files") page = "settings";
-    if (!["home", "library", "case", "directions", "videos", "reviews", "ai", "scripts", "settings"].includes(page)) { page = "library"; tail = []; }
+    if (!["home", "library", "case", "directions", "videos", "reviews", "ai", "scripts", "production", "settings"].includes(page)) { page = "library"; tail = []; }
     if (page === "case" && (!canonical || chosen) && typeof state !== "undefined") {
       const item = state.cases.find(row => row.case_id === tail[0]);
       if (item?.product) chosen = productOf(item);
@@ -90,14 +90,15 @@
     const picker = document.querySelector("#global-product");
     if (!picker || typeof esc !== "function") return;
     const entries = [...products].sort(([a], [b]) => a.localeCompare(b, "zh-CN"));
-    picker.innerHTML = `<option value="">全部产品</option>${entries.map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join("")}`;
+    const markup = `<option value="">全部产品</option>${entries.map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join("")}`;
+    if (picker.innerHTML !== markup) picker.innerHTML = markup;
     picker.value = current;
   }
   function setProduct(value) {
     const parsed = parse();
     parsed.product = normalizeProduct(value);
     if (parsed.page === "case") { parsed.page = "library"; parsed.tail = []; }
-    if (["ai", "scripts", "directions"].includes(parsed.page)) parsed.tail = [];
+    if (["ai", "scripts", "production", "directions"].includes(parsed.page)) parsed.tail = [];
     if (parsed.page === "library" && typeof navigationItem === "function") {
       const view = navigationItem(parsed.params.get("view") || "reference-all");
       if (view?.filters) {
@@ -149,12 +150,13 @@
     reviews: ["重新同步", "refresh", () => document.querySelector("#rev-sync")?.click()],
     ai: ["开始写稿", "plus", () => window.CaseAI?.startBlank()],
     scripts: ["保存脚本", "plus", () => window.CaseScripts?.openManual()],
+    production: ["刷新", "refresh", () => window.CaseProduction?.route(true, true)],
     settings: ["重新检查", "refresh", () => window.WorkbenchSettings?.render()],
   };
   function update() {
     const parsed = parse();
     document.querySelectorAll("[data-page]").forEach(button => {
-      const active = button.dataset.page === (parsed.page === "case" ? "library" : parsed.page === "scripts" ? "ai" : parsed.page);
+      const active = button.dataset.page === (parsed.page === "case" ? "library" : ["scripts", "production"].includes(parsed.page) ? "ai" : parsed.page);
       button.classList.toggle("active", active);
       if (active) button.setAttribute("aria-current", "page");
       else button.removeAttribute("aria-current");
@@ -175,12 +177,16 @@
     document.querySelectorAll("[data-page]").forEach(button => button.onclick = () => { location.hash = url("#" + button.dataset.page); });
     update();
     // Include products that only have sales rows or user reviews, without opening those pages.
-    Promise.allSettled([api("/api/performance/videos"), api("/api/reviews/summary"), api("/api/direction-catalog"), api("/api/creation")]).then(results => {
+    void api("/api/products").then(data => registerProducts(data.products || [])).catch(async error => {
+      // An already-running service may still use the earlier API until its
+      // current editing task finishes and it can restart safely.
+      if (error.status !== 404) return;
+      const results = await Promise.allSettled([api("/api/performance/videos"), api("/api/reviews/summary"), api("/api/direction-catalog"), api("/api/creation")]);
       const [videos, reviews, catalog, creation] = results;
       if (videos.status === "fulfilled") registerProducts(videos.value.videos || []);
       if (reviews.status === "fulfilled") registerProducts(reviews.value.products || []);
       if (catalog.status === "fulfilled") registerProducts([...(catalog.value.selling_points || []), ...(catalog.value.directions || [])]);
-      if (creation?.status === "fulfilled") registerProducts([...(creation.value.scripts || []), ...(creation.value.materials || [])]);
+      if (creation.status === "fulfilled") registerProducts([...(creation.value.scripts || []), ...(creation.value.materials || [])]);
     });
   }
   window.WorkbenchShell = { normalizeProduct, productOf, matchesProduct, parse, url, legacyHash, canonicalize, registerProducts, setProduct, chooseWritingCase, product: () => current, update, initialize };

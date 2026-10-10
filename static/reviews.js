@@ -61,19 +61,19 @@
   }
 
   // Whatever came from the address or from storage is checked against what the library really has.
-  function sanitize(f) {
-    const s = rev.summary, list = (value, labels, extra = []) => (Array.isArray(value) ? value.filter((c) => labels[c] || extra.includes(c)) : []);
-    f.platform = list(f.platform, s.labels.platform);
-    f.nature = list(f.nature, s.labels.nature, ["none"]);
-    f.topic = list(f.topic, s.labels.topic, ["none"]);
-    f.competitor = list(f.competitor, s.labels.competitor);
-    f.role = s.labels.role[f.role] ? f.role : "";
+  function sanitize(f, s = rev.summary) {
+    const list = (value, labels, extra = []) => (Array.isArray(value) ? value.filter((c) => typeof c === "string" && (!labels || labels[c] || extra.includes(c))) : []);
+    f.platform = list(f.platform, s?.labels.platform);
+    f.nature = list(f.nature, s?.labels.nature, ["none"]);
+    f.topic = list(f.topic, s?.labels.topic, ["none"]);
+    f.competitor = list(f.competitor, s?.labels.competitor);
+    if (s) f.role = s.labels.role[f.role] ? f.role : "";
     f.rating = String(f.rating) in ratings ? String(f.rating) : "";
     f.language = f.language in languages ? f.language : "";
     f.replied = f.replied in repliedOptions ? f.replied : "";
     f.sort = f.sort in sorts ? f.sort : "likes";
     f.video = /^\d{6,25}$/.test(f.video) ? f.video : "";
-    f.sku = s.skus.includes(f.sku) ? f.sku : "";
+    if (s) f.sku = s.skus.includes(f.sku) ? f.sku : "";
     f.since = /^\d{4}-\d{2}-\d{2}$/.test(f.since) ? f.since : "";
     return f;
   }
@@ -522,6 +522,7 @@
   // Any change of the filters: back to the first page of results, remembered, and shown in the address.
   function changed(next) {
     Object.assign(rev.filters, next);
+    if ("replied" in next && $("#rev-replied")) $("#rev-replied").value = rev.filters.replied;
     rev.shown = 50;
     save();
     refresh();
@@ -560,8 +561,7 @@
       box.textContent = "正在同步…";
       try {
         const result = await api("/api/reviews/sync", { method: "POST", body: {} });
-        await loadSummary();
-        await loadResults();
+        await Promise.all([loadSummary(),loadResults()]);
         if (pageHash() !== hash) return;
         render();
         const note = $("#rev-sync-result");
@@ -650,12 +650,13 @@
   window.addEventListener("workbench:basketchange", event => {
     if (event.detail?.source === "global" && pageHash().startsWith("#reviews") && $("#rev-results")) void refreshAll().catch(error => toast(error.message));
   });
-  function routeFilters(product) {
+  function routeFilters(product, summary = rev.summary) {
     const linked = filtersFromHash();
     // Product switches remove SKU/video from the URL. Do not restore these product-specific
     // filters from the previous page, including while its result request is still pending.
     const saved = filterProduct !== null && filterProduct !== product ? { ...rev.filters, sku: "", video: "" } : rev.filters;
-    return sanitize(linked || saved);
+    const source = linked || saved;
+    return sanitize({...source,...Object.fromEntries(listKeys.map(key => [key,Array.isArray(source[key]) ? [...source[key]] : []]))},summary);
   }
   async function route() {
     const hash = pageHash(), product = currentProduct(), sequence = ++routeSequence;
@@ -676,15 +677,26 @@
       } catch (error) {if (isCurrent()) toast(error.message);}
       return;
     }
-    if (!rev.summary) $("#content").innerHTML = skeletonMarkup(3);
+    $("#content").innerHTML = skeletonMarkup(3);
     try {
-      await loadSummary();
-      if (!isCurrent()) return;
       const linked = filtersFromHash();
-      rev.filters = routeFilters(product);
+      // Validate the fixed choices immediately; label/SKU validation follows the fresh summary.
+      // Valid saved filters can fetch the list and its summary at the same time.
+      rev.filters = routeFilters(product,null);
       filterProduct = product;
       if (linked) rev.shown = 50;
-      if (!await loadResults() || !isCurrent()) return;
+      const requested = params().toString();
+      const initialRead = loadResults().then(loaded => ({loaded}),error => ({error}));
+      const [,initial] = await Promise.all([loadSummary(),initialRead]);
+      if (!isCurrent()) return;
+      rev.filters = routeFilters(product);
+      // Unknown catalog filters are discarded as before, with one corrective read only when needed.
+      if (params().toString() !== requested) {
+        if (!await loadResults() || !isCurrent()) return;
+      } else {
+        if (initial.error) throw initial.error;
+        if (!initial.loaded) return;
+      }
       render();
       rendered = true;
       renderedProduct = product;

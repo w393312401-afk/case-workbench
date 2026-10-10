@@ -59,15 +59,22 @@ function nativeDetail(item) {
     return `<article class="native-entry"${attributes}><div class="native-entry-head">${timed ? `<button type="button" class="timestamp-chip" data-native-seek="${entry.start_sec}" data-native-end="${entry.end_sec}" data-native-loop="true" title="跳到此处并循环这一段" aria-label="循环 ${entry.start_sec} 至 ${entry.end_sec} 秒">${entry.start_sec}–${entry.end_sec}s</button>` : '<span class="badge">时间待核实</span>'}<h3>${esc(entry.function)}</h3><span class="badge">${entry.channel === 'speech' ? '口播原句' : '屏显原文'}</span></div><blockquote class="native-original" lang="en">${esc(entry.original)}</blockquote><p class="native-meaning">${esc(entry.meaning_zh)}</p>${timed ? `<div class="native-play-actions"><button type="button" class="subtle" data-native-seek="${entry.start_sec}" data-native-end="${entry.end_sec}" data-native-loop="false">▶ 播放此段</button><button type="button" class="subtle" data-native-seek="${entry.start_sec}" data-native-end="${entry.end_sec}" data-native-loop="true" aria-pressed="false">↻ 循环此段</button></div>` : ''}<div class="native-row-actions"><button type="button" class="subtle" data-native-material="${esc(item.case_id+':'+entry.id)}">加入素材篮</button></div><div class="native-note-grid">${note('表达分析', entry.analysis, '', true)}${note('场景与前后承接', entry.context)}${note('复用示例', entry.adaptation, 'native-adaptation')}${note('⚠ 适用边界', entry.boundary, 'native-boundary')}</div></article>`;
   }).join('')}</div>${supplemental.length ? `<details class="native-supplemental"><summary>补充借鉴要点 <span>${supplemental.length}</span></summary><ul class="bullet-list">${supplemental.map(text => `<li>${esc(text)}</li>`).join('')}</ul></details>` : ''}</section>`;
 }
+let syncNativeMaterials = null;
 function bindNativeMaterials(rows) {
   const byKey = new Map(rows.map(row => [row.item.case_id+':'+row.entry.id,row]));
+  const inBasket = row => Boolean(row && window.MaterialBasket?.has({type:'expression',source_id:row.item.case_id,text:row.entry.original}));
+  if (!syncNativeMaterials) window.addEventListener('workbench:basketitems', () => syncNativeMaterials());
+  syncNativeMaterials = () => $$('[data-native-material]').forEach(button => { button.textContent = inBasket(byKey.get(button.dataset.nativeMaterial)) ? '已在素材篮' : '加入素材篮'; });
   $$('[data-native-material]').forEach(button => button.onclick = async () => {
     const row = byKey.get(button.dataset.nativeMaterial);
     if (!row || !window.MaterialBasket) return;
+    // Already added: open the basket, where it can be edited or removed with undo.
+    if (inBasket(row)) { void window.MaterialBasket.open(); return; }
     button.disabled = true;
     try { await window.MaterialBasket.add({type:'expression',source_id:row.item.case_id,product:row.item.product,text:row.entry.original,source_label:shortTitle(row.item),note:[row.entry.context,row.entry.boundary].filter(Boolean).join('\n')}); }
     finally { button.disabled = false; }
   });
+  syncNativeMaterials();
 }
 function bindNativeDetail() {
   if (state.detail) bindNativeMaterials((state.detail.current?.native_reference?.entries || []).map(entry => ({item:state.detail,entry})));

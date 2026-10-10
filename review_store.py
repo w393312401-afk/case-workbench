@@ -45,6 +45,8 @@ DB_VERSION = 2
 NEW_DAYS = 14
 # How many quotes the basket for a script can hold.
 MAX_PICKS = 500
+# The longest note a picked quote can carry; the material basket uses the same limit for every note.
+NOTE_LIMIT = 2000
 PLATFORMS = tuple(PLATFORM_LABELS)
 SORTS = {
     "likes": "r.likes IS NULL, r.likes DESC, r.posted_on DESC",
@@ -134,6 +136,8 @@ class ReviewState:
 
     def __init__(self, path):
         self.path = Path(path)
+        # Counts saves in this process, so readers can cache without trusting file times alone.
+        self.saves = 0
 
     @staticmethod
     def empty():
@@ -167,6 +171,7 @@ class ReviewState:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self.path)
+            self.saves += 1
         finally:
             if os.path.exists(temporary):
                 os.remove(temporary)
@@ -797,8 +802,8 @@ class ReviewStore:
         pick (None once removed) and how many reviews are in the basket."""
         if not isinstance(picked, bool):
             raise ReviewError("摘录状态必须是 true 或 false")
-        if note is not None and (not isinstance(note, str) or len(note) > 2000):
-            raise ReviewError("备注须是 2000 字以内的文字")
+        if note is not None and (not isinstance(note, str) or len(note) > NOTE_LIMIT):
+            raise ReviewError(f"备注须是 {NOTE_LIMIT} 字以内的文字")
         with self.lock:
             connection = self.connect()
             try:
@@ -815,13 +820,51 @@ class ReviewStore:
                     outcome["pick"] = None
                     return
                 if identifier not in picks and len(picks) >= MAX_PICKS:
-                    raise ReviewError(f"摘录夹最多放 {MAX_PICKS} 条")
+                    raise ReviewError(f"素材篮里的评论摘录最多 {MAX_PICKS} 条")
                 current = picks.get(identifier) if isinstance(picks.get(identifier), dict) else {}
                 picks[identifier] = {"note": str(current.get("note") or "") if note is None else note.strip(),
                                      "added": current.get("added") or datetime.now().isoformat(timespec="microseconds")}
                 outcome["pick"] = picks[identifier]
             data = self._edit_state(change)
             return {"pick": outcome["pick"], "picks": len(data["picks"])}
+
+    def replace_picks(self, changes):
+        """Several basket changes in one write: None takes a pick out; a dict puts an earlier pick back exactly (note and
+        time) unless the review is gone or was picked again meanwhile."""
+        with self.lock:
+            wanted = [identifier for identifier, pick in changes.items() if pick is not None]
+            known = set()
+            if wanted:
+                connection = self.connect()
+                try:
+                    for i in range(0, len(wanted), 500):
+                        chunk = wanted[i:i + 500]
+                        known.update(row[0] for row in connection.execute(f"SELECT id FROM reviews WHERE id IN ({','.join('?' * len(chunk))})", chunk))
+                finally:
+                    connection.close()
+
+            def change(data):
+                picks = data["picks"]
+                for identifier, pick in changes.items():
+                    if pick is None:
+                        picks.pop(identifier, None)
+                    elif identifier in known and identifier not in picks:
+                        if len(picks) >= MAX_PICKS:
+                            raise ReviewError(f"素材篮里的评论摘录最多 {MAX_PICKS} 条")
+                        picks[identifier] = {"note": str(pick.get("note") or ""),
+                                             "added": pick.get("added") or datetime.now().isoformat(timespec="microseconds")}
+            self._edit_state(change)
+
+    def set_pick_notes(self, notes):
+        """Set the notes of several picked quotes in one write; quotes no longer picked are left out."""
+        if any(not isinstance(note, str) or len(note) > NOTE_LIMIT for note in notes.values()):
+            raise ReviewError(f"备注须是 {NOTE_LIMIT} 字以内的文字")
+        with self.lock:
+            def change(data):
+                for identifier, note in notes.items():
+                    if isinstance(data["picks"].get(identifier), dict):
+                        data["picks"][identifier]["note"] = note.strip()
+            self._edit_state(change)
 
     def picks(self):
         """The picked reviews as the page shows them (notes included), the most recently picked first."""

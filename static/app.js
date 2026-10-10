@@ -260,7 +260,8 @@ function skeletonMarkup(count = 3) {
   return `<div class="skeleton-page" role="status" aria-label="正在读取页面"><div class="skeleton-heading"></div><div class="skeleton-line"></div><div class="skeleton-grid">${Array.from({ length: count }, () => '<div class="skeleton-card"></div>').join("")}</div></div>`;
 }
 
-async function api(path, options = {}) {
+const pendingApiReads = new Map();
+async function requestApi(path, options = {}) {
   const headers = { ...options.headers };
   if (options.method === "POST") headers["X-Workbench-Token"] = state.token;
   if (
@@ -268,7 +269,7 @@ async function api(path, options = {}) {
     typeof options.body !== "string" &&
     !(options.body instanceof File)
   ) {
-    options.body = JSON.stringify(options.body);
+    options = { ...options, body: JSON.stringify(options.body) };
     headers["Content-Type"] = "application/json";
   }
   const response = await fetch(path, { ...options, headers });
@@ -279,6 +280,25 @@ async function api(path, options = {}) {
     throw error;
   }
   return result;
+}
+async function api(path, options = {}) {
+  // Share only simultaneous plain reads. Signals and custom request options
+  // retain their own lifecycle, and a write starts a fresh generation of reads.
+  if (Object.keys(options).length) {
+    if (!["GET", "HEAD"].includes(options.method || "GET")) pendingApiReads.clear();
+    return requestApi(path, options);
+  }
+  let request = pendingApiReads.get(path);
+  if (!request) {
+    request = requestApi(path);
+    pendingApiReads.set(path, request);
+    void request.finally(() => {
+      if (pendingApiReads.get(path) === request) pendingApiReads.delete(path);
+    }).catch(() => {});
+  }
+  const result = await request;
+  // Page modules decorate and filter their data; each reader owns its copy.
+  return structuredClone(result);
 }
 function toast(message, warning = false) {
   const el = $("#toast");
@@ -729,7 +749,7 @@ function promptCaseUpdate() {
   };
 }
 async function refresh(quiet = false) {
-  if (quiet && (window.CaseDirectionPicker?.hasVideoEdits?.() || window.CaseScripts?.modalOpen?.() || window.MaterialBasket?.modalOpen?.())) return;
+  if (quiet && (window.CaseDirectionPicker?.hasVideoEdits?.() || window.CaseScripts?.modalOpen?.() || window.CaseProduction?.modalOpen?.() || window.MaterialBasket?.modalOpen?.())) return;
   if (
     state.moving ||
     state.dragging ||
@@ -772,7 +792,7 @@ async function refresh(quiet = false) {
       return;
     }
     if (changed || !quiet) {
-      if (state.editor || state.deletion || state.bulk || window.CaseDirections?.modalOpen?.() || window.CaseScripts?.modalOpen?.() || window.CaseAI?.modalOpen?.())
+      if (state.editor || state.deletion || state.bulk || window.CaseDirections?.modalOpen?.() || window.CaseScripts?.modalOpen?.() || window.CaseProduction?.modalOpen?.() || window.CaseAI?.modalOpen?.())
         state.pendingSync = true;
       else if (
         quiet &&
@@ -883,6 +903,7 @@ const routeTable = {
   home: async () => window.WorkbenchHome?.route(),
   ai: async ({ keepScroll }) => window.CaseAI?.route(keepScroll),
   scripts: async ({ keepScroll }) => window.CaseScripts?.route(keepScroll),
+  production: async ({ keepScroll }) => window.CaseProduction?.route(keepScroll),
   videos: async () => window.CasePerformance?.route(),
   directions: async () => window.CaseDirections?.route(),
   reviews: async () => window.CaseReviews?.route(),
@@ -1075,7 +1096,7 @@ document.addEventListener("keydown", (event) => {
         ? "#ai"
         : (window.WorkbenchShell?.legacyHash() || location.hash).startsWith("#directions/")
           ? (window.WorkbenchShell?.url("#directions") || "#directions")
-        : state.routeKind === "scripts"
+        : ["scripts", "production"].includes(state.routeKind)
           ? window.WorkbenchShell.url("#ai")
         : ["home", "settings", "videos", "reviews", "directions"].includes(state.routeKind)
           ? state.libraryHash

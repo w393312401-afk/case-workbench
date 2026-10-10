@@ -109,7 +109,7 @@ class ReviewPageTests(unittest.TestCase):
         self.assertEqual(page.locator("[data-thread]").count(), 0)  # nothing to expand under a question nobody answered
         self.assertEqual(page.locator("#rev-replied").input_value(), "no")
 
-        page.locator("[data-reset]").click()
+        page.locator("#rev-page [data-reset]").click()
         self.open_drawer(page)
         page.select_option("#rev-replied", "yes")
         self.close_drawer(page)
@@ -323,7 +323,7 @@ class ReviewPageTests(unittest.TestCase):
         self.close_drawer(page)
         page.locator("[data-thread]").first.wait_for()
         self.assertFalse(self.overflows(page))  # the extra conversation button must wrap, not widen the page
-        page.locator("[data-reset]").click()
+        page.locator("#rev-page [data-reset]").click()
         self.card_action(self.card(page, "That’s a lot of wobble"), "改标签")
         self.card(page, "That’s a lot of wobble").locator(".rev-tag-editor").wait_for()
         page.locator(f".rev-video-chip[data-video='{performance.LINKED}']").first.click()

@@ -6,7 +6,7 @@ provenance. Script text is immutable: editing it creates a new version.
 from __future__ import annotations
 
 import copy
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import tempfile
 import threading
+import time
 from uuid import uuid4
 
 from direction_store import fingerprint, now, product_key
@@ -28,6 +29,13 @@ class CreationError(ValueError):
 STATUSES = {"draft", "adopted", "filmed", "published", "reviewed", "archived"}
 PLAN_ACTIONS = {"scale", "execution", "stop"}
 PLAN_STATUSES = {"pending", "working", "done", "cancelled"}
+# Case expressions and video hooks the basket holds; reviews have their own limit in review_store.MAX_PICKS.
+MAX_MATERIALS = 1000
+# Receipts and finished journals only answer retries of recent requests.
+RECEIPT_DAYS = 30
+# Every write keeps the previous catalog; the newest ones and one per recent day are enough to recover from.
+BACKUP_KEEP = 50
+BACKUP_DAYS = 30
 
 
 def text(value, label, required=True, limit=12000):
@@ -41,6 +49,8 @@ class CreationStore:
         self.root = Path(runtime) / "creation"
         self.path = self.root / "catalog.json"
         self.lock = lock or threading.RLock()
+        # Counts catalog writes in this process, so readers can cache without trusting file times alone.
+        self.version = 0
 
     @staticmethod
     def empty():
@@ -75,6 +85,8 @@ class CreationStore:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
+            if path == self.path:
+                self.version += 1
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
@@ -89,7 +101,51 @@ class CreationStore:
                     stream.write(raw)
                     stream.flush()
                     os.fsync(stream.fileno())
+                self._prune_backups()
         self._replace(self.path, data)
+
+    def _prune_backups(self):
+        """Keep the newest BACKUP_KEEP backups and, for BACKUP_DAYS days, the newest one of each day."""
+        files = []
+        for path in (self.root / "backups").glob("*.json"):
+            try:
+                files.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        cutoff, days = time.time() - BACKUP_DAYS * 86400, set()
+        for index, (modified, path) in enumerate(sorted(files, reverse=True)):
+            day = date.fromtimestamp(modified)
+            if index < BACKUP_KEEP or modified >= cutoff and day not in days:
+                days.add(day)
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+
+    def prune_operations(self):
+        """Drop finished operation journals older than RECEIPT_DAYS. Unfinished ones stay for recovery, and the small
+        markers left by case deletion stay so a stale retry still cannot write a deleted case back."""
+        cutoff = time.time() - RECEIPT_DAYS * 86400
+        for path in (self.root / "operations").glob("*.json"):
+            try:
+                if path.stat().st_mtime >= cutoff:
+                    continue
+                if json.loads(path.read_text(encoding="utf-8")).get("complete"):
+                    path.unlink()
+            except (OSError, ValueError):
+                continue
+
+    @staticmethod
+    def _prune_requests(data):
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=RECEIPT_DAYS)).isoformat(timespec="microseconds")
+        stamp = now()
+        for key, receipt in list(data["requests"].items()):
+            if not receipt.get("at"):
+                # Receipts from before this field start their month now.
+                receipt["at"] = stamp
+            elif receipt["at"] < cutoff:
+                del data["requests"][key]
 
     def public(self, product=None):
         with self.lock:
@@ -134,12 +190,13 @@ class CreationStore:
                 return copy.deepcopy(prior["result"])
             if body.get("revision") != self.revision(data):
                 raise CreationError(409, "创作资料已更新，请读取最新记录后重新保存。")
-            handlers = {"material": self._material, "theme_link": self._theme_link, "plan": self._plan,
+            handlers = {"material": self._material, "material_batch": self._material_batch, "theme_link": self._theme_link, "plan": self._plan,
                         "script": lambda d, b: self._script(d, b, source), "script_status": self._script_status}
             if kind not in handlers:
                 raise CreationError(400, "不支持这项创作操作。")
             result = handlers[kind](data, body)
-            data["requests"][key] = {"hash": request_hash, "result": copy.deepcopy(result)}
+            data["requests"][key] = {"hash": request_hash, "result": copy.deepcopy(result), "at": now()}
+            self._prune_requests(data)
             self.write(data)
             return result
 
@@ -186,10 +243,46 @@ class CreationStore:
                               (entry["product"], entry["kind"], entry["ref_id"]) == (product, item["kind"], item["ref_id"])), None)
             if duplicate:
                 return {"material": copy.deepcopy(duplicate), "existing": True}
-            if len(data["materials"]) >= 1000:
-                raise CreationError(400, "素材篮最多保留 1000 条其他素材。")
+            if len(data["materials"]) >= MAX_MATERIALS:
+                raise CreationError(400, f"素材篮里的案例表达和视频钩子最多 {MAX_MATERIALS} 条。")
             data["materials"].append(item)
         return {"material": copy.deepcopy(item)}
+
+    @staticmethod
+    def _material_batch(data, body):
+        """Take listed items out, put earlier items back exactly, or set several notes; absent items are skipped."""
+        if "notes" in body:
+            notes = body["notes"]
+            if not isinstance(notes, dict) or any(not isinstance(value, str) for value in notes.values()):
+                raise CreationError(400, "备注格式无效。")
+            changed = []
+            for item in data["materials"]:
+                if item["id"] in notes:
+                    item.update(note=text(notes[item["id"]], "备注", False, 5000), updated_at=now())
+                    changed.append(item["id"])
+            return {"noted": changed}
+        if "remove" in body:
+            ids = body["remove"]
+            if not isinstance(ids, list) or any(not isinstance(value, str) for value in ids):
+                raise CreationError(400, "要移出的素材编号格式无效。")
+            wanted = set(ids)
+            removed = [item["id"] for item in data["materials"] if item["id"] in wanted]
+            data["materials"] = [item for item in data["materials"] if item["id"] not in wanted]
+            return {"removed": removed}
+        items = body.get("restore")
+        if not isinstance(items, list) or any(not isinstance(item, dict) or not isinstance(item.get("id"), str) for item in items):
+            raise CreationError(400, "要恢复的素材格式无效。")
+        present = {item["id"] for item in data["materials"]}
+        sources = {(item["product"], item["kind"], item["ref_id"]) for item in data["materials"] if item.get("ref_id")}
+        restored = []
+        for item in items:
+            if item["id"] in present or item.get("ref_id") and (item.get("product"), item.get("kind"), item["ref_id"]) in sources:
+                continue
+            if len(data["materials"]) >= MAX_MATERIALS:
+                raise CreationError(400, f"素材篮里的案例表达和视频钩子最多 {MAX_MATERIALS} 条。")
+            data["materials"].append(copy.deepcopy(item))
+            restored.append(item["id"])
+        return {"restored": restored}
 
     def _theme_link(self, data, body):
         value = self._value(body, "theme_link")
@@ -212,7 +305,7 @@ class CreationStore:
                 "direction_id": text(value.get("direction_id", ""), "方向编号", False, 200),
                 "concern": text(value.get("concern", ""), "用户顾虑", False, 5000),
                 "note": text(value.get("note", ""), "关联说明", False, 5000), "updated_at": now()}
-        for key in ("review_id", "role", "target_id", "source_quote"):
+        for key in ("review_id", "role", "target_id", "target_label", "source_quote"):
             if key in value:
                 item[key] = text(value[key], key, False, 12000)
         if not item["selling_point_id"] and not item["concern"]:

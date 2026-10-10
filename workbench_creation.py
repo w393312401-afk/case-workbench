@@ -5,10 +5,22 @@ import copy
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 
 from creation_store import CreationError, text
 from direction_store import product_key, fingerprint, now
+from review_store import NOTE_LIMIT
+from ai_tasks import MAX_PROMPT_CHARS
+
+# The basket's input limits live here only; the page reads them from /api/materials.
+# prompt_chars is the whole writing task's context limit, which the page uses to size the selection.
+MATERIAL_LIMITS = {"note": NOTE_LIMIT, "hook_text": 6000, "prompt_chars": MAX_PROMPT_CHARS}
+
+
+def _check_note(value, label="备注"):
+    if value is not None and (not isinstance(value, str) or len(value) > MATERIAL_LIMITS["note"]):
+        raise CreationError(400, f"{label}须是 {MATERIAL_LIMITS['note']} 字以内的文字。")
 
 
 class CreationWorkbenchMixin:
@@ -136,6 +148,10 @@ class CreationWorkbenchMixin:
             if value.get("source_deleted"):
                 raise CreationError(410, "此操作的关联案例已删除，不能再次写回或恢复。")
             return path, value
+        # Finished journals pile up one per save; sweep old ones at most every few hours.
+        if time.monotonic() - getattr(self, "_operations_pruned", float("-inf")) > 6 * 3600:
+            self._operations_pruned = time.monotonic()
+            self.creation.prune_operations()
         return path, {"kind": kind, "hash": digest, "request_id": key, "created_at": now()}
 
     def script_to_case(self, identifier, body):
@@ -221,6 +237,18 @@ class CreationWorkbenchMixin:
             material = (record.get("mapped") or {}).get("material") or {}
             if identifier in {record.get("case_id"), record.get("target_case_id")} or material.get("kind") == "case" and str(material.get("ref_id") or "").startswith(identifier):
                 self.creation._replace(path, {"hash": record["hash"], "request_id": record["request_id"], "source_deleted": True})
+                continue
+            # Undo records of basket removals must not bring back an expression from the deleted case.
+            borrowed = lambda item: (item or {}).get("kind") == "case" and str((item or {}).get("ref_id") or "").startswith(identifier)
+            removed = [entry for entry in record.get("removed", []) if not borrowed(entry.get("material"))]
+            restore = [item for item in (record.get("mapped") or {}).get("restore", []) if not borrowed(item)]
+            if len(removed) != len(record.get("removed", [])) or len(restore) != len((record.get("mapped") or {}).get("restore", [])):
+                if "removed" in record:
+                    record["source_deleted_count"] = record.get("source_deleted_count", 0) + len(record["removed"]) - len(removed)
+                    record["removed"] = removed
+                if "restore" in (record.get("mapped") or {}):
+                    record["mapped"]["restore"] = restore
+                self.creation._replace(path, record)
 
     @staticmethod
     def _review_material(review):
@@ -230,22 +258,65 @@ class CreationWorkbenchMixin:
                 "source_label": review.get("platform") or "评论", "source_url": review.get("url") or review.get("source_url") or "",
                 "added": (review.get("pick") or {}).get("added"), "unverified": True}
 
+    def _material_sources(self):
+        """What the basket is built from. In-process write counts catch writes that file times can miss within one
+        clock tick; the file stamps catch writes from elsewhere."""
+        stamps = [self.creation.version, self.reviews.state.saves]
+        for path in (self.creation.path, self.reviews.state.path, self.reviews.database):
+            try:
+                info = path.stat()
+                stamps.append((info.st_mtime_ns, info.st_size))
+            except OSError:
+                stamps.append(None)
+        return tuple(stamps)
+
     def material_catalog(self, product=None):
         with self.lock:
-            catalog = self.creation.public()
-            picks = self.reviews.picks()
-            items = [self._review_material(review) for review in picks]
-            material_revision = fingerprint([catalog["revision"], items])
-            for item in catalog["materials"]:
-                items.append({**item, "type": item.get("type") or {"case": "expression", "video": "hook"}.get(item["kind"], "expression"),
-                              "source_id": item.get("source_id") or item.get("ref_id", "").split(":", 1)[0],
-                              "source_label": item.get("source_label") or item["title"], "added": item["created_at"]})
+            # Reading the catalog file and the picked reviews is the costly part; a save asks for this two or three times.
+            sources = self._material_sources()
+            cached = getattr(self, "_material_cache", None)
+            if not cached or cached[0] != sources:
+                cached = self._material_cache = (sources, self._build_material_catalog())
+            full = cached[1]
+            items, themes = full["items"], full["theme_links"]
             if product and product != "all":
                 items = [item for item in items if item["product"] == product_key(product)]
-            themes = catalog["theme_links"]
-            if product and product != "all":
                 themes = [item for item in themes if item["product"] == product_key(product)]
-            return {"revision": material_revision, "creation_revision": catalog["revision"], "items": items, "theme_links": themes}
+            # Callers may add keys to what they get back, so the cache hands out copies.
+            return {**full, "items": [dict(item) for item in items], "theme_links": [dict(item) for item in themes], "limits": dict(full["limits"])}
+
+    def _build_material_catalog(self):
+        catalog = self.creation.public()
+        picks = self.reviews.picks()
+        items = [self._review_material(review) for review in picks]
+        # Scripts and plans live in the same catalog but are not basket state, so they stay out of this revision.
+        material_revision = fingerprint([catalog["materials"], catalog["theme_links"], items])
+        for item in catalog["materials"]:
+            items.append({**item, "type": item.get("type") or {"case": "expression", "video": "hook"}.get(item["kind"], "expression"),
+                          "source_id": item.get("source_id") or item.get("ref_id", "").split(":", 1)[0],
+                          "source_label": item.get("source_label") or item["title"], "added": item["created_at"]})
+        for item in items:
+            item["item_revision"] = self._item_revision(item)
+        return {"revision": material_revision, "creation_revision": catalog["revision"], "items": items, "theme_links": catalog["theme_links"],
+                "limits": dict(MATERIAL_LIMITS)}
+
+    @staticmethod
+    def _item_revision(item):
+        return fingerprint([item["id"], item.get("note") or "", item.get("text") or ""])
+
+    def _check_material_base(self, body, value, operation):
+        """A note is compared with the version of that one item the page edited, so changes elsewhere never block it.
+        Adds are matched by source and removals are idempotent, so neither can overwrite newer work."""
+        if operation in {"add", "remove"}:
+            return
+        if "item_revision" not in value:
+            if body.get("revision") != self.material_catalog()["revision"]:
+                raise CreationError(409, "素材篮已更新，请刷新后重新保存；本次没有覆盖其他窗口的修改。")
+            return
+        identifier = value.get("id") or "review:" + str(value.get("source_id") or "")
+        current = next((item for item in self.material_catalog()["items"] if item["id"] == identifier), None)
+        if current and current["item_revision"] != value["item_revision"]:
+            raise CreationError(409, "这条素材的备注已在其他页面修改；本次没有覆盖，请核对后再保存。")
 
     def save_material(self, body):
         with self.lock:
@@ -255,11 +326,14 @@ class CreationWorkbenchMixin:
             operation = body.get("operation", "add")
             if operation not in {"add", "remove", "note"}:
                 raise CreationError(400, "素材操作无效。")
+            _check_note(value.get("note"))
+            if value["type"] == "hook" and operation == "add" and isinstance(value.get("text"), str) and len(value["text"]) > MATERIAL_LIMITS["hook_text"]:
+                raise CreationError(400, f"钩子原句须在 {MATERIAL_LIMITS['hook_text']} 字以内。")
             path, receipt = self._operation("material", body)
             if receipt.get("complete"):
-                return self.material_catalog()
-            if not receipt.get("prepared") and body.get("revision") != self.material_catalog()["revision"]:
-                raise CreationError(409, "素材篮已更新，请刷新后重新保存；本次没有覆盖其他窗口的修改。")
+                return self._material_result(receipt)
+            if not receipt.get("prepared"):
+                self._check_material_base(body, value, operation)
             receipt["prepared"] = True
             if value["type"] == "review":
                 source = str(value.get("source_id") or value.get("id", "").removeprefix("review:"))
@@ -270,6 +344,9 @@ class CreationWorkbenchMixin:
                 if "review_before" not in receipt:
                     receipt["review_before"] = current_pick
                     receipt["review_note"] = value.get("note") if value.get("note") is not None else (current_pick or {}).get("note", "")
+                    if operation == "add" and current_pick is not None:
+                        # Adding an already picked quote keeps its note, like a duplicate expression or hook.
+                        receipt.update(existing=True, review_note=current_pick.get("note", ""))
                 already_applied = (current_pick is None if operation == "remove" else current_pick is not None and current_pick.get("note", "") == receipt["review_note"])
                 if not already_applied and current_pick != receipt["review_before"]:
                     raise CreationError(409, "这条摘录已被其他窗口修改；本次重试没有覆盖新备注，请刷新核对。")
@@ -278,14 +355,19 @@ class CreationWorkbenchMixin:
                     self.reviews.set_pick(source, operation != "remove", receipt["review_note"])
             else:
                 if receipt.get("mapped"):
-                    self.creation.mutate("material", receipt["mapped"])
+                    if self.creation.mutate("material", receipt["mapped"]).get("existing"):
+                        receipt["existing"] = True
                     receipt["complete"] = True
                     receipt.pop("mapped", None)
                     self.creation._replace(path, receipt)
-                    return self.material_catalog()
+                    return self._material_result(receipt)
                 catalog = self.creation.public()
                 old = next((item for item in catalog["materials"] if item["id"] == value.get("id")), None)
-                if operation in {"remove", "note"} and not old:
+                if operation == "remove" and not old:
+                    receipt["complete"] = True
+                    self.creation._replace(path, receipt)
+                    return self._material_result(receipt)
+                if operation == "note" and not old:
                     raise CreationError(404, "该素材已经移出，请刷新素材篮。")
                 if operation in {"remove", "note"}:
                     material = {**old, "note": value.get("note", old["note"])}
@@ -313,16 +395,137 @@ class CreationWorkbenchMixin:
                           "operation": "remove" if operation == "remove" else "save"}
                 receipt["mapped"] = mapped
                 self.creation._replace(path, receipt)
-                self.creation.mutate("material", mapped)
+                if self.creation.mutate("material", mapped).get("existing"):
+                    receipt["existing"] = True
             receipt["complete"] = True
             receipt.pop("mapped", None)
             self.creation._replace(path, receipt)
+            return self._material_result(receipt)
+
+    def _material_result(self, receipt):
+        # A duplicate add leaves the stored item and its note unchanged; the page says so instead of "added".
+        catalog = self.material_catalog()
+        if receipt.get("existing"):
+            catalog["existing"] = True
+        return catalog
+
+    def save_material_notes(self, body):
+        """Save several notes in one journaled step: one write per store. Each note is checked against the version of
+        its own item, and if any of them changed elsewhere nothing is saved."""
+        with self.lock:
+            notes = body.get("notes")
+            if (not isinstance(notes, list) or not notes or len(notes) > 2000 or
+                    any(not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or not isinstance(entry.get("item_revision"), str) for entry in notes) or
+                    len({entry["id"] for entry in notes}) != len(notes)):
+                raise CreationError(400, "要保存的备注格式无效。")
+            for entry in notes:
+                _check_note(entry.get("note"))
+            path, receipt = self._operation("material_notes", body)
+            if not receipt.get("complete"):
+                if "mapped" not in receipt:
+                    items = {item["id"]: item for item in self.material_catalog()["items"]}
+                    if any(entry["id"] not in items for entry in notes):
+                        raise CreationError(404, "部分素材已经移出，请刷新素材篮。")
+                    changed = sum(items[entry["id"]]["item_revision"] != entry["item_revision"] for entry in notes)
+                    if changed:
+                        raise CreationError(409, f"有 {changed} 条素材的备注已在其他页面修改；这次没有保存任何备注，请核对后再保存。")
+                    receipt.update(reviews={items[entry["id"]]["source_id"]: entry["note"] for entry in notes if items[entry["id"]]["type"] == "review"},
+                                   mapped={"request_id": body["request_id"], "revision": self.creation.public()["revision"],
+                                           "notes": {entry["id"]: entry["note"] for entry in notes if items[entry["id"]]["type"] != "review"}})
+                    self.creation._replace(path, receipt)
+                if receipt["reviews"]:
+                    self.reviews.set_pick_notes(receipt["reviews"])
+                if receipt["mapped"]["notes"]:
+                    self.creation.mutate("material_batch", receipt["mapped"])
+                receipt["complete"] = True
+                receipt.pop("mapped", None)
+                self.creation._replace(path, receipt)
             return self.material_catalog()
+
+    def remove_materials(self, body):
+        """Take listed items out in one journaled step; the receipt keeps the exact items so the page can undo it."""
+        with self.lock:
+            ids = body.get("ids")
+            if not isinstance(ids, list) or not ids or len(ids) > 2000 or any(not isinstance(value, str) for value in ids) or len(set(ids)) != len(ids):
+                raise CreationError(400, "要移出的素材编号格式无效。")
+            path, receipt = self._operation("material_remove", body)
+            if not receipt.get("complete"):
+                if "removed" not in receipt:
+                    wanted, raw = set(ids), {item["id"]: item for item in self.creation.public()["materials"]}
+                    removed = []
+                    for item in self.material_catalog()["items"]:
+                        if item["id"] not in wanted:
+                            continue
+                        if body.get("product") and item["product"] != product_key(body["product"]):
+                            raise CreationError(409, "部分素材不属于当前产品，请刷新素材篮后再移出。")
+                        removed.append({"id": item["id"], "type": "review", "source_id": item["source_id"], "pick": {"note": item["note"], "added": item["added"]}}
+                                       if item["type"] == "review" else {"id": item["id"], "type": item["type"], "material": raw[item["id"]]})
+                    receipt.update(removed=removed, mapped={"request_id": body["request_id"], "revision": self.creation.public()["revision"],
+                                                            "remove": [entry["id"] for entry in removed if entry["type"] != "review"]})
+                    self.creation._replace(path, receipt)
+                reviews = {entry["source_id"]: None for entry in receipt["removed"] if entry["type"] == "review"}
+                if reviews:
+                    self.reviews.replace_picks(reviews)
+                if receipt["mapped"]["remove"]:
+                    self.creation.mutate("material_batch", receipt["mapped"])
+                receipt["complete"] = True
+                receipt.pop("mapped", None)
+                self.creation._replace(path, receipt)
+            return {**self.material_catalog(), "removal_id": receipt["request_id"], "removed": [entry["id"] for entry in receipt["removed"]]}
+
+    def restore_materials(self, body):
+        """Undo one removal: put its items back with their notes and ids, skipping any whose source has since gone."""
+        with self.lock:
+            source = body.get("removal_id")
+            if not isinstance(source, str) or not re.fullmatch(r"[\w-]{10,100}", source):
+                raise CreationError(400, "缺少要撤销的移出记录。")
+            path, receipt = self._operation("material_restore", body)
+            removal_path = self.creation.root / "operations" / (source + ".json")
+            removal = json.loads(removal_path.read_text(encoding="utf-8")) if removal_path.exists() else {}
+            if removal.get("kind") != "material_remove" or not removal.get("complete"):
+                raise CreationError(404, "找不到这次移出记录，无法撤销。")
+            if not receipt.get("complete"):
+                if "mapped" not in receipt:
+                    present = {item["id"] for item in self.material_catalog()["items"]}
+                    entries = [entry for entry in removal["removed"] if entry["id"] not in present]
+                    receipt.update(reviews={entry["source_id"]: entry["pick"] for entry in entries if entry["type"] == "review"},
+                                   mapped={"request_id": body["request_id"], "revision": self.creation.public()["revision"],
+                                           "restore": [entry["material"] for entry in entries if entry["type"] != "review"]})
+                    self.creation._replace(path, receipt)
+                if receipt["reviews"]:
+                    self.reviews.replace_picks(receipt["reviews"])
+                if receipt["mapped"]["restore"]:
+                    self.creation.mutate("material_batch", receipt["mapped"])
+                receipt["complete"] = True
+                receipt.pop("mapped", None)
+                self.creation._replace(path, receipt)
+            catalog = self.material_catalog()
+            present = {item["id"] for item in catalog["items"]}
+            restored = [entry["id"] for entry in removal["removed"] if entry["id"] in present]
+            return {**catalog, "restored": restored, "skipped": len(removal["removed"]) - len(restored) + removal.get("source_deleted_count", 0)}
 
     def save_material_theme(self, body):
         with self.lock:
+            _check_note(body.get("note"), "关联说明")
+            if body.get("operation") == "remove" and not isinstance(body.get("id"), str):
+                raise CreationError(400, "缺少要删除的主题关联。")
             path, receipt = self._operation("theme", body)
             if receipt.get("complete"):
+                return self.material_catalog()
+            if body.get("operation") == "remove":
+                # Removal by id cannot overwrite newer work, so it skips the basket revision; a missing link is already gone.
+                if not receipt.get("mapped"):
+                    if not any(item["id"] == body["id"] for item in self.creation.public()["theme_links"]):
+                        receipt["complete"] = True
+                        self.creation._replace(path, receipt)
+                        return self.material_catalog()
+                    receipt["mapped"] = {"revision": self.creation.public()["revision"], "request_id": body["request_id"],
+                                         "operation": "remove", "theme_link": {"id": body["id"]}}
+                    self.creation._replace(path, receipt)
+                self.creation.mutate("theme_link", receipt["mapped"])
+                receipt["complete"] = True
+                receipt.pop("mapped", None)
+                self.creation._replace(path, receipt)
                 return self.material_catalog()
             if not receipt.get("prepared") and body.get("revision") != self.material_catalog()["revision"]:
                 raise CreationError(409, "素材篮或主题关联已更新，请刷新后重新保存。")
@@ -347,6 +550,7 @@ class CreationWorkbenchMixin:
                 raise CreationError(400, "请选择同产品的卖点或方向顾虑。")
             link = {"product": product, "theme": str(review.get("text") or "评论主题")[:500], "review_id": review["id"],
                     "source_quote": str(review.get("text") or ""), "role": role, "target_id": target, "note": body.get("note", ""),
+                    "target_label": f"{point['code']} · {point['title']}" if point else direction["direction_id"],
                     "selling_point_id": point["id"] if point else "", "direction_id": direction["direction_id"] if direction else "",
                     "concern": str(review.get("text") or "评论所述顾虑") if direction else ""}
             mapped = {"revision": self.creation.public()["revision"], "request_id": body["request_id"], "theme_link": link}
@@ -407,6 +611,35 @@ class CreationWorkbenchMixin:
         self.creation.mutate("plan", {"revision": self.creation.public()["revision"], "request_id": key,
                                      "plan": {"id": plan["id"], "script_id": script["id"]}})
 
+    @staticmethod
+    def _writing_plan(body, direction):
+        """Freeze the recorded variants the user ticked; each one becomes one script."""
+        if "variants" not in body and "new_variant_count" not in body:
+            return None
+        if body.get("action") != "variants":
+            raise CreationError(400, "按变体写稿只用于生成变体。")
+        if not direction:
+            raise CreationError(400, "按变体写稿前请先选择一个测试方向。")
+        chosen, count = body.get("variants", []), body.get("new_variant_count", 0)
+        if not isinstance(chosen, list) or len(chosen) > 20:
+            raise CreationError(400, "所选变体格式无效。")
+        if type(count) is not int or not 0 <= count <= 5:
+            raise CreationError(400, "新变体条数须为 0–5。")
+        variants, picked = direction.get("variants") or [], []
+        for item in chosen:
+            index = item.get("index") if isinstance(item, dict) else None
+            if type(index) is not int or not 0 <= index < len(variants) or index in {entry["number"] - 1 for entry in picked}:
+                raise CreationError(400, "所选变体不存在或重复，请重新打开窗口。")
+            variant = variants[index]
+            if variant.get("conflict") or item.get("progression") != variant.get("progression"):
+                raise CreationError(409, "方向变体已更新，请重新打开窗口后再选择。")
+            picked.append({"number": index + 1, **{key: copy.deepcopy(variant[key]) for key in
+                ("progression", "baseline", "variant_type", "main_difference", "concern", "closing", "execution_change") if key in variant}})
+        if not picked and not count:
+            raise CreationError(400, "请至少勾选一条变体，或填写新变体条数。")
+        used = sorted({variant["progression"] for variant in variants if variant.get("progression") and not variant.get("conflict")})
+        return {"variants": picked, "new_variant_count": count, "used_progressions": used}
+
     def create_ai_task(self, body):
         with self.lock:
             body = dict(body)
@@ -437,6 +670,16 @@ class CreationWorkbenchMixin:
             context = {"kind": "case" if case else "direction" if direction else "blank", "product": product,
                        "title": (case or {}).get("current", {}).get("title") or (direction or {}).get("direction_id") or "空白创作",
                        "direction": direction, "materials": materials}
+            plan = self._writing_plan(body, direction)
+            if plan:
+                context["writing_plan"] = plan
+            if "carousel" in body:
+                if type(body["carousel"]) is not bool:
+                    raise CreationError(400, "图文版开关格式无效。")
+                if body["carousel"] and body.get("action") != "variants":
+                    raise CreationError(400, "图文版只用于生成变体。")
+                if body["carousel"]:
+                    context["carousel"] = True
             if body.get("plan_id"):
                 plan = next((item for item in self.creation.public()["plans"] if item["id"] == body["plan_id"]), None)
                 if not plan:

@@ -452,7 +452,7 @@ class TaskTests(unittest.TestCase):
         self.assertIn("<untrusted_draft_for_independent_review>", calls[1]["prompt"])
         self.assertIn("候选建议第 1 轮", calls[1]["prompt"])
         self.assertEqual([[skill["name"] for skill in call["skills"]] for call in calls],
-                         [["product-video-script-writing"], ["product-video-script-writing", "product-video-script-audit"]])
+                         [["product-video-script-writing"], ["product-video-script-writing"]])
         for call in calls:
             self.assertTrue(call["require_image_view"])
             self.assertIn(str(self.skill / "references" / "products" / "202H.md").replace("\\", "\\\\"), call["prompt"])
@@ -469,19 +469,13 @@ class TaskTests(unittest.TestCase):
         self.assertTrue(all(stage["status"] == "completed" for stage in raw["stages"].values()))
         self.assertEqual(self.records(), before)
 
-    def test_scoring_markdown_survives_two_stage_save_and_reload_with_current_rule_hash(self):
+    def test_variant_review_stage_carries_no_scoring_rules_and_output_survives_reload(self):
         install_review_fixture(self.skill)
-        scoring_path = self.skill.parent / AUDIT / "references" / "native-scoring.md"
-        before_rules = scoring_path.read_text(encoding="utf-8")
-        updated_rules = before_rules + "\nChanged fixture example before independent review.\n"
-        reviewed_text = (Path(__file__).parent / "fixtures" / "native-scoring-incomplete.md").read_text(encoding="utf-8")
+        reviewed_text = "复核后的候选稿，含意群表，不含评分。"
         calls = []
         def run(prompt, **kwargs):
             calls.append(prompt)
-            if len(calls) == 1:
-                scoring_path.write_text(updated_rules, encoding="utf-8")
-                return "独立初稿，不包含评分。"
-            return reviewed_text
+            return "独立初稿。" if len(calls) == 1 else reviewed_text
         self.bridges[0].run = run
         before_records = self.records()
         done = self.wait(self.manager.create(self.identifier, self.body("variants", "制作完整变体"))["task_id"])
@@ -491,23 +485,19 @@ class TaskTests(unittest.TestCase):
         turn = raw["rounds"][-1]
         self.assertEqual(raw["snapshot"]["current"], self.current)
         self.assertEqual(self.records(), before_records)
-        self.assertEqual(turn["output"], reviewed_text)
-        self.assertEqual(turn["stages"]["review"]["output"], reviewed_text)
-        self.assertEqual(turn["stages"]["draft"]["output"], "独立初稿，不包含评分。")
-        self.assertFalse(any(Path(ref["path"]).name == "native-scoring.md" for ref in turn["stages"]["draft"]["skill_bundle"]["references"]))
-        scoring_ref = next(ref for ref in turn["stages"]["review"]["skill_bundle"]["references"] if Path(ref["path"]).name == "native-scoring.md")
-        self.assertEqual(scoring_ref["text"], scoring_path.read_bytes().decode("utf-8-sig"))
-        self.assertEqual(scoring_ref["sha256"], hashlib.sha256(scoring_path.read_bytes()).hexdigest())
-        self.assertNotIn("NATIVE_SCORING_FIXTURE_V1", calls[0])
-        self.assertIn("NATIVE_SCORING_FIXTURE_V1", calls[1])
-        self.assertNotIn("不展示初稿、逐项评分", calls[1])
-        self.assertNotIn("不输出五项评分", calls[1])
+        self.assertEqual((turn["output"], turn["stages"]["review"]["output"]), (reviewed_text, reviewed_text))
+        self.assertEqual(turn["stages"]["draft"]["output"], "独立初稿。")
+        for stage in ("draft", "review"):
+            self.assertFalse(any(Path(ref["path"]).name == "native-scoring.md" for ref in turn["stages"][stage]["skill_bundle"]["references"]))
+        for prompt in calls:
+            self.assertNotIn("NATIVE_SCORING_FIXTURE_V1", prompt)
+            self.assertNotIn("简明原生度评分按", prompt)
+        self.assertIn("原生度评分或相对初稿的修改清单", calls[1])
         self.manager.shutdown()
         restarted = self.new_manager()
         reloaded = restarted.get(done["task_id"])["rounds"][-1]
         self.assertEqual(reloaded["output"], reviewed_text)
         self.assertNotIn("output", reloaded["stages"]["draft"])
-        self.assertNotIn("native_score", reloaded)
 
     def test_ordinary_review_persists_complete_markdown_score_without_new_schema(self):
         install_review_fixture(self.skill)
@@ -524,17 +514,13 @@ class TaskTests(unittest.TestCase):
         references = raw["rounds"][-1]["skill_bundle"]["references"]
         self.assertEqual(sum(Path(ref["path"]).name == "native-scoring.md" for ref in references), 1)
 
-    def test_missing_scoring_file_preserves_draft_and_does_not_start_review_call(self):
+    def test_missing_scoring_file_does_not_block_variant_review(self):
         install_review_fixture(self.skill)
         (self.skill.parent / AUDIT / "references" / "native-scoring.md").unlink()
         done = self.wait(self.manager.create(self.identifier, self.body("variants"))["task_id"])
-        self.assertEqual(done["status"], "failed", done)
-        self.assertEqual(len(self.bridges[0].calls), 1)
-        turn = done["rounds"][-1]
-        self.assertEqual(turn["output"], "")
-        self.assertTrue(turn["stages"]["draft"]["output"])
-        self.assertEqual(turn["stages"]["review"]["status"], "failed")
-        self.assertIn("native-scoring.md", turn["error"])
+        self.assertEqual(done["status"], "completed", done)
+        self.assertEqual(len(self.bridges[0].calls), 2)
+        self.assertEqual(done["rounds"][-1]["stages"]["review"]["status"], "completed")
 
     def test_partial_scoring_response_is_not_final_on_failure_or_cancel(self):
         install_review_fixture(self.skill)

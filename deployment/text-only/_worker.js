@@ -110,7 +110,7 @@ async function loadSnapshot(env, request, path, refresh = false) {
 }
 async function apiSnapshot(env, request, path) {
   const base = await loadSnapshot(env, request, BUNDLE_PATH);
-  if (!base.split || path === '/api/state') return base;
+  if (!base.split || path === '/api/state' || path === '/api/products') return base;
   let fragment;
   let match;
   if (path === '/api/reviews' || /^\/api\/reviews\/(?:summary|picks|tag-edits|[0-9a-f]{16})$/.test(path)) fragment = '/data/reviews.json';
@@ -325,6 +325,13 @@ function directionDetail(data, id, product) {
 }
 
 function api(data, path, query) {
+  if (path === '/api/products') {
+    const rows = [...(data.state?.cases || []), ...(data.performance?.videos || []),
+      ...(data.direction_catalog?.selling_points || []), ...(data.direction_catalog?.directions || []),
+      ...(data.creation?.scripts || []), ...(data.creation?.materials || [])];
+    const values = data.products || [...rows.map(row => row.product), ...(data.reviews?.summary?.products || [])];
+    return { products: [...new Set(values.filter(value => typeof value === 'string' && value.trim()))].sort() };
+  }
   if (path === '/api/state') {
     const since = one(query, 'since');
     if (since && since === data.state.digest) return { app: data.state.app, token: data.state.token || '', signature: data.state.signature, digest: data.state.digest, unchanged: true };

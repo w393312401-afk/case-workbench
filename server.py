@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gzip
 import hashlib
 import json
 import mimetypes
@@ -11,6 +12,7 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -29,12 +31,17 @@ from validate_case_structure import DEFAULT_TEMPLATE, validate_case_structure
 from case_deletion import DeletionManager, DeletionError
 from managed_video import ManagedVideoFiles, VideoFileError
 from ai_tasks import AITaskManager, AITaskError
-from performance_store import PerformanceStore
+from performance_store import PerformanceStore, product_short
 from sales_data import SalesDataResolver
 from review_store import ReviewError, ReviewStore
 from direction_store import DirectionError, DirectionStore, product_key
 from creation_store import CreationError, CreationStore
 from workbench_creation import CreationWorkbenchMixin
+from production_store import ProductionStore
+from elevenlabs_client import ElevenLabsClient, VoiceError
+from workbench_production import ProductionWorkbenchMixin
+from resolve_bridge import ResolveBridge
+from workbench_editing import EditingWorkbenchMixin
 
 EXTENSIONS = {
     "video": {".mp4", ".webm", ".mov", ".m4v"},
@@ -74,8 +81,10 @@ class CachedCaseStore(CaseStore):
         super().__init__(root)
         self.index_key = None
         self._index_cache = None
+        self._case_cache = {}
+        self._cache_lock = threading.RLock()
 
-    def fingerprint(self):
+    def fingerprint(self, identifier=None):
         """Kinds, sizes and times of the entries the index is built from:
         cases/ itself (case folders, index.json), and each case's original.json and events/."""
         entries = []
@@ -98,7 +107,13 @@ class CachedCaseStore(CaseStore):
                 entries.append((str(folder), "unreadable"))
             return found
 
-        for case, is_dir in scan(self.root / "cases"):
+        if identifier is not None:
+            folder = self.folder(identifier)
+            entries.append((str(folder), file_key(folder)))
+            folders = [(str(folder), True)]
+        else:
+            folders = scan(self.root / "cases")
+        for case, is_dir in folders:
             if is_dir:
                 for part, part_is_dir in scan(case, {"original.json", "events"}):
                     if part_is_dir:
@@ -106,15 +121,33 @@ class CachedCaseStore(CaseStore):
         return tuple(sorted(entries, key=repr))
 
     def read_index(self):
-        key = self.fingerprint()
-        cached = self._index_cache
-        if cached is not None and cached[0] == key:
-            self.index_key = key
-            return cached[1]
-        index = super().read_index()
-        # The key was taken before reading, so a change made during the read forces a re-check next time.
-        self._index_cache, self.index_key = (key, index), key
-        return index
+        with self._cache_lock:
+            key = self.fingerprint()
+            cached = self._index_cache
+            if cached is not None and cached[0] == key:
+                self.index_key = key
+                return cached[1]
+            index = super().read_index()
+            # The key was taken before reading, so a change made during the read forces a re-check next time.
+            self._index_cache, self.index_key = (key, index), key
+            known = {case["case_id"] for case in index["cases"]}
+            self._case_cache = {identifier: value for identifier, value in self._case_cache.items() if identifier in known}
+            return index
+
+    def read_case(self, identifier):
+        # Retain the store's identifier/path/link checks on cache hits. Scan every event so
+        # external appends, edits, removals and invalid entries still invalidate validation.
+        self.folder(identifier)
+        with self._cache_lock:
+            key = self.fingerprint(identifier)
+            cached = self._case_cache.get(identifier)
+            if cached is None or cached[0] != key:
+                case = super().read_case(identifier)
+                self._case_cache[identifier] = (key, case)
+            else:
+                case = cached[1]
+            # Existing consumers may edit their returned current snapshot before saving.
+            return copy.deepcopy(case)
 
 
 def revision(case):
@@ -143,7 +176,7 @@ def review_request(query):
     return filters, numbers("limit", 50), numbers("offset", 0), one("sort", "likes")
 
 
-class Workbench(CreationWorkbenchMixin):
+class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin):
     def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=()):
         self.store = CachedCaseStore(skill_root)
         self.runtime = Path(runtime_root).resolve()
@@ -154,6 +187,9 @@ class Workbench(CreationWorkbenchMixin):
         self.requests = {}
         self.structure_cache = {}
         self.state_cache = None
+        self.products_cache = None
+        self.review_product_sources = None
+        self.direction_sync_cache = None
         self.thumbnail_lock = threading.Lock()
         self.deletion = DeletionManager(self.store.root, self.runtime)
         self.video_files = ManagedVideoFiles(self.runtime)
@@ -162,8 +198,16 @@ class Workbench(CreationWorkbenchMixin):
         self.sales = SalesDataResolver(self.performance)
         self.directions = DirectionStore(self.runtime, self.store.root, self.lock)
         self.creation = CreationStore(self.runtime, self.lock)
+        self.production = ProductionStore(self.runtime, self.lock)
+        self.voices = ElevenLabsClient()
+        self.resolve = ResolveBridge()
         self.ai = AITaskManager(self.store, self.runtime, self.lock, bridge=ai_bridge,
                                 review_digest=self.review_digest, sales_resolver=self.sales)
+        # AI editing uses the same local Claude client as writing, with its own restricted tool profile.
+        self.editor = getattr(self.ai.bridge, "claude", None)
+        self.edit_skill_dir = Path(skill_root).resolve().parent / "davinci-product-video-editing"
+        self.ledger_dir = self.runtime / "davinci-ledger"
+        self.production.interrupt_running()
 
     def claude_settings(self, action, body):
         """Old clients cannot re-enable API billing or install an unused SDK."""
@@ -240,6 +284,77 @@ class Workbench(CreationWorkbenchMixin):
                 links[video_id] = entry["case_id"]
         return links
 
+    def products(self):
+        """Lightweight product inventory, without full lists or analytics."""
+        # Preserve discovery of freshly supplied review exports without holding the
+        # workbench lock during their import. Unchanged sources skip this entirely.
+        review_files = self.reviews.source_files()
+        source_key = tuple((platform, str(path), file_key(path)) for platform, path in review_files)
+        review_key = (source_key, self.reviews.database.is_file())
+        if self.review_product_sources != review_key:
+            try:
+                if review_files or self.reviews.database.is_file():
+                    self.reviews.sync()
+                self.review_product_sources = (source_key, self.reviews.database.is_file())
+            except (OSError, sqlite3.Error, ReviewError):
+                pass
+        def database_signature(path):
+            return file_key(path), file_key(Path(str(path) + "-wal"))
+
+        def distinct(database, query, lock):
+            if not database.is_file():
+                return []
+            # Open existing data read-only: discovery must not create/migrate a database.
+            with lock:
+                connection = None
+                try:
+                    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+                    return [row[0] for row in connection.execute(query)]
+                except (OSError, sqlite3.Error):
+                    return []
+                finally:
+                    if connection is not None:
+                        connection.close()
+
+        with self.lock:
+            cases = self.store.read_index()["cases"]
+            grading = tuple(sorted((str(path), file_key(path)) for path in
+                (self.store.root / "references" / "products").glob("*-selling-point-grading.md")))
+            key = (self.store.index_key, file_key(self.directions.path), file_key(self.creation.path),
+                   database_signature(self.performance.database), database_signature(self.reviews.database), grading)
+            if self.products_cache is not None and self.products_cache[0] == key:
+                return self.products_cache[1]
+            values = {product_key(case.get("product")) for case in cases}
+            for store, groups, error in ((self.directions, ("selling_points", "directions", "video_links"), DirectionError),
+                                        (self.creation, ("scripts", "materials", "theme_links", "plans"), CreationError)):
+                try:
+                    catalog = store.read()
+                    values.update(product_key(item.get("product")) for group in groups for item in catalog[group])
+                except error:
+                    # A broken optional catalog must not hide products from other modules.
+                    pass
+            values.update(product_key(Path(path).name.removesuffix("-selling-point-grading.md")) for path, _ in grading)
+            values.update(product_short(value) for value in distinct(self.performance.database,
+                "SELECT products FROM daily WHERE products != '' UNION SELECT products FROM periods WHERE products != ''", self.performance.lock))
+            values.update(product_key(value) for value in distinct(self.reviews.database,
+                "SELECT DISTINCT product FROM reviews WHERE product != ''", self.reviews.lock))
+            result = {"products": sorted(values - {"", "all"})}
+            self.products_cache = (key, result)
+            return result
+
+    def synced_directions(self, cases):
+        """Reuse read-only migration results until records, catalog or grading files change."""
+        grading = tuple(sorted((str(path), file_key(path)) for path in
+            (self.store.root / "references" / "products").glob("*-selling-point-grading.md")))
+        key = (self.store.index_key, file_key(self.directions.path), grading)
+        if self.direction_sync_cache is not None and self.direction_sync_cache[0] == key:
+            return self.direction_sync_cache[1]
+        catalog = self.directions.sync(cases)
+        # A pre-read key makes a concurrent external edit invalidate this result on
+        # the next request, including when migration wrote the catalog itself.
+        self.direction_sync_cache = (key, catalog)
+        return catalog
+
     def import_performance_uploads(self, body):
         paths = body.get("paths")
         if not isinstance(paths, list) or not paths or len(paths) > 100:
@@ -282,7 +397,7 @@ class Workbench(CreationWorkbenchMixin):
 
     def direction_summary(self, **filters):
         summary = self.sales.direction_summary(self.store.direction_summary(**filters))
-        catalog = self.directions.sync(self.store.read_index()["cases"])
+        catalog = self.synced_directions(self.store.read_index()["cases"])
         for group in summary["groups"]:
             entity = self.directions.find_direction(catalog, group["product"], group["direction_id"])
             if entity:
@@ -294,7 +409,7 @@ class Workbench(CreationWorkbenchMixin):
     def direction_catalog(self, product=None):
         with self.lock:
             cases = self.store.read_index()["cases"]
-            data = self.directions.sync(cases)
+            data = self.synced_directions(cases)
             result = self.directions.public(data, product)
             independent_scripts = self.creation.public(product)["scripts"]
             direction_videos = {}
@@ -432,7 +547,7 @@ class Workbench(CreationWorkbenchMixin):
         with self.lock:
             # Read records afresh: changes from the existing intake tools appear without restarting.
             index = self.store.read_index()
-            self.directions.sync(index["cases"])
+            direction_catalog = self.synced_directions(index["cases"])
             known = {entry["case_id"] for entry in index["cases"]}
             self.requests = {key: value for key, value in self.requests.items()
                 if not value[1].get("case") or value[1]["case"]["case_id"] in known}
@@ -448,7 +563,7 @@ class Workbench(CreationWorkbenchMixin):
             if self.state_cache is not None and self.state_cache[0] == key:
                 return self.state_cache[1]
             sales = self.sales.resolve_cases(index["cases"])
-            cases = [self.detail(entry["case_id"], sales[entry["case_id"]]) for entry in index["cases"]]
+            cases = [self.detail(entry["case_id"], sales[entry["case_id"]], direction_catalog) for entry in index["cases"]]
             signature = hashlib.sha256("".join(item["revision"] + json.dumps(item["assets"], sort_keys=True)
                                              + item.get("source_analysis", {}).get("digest", "")
                                              + json.dumps(item["sales_data"], sort_keys=True, ensure_ascii=False)
@@ -456,17 +571,18 @@ class Workbench(CreationWorkbenchMixin):
             navigation = self.navigation()
             signature = hashlib.sha256((signature + json.dumps(navigation, sort_keys=True)).encode()).hexdigest()
             summaries = []
+            indexed = {entry["case_id"]: entry for entry in index["cases"]}
             for case in cases:
                 current = case.get("current")
                 summaries.append({key: case[key] for key in ("case_id", "product", "revision", "assets", "current", "sales_data", "resolved_direction", "current_event_id", "archived", "archive_event_id") if key in case} | {
                     "title": current["title"] if current else case["title"],
                     "updated_at": case["events"][-1]["created_at"],
                     "event_count": len(case["events"]),
-                    "search_text": next(x["current_search_text"] for x in index["cases"] if x["case_id"] == case["case_id"]),
+                    "search_text": indexed[case["case_id"]]["current_search_text"],
                 })
             paths = {"records": str(self.store.root / "cases"), "evidence": str(self.runtime / "evidence"), "library": str(self.library), "directions": str(self.directions.root), "creation": str(self.creation.root)}
             # Lets the polling page ask "anything new since this digest?" and get a tiny reply instead of every case.
-            direction_revision = self.directions.revision(self.directions.read())
+            direction_revision = self.directions.revision(direction_catalog)
             creation_revision = self.creation.revision(self.creation.read())
             signature = hashlib.sha256((signature + direction_revision + creation_revision).encode()).hexdigest()
             digest = hashlib.sha256(json.dumps([navigation, summaries, paths, direction_revision, creation_revision], sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -896,10 +1012,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         super().log_request(code, size)
 
-    def headers_common(self):
+    def headers_common(self, cache_control="no-store"):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 
     def output(self, status, content, content_type="application/json; charset=utf-8"):
@@ -949,6 +1065,8 @@ class Handler(BaseHTTPRequestHandler):
                     if query.get("since", [None])[0] == snapshot["digest"]:
                         return self.output(200, {key: snapshot[key] for key in ("app", "token", "signature", "digest")} | {"unchanged": True})
                     return self.output(200, snapshot)
+                if path == "/api/products":
+                    return self.output(200, self.app.products())
                 if path == "/api/ai/status":
                     return self.output(200, self.app.ai.status())
                 if path == "/api/ai/claude/login":
@@ -958,6 +1076,23 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.creation_catalog(query.get("product", [None])[0]))
                 if path == "/api/materials":
                     return self.output(200, self.app.material_catalog(query.get("product", [None])[0]))
+                if path == "/api/production":
+                    return self.output(200, self.app.production_catalog(query.get("product", [None])[0]))
+                if path == "/api/production/eleven":
+                    return self.output(200, self.app.eleven_status())
+                if path == "/api/production/resolve":
+                    return self.output(200, self.app.resolve_status())
+                if path == "/api/production/variants":
+                    task_id, round_id = query.get("task_id", [""]), query.get("round_id", [""])
+                    if len(task_id) != 1 or len(round_id) != 1 or not re.fullmatch(r"AIT-[0-9a-f]{12}", task_id[0]) or not re.fullmatch(r"AIR-[0-9a-f]{12}", round_id[0]):
+                        raise ApiError(400, "候选轮次参数无效。")
+                    return self.output(200, self.app.production_variants(task_id[0], round_id[0]))
+                job_match = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})", path)
+                if job_match:
+                    return self.output(200, self.app.production_job(job_match.group(1)))
+                audio_match = re.fullmatch(r"/api/production/audio/(PRD-[0-9a-f]{12})/(TAK-[0-9a-f]{12})/(mp3|wav)", path)
+                if audio_match:
+                    return self.file(self.app.production_audio(*audio_match.groups()), download="download" in query)
                 script_match = re.fullmatch(r"/api/scripts/(SCR-[0-9a-f]{12})", path)
                 if script_match:
                     return self.output(200, self.app.script_detail(script_match.group(1)))
@@ -978,7 +1113,7 @@ class Handler(BaseHTTPRequestHandler):
                     with self.app.lock:
                         return self.output(200, self.app.direction_summary(**values))
                 if path == "/api/ai/options":
-                    return self.output(200, self.app.ai.options())
+                    return self.output(200, self.app.ai.options(refresh=query.get("refresh") == ["1"]))
                 ai_stream = re.fullmatch(r"/api/ai/tasks/(AIT-[0-9a-f]{12})/stream", path)
                 if ai_stream:
                     return self.event_stream(ai_stream.group(1))
@@ -1055,11 +1190,11 @@ class Handler(BaseHTTPRequestHandler):
                     file = self.app.asset_path(parts[1], parts[2], query.get("event", [None])[0])
                     return self.file(file, download="download" in query)
                 files = {"/": "index.html", "/app.js": "app.js", "/navigation.js": "navigation.js", "/library.js": "library.js", "/bulk.js": "bulk.js", "/detail.js": "detail.js", "/transcript-sync.js": "transcript-sync.js", "/delete.js": "delete.js", "/directions.js": "directions.js", "/editor.js": "editor.js", "/native.js": "native.js", "/ai.js": "ai.js", "/performance.js": "performance.js", "/perf-dashboard.js": "perf-dashboard.js", "/reviews.js": "reviews.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
-                files.update({"/" + name: name for name in ("shell.js", "shell.css", "settings.js", "settings.css", "global-search.js", "global-search.css", "navigation.css", "library.css", "detail.css", "inline-editor.js", "inline-editor.css", "direction-picker.js", "direction-picker.css", "home.js", "home.css", "material-basket.js", "material-basket.css", "scripts.js", "scripts.css", "writing.css", "reviews-layout.css", "demo.js")})
+                files.update({"/" + name: name for name in ("shell.js", "shell.css", "settings.js", "settings.css", "global-search.js", "global-search.css", "navigation.css", "library.css", "detail.css", "inline-editor.js", "inline-editor.css", "direction-picker.js", "direction-picker.css", "home.js", "home.css", "material-basket.js", "material-basket.css", "scripts.js", "scripts.css", "production.js", "production.css", "writing.css", "reviews-layout.css", "demo.js")})
                 if path in files:
-                    return self.file(APP_ROOT / "static" / files[path])
+                    return self.file(APP_ROOT / "static" / files[path], cache=True)
                 if path == "/directions.css":
-                    return self.file(APP_ROOT / "static" / "directions.css")
+                    return self.file(APP_ROOT / "static" / "directions.css", cache=True)
                 raise ApiError(404, "页面不存在。")
             if self.command == "POST":
                 if path == "/api/upload":
@@ -1109,6 +1244,31 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.save_script_status(identifier, body) if action == "status" else self.app.script_to_case(identifier, body))
                 if path == "/api/materials":
                     return self.output(200, self.app.save_material(body))
+                if path == "/api/production/voices":
+                    return self.output(200, self.app.save_voice(body))
+                if path == "/api/production/readings":
+                    return self.output(200, self.app.save_reading(body))
+                if path == "/api/production/settings":
+                    return self.output(200, self.app.save_production_settings(body))
+                if path == "/api/production/jobs":
+                    return self.output(200, self.app.create_production_job(body))
+                edit_cancel = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/edits/(EDT-[0-9a-f]{12})/cancel", path)
+                if edit_cancel:
+                    return self.output(200, self.app.cancel_edit(*edit_cancel.groups()))
+                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|archive|timeline|open|edit|handoff)", path)
+                if job_action:
+                    identifier, action = job_action.groups()
+                    handler = {"takes": self.app.generate_take, "select": self.app.select_take,
+                               "lines": self.app.save_job_lines, "archive": self.app.archive_job,
+                               "timeline": self.app.build_timeline, "open": self.app.open_timeline,
+                               "edit": self.app.start_edit, "handoff": self.app.edit_handoff}[action]
+                    return self.output(200, handler(identifier, body))
+                if path == "/api/materials/remove":
+                    return self.output(200, self.app.remove_materials(body))
+                if path == "/api/materials/notes":
+                    return self.output(200, self.app.save_material_notes(body))
+                if path == "/api/materials/restore":
+                    return self.output(200, self.app.restore_materials(body))
                 if path == "/api/material-themes":
                     return self.output(200, self.app.save_material_theme(body))
                 if path == "/api/plans":
@@ -1188,6 +1348,8 @@ class Handler(BaseHTTPRequestHandler):
         except DirectionError as exc:
             return self.output(exc.status, {"error": str(exc)})
         except CreationError as exc:
+            return self.output(exc.status, {"error": str(exc)})
+        except VoiceError as exc:
             return self.output(exc.status, {"error": str(exc)})
         except AITaskError as exc:
             return self.output(exc.status, {"error": str(exc)})
@@ -1288,8 +1450,43 @@ class Handler(BaseHTTPRequestHandler):
         return self.output(200, {"path": str(target), "name": raw_name, "bytes": length,
                                  "managed": True, "temporary": True})
 
-    def file(self, path, download=False):
-        total = path.stat().st_size
+    def file(self, path, download=False, cache=False):
+        content = None
+        compressed = False
+        if cache:
+            with self.server.static_lock:
+                key = file_key(path)
+                cached = self.server.static_cache.get(path)
+                if cached is None or cached[0] != key:
+                    raw = path.read_bytes()
+                    packed = gzip.compress(raw, compresslevel=5, mtime=0) if len(raw) >= 1024 and path.suffix in {".js", ".css", ".html", ".svg"} else None
+                    if packed is not None and len(packed) >= len(raw):
+                        packed = None
+                    cached = (key, raw, packed)
+                    self.server.static_cache[path] = cached
+            encodings = {}
+            for part in self.headers.get("Accept-Encoding", "").lower().split(","):
+                name, *parameters = part.strip().split(";")
+                quality = 1.0
+                for parameter in parameters:
+                    if parameter.strip().startswith("q="):
+                        try:
+                            quality = float(parameter.strip()[2:])
+                        except ValueError:
+                            quality = 0.0
+                encodings[name] = quality
+            compressed = cached[2] is not None and encodings.get("gzip", encodings.get("*", 0)) > 0 and not self.headers.get("Range")
+            content = cached[2] if compressed else cached[1]
+            etag = '"' + hashlib.sha256(content).hexdigest() + '"'
+            supplied = self.headers.get("If-None-Match", "")
+            if any(tag.strip().removeprefix("W/") in {etag, "*"} for tag in supplied.split(",")):
+                self.send_response(304)
+                self.headers_common("private, no-cache")
+                self.send_header("ETag", etag)
+                self.send_header("Vary", "Accept-Encoding")
+                self.end_headers()
+                return
+        total = len(content) if content is not None else path.stat().st_size
         start, end, status = 0, total - 1, 200
         range_header = self.headers.get("Range")
         if range_header:
@@ -1305,7 +1502,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             status = 206
         self.send_response(status)
-        self.headers_common()
+        self.headers_common("private, no-cache" if cache else "no-store")
+        if cache:
+            self.send_header("ETag", etag)
+            self.send_header("Vary", "Accept-Encoding")
+        if compressed:
+            self.send_header("Content-Encoding", "gzip")
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         if path.suffix in {".md", ".txt"}:
             content_type = "text/plain; charset=utf-8"
@@ -1319,6 +1521,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
         self.end_headers()
         if self.command != "HEAD":
+            if content is not None:
+                self.wfile.write(content[start:end + 1])
+                return
             with path.open("rb") as stream:
                 stream.seek(start)
                 remaining = end - start + 1
@@ -1338,6 +1543,8 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, *args, **kwargs):
         self._write_gate = threading.Condition()
+        self.static_lock = threading.Lock()
+        self.static_cache = {}
         self._active_writes = 0
         self._shutting_down = False
         super().__init__(*args, **kwargs)
@@ -1372,6 +1579,8 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
             if any(task.get("status") in {"queued", "running", "stopping"}
                    or task.get("busy") or task.get("stopping") for task in tasks):
                 raise ApiError(409, "AI 协作仍在运行或停止中，请完成后再重新启动。")
+            if self.app.edit_running():
+                raise ApiError(409, "AI 剪辑仍在运行，请等它结束或先停止，再重新启动。")
         except Exception:
             with self._write_gate:
                 self._shutting_down = False
@@ -1385,6 +1594,7 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
 
     def server_close(self):
         if hasattr(self, "app"):
+            self.app.stop_edits()
             self.app.ai.shutdown()
             close = getattr(self.app.ai.bridge, "close", None)
             if callable(close):

@@ -85,6 +85,39 @@ class AIHTTPTests(unittest.TestCase):
         return {"request_id":uuid4().hex, "case_id":self.case_id, "revision":detail["revision"],
                 "action":action, "instruction":"检查这一版的购买理由，并保存候选建议。"}
 
+    def test_explicit_options_refresh_updates_catalog_without_running_a_task(self):
+        source = {"models": [{"id": "claude-opus", "name": "Claude Opus 5.5", "available": True}]}
+        cached = copy.deepcopy(source)
+        calls = {"models": 0, "refresh": 0}
+
+        def models():
+            calls["models"] += 1
+            return copy.deepcopy(cached)
+
+        def refresh_models():
+            calls["refresh"] += 1
+            cached.clear()
+            cached.update(copy.deepcopy(source))
+
+        with patch.object(self.bridge, "models", models, create=True), \
+                patch.object(self.bridge, "refresh_models", refresh_models, create=True):
+            status, first = self.request("GET", "/api/ai/options")
+            self.assertEqual(status, 200, first)
+            self.assertEqual(first["models"][0]["name"], "Claude Opus 5.5")
+            source["models"][0]["name"] = "Claude Opus 6.1"
+
+            status, unchanged = self.request("GET", "/api/ai/options")
+            self.assertEqual(status, 200, unchanged)
+            self.assertEqual(unchanged["models"][0]["name"], "Claude Opus 5.5")
+            self.assertEqual(calls, {"models": 2, "refresh": 0})
+
+            status, refreshed = self.request("GET", "/api/ai/options?refresh=1")
+            self.assertEqual(status, 200, refreshed)
+            self.assertEqual(refreshed["models"][0]["name"], "Claude Opus 6.1")
+            self.assertEqual(calls, {"models": 3, "refresh": 1})
+            self.assertEqual(self.bridge.prompts, [])
+            self.assertFalse(self.bridge.started.is_set())
+
     def test_legacy_claude_key_and_sdk_routes_cannot_reenable_api_billing(self):
         for path in ("/api/ai/claude/key", "/api/ai/claude/key/delete", "/api/ai/claude/install"):
             with self.subTest(path=path):

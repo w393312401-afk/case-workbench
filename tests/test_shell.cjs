@@ -89,3 +89,25 @@ test('switching product detaches saved filters before clearing its direction', (
   h.shell.setProduct('129N');
   assert.equal(h.location.hash, '#/129N/library?category=positive&q=clamp');
 });
+
+test('startup discovers products with one inventory request', async () => {
+  const h = harness(), calls = [];
+  h.context.document.querySelectorAll = () => [];
+  h.context.api = async path => {calls.push(path); return {products: ['202H', '129N']};};
+  h.shell.initialize();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ['/api/products']);
+});
+
+test('an older running service keeps product discovery until it can restart', async () => {
+  const h = harness(), calls = [];
+  h.context.document.querySelectorAll = () => [];
+  h.context.api = async path => {
+    calls.push(path);
+    if (path === '/api/products') throw Object.assign(new Error('old service'), {status: 404});
+    return {};
+  };
+  h.shell.initialize();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ['/api/products', '/api/performance/videos', '/api/reviews/summary', '/api/direction-catalog', '/api/creation']);
+});
