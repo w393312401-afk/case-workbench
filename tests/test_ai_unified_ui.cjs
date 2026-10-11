@@ -25,7 +25,7 @@ function markdownImplementation(name) {
   assert.ok(start >= 0 && end > start, `Load actual ${name} function`);
   return detailSource.slice(start, end);
 }
-const helpers = ['taskModel','taskSummary','rememberTaskState','refreshAvailability','settingsFromRound','modelChoices','selectedModel','allowedEfforts','skillAvailable','settingsIssue','settingsMarkup','modelOptionGroups','claudeHint','rememberedSettings','modelLabel','titleLineGroups','stageMetadata','roundCopyText','reviewContextText'];
+const helpers = ['taskModel','taskSummary','rememberTaskState','refreshAvailability','settingsFromRound','modelChoices','selectedModel','allowedEfforts','skillAvailable','settingsIssue','settingsMarkup','defaultsSummary','defaultsMarkup','modelLabel','titleLineGroups','stageMetadata','roundCopyText','reviewContextText'];
 const scope = vm.runInNewContext(`
   ${declaration('skillNames')}
   ${declaration('legacySkillNames')}
@@ -59,8 +59,8 @@ test('historical selection migrates for continuation without changing its source
     const next = scope.settingsFromRound(round);
     assert.equal(next.skill_selection,'product-video-script-review');
     assert.match(next.migration_notice,/合并/);
-    assert.equal(next.model,'test-a');
-    assert.equal(next.reasoning_effort,'high');
+    assert.equal(Object.hasOwn(next,'model'),false);
+    assert.equal(Object.hasOwn(next,'reasoning_effort'),false);
     assert.equal(JSON.stringify(round),before);
   }
   assert.equal(scope.settingsFromRound({skill_selection:'none'}).skill_selection,'none');
@@ -135,40 +135,28 @@ test('failed or cancelled partial scoring stays recoverable and never becomes th
   }
 });
 
-test('Claude and Codex models are grouped, and unready Claude models cannot be picked', () => {
-  const models = [{id:'gpt-5',name:'GPT-5',provider:'codex',reasoning_efforts:['low']},
-    {id:'claude-opus-5-5',name:'Claude Opus 5.5',provider:'claude',is_default:true,available:false,reasoning_efforts:['high'],default_reasoning_effort:'high'}];
-  const html = scope.modelOptionGroups(models,{model:null});
-  assert.match(html,/<optgroup label="本机 Claude Code"><option value="claude-opus-5-5"  disabled>Claude Opus 5\.5 · 推荐 · 未就绪<\/option><\/optgroup>/);
-  assert.match(html,/<optgroup label="本机 Codex"><option value="gpt-5"/);
-  assert.equal(scope.modelOptionGroups([models[0]],{model:null}).includes('optgroup'),false);
-});
-
-test('Claude client default is selected on first use and preserves client thinking settings', () => {
-  scope.ai.options.models = [
-    {id:'claude-default',name:'Claude 客户端默认',provider:'claude',is_default:true,available:true,reasoning_efforts:[]},
-    {id:'claude-opus',name:'Claude Opus',provider:'claude',available:true,reasoning_efforts:['high']},
-  ];
-  scope.localStorage.value = null;
-  assert.deepEqual(JSON.parse(JSON.stringify(scope.rememberedSettings())), {model:'claude-default',reasoning_effort:null});
-  const html = scope.settingsMarkup('client',{model:'claude-default',reasoning_effort:null,skill_selection:'auto'});
-  assert.match(html,/<select id="client-effort" disabled>/);
-  assert.match(html,/Claude 客户端默认 · 推荐/);
-  scope.localStorage.value = JSON.stringify({model:'claude-opus',reasoning_effort:'high'});
-  assert.deepEqual(JSON.parse(JSON.stringify(scope.rememberedSettings())), {model:'claude-opus',reasoning_effort:'high'});
+test('ordinary settings show global defaults and keep model choices out of task controls', () => {
+  scope.ai.options.models = [{id:'gpt-6.1-sol',name:'GPT-6.1-Sol',provider:'codex',reasoning_efforts:['high'],available:true}];
+  scope.ai.options.default_settings = {model:'gpt-6.1-sol',reasoning_effort:'high'};
+  const settings = {skill_selection:'auto',model:'old-hidden-choice',reasoning_effort:'low'};
+  const html = scope.settingsMarkup('client',settings);
+  assert.doesNotMatch(html, /client-model|client-effort|old-hidden-choice/);
+  assert.match(scope.defaultsMarkup('client'), /使用全局默认 · GPT-6\.1-Sol · 思考高/);
+  assert.match(scope.defaultsMarkup('client'), /href="#settings".*全局设置/);
+  assert.equal(scope.settingsIssue(settings),'');
   scope.ai.options.models = [];
-  scope.localStorage.value = null;
+  scope.ai.options.default_settings = {model:null,reasoning_effort:null};
 });
 
-test('unavailable selected Claude blocks submission and points to client status', () => {
+test('unavailable global default blocks submission and can be repaired in global settings', () => {
   scope.ai.options.models = [{id:'claude-default',provider:'claude',available:false}];
+  scope.ai.options.default_settings = {model:'claude-default',reasoning_effort:null};
   scope.ai.status = {providers:{claude:{available:false,error:'请先登录本机 Claude Code。'}}};
-  assert.equal(scope.settingsIssue({model:'claude-default',reasoning_effort:null,skill_selection:'auto'}),'请先登录本机 Claude Code。');
-  assert.match(scope.claudeHint(),/请先登录本机 Claude Code。/);
-  assert.match(scope.claudeHint(),/href="#settings">查看客户端状态/);
-  scope.ai.status.providers.claude.available = true;
-  assert.equal(scope.claudeHint(),'');
+  assert.equal(scope.settingsIssue({skill_selection:'auto'}),'请先登录本机 Claude Code。');
+  scope.ai.options.default_settings.model = 'unavailable-old-model';
+  assert.match(scope.settingsIssue({skill_selection:'auto'}), /全局默认模型当前不可选.*全局设置/);
   scope.ai.options.models = [];
+  scope.ai.options.default_settings = {model:null,reasoning_effort:null};
   scope.ai.status = null;
 });
 
@@ -220,15 +208,18 @@ test('task summaries retain the latest actual or requested model through detail 
   scope.ai.taskList = null;
 });
 
-test('model loading is explicit and an unavailable catalog still permits the local default after failure', () => {
-  const settings = {model:null,reasoning_effort:null,skill_selection:'auto'};
+test('default loading and failure are explicit while a successful local default remains usable', () => {
+  const settings = {skill_selection:'auto'};
   scope.ai.options = null;
-  const html = scope.settingsMarkup('loading',settings);
-  assert.match(html,/<select id="loading-model" disabled aria-busy="true"><option value="">正在读取模型…<\/option><\/select>/);
-  assert.equal(scope.settingsIssue(settings),'正在读取模型，请稍候。');
-  scope.ai.options = {models:[],skills:[],models_error:'模型列表暂时无法读取'};
+  assert.match(scope.defaultsSummary(),/正在读取全局默认配置/);
+  assert.match(scope.settingsIssue(settings),/正在读取全局默认配置/);
+  assert.doesNotMatch(scope.settingsMarkup('loading',settings), /loading-model|loading-effort/);
+  scope.ai.options = {models:[],skills:[],options_error:'全局默认配置暂时无法读取，请重新检查。'};
+  assert.match(scope.settingsIssue(settings),/请重新检查/);
+  assert.equal(scope.defaultsSummary(),'全局默认配置暂不可用');
+  scope.ai.options = {models:[],skills:[],default_settings:{model:null,reasoning_effort:null},models_error:'模型列表暂时无法读取'};
   assert.equal(scope.settingsIssue(settings),'');
-  assert.match(scope.settingsMarkup('failed',settings),/本机默认（运行后确认）/);
+  assert.match(scope.defaultsSummary(),/使用全局默认 · 本机默认模型/);
   scope.ai.options = {models:[],skills:[{id:'product-video-script-review',label:'统一技能',available:true}]};
 });
 

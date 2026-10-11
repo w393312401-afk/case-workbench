@@ -93,7 +93,7 @@ class CreationWorkbenchMixin:
             self.state_cache = None
             return {**result, "catalog": self.creation_catalog()}
 
-    def save_script_status(self, identifier, body):
+    def save_script_status(self, identifier, body, *, carousel_id=None):
         with self.lock:
             body = copy.deepcopy(body)
             value = body.setdefault("script_status", {})
@@ -106,6 +106,16 @@ class CreationWorkbenchMixin:
             if prior:
                 return {**prior, "script": self._script_alias(prior["script"]), "catalog": self.creation_catalog()}
             script = self.creation.get_script(identifier)
+            production = getattr(self, "production", None)
+            for carousel in production.public().get("carousels", []) if production else []:
+                published = carousel.get("publication") or {}
+                if carousel["script_id"] != identifier or not published:
+                    continue
+                changed = (value.get("video_id", script.get("video_id")), value.get("published_on", script.get("published_on"))) != (
+                    published["post_id"], published["published_on"])
+                invalid_status = value.get("status", script["status"]) not in {"published", "reviewed", "archived"}
+                if (changed or invalid_status) and carousel_id != carousel["id"]:
+                    raise CreationError(409, "这条脚本已有图文发布登记，请到对应图文制作单修改，保留实际成品包关联。")
             video = str(value.get("video_id", script["video_id"]) or "")
             if video:
                 actual = self.performance.video_brief([video]).get(video)

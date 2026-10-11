@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
@@ -42,6 +43,18 @@ from elevenlabs_client import ElevenLabsClient, VoiceError
 from workbench_production import ProductionWorkbenchMixin
 from resolve_bridge import ResolveBridge
 from workbench_editing import EditingWorkbenchMixin
+from workbench_carousel import CarouselWorkbenchMixin
+from workbench_carousel_stills import CarouselStillsMixin
+from workbench_carousel_images import CarouselImagesMixin
+from workbench_carousel_import import CarouselFinishedImportMixin
+from workbench_carousel_delivery import CarouselDeliveryMixin
+from workbench_carousel_publish import CarouselPublishMixin
+from codex_image_bridge import CodexImageBridge
+from codex_stills_bridge import CodexStillsBridge
+from codex_edit_bridge import CodexEditBridge
+from data_transfer import DataTransfer, TransferError, pick_directory
+from data_backup import BackupError, MAX_BYTES
+from data_lease import ServerLease
 
 EXTENSIONS = {
     "video": {".mp4", ".webm", ".mov", ".m4v"},
@@ -68,6 +81,22 @@ def file_key(path):
     return stat.st_size, stat.st_mtime_ns, getattr(stat, "st_birthtime_ns", stat.st_ctime_ns)
 
 
+def accepts_gzip(value):
+    """Honor an explicit gzip preference before the wildcard fallback."""
+    encodings = {}
+    for part in value.lower().split(","):
+        name, *parameters = part.strip().split(";")
+        quality = 1.0
+        for parameter in parameters:
+            if parameter.strip().startswith("q="):
+                try:
+                    quality = float(parameter.strip()[2:])
+                except ValueError:
+                    quality = 0.0
+        encodings[name] = quality if 0 <= quality <= 1 else 0.0
+    return encodings.get("gzip", encodings.get("*", 0)) > 0
+
+
 class CachedCaseStore(CaseStore):
     """CaseStore that reuses its last full index verification while the record files are unchanged.
 
@@ -79,10 +108,40 @@ class CachedCaseStore(CaseStore):
 
     def __init__(self, root):
         super().__init__(root)
-        self.index_key = None
+        self._index_key = None
         self._index_cache = None
         self._case_cache = {}
         self._cache_lock = threading.RLock()
+        self._index_context = threading.local()
+
+    @property
+    def index_key(self):
+        snapshot = getattr(self._index_context, "snapshot", None)
+        return snapshot[0] if snapshot is not None else self._index_key
+
+    @contextmanager
+    def index_snapshot(self):
+        """Share one verified index within an explicitly read-only operation.
+
+        A new outer scope still scans for external changes. Nested scopes and
+        helper reads use that same index and change marker; other threads keep
+        validating independently. Individual read_case() checks are unchanged.
+        """
+        previous = getattr(self._index_context, "snapshot", None)
+        if previous is None:
+            with self._cache_lock:
+                index = self.read_index()
+                snapshot = (self._index_key, index)
+        else:
+            snapshot = previous
+        self._index_context.snapshot = snapshot
+        try:
+            yield snapshot[1]
+        finally:
+            if previous is None:
+                del self._index_context.snapshot
+            else:
+                self._index_context.snapshot = previous
 
     def fingerprint(self, identifier=None):
         """Kinds, sizes and times of the entries the index is built from:
@@ -121,15 +180,18 @@ class CachedCaseStore(CaseStore):
         return tuple(sorted(entries, key=repr))
 
     def read_index(self):
+        snapshot = getattr(self._index_context, "snapshot", None)
+        if snapshot is not None:
+            return snapshot[1]
         with self._cache_lock:
             key = self.fingerprint()
             cached = self._index_cache
             if cached is not None and cached[0] == key:
-                self.index_key = key
+                self._index_key = key
                 return cached[1]
             index = super().read_index()
             # The key was taken before reading, so a change made during the read forces a re-check next time.
-            self._index_cache, self.index_key = (key, index), key
+            self._index_cache, self._index_key = (key, index), key
             known = {case["case_id"] for case in index["cases"]}
             self._case_cache = {identifier: value for identifier, value in self._case_cache.items() if identifier in known}
             return index
@@ -176,7 +238,7 @@ def review_request(query):
     return filters, numbers("limit", 50), numbers("offset", 0), one("sort", "likes")
 
 
-class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin):
+class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, CarouselWorkbenchMixin, CarouselStillsMixin, CarouselImagesMixin, CarouselFinishedImportMixin, CarouselDeliveryMixin, CarouselPublishMixin):
     def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=()):
         self.store = CachedCaseStore(skill_root)
         self.runtime = Path(runtime_root).resolve()
@@ -203,11 +265,74 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
         self.resolve = ResolveBridge()
         self.ai = AITaskManager(self.store, self.runtime, self.lock, bridge=ai_bridge,
                                 review_digest=self.review_digest, sales_resolver=self.sales)
-        # AI editing uses the same local Claude client as writing, with its own restricted tool profile.
+        # Editing uses the selected local client with a task-specific restricted tool profile.
         self.editor = getattr(self.ai.bridge, "claude", None)
+        codex = getattr(self.ai.bridge, "codex", None)
+        self.edit_codex = CodexEditBridge(executable=getattr(codex, "executable", None))
+        self.still_codex = CodexStillsBridge(executable=getattr(codex, "executable", None))
         self.edit_skill_dir = Path(skill_root).resolve().parent / "davinci-product-video-editing"
         self.ledger_dir = self.runtime / "davinci-ledger"
+        self.carousel_image_root = APP_ROOT / "图文素材"  # existing carousel folders, only read from
+        self.carousel_finished_root = APP_ROOT / "图文成品"  # explicit finished-package import boundary
+        self.image_generator = CodexImageBridge()
+        self.recover_edit_results()
         self.production.interrupt_running()
+        self.data_transfer = DataTransfer(self.store.root, self.runtime, APP_ROOT,
+            locks=(self.lock, self.reviews.lock, self.performance.lock),
+            validator=self.validate_imported_data, ensure_idle=self.ensure_data_idle,
+            on_restore=self.reload_imported_data, extra_sources=performance_sources)
+        self.performance.sources = list(self.data_transfer.manager.extra_sources)
+
+    @staticmethod
+    def validate_imported_data(skill, runtime):
+        store = CaseStore(skill)
+        store.rebuild_index()
+        store.read_index()
+        DirectionStore(runtime, skill).read()
+        CreationStore(runtime).read()
+        ProductionStore(runtime).read()
+
+    def ensure_data_idle(self):
+        with self.lock:
+            tasks = self.ai.list_tasks()
+            if any(task.get("busy") or task.get("stopping") or task.get("status") in {"queued", "running", "stopping"} for task in tasks):
+                raise TransferError("AI 协作正在运行，请结束后再导入、导出或备份。", 409)
+            if getattr(self, "_voicing_jobs", set()) or self.edit_running() or self.image_running():
+                raise TransferError("配音、剪辑或图文制作正在运行，请完成后再操作总数据。", 409)
+
+    def reload_imported_data(self):
+        with self.lock:
+            self.requests.clear()
+            self.structure_cache.clear()
+            self.state_cache = self.products_cache = self.review_product_sources = self.direction_sync_cache = None
+            self.store._index_key = self.store._index_cache = None
+            self.store._case_cache.clear()
+            self.creation.version += 1
+            self.ai._locations.clear()
+            self.ai._live.clear()
+            self.ai._live_saved.clear()
+            self.ai._cancel_events.clear()
+            self.ai._discover()
+            from ai_tasks import ACTIVE, _now
+            for identifier in list(self.ai._locations):
+                task = self.ai._read(identifier)
+                if task["status"] in ACTIVE:
+                    task.update(status="interrupted", progress="数据已恢复，本轮已中断；可检查历史后继续。")
+                    for turn in task["rounds"]:
+                        if turn["status"] in ACTIVE:
+                            turn.update(status="interrupted", error="数据恢复后未自动重试。", completed_at=_now())
+                            self.ai._settle_stages(turn, "interrupted", turn["error"])
+                    self.ai._write(task)
+            self.ai._changed()
+            with self.performance.lock:
+                self.performance.sources = list(self.data_transfer.manager.extra_sources)
+                self.performance._cache.clear()
+                self.performance._cache_generation = None
+                self.performance._cache_bytes = 0
+            self.reviews.state_error = None
+            self.reviews.state.saves += 1
+            self.production.interrupt_running()
+            render_library(self.store.root, self.library)
 
     def claude_settings(self, action, body):
         """Old clients cannot re-enable API billing or install an unused SDK."""
@@ -442,8 +567,10 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
                 point["performance"] = totals(set().union(*led)) if led else None
             return result
 
-    def direction_detail(self, identifier, product=None):
-        with self.lock:
+    def direction_detail(self, identifier, product=None, *, view="full", include_tasks=True):
+        if view not in {"full", "page"}:
+            raise ApiError(400, "方向详情显示范围无效。")
+        with self.lock, self.store.index_snapshot():
             catalog = self.direction_catalog(product)
             matches = [item for item in catalog["directions"] if item["direction_id"] == identifier]
             if not matches:
@@ -453,40 +580,57 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
             entity = matches[0]
             product = entity["product"]
             group = next(iter(self.direction_summary(product=product, direction_id=identifier, archive="all")["groups"]), None)
-            cases = [self.detail(case["case_id"]) for case in self.store.read_index()["cases"]
+            index = self.store.read_index()["cases"]
+            selected = [case for case in index
                      if product_key(case.get("product")) == product and
                      ((case.get("current") or {}).get("test_direction") or {}).get("direction_id") == identifier]
+            # The group already resolved these same video IDs in one sales query.
+            sales = {item["case_id"]: item["sales_data"] for item in (group or {}).get("observations", [])
+                     if item.get("sales_data") is not None}
+            missing = [case for case in selected if case["case_id"] not in sales]
+            if missing:
+                sales.update(self.sales.resolve_cases(missing))
+            if view == "page":
+                # The direction page links to cases; their full histories,
+                # source documents and asset status belong to the case page.
+                # Build the displayed titles directly from this verified index.
+                cases = [{"case_id": case["case_id"], "title": case["title"],
+                          "archived": case["archived"],
+                          "current": {"title": case["current"]["title"]} if case.get("current") else None}
+                         for case in selected]
+            else:
+                raw_catalog = self.synced_directions(index)
+                cases = [self.detail(case["case_id"], sales[case["case_id"]], raw_catalog) for case in selected]
             links = {link["video_id"]: link for link in catalog["video_links"] if link["product"] == product and link["direction_id"] == identifier}
-            case_by_video = {str(((case.get("current") or {}).get("metrics") or {}).get("video_id") or ""): case["case_id"] for case in cases}
+            case_by_video = {str(((case.get("current") or {}).get("metrics") or {}).get("video_id") or ""): case["case_id"] for case in selected}
             videos = (set(links) | set(case_by_video)) - {""}
             by_video = {link["video_id"]: link for link in catalog["video_links"] if link["product"] == product}
             videos = {video for video in videos if video not in by_video or by_video[video]["direction_id"] == identifier}
-            brief = self.performance.video_brief(videos)
             scripts = [{"case_id": case["case_id"], "title": case["current"]["title"],
                         "script_version": (case["current"].get("production") or {}).get("script_version"),
                         "text": case["current"]["transcript"]["text"]}
-                       for case in cases if (case.get("current") or {}).get("transcript")]
+                       for case in selected if (case.get("current") or {}).get("transcript")]
             creation = self.creation_catalog(product)
             independent = [script for script in creation["scripts"] if script.get("direction_id") == identifier]
             scripts.extend(independent)
             videos.update(script["video_id"] for script in independent if script.get("video_id"))
             brief = self.performance.video_brief(videos)
-            tasks = []
-            for task in self.ai.list_tasks():
-                # Tasks belong to their frozen direction, even if the case later moves.
-                snapshot = self.ai._read(task["task_id"])["snapshot"]
-                frozen = (snapshot.get("current") or {}).get("test_direction") or {}
-                frozen_id = ((snapshot.get("creation_context") or {}).get("direction") or {}).get("direction_id") or frozen.get("direction_id")
-                if product_key(snapshot.get("product")) == product and frozen_id == identifier:
-                    tasks.append(task)
-            return {"revision": catalog["revision"], "direction": entity,
+            # Filter frozen ownership before assembling task cards; live case moves
+            # never reassign the task, and there is no second task-file read.
+            defer_tasks = view == "page" and not include_tasks
+            tasks = [] if defer_tasks else self.ai.list_tasks(product=product, direction_id=identifier)
+            result = {"revision": catalog["revision"], "direction": entity,
                     "selling_point": next((point for point in catalog["selling_points"] if point["id"] == entity.get("selling_point_id")), None),
+                    "selling_points": catalog["selling_points"],
                     "group": group, "cases": cases, "scripts": scripts, "tasks": tasks,
                     "creation_revision": creation["revision"],
                     "plans": [plan for plan in creation["plans"] if plan.get("direction_id") == identifier],
                     "theme_links": [link for link in creation["theme_links"] if link.get("direction_id") == identifier or link.get("selling_point_id") == entity.get("selling_point_id")],
                     "videos": [{"video_id": video, **brief.get(video, {}), "product": product, "direction_id": identifier,
                                 "case_id": case_by_video.get(video)} for video in sorted(videos)]}
+            if defer_tasks:
+                result["tasks_pending"] = True
+            return result
 
     def save_direction_catalog(self, kind, body):
         with self.lock:
@@ -1020,10 +1164,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def output(self, status, content, content_type="application/json; charset=utf-8"):
         if not isinstance(content, bytes):
-            content = json.dumps(content, ensure_ascii=False).encode("utf-8")
+            content = json.dumps(content, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        json_response = content_type.startswith("application/json")
+        compressed = json_response and len(content) >= 1024 and accepts_gzip(self.headers.get("Accept-Encoding", ""))
+        if compressed:
+            content = gzip.compress(content, compresslevel=1, mtime=0)
         self.send_response(status)
         self.headers_common()
         self.send_header("Content-Type", content_type)
+        if json_response:
+            self.send_header("Vary", "Accept-Encoding")
+        if compressed:
+            self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(content)))
         if self.close_connection:
             self.send_header("Connection", "close")
@@ -1056,6 +1208,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.begin_write()
                 post_admitted = True
             if self.command in {"GET", "HEAD"}:
+                if self.server.data_maintenance and path not in {"/api/data/status", "/api/service/status"}:
+                    raise ApiError(409, "总数据正在导入，请稍后刷新。")
+                if path == "/api/data/status":
+                    return self.output(200, self.app.data_transfer.status())
+                download = re.fullmatch(r"/api/data/download/([A-Za-z0-9_-]{32})", path)
+                if download:
+                    return self.file(self.app.data_transfer.download(download.group(1)), download=True)
                 if path == "/api/service/status":
                     return self.output(200, {"app": "video-case-workbench", "pid": os.getpid(),
                         "token": self.app.token, "shutdown_supported": True, "shutting_down": self.server.shutting_down,
@@ -1078,15 +1237,56 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.material_catalog(query.get("product", [None])[0]))
                 if path == "/api/production":
                     return self.output(200, self.app.production_catalog(query.get("product", [None])[0]))
+                if path == "/api/production/deliveries":
+                    return self.output(200, self.app.production_deliveries(query.get("product", [None])[0]))
                 if path == "/api/production/eleven":
                     return self.output(200, self.app.eleven_status())
                 if path == "/api/production/resolve":
                     return self.output(200, self.app.resolve_status())
+                if path == "/api/production/still-search":
+                    return self.output(200, self.app.still_search_status())
+                if path == "/api/production/edit-clients":
+                    return self.output(200, self.app.edit_client_status())
+                if path == "/api/production/codex-images":
+                    return self.output(200, self.app.image_status())
                 if path == "/api/production/variants":
                     task_id, round_id = query.get("task_id", [""]), query.get("round_id", [""])
                     if len(task_id) != 1 or len(round_id) != 1 or not re.fullmatch(r"AIT-[0-9a-f]{12}", task_id[0]) or not re.fullmatch(r"AIR-[0-9a-f]{12}", round_id[0]):
                         raise ApiError(400, "候选轮次参数无效。")
                     return self.output(200, self.app.production_variants(task_id[0], round_id[0]))
+                if path == "/api/production/carousel-variants":
+                    task_id, round_id = query.get("task_id", [""]), query.get("round_id", [""])
+                    if len(task_id) != 1 or len(round_id) != 1 or not re.fullmatch(r"AIT-[0-9a-f]{12}", task_id[0]) or not re.fullmatch(r"AIR-[0-9a-f]{12}", round_id[0]):
+                        raise ApiError(400, "候选轮次参数无效。")
+                    return self.output(200, self.app.carousel_variants(task_id[0], round_id[0]))
+                delivery_download = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/deliveries/(DLV-[0-9a-f]{12})/download", path)
+                if delivery_download:
+                    downloaded = self.file(self.app.carousel_delivery_file(*delivery_download.groups()), download=True)
+                    if downloaded:
+                        self.app.collect_carousel_delivery(*delivery_download.groups())
+                    return
+                carousel_output = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/outputs/(OUT-[0-9a-f]{12})", path)
+                if carousel_output:
+                    size = query.get("size", ["thumb"])[0]
+                    return self.file(self.app.carousel_output(*carousel_output.groups(), "full" if size == "full" else "thumb"))
+                carousel_image = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/images/(CND-[0-9a-f]{12})", path)
+                if carousel_image:
+                    size = query.get("size", ["thumb"])[0]
+                    return self.file(self.app.carousel_image(*carousel_image.groups(), "full" if size == "full" else "thumb"))
+                folder_list = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/folder-images", path)
+                if folder_list:
+                    return self.output(200, self.app.folder_images(folder_list.group(1)))
+                if path == "/api/production/folder-thumb":
+                    selected = query.get("path", [""])
+                    if len(selected) != 1:
+                        raise ApiError(400, "图片路径无效。")
+                    return self.file(self.app.folder_thumb(selected[0]))
+                carousel_match = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})", path)
+                if carousel_match:
+                    return self.output(200, self.app.carousel_detail(carousel_match.group(1)))
+                carousel_preflight = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/preflight", path)
+                if carousel_preflight:
+                    return self.output(200, self.app.carousel_delivery_preflight(carousel_preflight.group(1)))
                 job_match = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})", path)
                 if job_match:
                     return self.output(200, self.app.production_job(job_match.group(1)))
@@ -1102,7 +1302,14 @@ class Handler(BaseHTTPRequestHandler):
                         raise ApiError(400, "方向产品筛选只能出现一次。")
                     if path == "/api/direction-catalog":
                         return self.output(200, self.app.direction_catalog(selected[0]))
-                    return self.output(200, self.app.direction_detail(path.removeprefix("/api/direction-catalog/"), selected[0]))
+                    views = query.get("view", ["full"])
+                    if len(views) != 1:
+                        raise ApiError(400, "方向详情显示范围只能出现一次。")
+                    include_tasks = parse_qs(parsed.query, keep_blank_values=True).get("include_tasks", ["1"])
+                    if len(include_tasks) != 1 or include_tasks[0] not in {"0", "1"}:
+                        raise ApiError(400, "方向详情任务显示范围须是单个 0 或 1。")
+                    return self.output(200, self.app.direction_detail(path.removeprefix("/api/direction-catalog/"), selected[0],
+                        view=views[0], include_tasks=include_tasks[0] == "1"))
                 if path == "/api/directions":
                     values = {}
                     for key, default in (("product", None), ("direction_id", None), ("archive", "active")):
@@ -1114,14 +1321,21 @@ class Handler(BaseHTTPRequestHandler):
                         return self.output(200, self.app.direction_summary(**values))
                 if path == "/api/ai/options":
                     return self.output(200, self.app.ai.options(refresh=query.get("refresh") == ["1"]))
+                if path == "/api/ai/preferences":
+                    return self.output(200, {"preferences": self.app.ai.preferences()})
                 ai_stream = re.fullmatch(r"/api/ai/tasks/(AIT-[0-9a-f]{12})/stream", path)
                 if ai_stream:
                     return self.event_stream(ai_stream.group(1))
                 if path == "/api/ai/tasks":
-                    selected = query.get("case_id", [None])
-                    if len(selected) != 1:
-                        raise ApiError(400, "案例筛选格式无效。")
-                    return self.output(200, {"tasks": self.app.ai.list_tasks(selected[0])})
+                    values = {}
+                    task_query = parse_qs(parsed.query, keep_blank_values=True)
+                    for name in ("case_id", "product", "direction_id"):
+                        selected = (query if name == "case_id" else task_query).get(name, [None])
+                        if len(selected) != 1:
+                            raise ApiError(400, "AI 任务筛选格式无效。")
+                        values[name] = selected[0]
+                    return self.output(200, {"tasks": self.app.ai.list_tasks(values["case_id"],
+                        product=values["product"], direction_id=values["direction_id"])})
                 ai_match = re.fullmatch(r"/api/ai/tasks/(AIT-[0-9a-f]{12})", path)
                 if ai_match:
                     return self.output(200, {"task": self.app.ai.get(ai_match.group(1))})
@@ -1200,6 +1414,16 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/upload":
                     post_body_unread = False  # upload handles its own bounded rejection drain.
                     return self.upload(query)
+                if path == "/api/data/import/inspect":
+                    try:
+                        length = int(self.headers.get("Content-Length", "-1"))
+                    except ValueError:
+                        raise ApiError(400, "备份包长度无效。")
+                    if not 0 < length <= MAX_BYTES + 1024**3:
+                        raise ApiError(413, "备份包为空或超过 2 TB。")
+                    self.connection.settimeout(300)
+                    post_body_unread = False
+                    return self.output(200, self.app.data_transfer.inspect_upload(self.rfile, length))
                 length = self.content_length(4 * 1024 * 1024)
                 try:
                     raw_body = self.rfile.read(length)
@@ -1209,6 +1433,31 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(400, "提交内容不是有效数据。")
                 if not isinstance(body, dict):
                     raise ApiError(400, "提交内容格式错误。")
+                if path == "/api/data/settings":
+                    return self.output(200, self.app.data_transfer.save_settings(body))
+                if path == "/api/data/preferences":
+                    return self.output(200, self.app.data_transfer.save_preferences(body))
+                if path == "/api/data/export":
+                    return self.output(200, self.app.data_transfer.export(body))
+                if path == "/api/data/import":
+                    return self.output(200, self.app.data_transfer.restore(body))
+                if path in {"/api/data/backup", "/api/data/backup/due"}:
+                    if body:
+                        raise ApiError(400, "备份操作只接受空对象。")
+                    result = self.app.data_transfer.due_backup() if path.endswith("/due") else self.app.data_transfer.backup()
+                    return self.output(200, result or {"status": self.app.data_transfer.status(), "unchanged": True})
+                if path in {"/api/data/pick-directory", "/api/data/open-directory"}:
+                    if body or not self.app.allow_open:
+                        raise ApiError(403, "当前模式无法打开本地目录窗口。")
+                    if path.endswith("pick-directory"):
+                        return self.output(200, pick_directory())
+                    directory = self.app.data_transfer.status()["settings"]["directory"]
+                    if not directory or not Path(directory).is_dir():
+                        raise ApiError(404, "请先保存可用的备份文件夹。")
+                    if os.name != "nt":
+                        raise ApiError(400, "当前系统不支持打开本地文件夹。")
+                    subprocess.Popen(["explorer.exe", directory])
+                    return self.output(200, {"ok": True})
                 if path == "/api/service/shutdown":
                     if body:
                         raise ApiError(400, "关闭服务只接受空对象。")
@@ -1236,6 +1485,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, draft)
                 if path == "/api/ai/tasks":
                     return self.output(200, {"task": self.app.create_ai_task(body)})
+                if path == "/api/ai/preferences":
+                    return self.output(200, {"preferences": self.app.ai.save_preferences(body)})
                 if path == "/api/scripts":
                     return self.output(200, self.app.save_script(body))
                 script_action = re.fullmatch(r"/api/scripts/(SCR-[0-9a-f]{12})/(status|case)", path)
@@ -1252,16 +1503,48 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.save_production_settings(body))
                 if path == "/api/production/jobs":
                     return self.output(200, self.app.create_production_job(body))
+                if path == "/api/production/carousels":
+                    return self.output(200, self.app.create_carousel(body))
+                search_cancel = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/searches/(STS-[0-9a-f]{12})/cancel", path)
+                if search_cancel:
+                    return self.output(200, self.app.cancel_still_search(*search_cancel.groups()))
+                image_cancel = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/generations/(IMG-[0-9a-f]{12})/cancel", path)
+                if image_cancel:
+                    return self.output(200, self.app.cancel_image_generation(*image_cancel.groups()))
+                review_cancel = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/reviews/(REV-[0-9a-f]{12})/cancel", path)
+                if review_cancel:
+                    return self.output(200, self.app.cancel_image_generation(*review_cancel.groups()))
+                carousel_action = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/(slides|archive|search|base|import|import-finished|generate|recheck|select-output|requirements|preflight|approval|delivery|publication)", path)
+                if carousel_action:
+                    identifier, action = carousel_action.groups()
+                    handler = {"slides": self.app.save_carousel_slides, "archive": self.app.archive_carousel,
+                               "search": self.app.start_still_search, "base": self.app.choose_base,
+                               "import": self.app.import_folder_image, "generate": self.app.start_image_generation,
+                               "import-finished": self.app.import_finished_images, "recheck": self.app.start_carousel_review,
+                               "select-output": self.app.select_carousel_output, "requirements": self.app.save_carousel_requirements,
+                               "preflight": self.app.carousel_delivery_preflight,
+                               "approval": self.app.approve_carousel_output, "delivery": self.app.create_carousel_delivery,
+                               "publication": self.app.save_carousel_publication}[action]
+                    return self.output(200, handler(identifier, body))
                 edit_cancel = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/edits/(EDT-[0-9a-f]{12})/cancel", path)
                 if edit_cancel:
                     return self.output(200, self.app.cancel_edit(*edit_cancel.groups()))
-                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|archive|timeline|open|edit|handoff)", path)
+                edit_recheck = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/edits/(EDT-[0-9a-f]{12})/recheck", path)
+                if edit_recheck:
+                    return self.output(200, self.app.recheck_edit(*edit_recheck.groups(), body))
+                edit_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/edits/(EDT-[0-9a-f]{12})/(approval|baseline)", path)
+                if edit_action:
+                    identifier, edit_id, action = edit_action.groups()
+                    handler = {"approval": self.app.approve_edit, "baseline": self.app.adopt_edit_baseline}[action]
+                    return self.output(200, handler(identifier, edit_id, body))
+                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|archive|timeline|open|edit|handoff|recover)", path)
                 if job_action:
                     identifier, action = job_action.groups()
                     handler = {"takes": self.app.generate_take, "select": self.app.select_take,
                                "lines": self.app.save_job_lines, "archive": self.app.archive_job,
                                "timeline": self.app.build_timeline, "open": self.app.open_timeline,
-                               "edit": self.app.start_edit, "handoff": self.app.edit_handoff}[action]
+                               "edit": self.app.start_edit, "handoff": self.app.edit_handoff,
+                               "recover": self.app.recover_production_operation}[action]
                     return self.output(200, handler(identifier, body))
                 if path == "/api/materials/remove":
                     return self.output(200, self.app.remove_materials(body))
@@ -1345,6 +1628,9 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             self.close_connection = True
             self.output(exc.status, {"error": str(exc)})
+        except (TransferError, BackupError) as exc:
+            self.close_connection = True
+            return self.output(exc.status, {"error": str(exc)})
         except DirectionError as exc:
             return self.output(exc.status, {"error": str(exc)})
         except CreationError as exc:
@@ -1464,18 +1750,7 @@ class Handler(BaseHTTPRequestHandler):
                         packed = None
                     cached = (key, raw, packed)
                     self.server.static_cache[path] = cached
-            encodings = {}
-            for part in self.headers.get("Accept-Encoding", "").lower().split(","):
-                name, *parameters = part.strip().split(";")
-                quality = 1.0
-                for parameter in parameters:
-                    if parameter.strip().startswith("q="):
-                        try:
-                            quality = float(parameter.strip()[2:])
-                        except ValueError:
-                            quality = 0.0
-                encodings[name] = quality
-            compressed = cached[2] is not None and encodings.get("gzip", encodings.get("*", 0)) > 0 and not self.headers.get("Range")
+            compressed = cached[2] is not None and accepts_gzip(self.headers.get("Accept-Encoding", "")) and not self.headers.get("Range")
             content = cached[2] if compressed else cached[1]
             etag = '"' + hashlib.sha256(content).hexdigest() + '"'
             supplied = self.headers.get("If-None-Match", "")
@@ -1533,6 +1808,9 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     remaining -= len(chunk)
+                if download and status == 200 and remaining == 0:
+                    self.wfile.flush()
+                    return True
 
 
 class WorkbenchHTTPServer(ThreadingHTTPServer):
@@ -1547,6 +1825,8 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
         self.static_cache = {}
         self._active_writes = 0
         self._shutting_down = False
+        self.data_maintenance = False
+        self._request_context = threading.local()
         super().__init__(*args, **kwargs)
 
     @property
@@ -1556,13 +1836,37 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
 
     def begin_write(self):
         with self._write_gate:
+            if self.data_maintenance:
+                raise ApiError(409, "总数据导入、导出或备份正在进行，请完成后再保存或上传。")
             if self._shutting_down:
                 raise ApiError(409, "工作台正在重新启动，请稍后重试。")
             self._active_writes += 1
+            self._request_context.writing = True
 
     def end_write(self):
         with self._write_gate:
             self._active_writes -= 1
+            self._request_context.writing = False
+            self._write_gate.notify_all()
+
+    def begin_data_maintenance(self):
+        with self._write_gate:
+            own_request = int(bool(getattr(self._request_context, "writing", False)))
+            if self._shutting_down or self.data_maintenance or self._active_writes > own_request:
+                raise ApiError(409, "还有保存或上传操作正在进行，请完成后再导入总数据。")
+            self.data_maintenance = True
+
+    @contextmanager
+    def data_operation(self):
+        self.begin_data_maintenance()
+        try:
+            yield
+        finally:
+            self.end_data_maintenance()
+
+    def end_data_maintenance(self):
+        with self._write_gate:
+            self.data_maintenance = False
             self._write_gate.notify_all()
 
     def prepare_shutdown(self):
@@ -1571,6 +1875,8 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
                 raise ApiError(409, "工作台已经在关闭，请等待完成。")
             if self._active_writes:
                 raise ApiError(409, "工作台正在保存或处理操作，请完成后重试。")
+            if getattr(self.app, "data_transfer", None) and self.app.data_transfer.busy:
+                raise ApiError(409, "总数据备份或导入导出正在进行，请完成后重试。")
             # Reserve admission before checking AI. No gate is held while
             # taking the app/AI lock, so finishing writes cannot deadlock it.
             self._shutting_down = True
@@ -1581,6 +1887,10 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
                 raise ApiError(409, "AI 协作仍在运行或停止中，请完成后再重新启动。")
             if self.app.edit_running():
                 raise ApiError(409, "AI 剪辑仍在运行，请等它结束或先停止，再重新启动。")
+            if getattr(self.app, "_voicing_jobs", set()):
+                raise ApiError(409, "配音仍在运行，请等它完成后再重新启动。")
+            if getattr(self.app, "image_running", lambda: False)():
+                raise ApiError(409, "图文出图仍在运行，请等它结束或先停止，再重新启动。")
         except Exception:
             with self._write_gate:
                 self._shutting_down = False
@@ -1594,12 +1904,16 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
 
     def server_close(self):
         if hasattr(self, "app"):
+            self.app.data_transfer.close()
+            getattr(self.app, "stop_images", lambda: None)()
             self.app.stop_edits()
             self.app.ai.shutdown()
             close = getattr(self.app.ai.bridge, "close", None)
             if callable(close):
                 close()
         super().server_close()
+        if getattr(self, "data_lease", None):
+            self.data_lease.close()
 
 
 def make_server(skill_root, runtime_root, port=8767, allow_open=True, ai_bridge=None, performance_sources=None):
@@ -1608,8 +1922,13 @@ def make_server(skill_root, runtime_root, port=8767, allow_open=True, ai_bridge=
     if performance_sources is None:
         performance_sources = DEFAULT_CONFIG.get("performance_sources", [])
     try:
+        server.data_lease = ServerLease(runtime_root)
+        if not server.data_lease.acquire():
+            raise RuntimeError("此工作台正在运行或正在离线备份，请稍后重新打开。")
         server.app = Workbench(skill_root, runtime_root, allow_open, ai_bridge=ai_bridge,
                                performance_sources=performance_sources)
+        server.app.data_transfer.maintenance = server.data_operation
+        server.app.data_transfer.start(server.server_port)
     except Exception:
         server.server_close()
         raise

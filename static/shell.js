@@ -7,7 +7,7 @@
   const products = new Map([["202H", "SHARPAL 202H"]]);
   const listContexts = new Map(), detailContexts = new Map();
   const navigationStorageKey = "workbench-navigation-v1";
-  const pageLabels = { home: "本周", library: "案例库", directions: "卖点与方向", videos: "视频数据", reviews: "用户声音", ai: "写稿", scripts: "脚本版本", production: "制作单", settings: "设置" };
+  const pageLabels = { home: "工作概览", library: "案例库", directions: "卖点与方向", videos: "视频数据", reviews: "用户声音", ai: "内容创作", scripts: "脚本版本", production: "内容制作", settings: "设置" };
   let navigationRoute = null, restoringList = null;
   let breadcrumbSource = null, breadcrumbHTML = null;
   try {
@@ -170,7 +170,7 @@
     if (!node) return;
     const parsed = parse(), page = parsed.page === "case" ? "library" : parsed.page;
     const crumbs = [{ label: "工作空间", href: listURL("home", parsed.product) }];
-    if (["scripts", "production"].includes(page)) crumbs.push({ label: "写稿", href: listURL("ai", parsed.product) });
+    if (["scripts", "production"].includes(page)) crumbs.push({ label: "内容创作", href: listURL("ai", parsed.product) });
     crumbs.push({ label: pageLabels[page] || "案例库", href: parsed.tail.length ? parentURL(parsed) : null });
     if (parsed.tail.length) {
       let label = parsed.page === "case" ? "案例详情" : page === "ai" ? "任务详情" : page === "scripts" ? "脚本详情" : page === "production" ? (parsed.tail[0].startsWith("CAR-") ? "图文制作单" : "制作单详情") : parsed.tail.join("/");
@@ -189,7 +189,7 @@
     if (up) {
       up.hidden = !parsed.tail.length && !["scripts", "production"].includes(parsed.page);
       up.href = parentURL(parsed);
-      const parentLabel = parsed.page === "case" ? "案例库" : parsed.tail.length ? pageLabels[page] : "写稿";
+      const parentLabel = parsed.page === "case" ? "案例库" : parsed.tail.length ? pageLabels[page] : "内容创作";
       up.title = `返回${parentLabel}`;
       up.setAttribute("aria-label", up.title);
     }
@@ -334,6 +334,7 @@
     const compactScreen = window.matchMedia("(max-width:850px)");
     const phoneScreen = window.matchMedia("(max-width:760px)");
     const shortcuts = [...rail.querySelectorAll("[data-sidebar-target]")];
+    const connection = sidebar.querySelector("#connection-status");
     let preference = null, collapsed = false, peek = false, openTimer = 0, closeTimer = 0;
     let pendingTrigger = null;
     let lastTrigger = menu, ignoreFocus = false, keyboardMode = false;
@@ -451,6 +452,12 @@
       if (document.querySelector("dialog[open]")) closePeek();
     });
     for (const region of [rail, sidebar]) {
+      // Keep the two columns on the same rows when a short window needs scrolling.
+      region.addEventListener("scroll", () => {
+        if (!collapsed) return;
+        const other = region === rail ? sidebar : rail;
+        if (Math.abs(other.scrollTop - region.scrollTop) > 1) other.scrollTop = region.scrollTop;
+      }, {passive:true});
       region.addEventListener("pointerenter", cancelClose);
       region.addEventListener("pointerleave", () => { cancelOpen(); scheduleClose(); });
       region.addEventListener("focusin", cancelClose);
@@ -464,6 +471,14 @@
     });
     document.addEventListener("keydown", event => {
       keyboardMode = true;
+      const connectionStatus = document.querySelector("#connection-status");
+      if (event.key === "Escape" && connectionStatus?.open && connectionStatus.contains(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        connectionStatus.open = false;
+        connectionStatus.querySelector("summary").focus();
+        return;
+      }
       if (event.key === "Escape" && peek && !event.defaultPrevented && !document.querySelector("dialog[open]")) {
         event.preventDefault();
         // The page's Escape shortcut must not navigate while dismissing this panel.
@@ -482,6 +497,11 @@
     });
     // Counts and connection-driven labels can update without a route change.
     new MutationObserver(syncRail).observe(sidebar, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["class", "hidden", "aria-label", "aria-current", "data-public-hidden"] });
+    if (connection) new ResizeObserver(() => {
+      // Sync details can grow; reserve that same footer space under the icon tools.
+      const height = connection.getBoundingClientRect().height + parseFloat(getComputedStyle(connection).marginTop || "0");
+      root.style.setProperty("--sidebar-footer-space", `${height}px`);
+    }).observe(connection);
     syncRail();
     applyPreference();
   }
@@ -499,8 +519,6 @@
     if (button && action) { button.innerHTML = `${icon(action[1])}${action[0]}`; button.onclick = action[2]; }
     const importer = document.querySelector("#import-video-top");
     if (importer) importer.hidden = !["library", "case"].includes(parsed.page);
-    const brand = document.querySelector(".brand");
-    if (brand) brand.href = listURL("home");
     registerProducts(state.cases);
     renderBreadcrumb();
   }

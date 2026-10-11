@@ -31,9 +31,11 @@ SETTING_RANGES = {"stability": (0.0, 1.0, 0.5), "similarity_boost": (0.0, 1.0, 0
 
 
 class VoiceError(ValueError):
-    def __init__(self, status, message):
+    def __init__(self, status, message, *, retry_safe=False, provider_status=None):
         super().__init__(message)
         self.status = status
+        self.retry_safe = retry_safe
+        self.provider_status = provider_status
 
 
 def model(identifier):
@@ -93,9 +95,9 @@ class ElevenLabsClient:
     def key(self):
         value = self.key_provider()
         if not value:
-            raise VoiceError(503, f"没有找到 ElevenLabs 密钥。请把以 sk_ 开头的密钥设为用户环境变量 {KEY_NAME}。")
+            raise VoiceError(503, f"没有找到 ElevenLabs 密钥。请把以 sk_ 开头的密钥设为用户环境变量 {KEY_NAME}。", retry_safe=True)
         if not value.startswith("sk_"):
-            raise VoiceError(503, f"环境变量 {KEY_NAME} 里的值不是以 sk_ 开头的密钥，可能填成了密钥 ID。请在 ElevenLabs 后台新建或轮换密钥，复制完整密钥后重新设置。")
+            raise VoiceError(503, f"环境变量 {KEY_NAME} 里的值不是以 sk_ 开头的密钥，可能填成了密钥 ID。请在 ElevenLabs 后台新建或轮换密钥，复制完整密钥后重新设置。", retry_safe=True)
         return value
 
     def _urllib(self, method, url, headers, data, timeout):
@@ -132,15 +134,16 @@ class ElevenLabsClient:
             raise VoiceError(502, "连接 ElevenLabs 失败，请检查网络后重试。") from exc
         if status >= 400:
             code, message = _message(raw)
+            refusal = {"retry_safe": 400 <= status < 500, "provider_status": status}
             if status in {401, 403} or "api_key" in code or "invalid_api_key" in message:
-                raise VoiceError(503, "ElevenLabs 拒绝了密钥，请确认环境变量里是以 sk_ 开头、仍然有效的完整密钥。")
+                raise VoiceError(503, "ElevenLabs 拒绝了密钥，请确认环境变量里是以 sk_ 开头、仍然有效的完整密钥。", **refusal)
             if status == 404 or code in {"voice_not_found", "not_found"}:
-                raise VoiceError(404, "ElevenLabs 找不到这个音色 ID，请核对后再试。")
+                raise VoiceError(404, "ElevenLabs 找不到这个音色 ID，请核对后再试。", **refusal)
             if "quota" in code or "quota" in message.lower() or status == 402:
-                raise VoiceError(409, "ElevenLabs 额度不足，本次没有生成。")
+                raise VoiceError(409, "ElevenLabs 额度不足，本次没有生成。", **refusal)
             if status == 429:
-                raise VoiceError(429, "ElevenLabs 当前请求过多，请稍后重试。")
-            raise VoiceError(502, f"ElevenLabs 返回错误（{status}）{('：' + message[:300]) if message else ''}")
+                raise VoiceError(429, "ElevenLabs 当前请求过多，请稍后重试。", **refusal)
+            raise VoiceError(502, f"ElevenLabs 返回错误（{status}）{('：' + message[:300]) if message else ''}", **refusal)
         try:
             body = json.loads(raw)
         except ValueError as exc:

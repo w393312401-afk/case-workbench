@@ -16,10 +16,13 @@ ranges are kept for reference only.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
+import copy
 import math
 import re
 import shutil
 import sqlite3
+import sys
 import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -59,6 +62,27 @@ METRICS = [c for c in dict.fromkeys(COLUMNS.values()) if c not in TEXT]
 TOTAL_METRICS = [c for c in TOTAL_COLUMNS.values() if c != "date"]
 VIDEO_TEXT = ["account", "creator_id", "title", "posted_at", "products"]
 SUMMED = ["views", "likes", "comments", "shares", "impressions", "clicks", "orders", "items", "gmv"]
+FACT_COLUMNS = ("video_id", "start", "end", "account", "title", "posted_at", "products", *SUMMED, "source_file")
+MAX_CACHE_BYTES = 64 * 1024 * 1024
+MAX_CACHE_ENTRIES = 128
+_MISS = object()
+
+
+def _memory_size(value):
+    """Conservative retained Python size, including nested containers and shared keys."""
+    pending, seen, total = [value], set(), 0
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        total += sys.getsizeof(item)
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            pending.extend(item)
+    return total
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS daily (
@@ -151,14 +175,74 @@ class PerformanceStore:
         self.database = self.root / "performance.sqlite"
         self.uploads = self.root / "uploads"
         self.sources = [Path(s) for s in sources]
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self._cache = OrderedDict()
+        self._cache_generation = None
+        self._cache_bytes = 0
 
     def connect(self):
         self.root.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.database, isolation_level=None, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.executescript(SCHEMA)
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.executescript(SCHEMA)
+            return connection
+        except Exception:
+            connection.close()
+            raise
+
+    def _query_connection(self):
+        """Pin one SQLite read snapshot; close it after each query to permit file replacement."""
+        connection = self.connect()
+        try:
+            connection.execute("PRAGMA temp_store=MEMORY")
+            before = self.signature()
+            connection.execute("BEGIN")
+            connection.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            generation = before if before == self.signature() else None
+            return connection, generation
+        except Exception:
+            connection.close()
+            raise
+
+    def _cached_value(self, key):
+        if key not in self._cache:
+            return _MISS
+        value, weight = self._cache.pop(key)
+        self._cache[key] = (value, weight)
+        return value
+
+    def _remember(self, key, value, generation):
+        # Results from a pinned old snapshot may still be returned to its reader,
+        # but must never become the cache for newer commits made outside our lock.
+        if generation != self._cache_generation or generation != self.signature():
+            return
+        weight = _memory_size((key, value))
+        if weight > MAX_CACHE_BYTES:
+            return
+        previous = self._cache.pop(key, None)
+        if previous is not None:
+            self._cache_bytes -= previous[1]
+        while self._cache and (self._cache_bytes + weight > MAX_CACHE_BYTES or len(self._cache) >= MAX_CACHE_ENTRIES):
+            _, (_, removed) = self._cache.popitem(last=False)
+            self._cache_bytes -= removed
+        self._cache[key] = (value, weight)
+        self._cache_bytes += weight
+
+    def _read_cached(self, key, loader, clone=copy.deepcopy):
+        # One lock coalesces identical misses and lets the different dashboard
+        # queries reuse the normalized facts from this database generation.
+        with self.lock:
+            generation = self.signature()
+            if generation != self._cache_generation:
+                self._cache.clear()
+                self._cache_bytes = 0
+                self._cache_generation = generation
+            value = self._cached_value(key)
+            if value is _MISS:
+                value = loader()
+                self._remember(key, value, generation)
+            return clone(value)
 
     # ---- import -----------------------------------------------------------
     def _import_file(self, connection, path):
@@ -236,30 +320,54 @@ class PerformanceStore:
         return target
 
     # ---- queries ----------------------------------------------------------
-    def _facts(self, connection):
+    def _facts(self, connection, generation=None):
         """Per-video rows without double counting daily and weekly exports."""
+        cached = self._cached_value("facts") if generation is not None and generation == self._cache_generation else _MISS
+        if cached is not _MISS:
+            image, excluded = cached
+            connection.execute("ATTACH DATABASE ':memory:' AS normalized")
+            connection.deserialize(image, name="normalized")
+            connection.execute("CREATE TEMP VIEW facts AS SELECT * FROM normalized.facts")
+            return excluded
+        connection.execute(f"CREATE TEMP TABLE facts ({', '.join(column + (' REAL' if column in SUMMED else ' TEXT') for column in FACT_COLUMNS)})")
+        excluded = self._materialize_facts(connection)
+        connection.execute("CREATE INDEX temp.facts_video ON facts(video_id, end, start, source_file)")
+        connection.execute("CREATE INDEX temp.facts_dates ON facts(start, end)")
+        # A SQLite image is far smaller and faster to reuse than thousands of
+        # Python row objects. It contains only derived temporary data; each reader
+        # restores its own in-memory copy alongside its pinned source snapshot.
+        if hasattr(connection, "serialize") and hasattr(connection, "deserialize"):
+            try:
+                image = connection.serialize(name="temp")
+            except sqlite3.NotSupportedError:
+                pass
+            else:
+                self._remember("facts", (image, excluded), generation)
+        return excluded
+
+    def _materialize_facts(self, connection):
         # A shifted weekly export can overlap another week's totals. Choose
         # whole newer intervals per video; an older partial overlap cannot be
         # split into daily metrics. Every read path uses this same selection.
-        selected, covered, excluded = [], {}, {}
+        selected, covered, excluded, intervals = [], {}, {}, {}
         for row in connection.execute("SELECT video_id, range_start, range_end, source_file FROM periods WHERE span_days=7 ORDER BY video_id, range_end DESC, range_start DESC, source_file DESC"):
             video_id, start, end, source_file = row
-            first, last = date.fromisoformat(start), date.fromisoformat(end)
-            days = {(first + timedelta(days=i)).isoformat() for i in range((last-first).days+1)}
+            interval = (start, end)
+            days = intervals.get(interval)
+            if days is None:
+                first, last = date.fromisoformat(start), date.fromisoformat(end)
+                days = {(first + timedelta(days=i)).isoformat() for i in range((last-first).days+1)}
+                intervals[interval] = days
             used = covered.setdefault(video_id, set())
             if days & used:
                 excluded.setdefault(video_id, []).append({"start": start, "end": end, "source_file": source_file})
             else:
                 selected.append((video_id, start, end))
                 used.update(days)
-        connection.executescript("""
-            DROP TABLE IF EXISTS temp.week_ranges;
-            CREATE TEMP TABLE week_ranges (video_id TEXT, s TEXT, e TEXT, PRIMARY KEY (video_id, s, e));
-        """)
+        connection.execute("CREATE TEMP TABLE week_ranges (video_id TEXT, s TEXT, e TEXT, PRIMARY KEY (video_id, s, e))")
         connection.executemany("INSERT INTO week_ranges VALUES (?,?,?)", selected)
-        connection.executescript("""
-            DROP VIEW IF EXISTS temp.facts;
-            CREATE TEMP VIEW facts AS
+        connection.execute("""
+            INSERT INTO facts
               SELECT video_id, date start, date end, account, title, posted_at, products,
                      views, likes, comments, shares, impressions, clicks, orders, items, gmv, source_file
               FROM daily d WHERE NOT EXISTS (SELECT 1 FROM week_ranges w
@@ -268,7 +376,7 @@ class PerformanceStore:
               SELECT video_id, range_start, range_end, account, title, posted_at, products,
                      views, likes, comments, shares, impressions, clicks, orders, items, gmv, source_file
               FROM periods p WHERE p.span_days = 7 AND EXISTS (SELECT 1 FROM week_ranges w
-                  WHERE w.video_id = p.video_id AND w.s = p.range_start AND w.e = p.range_end);
+                  WHERE w.video_id = p.video_id AND w.s = p.range_start AND w.e = p.range_end)
         """)
         return excluded
 
@@ -282,11 +390,19 @@ class PerformanceStore:
         return days
 
     def videos(self, case_links=None):
+        result = self._read_cached("videos", self._read_videos)
         case_links = case_links or {}
+        for video in result:
+            video["case_id"] = case_links.get(video["video_id"])
+        return result
+
+    def _read_videos(self, source=None):
+        # Case links belong to the workbench, rather than the sales database cache.
+        case_links = {}
         with self.lock:
-            connection = self.connect()
+            connection, generation = source if source is not None else self._query_connection()
             try:
-                self._facts(connection)
+                self._facts(connection, generation)
                 covered = self.coverage(connection)
                 last_day = max(covered) if covered else None
                 first_seen = dict(connection.execute("SELECT account, MIN(start) FROM facts GROUP BY account").fetchall())
@@ -305,7 +421,8 @@ class PerformanceStore:
                         FROM facts GROUP BY video_id, week"""):
                     weekly.setdefault(video_id, {})[week] = (views or 0, gmv or 0)
             finally:
-                connection.close()
+                if source is None:
+                    connection.close()
         this_week = _monday(date.fromisoformat(last_day)).isoformat() if last_day else None
         result = []
         for row in rows:
@@ -345,14 +462,17 @@ class PerformanceStore:
         """The few figures shown beside a video elsewhere (title, account, posting day, views, clicks, orders, GMV), for just
         these videos. A light cousin of videos(), which works out every video's follow-up status and takes seconds.
         Empty (and nothing is created) before any export was imported."""
-        ids = sorted({str(v) for v in video_ids if v})
+        ids = tuple(sorted({str(v) for v in video_ids if v}))
         if not ids or not self.database.is_file():
             return {}
+        return self._read_cached(("brief", ids), lambda: self._read_video_brief(ids))
+
+    def _read_video_brief(self, ids):
         result = {}
         with self.lock:
-            connection = self.connect()
+            connection, generation = self._query_connection()
             try:
-                excluded = self._facts(connection)
+                excluded = self._facts(connection, generation)
                 for start in range(0, len(ids), 500):
                     chunk = ids[start:start + 500]
                     # Keep each requested video's own coverage, not the union of
@@ -403,32 +523,39 @@ class PerformanceStore:
         for path in (self.database, Path(str(self.database) + "-wal")):
             try:
                 stat = path.stat()
-                values.append((str(path), stat.st_size, stat.st_mtime_ns, getattr(stat, "st_ino", None)))
+                values.append((str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, getattr(stat, "st_ino", None)))
             except OSError:
                 values.append((str(path), None))
         return tuple(values)
 
     def video(self, video_id, case_links=None):
-        videos = self.videos(case_links)
-        rows = [v for v in videos if v["video_id"] == video_id]
-        if not rows:
-            return None
-        row = rows[0]
-        # Where this video sits among the others: first-two-week views against videos whose window
-        # is complete (the follow-up rule's basis), cumulative GMV against every imported video.
-        # "Top N%": the share of videos at or above this one, rounded up, never below 1%.
-        def top_pct(values, value):
-            return max(1, math.ceil(100 * sum(other >= value for other in values) / len(values)))
+        result = self._read_cached(("video", video_id), lambda: self._read_video(video_id))
+        if result is not None:
+            result["case_id"] = (case_links or {}).get(video_id)
+        return result
 
-        judged = [v["window_views"] for v in videos if v["status"] in {"focus", "follow", "watch", "drop"}]
-        ranks = {"judged_videos": len(judged), "all_videos": len(videos),
-                 "gmv_top_pct": top_pct([v["gmv"] or 0 for v in videos], row["gmv"] or 0)}
-        if judged and row["status"] in {"focus", "follow", "watch", "drop"}:
-            ranks["window_top_pct"] = top_pct(judged, row["window_views"])
+    def _read_video(self, video_id):
         with self.lock:
-            connection = self.connect()
+            connection, generation = self._query_connection()
             try:
-                self._facts(connection)
+                videos = self._cached_value("videos") if generation is not None and generation == self._cache_generation else _MISS
+                if videos is _MISS:
+                    videos = self._read_videos((connection, generation))
+                    self._remember("videos", videos, generation)
+                else:
+                    self._facts(connection, generation)
+                row = next((video for video in videos if video["video_id"] == video_id), None)
+                if row is None:
+                    return None
+                # Ranks, totals and series all describe the same pinned snapshot.
+                def top_pct(values, value):
+                    return max(1, math.ceil(100 * sum(other >= value for other in values) / len(values)))
+
+                judged = [video["window_views"] for video in videos if video["status"] in {"focus", "follow", "watch", "drop"}]
+                ranks = {"judged_videos": len(judged), "all_videos": len(videos),
+                         "gmv_top_pct": top_pct([video["gmv"] or 0 for video in videos], row["gmv"] or 0)}
+                if judged and row["status"] in {"focus", "follow", "watch", "drop"}:
+                    ranks["window_top_pct"] = top_pct(judged, row["window_views"])
                 series = [dict(r) for r in connection.execute(
                     "SELECT start, end, views, clicks, orders, items, gmv FROM facts WHERE video_id = ? ORDER BY start", (video_id,))]
             finally:
@@ -443,11 +570,19 @@ class PerformanceStore:
                  one, else the daily rows, else the weekly ones (a week belongs to the month holding its Thursday).
         shop_daily: all-video daily totals, which are a different caliber from the per-video rows and never mixed with them.
         Row layout is [video index, week|month, views, impressions, clicks, orders, items, gmv]."""
+        def clone(value):
+            # All row cells are immutable scalars; copy the mutable containers.
+            return {"videos": [row[:] for row in value["videos"]], "weekly": [row[:] for row in value["weekly"]],
+                    "monthly": [row[:] for row in value["monthly"]], "months": dict(value["months"]),
+                    "shop_daily": [dict(row) for row in value["shop_daily"]]}
+        return self._read_cached("analytics", self._read_analytics, clone)
+
+    def _read_analytics(self):
         measures = "SUM(views), SUM(impressions), SUM(clicks), SUM(orders), SUM(items), SUM(gmv)"
         with self.lock:
-            connection = self.connect()
+            connection, generation = self._query_connection()
             try:
-                self._facts(connection)
+                self._facts(connection, generation)
                 weekly = connection.execute(f"""
                     SELECT video_id, date(start, '-' || ((strftime('%w', start) + 6) % 7) || ' days') week, {measures}
                     FROM facts GROUP BY video_id, week ORDER BY week, video_id""").fetchall()
@@ -486,10 +621,15 @@ class PerformanceStore:
         }
 
     def summary(self):
+        result = self._read_cached("summary", self._read_summary)
+        result["sources"] = [str(source) for source in self.sources]
+        return result
+
+    def _read_summary(self):
         with self.lock:
-            connection = self.connect()
+            connection, generation = self._query_connection()
             try:
-                self._facts(connection)
+                self._facts(connection, generation)
                 covered = sorted(self.coverage(connection))
                 weeks = [dict(r) for r in connection.execute("""
                     SELECT date(start, '-' || ((strftime('%w', start) + 6) % 7) || ' days') week,

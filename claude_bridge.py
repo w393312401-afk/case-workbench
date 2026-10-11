@@ -784,6 +784,9 @@ class ClaudeBridge:
                         "--settings", str(settings_file), "--system-prompt-file", str(rules_file)]
                 for path in profile.get("dirs", []):
                     args.extend(["--add-dir", str(path)])
+                if profile.get("denied"):
+                    # Hidden from the model entirely, not merely refused when it tries them.
+                    args.extend(["--disallowedTools", ",".join(profile["denied"])])
             if cli_model:
                 args.extend(["--model", cli_model])
             if reasoning_effort:

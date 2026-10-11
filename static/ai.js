@@ -109,23 +109,40 @@ window.CaseAI = (() => {
     ai.statusAt = Date.now();
     ai.options = null;
   }
+  function refreshDefaults(preferences) {
+    ai.defaultsRevision = (ai.defaultsRevision || 0) + 1;
+    ai.savedDefaults = {model:preferences?.model || null,reasoning_effort:preferences?.reasoning_effort || null};
+    if (ai.options) {
+      ai.options.default_settings = ai.savedDefaults;
+      ai.options.defaults_configured = true;
+      if (ai.options.defaults_error) {ai.options.defaults_error = '';ai.options.options_error = '';}
+    }
+    refreshSettingsViews();
+    if ((ai.modal || ai.task) && (!ai.options || ai.options.options_error || (ai.savedDefaults.model && !selectedModel(ai.savedDefaults)))) void loadOptions(true).then(refreshSettingsViews);
+  }
+  function refreshSettingsViews() {
+    if (ai.modal) renderSettings('ai-create',ai.modal.settings);
+    if (ai.task) renderSettings('ai-continue',settingsForTask(ai.task));
+    updateSettingsControls();
+  }
   async function loadOptions(force = false) {
     if (ai.optionsLoading) return ai.optionsLoading;
     if (ai.options && !force) return ai.options;
+    const revision = ai.defaultsRevision || 0;
     ai.optionsLoading = (async () => {
       try {
         const result = await api(`/api/ai/options${force ? '?refresh=1' : ''}`);
-        ai.options = {models:Array.isArray(result.models) ? result.models : [],skills:Array.isArray(result.skills) ? result.skills : [],default_model:result.default_model || null,models_error:result.models_error || ''};
-      } catch (error) {ai.options = {models:[],skills:[],default_model:null,models_error:`模型列表暂时无法读取：${message(error)}`};}
+        const current = (ai.defaultsRevision || 0) === revision, defaults = current ? result.default_settings : ai.savedDefaults;
+        const defaultsError = current ? result.defaults_error || '' : '';
+        ai.options = {models:Array.isArray(result.models) ? result.models : [],skills:Array.isArray(result.skills) ? result.skills : [],default_settings:{model:defaults?.model || null,reasoning_effort:defaults?.reasoning_effort || null},defaults_configured:current ? !!result.defaults_configured : true,defaults_error:defaultsError,options_error:defaultsError,models_error:result.models_error || ''};
+      } catch (error) {ai.options = {models:[],skills:[],default_settings:ai.savedDefaults || {model:null,reasoning_effort:null},options_error:`全局默认配置暂时无法读取：${message(error)}。请重新检查。`};}
       return ai.options;
     })();
     try {return await ai.optionsLoading;} finally {ai.optionsLoading = null;}
   }
   function settingsFromRound(round) {
-    const model = round?.requested_model ?? null;
     const legacy = Object.hasOwn(legacySkillNames,round?.skill_selection);
-    return {model,reasoning_effort:model ? round?.requested_reasoning_effort ?? null : null,
-      skill_selection:legacy ? 'product-video-script-review' : round?.skill_selection || 'auto',
+    return {skill_selection:legacy ? 'product-video-script-review' : round?.skill_selection || 'auto',
       migration_notice:legacy ? '上轮的技能选择已合并。继续修改将使用统一创作与审查技能，历史结果保持原样。' : ''};
   }
   function modelChoices() {return ai.options?.models || [];}
@@ -140,55 +157,36 @@ window.CaseAI = (() => {
     return ai.options?.skills.some(skill => skill.id === id && skill.available);
   }
   function settingsIssue(settings) {
-    if (!ai.options || ai.optionsLoading) return '正在读取模型，请稍候。';
-    if (settings.model && !modelChoices().some(model => model.id === settings.model)) return '上轮选择的模型当前不可选，请切换到本机默认或其他可用模型。';
-    const selected = selectedModel(settings);
-    if (selected?.available === false) return providerOf(selected) === 'claude' ? ai.status?.providers?.claude?.error || '本机 Claude Code 尚未就绪，请登录客户端后重新检查。' : '所选模型目前不可用，请重新检查或选择其他模型。';
-    if (settings.reasoning_effort && !allowedEfforts(settings).includes(settings.reasoning_effort)) return '当前模型不支持这个思考强度，请重新选择。';
+    if (!ai.options || ai.optionsLoading) return '正在读取全局默认配置，请稍候。';
+    if (ai.options.options_error) return ai.options.options_error;
+    const defaults = ai.options.default_settings || {}, selected = selectedModel(defaults);
+    if (defaults.model && !selected) return '全局默认模型当前不可选，请在全局设置中更新模型。';
+    if (selected?.available === false) return providerOf(selected) === 'claude' ? ai.status?.providers?.claude?.error || '全局默认模型使用的 Claude Code 尚未就绪，请在全局设置中检查。' : '全局默认模型目前不可用，请重新检查或在全局设置中更新模型。';
+    if (defaults.reasoning_effort && !allowedEfforts(defaults).includes(defaults.reasoning_effort)) return '全局默认模型不支持已保存的思考强度，请在全局设置中更新。';
     if (!skillAvailable(settings.skill_selection)) return '所选技能目前不可用，请改为自动匹配或选择其他技能。';
     return '';
   }
   function settingsMarkup(prefix,settings) {
-    const models = modelChoices(), selected = selectedModel(settings), efforts = allowedEfforts(settings);
-    const loading = !ai.options || !!ai.optionsLoading;
-    const unknown = settings.model && !models.some(model => model.id === settings.model);
-    return `<fieldset class="ai-run-settings" id="${prefix}-fieldset"><div class="ai-settings-grid"><label class="field"><span>模型</span><select id="${prefix}-model" ${loading ? 'disabled aria-busy="true"' : ''}><option value="">${loading ? '正在读取模型…' : '本机默认（运行后确认）'}</option>${loading ? '' : modelOptionGroups(models,settings)}${!loading && unknown ? `<option value="${esc(settings.model)}" selected disabled>当前不可选 · ${esc(modelLabel(settings.model))}</option>` : ''}</select></label><label class="field"><span>思考强度</span><select id="${prefix}-effort" ${!efforts.length ? 'disabled' : ''}><option value="">${esc(selected?.default_reasoning_effort ? `默认（${effortNames[selected.default_reasoning_effort] || selected.default_reasoning_effort}）` : '本机默认（运行后确认）')}</option>${efforts.map(value => `<option value="${esc(value)}" ${settings.reasoning_effort === value ? 'selected' : ''}>${esc(effortNames[value] || value)}</option>`).join('')}</select></label><label class="field"><span>使用技能</span><select id="${prefix}-skills">${Object.entries(skillNames).map(([id,label]) => {const known = ai.options?.skills.find(skill => skill.id === id);const available = skillAvailable(id);return `<option value="${id}" ${settings.skill_selection === id ? 'selected' : ''} ${available ? '' : 'disabled'}>${esc(known?.label || label)}${available ? '' : ' · 不可用'}</option>`;}).join('')}</select></label></div><p class="ai-model-description">${selected ? `<span class="ai-provider-badge ${esc(providerOf(selected))}">${esc(providerNames[providerOf(selected)] || '模型')}</span>` : ''}${esc(loading ? '正在读取可用模型和客户端设置。' : selected?.description || '使用本机配置；本轮实际模型会在回复中显示。选择具体模型后可调整思考强度。')}</p>${claudeHint()}<p class="ai-options-note" ${ai.options?.models_error && (selected?.provider || (String(selected?.id || '').startsWith('claude-') ? 'claude' : '')) === 'codex' ? '' : 'hidden'}>${esc(ai.options?.models_error || '')} 可以使用本机默认，不提供未经确认的模型选项。</p><p class="ai-settings-issue" role="status" ${settingsIssue(settings) ? '' : 'hidden'}>${esc(settingsIssue(settings))}</p></fieldset>`;
+    return `<fieldset class="ai-run-settings" id="${prefix}-fieldset"><label class="field"><span>使用技能</span><select id="${prefix}-skills">${Object.entries(skillNames).map(([id,label]) => {const known = ai.options?.skills.find(skill => skill.id === id);const available = skillAvailable(id);return `<option value="${id}" ${settings.skill_selection === id ? 'selected' : ''} ${available ? '' : 'disabled'}>${esc(known?.label || label)}${available ? '' : ' · 不可用'}</option>`;}).join('')}</select></label><p class="ai-settings-issue" role="status" ${settingsIssue(settings) ? '' : 'hidden'}>${esc(settingsIssue(settings))}</p></fieldset>`;
   }
-  const providerNames = {claude:'Claude',codex:'本机 Codex'};
-
   const providerOf = model => model?.provider || (String(model?.id || '').startsWith('claude-') ? 'claude' : 'codex');
-  function settingsSummary(settings) {
-    const model = selectedModel(settings)?.name || (settings.model ? modelLabel(settings.model) : '本机默认模型');
-    const effort = settings.reasoning_effort ? `思考${effortNames[settings.reasoning_effort] || settings.reasoning_effort}` : '默认思考强度';
-    return [model,effort,skillNames[settings.skill_selection] || '自动使用统一技能'].join(' · ');
-  }  function modelOptionGroups(models,settings) {
-    const option = model => {const off = model.available === false;return `<option value="${esc(model.id)}" ${settings.model === model.id ? 'selected' : ''} ${off && settings.model !== model.id ? 'disabled' : ''}>${esc(model.name || model.id)}${model.is_default && providerOf(model) === 'claude' ? ' · 推荐' : ''}${off ? ' · 未就绪' : ''}</option>`;};
-    const groups = [['claude','本机 Claude Code'],['codex','本机 Codex']].map(([key,label]) => [label,models.filter(model => providerOf(model) === key)]).filter(([,items]) => items.length);
-    return groups.length > 1 ? groups.map(([label,items]) => `<optgroup label="${esc(label)}">${items.map(option).join('')}</optgroup>`).join('') : models.map(option).join('');
+  function defaultsSummary() {
+    if (!ai.options || ai.optionsLoading) return '正在读取全局默认配置…';
+    if (ai.options.options_error) return '全局默认配置暂不可用';
+    const defaults = ai.options.default_settings || {}, model = selectedModel(defaults);
+    const label = model?.name || (defaults.model ? modelLabel(defaults.model) : '本机默认模型');
+    const effort = defaults.reasoning_effort ? `思考${effortNames[defaults.reasoning_effort] || defaults.reasoning_effort}` : '默认思考强度';
+    return `使用全局默认 · ${label} · ${effort}`;
   }
-  function claudeHint() {
-    const claude = ai.status?.providers?.claude;
-    if (!claude || claude.available) return '';
-    return `<p class="ai-provider-hint">${esc(claude.error || claude.label || '请在本机 Claude Code 登录后重新检查。')} <a href="${esc(pageURL('#settings'))}">查看客户端状态</a></p>`;
+  function defaultsMarkup(prefix) {
+    return `<p class="ai-model-description ai-global-defaults"><span id="${prefix}-defaults-summary">${esc(defaultsSummary())}</span> <a href="${esc(pageURL('#settings'))}" target="_blank" rel="noopener" title="在新标签页打开，保留当前输入">全局设置</a></p>`;
   }
-  const lastSettingsKey = 'case-workbench.ai.last-settings';
-  function rememberSettings(settings) {try {localStorage.setItem(lastSettingsKey,JSON.stringify({model:settings.model || null,reasoning_effort:settings.reasoning_effort || null}));} catch {}}
-  function rememberedSettings() {
-    try {
-      const saved = JSON.parse(localStorage.getItem(lastSettingsKey) || 'null');
-      const model = saved?.model && modelChoices().find(item => item.id === saved.model && item.available !== false);
-      // Nothing remembered yet: a ready Claude default is preselected; otherwise the local default stays.
-      const preferred = modelChoices().find(item => providerOf(item) === 'claude' && item.is_default && item.available !== false);
-      if (!model) return saved ? {model:null,reasoning_effort:null} : {model:preferred?.id || null,reasoning_effort:null};
-      return {model:model.id,reasoning_effort:(model.reasoning_efforts || []).includes(saved.reasoning_effort) ? saved.reasoning_effort : null};
-    } catch {return {model:null,reasoning_effort:null};}
-  }
+  // Model selection is now shared by the workbench, never a hidden browser override.
+  try {localStorage.removeItem('case-workbench.ai.last-settings');} catch {}
   function renderSettings(prefix,settings) {
     const host = $(`#${prefix}-settings`);if (!host) return;
     host.innerHTML = settingsMarkup(prefix,settings);
     if (settings.migration_notice) {const notice = document.createElement('p');notice.className = 'ai-options-note';notice.textContent = settings.migration_notice;host.append(notice);}
-    $(`#${prefix}-model`).addEventListener('change',event => {settings.model = event.target.value || null;settings.reasoning_effort = null;rememberSettings(settings);renderSettings(prefix,settings);updateSettingsControls();});
-    $(`#${prefix}-effort`).addEventListener('change',event => {settings.reasoning_effort = event.target.value || null;rememberSettings(settings);updateSettingsControls();});
     $(`#${prefix}-skills`).addEventListener('change',event => {settings.skill_selection = event.target.value;updateSettingsControls();});
   }
   function updateSettingsControls() {if (ai.modal) updateCreateControls();updateTaskControls();}
@@ -238,21 +236,23 @@ window.CaseAI = (() => {
     const product = item.product || window.WorkbenchShell?.product() || '';
     const key = `create:${item.case_id || `${product}:${item.direction_id || 'blank'}`}:${action}`, pending = ai.pending.get(key);
     const materialIds = pending?.payload.material_ids || item.material_ids || null;
-    const modal = {key,caseId:item.case_id,product,directionId:pending?.payload.direction_id || item.direction_id || '',caseTitle:item.current?.title || item.title || item.direction_id || item.case_id || `${product} · 空白写稿`,revision:pending?.payload.revision || item.revision,planId:pending?.payload.plan_id || item.plan_id || '',action,instruction:pending?.payload.instruction || item.plan_note || '',includeBasket:pending ? !!(pending.payload.include_basket || pending.payload.material_ids?.length) : !!(materialIds?.length || item.direction_id),materialIds,materials:[],directions:item.direction_id ? [item] : [],variantSel:pending?.payload.variants ? pending.payload.variants.map(item => item.index) : pending ? [] : null,newVariants:pending?.payload.new_variant_count || 0,carousel:!!pending?.payload.carousel,settings:{model:pending?.payload.model || null,reasoning_effort:pending?.payload.reasoning_effort || null,skill_selection:pending?.payload.skill_selection || 'auto'},busy:false,blocked:false,error:pending ? '上次提交结果尚未确认。请重试同一请求核对，不会重复创建任务。' : ''};
+    const modal = {key,caseId:item.case_id,product,directionId:pending?.payload.direction_id || item.direction_id || '',caseTitle:item.current?.title || item.title || item.direction_id || item.case_id || `${product} · 空白写稿`,revision:pending?.payload.revision || item.revision,planId:pending?.payload.plan_id || item.plan_id || '',action,instruction:pending?.payload.instruction || item.plan_note || '',includeBasket:pending ? !!(pending.payload.include_basket || pending.payload.material_ids?.length) : !!(materialIds?.length || item.direction_id),materialIds,materials:[],directions:item.direction_id ? [item] : [],variantSel:pending?.payload.variants ? pending.payload.variants.map(item => item.index) : pending ? [] : null,newVariants:pending?.payload.new_variant_count || 0,carousel:!!pending?.payload.carousel,settings:{skill_selection:pending?.payload.skill_selection || 'auto'},busy:false,blocked:false,error:pending ? '上次提交结果尚未确认。请重试同一请求核对，不会重复创建任务。' : ''};
     ai.modal = modal;
     setText('#ai-create-title',actions[action]);setText('#ai-create-case',modal.caseTitle);
     setText('#ai-create-version',item.case_id ? '基于当前案例版本' : item.direction_id ? '基于当前方向定义' : '空白写稿');
     if ($('#ai-create-advanced')) $('#ai-create-advanced').open = false;
+    $('#ai-create-defaults').innerHTML = defaultsMarkup('ai-create');
     if (!$('#ai-basket-choice')) $('#ai-create-settings').insertAdjacentHTML('afterend','<div id="ai-basket-choice" class="ai-basket-choice"></div>');
     renderBasketChoice(modal);
     $('#ai-create-instruction').value = modal.instruction;
     $('#ai-create-instruction').placeholder = requestHints[action];
+    const optionsRequest = loadOptions(true);
     renderSettings('ai-create',modal.settings);$('#ai-create-dialog').showModal();updateCreateControls();
-    await Promise.all([checkStatus(),loadOptions(),api(`/api/materials?product=${encodeURIComponent(product)}`).then(data => {modal.materials = data.items || [];}).catch(error => {modal.basketError = message(error);}),item.case_id ? Promise.resolve() : api(`/api/direction-catalog?product=${encodeURIComponent(product)}`).then(data => {modal.directions = data.directions || [];}).catch(() => {})]);if (ai.modal !== modal) return;if (!pending && !modal.settings.model) Object.assign(modal.settings,rememberedSettings());renderBasketChoice(modal);renderSettings('ai-create',modal.settings);updateCreateControls();$('#ai-create-instruction').focus();
+    await Promise.all([checkStatus(),optionsRequest,api(`/api/materials?product=${encodeURIComponent(product)}`).then(data => {modal.materials = data.items || [];}).catch(error => {modal.basketError = message(error);}),item.case_id ? Promise.resolve() : api(`/api/direction-catalog?product=${encodeURIComponent(product)}`).then(data => {modal.directions = data.directions || [];}).catch(() => {})]);if (ai.modal !== modal) return;renderBasketChoice(modal);renderSettings('ai-create',modal.settings);updateCreateControls();$('#ai-create-instruction').focus();
   }
   function renderBasketChoice(modal) {
     const host = $('#ai-basket-choice');if (!host) return;
-    host.innerHTML = `${!modal.caseId ? `<div class="ai-source-row"><label class="field"><span>本次方向</span><select id="ai-create-direction"><option value="">空白写稿，不指定方向</option>${modal.directions.filter(item => item.status !== 'archived').map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === modal.directionId ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>${!modal.materialIds ? '<button type="button" class="subtle" id="ai-create-from-case">改为从案例写稿</button>' : ''}</div>` : ''}<label class="ai-check"><input id="ai-include-basket" type="checkbox" ${modal.includeBasket ? 'checked' : ''} ${ai.pending.has(modal.key) ? 'disabled' : ''}> 携带${modal.materialIds ? '已选择的素材' : '当前产品的素材篮'}（${modal.materialIds?.length ?? modal.materials.length} 条）</label><p class="context-note">${esc(modal.basketError ? `素材篮暂不可用：${modal.basketError}。可取消携带素材，或关闭后重试。` : '提交时固定选中的素材；以后修改素材篮不会改动此任务。')}</p><div id="ai-variant-plan"></div>${modal.action === 'variants' ? `<label class="ai-carousel-toggle"><input id="ai-carousel" type="checkbox" ${modal.carousel ? 'checked' : ''}> 同时出图文版（每条稿附 5 张挂车图文与 copy.json）</label>` : ''}`;
+    host.innerHTML = `${!modal.caseId ? `<div class="ai-source-row"><label class="field"><span>本次方向</span><select id="ai-create-direction"><option value="">空白写稿，不指定方向</option>${modal.directions.filter(item => item.status !== 'archived').map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === modal.directionId ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>${!modal.materialIds ? '<button type="button" class="subtle" id="ai-create-from-case">改为从案例写稿</button>' : ''}</div>` : ''}<label class="ai-check"><input id="ai-include-basket" type="checkbox" ${modal.includeBasket ? 'checked' : ''} ${ai.pending.has(modal.key) ? 'disabled' : ''}> 携带${modal.materialIds ? '已选择的素材' : '当前产品的摘录篮'}（${modal.materialIds?.length ?? modal.materials.length} 条）</label><p class="context-note">${esc(modal.basketError ? `摘录篮暂不可用：${modal.basketError}。可取消携带素材，或关闭后重试。` : '提交时固定选中的素材；以后修改摘录篮不会改动此任务。')}</p><div id="ai-variant-plan"></div>${modal.action === 'variants' ? `<label class="ai-carousel-toggle"><input id="ai-carousel" type="checkbox" ${modal.carousel ? 'checked' : ''}> 同时出图文版（每条稿附 5 张挂车图文与 copy.json）</label>` : ''}`;
     $('#ai-include-basket').onchange = event => {modal.includeBasket = event.target.checked;updateCreateControls();};
     if ($('#ai-create-direction')) $('#ai-create-direction').onchange = event => {modal.directionId = event.target.value;modal.variantSel = null;renderVariantPlan(modal);updateCreateControls();};
     if ($('#ai-carousel')) $('#ai-carousel').onchange = event => {modal.carousel = event.target.checked;updateCreateControls();};
@@ -288,7 +288,7 @@ window.CaseAI = (() => {
     const product = items[0].product || currentProductForMaterials(items);
     if (!product || items.some(item => item.product && window.WorkbenchShell && !window.WorkbenchShell.matchesProduct(item.product,product))) {toast('请选取同一产品的素材后开始写稿。',true);return false;}
     const material_ids = items.map(item => item.id || item.material_id).filter(Boolean);
-    if (material_ids.length !== items.length) {toast('素材信息不完整，请重新读取素材篮。',true);return false;}
+    if (material_ids.length !== items.length) {toast('素材信息不完整，请重新读取摘录篮。',true);return false;}
     await openCreate({product,title:`${product} · 素材写稿`,material_ids},'variants');return !!ai.modal;
   }
   function currentProductForMaterials() {return window.WorkbenchShell?.product() || '';}
@@ -306,9 +306,10 @@ window.CaseAI = (() => {
     const modal = ai.modal;if (!modal) return;
     const pending = ai.pending.get(modal.key), busy = modal.busy;
     setText('#ai-create-availability',availabilityText());
+    setText('#ai-create-defaults-summary',defaultsSummary());
     // The folded settings open by themselves when something there needs attention.
     const issue = !pending && settingsIssue(modal.settings) && ai.options && !ai.optionsLoading;
-    setText('#ai-create-settings-summary',issue ? '需要处理' : ai.status?.available === false ? 'AI 暂不可用' : settingsSummary(modal.settings));
+    setText('#ai-create-settings-summary',issue ? '需要处理' : ai.status?.available === false ? 'AI 暂不可用' : skillNames[modal.settings.skill_selection] || skillNames.auto);
     $('#ai-create-settings-summary')?.classList.toggle('is-warn',!!issue || ai.status?.available === false);
     if ((issue || ai.status?.available === false) && $('#ai-create-advanced')) $('#ai-create-advanced').open = true;
     $('#ai-create-availability').classList.toggle('unavailable',ai.status?.available === false);
@@ -327,7 +328,7 @@ window.CaseAI = (() => {
     $('#ai-create-check').disabled = busy;
     setText('#submit-ai-create',busy ? '正在提交…' : pending ? '重试同一请求' : '开始协作');
     setText('#ai-create-error',modal.error);$('#ai-create-error').hidden = !modal.error;
-    setText('#ai-create-hint',pending ? '为防止重复创建，重试使用上次的相同要求和请求。' : plan ? `将按 ${selected} 条变体各写一稿${modal.newVariants ? `，另提 ${modal.newVariants} 条新变体` : ''}${modal.carousel ? '，每条附图文版' : ''}；提交后可在「写稿」查看进度与结果。` : '提交后可在「写稿」查看进度与结果。');
+    setText('#ai-create-hint',pending ? '为防止重复创建，重试使用上次的相同要求和请求。' : plan ? `将按 ${selected} 条变体各写一稿${modal.newVariants ? `，另提 ${modal.newVariants} 条新变体` : ''}${modal.carousel ? '，每条附图文版' : ''}；提交后可在「内容创作」查看进度与结果。` : '提交后可在「内容创作」查看进度与结果。');
   }
   function closeCreate() {
     if (ai.modal?.busy) {toast('正在提交，请等待返回结果。',true);return;}
@@ -337,7 +338,7 @@ window.CaseAI = (() => {
     event.preventDefault();const modal = ai.modal;
     if (!modal || modal.busy || modal.blocked || (modal.includeBasket && !!modal.basketError) || !ai.status?.available || (!modal.instruction.trim() && !planActive(modal)) || (!ai.pending.has(modal.key) && settingsIssue(modal.settings))) return;
     let pending = ai.pending.get(modal.key);
-    if (!pending) {pending = {path:'/api/ai/tasks',payload:{request_id:crypto.randomUUID(),...(modal.planId ? {plan_id:modal.planId} : {}),...(modal.caseId ? {case_id:modal.caseId,revision:modal.revision} : {product:modal.product,...(modal.directionId ? {direction_id:modal.directionId} : {})}),...(modal.includeBasket && modal.materialIds ? {material_ids:modal.materialIds} : {include_basket:modal.includeBasket}),action:modal.action,instruction:modal.instruction.trim(),...planPayload(modal),...(modal.action === 'variants' && modal.carousel ? {carousel:true} : {}),...modal.settings}};ai.pending.set(modal.key,pending);}
+    if (!pending) {pending = {path:'/api/ai/tasks',payload:{request_id:crypto.randomUUID(),...(modal.planId ? {plan_id:modal.planId} : {}),...(modal.caseId ? {case_id:modal.caseId,revision:modal.revision} : {product:modal.product,...(modal.directionId ? {direction_id:modal.directionId} : {})}),...(modal.includeBasket && modal.materialIds ? {material_ids:modal.materialIds} : {include_basket:modal.includeBasket}),action:modal.action,instruction:modal.instruction.trim(),...planPayload(modal),...(modal.action === 'variants' && modal.carousel ? {carousel:true} : {}),skill_selection:modal.settings.skill_selection}};ai.pending.set(modal.key,pending);}
     modal.busy = true;pending.busy = true;modal.error = '';ai.mutation++;updateCreateControls();
     try {
       const response = await api(pending.path,{method:'POST',body:pending.payload});
@@ -443,8 +444,8 @@ window.CaseAI = (() => {
       restoreListState(saved);
       ai.page = 'list';ai.task = null;ai.lastList = '';
       ai.listProduct = window.WorkbenchShell?.product() || '';
-      $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 写稿';
-      $('#content').innerHTML = `<div class="page-heading ai-list-heading"><div><h1>写稿</h1><p>从方向、案例或空白要求开始，检查候选后采纳为脚本版本。</p></div><button type="button" class="ai-service-pill" id="ai-check-service" title="重新检查 AI 服务"><i></i><span id="ai-service-label">${esc(availabilityText())}</span></button></div><nav class="scripts-tabs" aria-label="写稿内容"><a href="${esc(pageURL('#ai'))}" aria-current="page">协作任务</a><a href="${esc(pageURL('#scripts'))}">脚本版本</a><a href="${esc(pageURL('#production'))}">制作视频</a></nav>
+      $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 内容创作';
+      $('#content').innerHTML = `<div class="page-heading ai-list-heading"><div><h1>内容创作</h1><p>从方向、案例或空白要求开始，检查候选后采纳为脚本版本。</p></div><button type="button" class="ai-service-pill" id="ai-check-service" title="重新检查 AI 服务"><i></i><span id="ai-service-label">${esc(availabilityText())}</span></button></div><nav class="scripts-tabs" aria-label="内容创作"><a href="${esc(pageURL('#ai'))}" aria-current="page">协作任务</a><a href="${esc(pageURL('#scripts'))}">脚本版本</a><a href="${esc(pageURL('#production'))}">内容制作</a></nav>
         <div class="ai-list-toolbar"><div class="ai-segment" role="group" aria-label="按状态筛选">${Object.entries(listFilters).map(([key,[label]]) => `<button type="button" data-ai-filter="${key}" aria-pressed="${(ai.filter || 'all') === key}">${label}<small data-ai-filter-count="${key}"></small></button>`).join('')}</div><label class="ai-group-choice"><span>分组</span><select id="ai-group-by"><option value="direction">按方向</option><option value="case">按案例</option></select></label><button type="button" class="subtle" id="ai-select-toggle" aria-pressed="false">选择</button></div>
         <div class="ai-selection-toolbar" id="ai-selection-toolbar" hidden><div class="ai-selection-main"><label class="select-all"><input type="checkbox" id="ai-select-all">全选</label><span id="ai-selected-count" class="selection-count">已选 0 条</span><span id="ai-selection-note" class="selection-count"></span></div><button type="button" class="danger-outline" id="ai-delete-selected" disabled>${icon('trash')}删除本地记录</button></div><div id="ai-list-error" class="ai-error" role="alert" hidden></div><div id="ai-task-list">${skeletonMarkup(2)}</div>`;
       $('#ai-group-by').value = saved?.groupBy === 'case' ? 'case' : 'direction';
@@ -519,13 +520,14 @@ window.CaseAI = (() => {
     return `<p class="ai-run-line">${esc(line)}</p>${round.skills_status === 'unavailable' || round.review_context?.status === 'unavailable' ? `<p class="ai-skill-status">${esc(round.skills_status === 'unavailable' ? skillState : reviewContextText(round.review_context))}</p>` : ''}${round.migration_notice ? `<p class="ai-options-note">${esc(round.migration_notice)}</p>` : ''}<details class="ai-execution-details"><summary>本轮设置</summary><p>${esc(skillState)}</p>${round.review_context ? `<p>${esc(reviewContextText(round.review_context))}</p>` : ''}<p>请求模型：${esc(requested)} · 请求思考强度：${esc(round.requested_reasoning_effort ? effortNames[round.requested_reasoning_effort] || round.requested_reasoning_effort : '默认')}</p>${skills.map(skill => `<div><strong>${esc(skill.label || skill.name)}</strong><code>${esc(skill.path || '未记录路径')}</code>${skill.sha256 ? `<small>文件校验：${esc(skill.sha256)}</small>` : ''}</div>`).join('')}</details>${stageMetadata(round)}`;
   }
   function stageMetadata(round) {
-    if (!round.stages) return '';
-    const rows = ['draft','review'].filter(name => round.stages[name]).map(name => {
-      const stage = round.stages[name], label = name === 'draft' ? '初稿' : '独立内容复核';
+    const check = round.format_check?.status && round.format_check.status !== 'ok' && round.format_check.reason ? `<p class="ai-format-check ${esc(round.format_check.status)}">${esc(round.format_check.reason)}</p>` : '';
+    if (!round.stages) return check ? `<div class="ai-stage-status">${check}</div>` : '';
+    const rows = ['draft','review','format'].filter(name => round.stages[name]).map(name => {
+      const stage = round.stages[name], label = {draft:'初稿',review:'独立内容复核',format:'格式整理（只改排版）'}[name];
       const recovered = round.status !== 'completed' && !active(round) ? stage.output || (stage.messages || []).filter(entry => entry.phase !== 'commentary').map(entry => entry.text || '').join('\n\n') : '';
       return `<p>${label}：${esc(statusText(stage))} · 模型：${esc(stage.model ? modelLabel(stage.model) : '尚未回报')} · 思考强度：${esc(effortNames[stage.reasoning_effort] || stage.reasoning_effort || '尚未回报')}</p>${recovered ? `<details class="ai-execution-details"><summary>查看保留的${label}文本（本轮未完成）</summary><pre>${esc(recovered)}</pre></details>` : ''}`;
     }).join('');
-    return `<div class="ai-stage-status">${rows}<small>内容复核采用独立模型调用，不代表本土达人认证、母语者审核或市场验证。</small></div>`;
+    return `<div class="ai-stage-status">${rows}${check}${round.stages.review ? '<small>内容复核采用独立模型调用，不代表本土达人认证、母语者审核或市场验证。</small>' : ''}</div>`;
   }
   function responseLabel(round,entry) {
     if (entry.phase === 'commentary') return '处理进展';
@@ -606,7 +608,7 @@ window.CaseAI = (() => {
     const output = $('.ai-round-output',node), hasAnswerMessages = entries.some(entry => entry.phase !== 'commentary' && entry.text);
     output.hidden = !showCanonical && hasAnswerMessages;
     if (showCanonical || !hasAnswerMessages) {
-      const text = round.output || (active(round) ? round.stages ? round.active_stage === 'review' ? '初稿已保存，正在独立复核。完成后显示修订候选。' : '正在起草。独立复核完成后显示修订候选。' : '正在等待回复…' : round.stages ? '本轮尚未完成独立复核，保留的文本可在上方展开查看。' : '本轮没有返回可用回答。');
+      const text = round.output || (active(round) ? round.stages ? round.active_stage === 'format' ? '正在整理成可制作格式（只改排版，完成后逐字核对）。' : round.active_stage === 'review' ? '初稿已保存，正在独立复核。完成后显示修订候选。' : '正在起草。独立复核完成后显示修订候选。' : '正在等待回复…' : round.kind === 'format' ? '格式整理没有通过，原候选保持不变；可以在原候选里手动拆分口播。' : round.stages ? '本轮尚未完成独立复核，保留的文本可在上方展开查看。' : '本轮没有返回可用回答。');
       writeResponseBody(output,text,round.status === 'completed' && !!round.output);
     }
     const copy = $('.ai-copy-round',node), text = roundCopyText(round);
@@ -617,16 +619,18 @@ window.CaseAI = (() => {
     const title = $('.ai-output-title',node);if (title) title.textContent = final ? '候选结果' : active(round) ? '实时回复' : '本轮回复（未完成）';
     copy.innerHTML = icon('copy') + (final ? '复制结果' : '复制当前文本');copy.onclick = () => copyText(text,final ? '候选结果已复制' : '当前回复文本已复制');
     let adoption = $('.ai-candidate-actions',node);
-    if (!adoption) {adoption = document.createElement('div');adoption.className = 'ai-candidate-actions';adoption.innerHTML = `<button type="button" class="primary compact" data-adopt-script>采纳为脚本版本</button><details class="ai-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-write-case>写回案例</button><button type="button" role="menuitem" data-produce-video>制作视频</button></div></details>`;$('.ai-output-actions',node).prepend(adoption);}
+    if (!adoption) {adoption = document.createElement('div');adoption.className = 'ai-candidate-actions';adoption.innerHTML = `<button type="button" class="primary compact" data-adopt-script>采纳为脚本版本</button><details class="ai-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-write-case>写回案例</button><button type="button" role="menuitem" data-produce-video>制作视频</button><button type="button" role="menuitem" data-produce-carousel>制作图文</button><button type="button" role="menuitem" data-format-round>整理为可制作格式</button></div></details>`;$('.ai-output-actions',node).prepend(adoption);}
     adoption.hidden = !canonical;
     $('[data-adopt-script]',adoption).onclick = () => window.CaseScripts?.adoptCandidate(ai.task,round,false);
     $('[data-write-case]',adoption).onclick = () => window.CaseScripts?.adoptCandidate(ai.task,round,true);
     const produce = $('[data-produce-video]',adoption);if (produce) {produce.hidden = ai.task.action !== 'variants';produce.onclick = () => window.CaseProduction?.fromCandidate(ai.task,round);}
+    const carousel = $('[data-produce-carousel]',adoption);if (carousel) {carousel.hidden = ai.task.action !== 'variants' || !/photo_carousel|叠字/.test(String(round.output || ''));carousel.onclick = () => window.CaseProduction?.fromCandidateCarousel(ai.task,round);}
+    const relayout = $('[data-format-round]',adoption);if (relayout) {relayout.hidden = ai.task.action !== 'variants' || round.format_check?.status === 'ok';relayout.onclick = async () => {relayout.disabled = true;try {await formatRound(ai.task,round);} catch (error) {toast(message(error),true);} finally {relayout.disabled = false;}};}
   }
   function taskContextMarkup(task) {
     const context = task.context || {};
     const link = task.case_id ? `<a href="${esc(pageURL(`#case/${encodeURIComponent(task.case_id)}`))}">${icon('file')}查看关联案例</a>` : context.direction_id ? `<a href="${esc(window.WorkbenchShell?.url(`#directions/${encodeURIComponent(context.direction_id)}`,taskProduct(task)) || '#directions')}">查看来源方向</a>` : `<span>${esc(taskProduct(task))} · 空白写稿</span>`;
-    return `${link}<span>基于发起时固定的${task.case_id ? '案例版本' : context.direction_id ? '方向资料' : '创作要求'}</span><details class="ai-version-details"><summary>查看本次资料</summary><div>${task.case_id ? `<span>案例版本</span><code>${esc(task.base_revision || '未提供')}</code><span>来源记录</span><code>${esc(task.base_event_id || '首次原始资料')}</code>` : `<span>产品</span><code>${esc(taskProduct(task))}</code>`}${context.materials?.length ? `<span>随任务固定的素材（${context.materials.length} 条）</span>${context.materials.map(item => `<p>${esc(item.title || item.text || item.source_id || item.kind || '素材')}</p>`).join('')}` : '<span>未附素材篮条目</span>'}</div></details>`;
+    return `${link}<span>基于发起时固定的${task.case_id ? '案例版本' : context.direction_id ? '方向资料' : '创作要求'}</span><details class="ai-version-details"><summary>查看本次资料</summary><div>${task.case_id ? `<span>案例版本</span><code>${esc(task.base_revision || '未提供')}</code><span>来源记录</span><code>${esc(task.base_event_id || '首次原始资料')}</code>` : `<span>产品</span><code>${esc(taskProduct(task))}</code>`}${context.materials?.length ? `<span>随任务固定的素材（${context.materials.length} 条）</span>${context.materials.map(item => `<p>${esc(item.title || item.text || item.source_id || item.kind || '素材')}</p>`).join('')}` : '<span>未附摘录篮条目</span>'}</div></details>`;
   }
   function roundMarkup(round,index) {
     return `<article class="ai-round" data-round-id="${esc(round.round_id || String(index))}"><div class="ai-round-heading"><button type="button" class="ai-round-toggle" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><h2>第 ${index+1} 轮</h2><span class="ai-round-summary">${esc(round.instruction || '')}</span></button><span class="ai-round-status ai-status ${esc(round.status)}">${esc(statusText(round))}</span><small class="ai-round-time">${esc(readableDate(round.completed_at || round.created_at))}</small></div>
@@ -635,12 +639,12 @@ window.CaseAI = (() => {
   }
   function renderTaskShell(task,keepScroll) {
     ai.page = task.task_id;
-    $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 写稿 <span>/</span> 任务详情';
-    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || pageURL('#ai'))}">${icon('back')}返回写稿</a><div class="page-heading ai-task-heading"><div><p class="ai-task-meta"><span class="ai-status" id="ai-task-status"></span><span>${esc(actions[task.action] || 'AI 协作')}</span></p><h1>${esc(contextTitle(task))}</h1></div><button type="button" class="secondary compact" id="ai-cancel-task">取消处理</button></div>
+    $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 内容创作 <span>/</span> 任务详情';
+    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || pageURL('#ai'))}">${icon('back')}返回内容创作</a><div class="page-heading ai-task-heading"><div><p class="ai-task-meta"><span class="ai-status" id="ai-task-status"></span><span>${esc(actions[task.action] || 'AI 协作')}</span></p><h1>${esc(contextTitle(task))}</h1></div><button type="button" class="secondary compact" id="ai-cancel-task">取消处理</button></div>
       <div class="ai-task-context">${taskContextMarkup(task)}<span>独立候选，不改动案例正文</span></div><p id="ai-stale-warning" class="ai-stale-warning" hidden>案例已经更新。这个任务继续使用开始时的案例版本；若要基于新版讨论，请回到案例重新发起任务。</p>
       <div class="ai-task-progress"><p id="ai-task-progress" role="status"></p><small id="ai-stream-status" class="ai-stream-status"></small></div><p class="ai-error" id="ai-task-error" role="alert" hidden></p><div id="ai-rounds"></div>
       <section class="ai-continue-card ai-composer" aria-label="继续一起修改"><form id="ai-continue-form"><label class="sr-only" for="ai-continue-instruction">下一步要求</label><textarea id="ai-continue-instruction" maxlength="12000" rows="2" required placeholder="继续一起修改：例如保留第二版的推进结构，把正文压缩到 30 秒。"></textarea>
-        <details class="ai-advanced" id="ai-continue-advanced"><summary><span>模型与技能</span><span class="ai-advanced-summary" id="ai-continue-settings-summary"></span></summary>${serviceMarkup()}<div id="ai-continue-settings"></div></details>
+        ${defaultsMarkup('ai-continue')}<details class="ai-advanced" id="ai-continue-advanced"><summary><span>技能与服务</span><span class="ai-advanced-summary" id="ai-continue-settings-summary"></span></summary>${serviceMarkup()}<div id="ai-continue-settings"></div></details>
         <div class="ai-continue-footer"><p class="ai-muted" id="ai-continue-note"></p><small class="ai-shortcut-hint">Ctrl + Enter 提交</small><button type="submit" class="primary compact" id="ai-continue-submit">继续修改</button></div></form></section>`;
     $('#ai-continue-instruction').value = ai.drafts.get(task.task_id) || ai.pending.get(`continue:${task.task_id}`)?.payload.instruction || '';
     renderSettings('ai-continue',settingsForTask(task));
@@ -696,8 +700,10 @@ window.CaseAI = (() => {
     button.textContent = cancel?.busy ? '正在请求取消…' : waiting ? '等待取消完成…' : cancel ? '重试取消请求' : '取消处理';
     setText('#ai-continue-note',pending ? '上次提交尚待核对；重试会使用相同要求，避免重复增加一轮。' : active(task) ? '本轮处理期间可以先写下一步要求，完成后再提交。' : ['failed','interrupted','cancelled'].includes(task.status) ? '任务已停止。填写要求并提交，会明确开启新一轮尝试。' : '继续使用任务开始时固定的资料，并保留此前每轮记录。');
     setText('#ai-service-label',availabilityText());
+    setText('#ai-continue-defaults-summary',defaultsSummary());
     const issue = !pending && ai.options && !ai.optionsLoading && settingsIssue(settingsForTask(task));
-    setText('#ai-continue-settings-summary',issue ? '需要处理' : ai.status?.available === false ? 'AI 暂不可用' : settingsSummary(settingsForTask(task)));
+    if (issue && $('#ai-continue-advanced')) $('#ai-continue-advanced').open = true;
+    setText('#ai-continue-settings-summary',issue ? '需要处理' : ai.status?.available === false ? 'AI 暂不可用' : skillNames[settingsForTask(task).skill_selection] || skillNames.auto);
     $('#ai-continue-settings-summary')?.classList.toggle('is-warn',!!issue || ai.status?.available === false);
     const error = ai.errors.get(task.task_id) || '';setText('#ai-task-error',error);$('#ai-task-error').hidden = !error;
   }
@@ -706,7 +712,7 @@ window.CaseAI = (() => {
     const instruction = $('#ai-continue-instruction').value.trim(), key = `continue:${task.task_id}`;
     if (!instruction || ai.pending.get(key)?.busy || (!ai.pending.has(key) && settingsIssue(settingsForTask(task)))) return;
     let pending = ai.pending.get(key);
-    if (!pending) {pending = {path:`/api/ai/tasks/${encodeURIComponent(task.task_id)}/continue`,payload:{request_id:crypto.randomUUID(),task_revision:task.revision,instruction,...settingsForTask(task)}};ai.pending.set(key,pending);}
+    if (!pending) {pending = {path:`/api/ai/tasks/${encodeURIComponent(task.task_id)}/continue`,payload:{request_id:crypto.randomUUID(),task_revision:task.revision,instruction,skill_selection:settingsForTask(task).skill_selection}};ai.pending.set(key,pending);}
     pending.busy = true;closeStream();ai.mutation++;ai.errors.delete(task.task_id);updateTaskControls();
     try {
       const response = await api(pending.path,{method:'POST',body:pending.payload});
@@ -720,6 +726,23 @@ window.CaseAI = (() => {
       ai.errors.set(task.task_id,error.status === 409 ? '任务已更新，本次未追加要求。正在读取最新记录，请核对后再提交。' : definitive(error) ? message(error) : `提交结果尚未确认：${message(error)}。请重试同一请求核对。`);
       if (error.status === 404) {if (pageHash() === `#ai/${encodeURIComponent(task.task_id)}`) renderMissing();return;}
       if (error.status === 409) void pollTask(true);
+    } finally {pending.busy = false;updateTaskControls();syncStream(ai.task);void loadTaskList(0,true).catch(() => {});}
+  }
+  // A format-only round re-lays out an earlier candidate; the server keeps it only if every spoken word matches.
+  async function formatRound(task,round) {
+    const key = `format:${task.task_id}:${round.round_id}`;let pending = ai.pending.get(key);
+    if (pending?.busy) return false;
+    if (!pending) {pending = {path:`/api/ai/tasks/${encodeURIComponent(task.task_id)}/continue`,payload:{request_id:crypto.randomUUID(),task_revision:(ai.task?.task_id === task.task_id ? ai.task : task).revision,format_round_id:round.round_id}};ai.pending.set(key,pending);}
+    pending.busy = true;closeStream();ai.mutation++;ai.errors.delete(task.task_id);
+    try {
+      const response = await api(pending.path,{method:'POST',body:pending.payload});
+      ai.pending.delete(key);
+      if (pageHash() === `#ai/${encodeURIComponent(task.task_id)}`) updateTask(response.task);else rememberTaskState(response.task);
+      toast('已开始整理格式（只改排版，逐字核对）。完成后在新一轮里点「制作视频」或「制作图文」。');
+      return true;
+    } catch (error) {
+      if (definitive(error)) ai.pending.delete(key);
+      throw error;
     } finally {pending.busy = false;updateTaskControls();syncStream(ai.task);void loadTaskList(0,true).catch(() => {});}
   }
   async function cancelTask() {
@@ -748,7 +771,7 @@ window.CaseAI = (() => {
   function renderMissing() {
     closeStream();
     const id = ai.task?.task_id || (pageHash().startsWith('#ai/') ? decodeURIComponent(pageHash().slice(4)) : '');ai.task = null;ai.page = 'missing';if (id) {ai.errors.delete(id);ai.cancelWaiting.delete(id);ai.drafts.delete(id);ai.pending.delete(`continue:${id}`);ai.pending.delete(`cancel:${id}`);}
-    $('#content').innerHTML = '<div class="empty"><h3>任务或关联案例已不存在</h3><p>旧任务内容已从当前页面清空，请返回任务列表查看现有记录。</p><a class="secondary" href="#ai">返回写稿</a></div>';
+    $('#content').innerHTML = '<div class="empty"><h3>任务或关联案例已不存在</h3><p>旧任务内容已从当前页面清空，请返回任务列表查看现有记录。</p><a class="secondary" href="#ai">返回内容创作</a></div>';
   }
   function closeStream() {
     if (ai.stream) ai.stream.source.close();
@@ -831,7 +854,7 @@ window.CaseAI = (() => {
     if (ai.page === id && $('#ai-rounds')) {await pollTask();return;}
     ai.page = '';ai.task = null;$('#content').innerHTML = skeletonMarkup(2);
     try {
-      void Promise.all([checkStatus(),loadOptions()]).then(() => {
+      void Promise.all([checkStatus(),loadOptions(true)]).then(() => {
         if (sequence !== ai.sequence || pageHash() !== hash || ai.task?.task_id !== id) return;
         setText('#ai-service-label',availabilityText());
         renderSettings('ai-continue',settingsForTask(ai.task));
@@ -861,7 +884,7 @@ window.CaseAI = (() => {
   $('#close-ai-delete').onclick = $('#cancel-ai-delete').onclick = closeDeleteDialog;
   $('#ai-delete-dialog').addEventListener('cancel',event => {event.preventDefault();closeDeleteDialog();});
   window.addEventListener('hashchange',() => {if (ai.stream && pageHash() !== `#ai/${encodeURIComponent(ai.stream.taskId)}`) closeStream();});
-  document.addEventListener('visibilitychange',() => {if (document.hidden) closeStream();else {void loadTaskList().catch(() => {});if (pageHash().startsWith('#ai/')) {syncStream(ai.task);void pollTask(true);}}});
+  document.addEventListener('visibilitychange',() => {if (document.hidden) closeStream();else {void loadTaskList().catch(() => {});if (ai.modal || pageHash().startsWith('#ai/')) void loadOptions(true).then(refreshSettingsViews);if (pageHash().startsWith('#ai/')) {syncStream(ai.task);void pollTask(true);}}});
   setInterval(() => {
     if (document.hidden) return;
     if (ai.modal) updateCreateControls();
@@ -874,5 +897,5 @@ window.CaseAI = (() => {
   if (state.detail && pageHash() === `#case/${state.detail.case_id}` && !$('.ai-case-actions')) void mountCaseActions(state.detail);
   const closeMenus = event => $$('.ai-menu[open]').forEach(menu => {if (event.key === 'Escape' || !menu.contains(event.target)) menu.open = false;});
   window.addEventListener('click',closeMenus,true);window.addEventListener('keydown',event => {if (event.key === 'Escape') closeMenus(event);});
-  return {mountCaseActions,startWriting,startFromDirection,startBlank,startWithMaterials,modalOpen,hasUnsavedInput,refreshAvailability,captureListState,route:routeAI};
+  return {mountCaseActions,startWriting,startFromDirection,startBlank,startWithMaterials,modalOpen,hasUnsavedInput,refreshAvailability,refreshDefaults,captureListState,route:routeAI,formatRound};
 })();

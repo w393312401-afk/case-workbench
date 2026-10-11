@@ -222,8 +222,9 @@ class CreationStore:
             return {"removed": identifier}
         if identifier and not old:
             raise CreationError(404, "素材不存在。")
-        if value.get("kind") not in {"case", "video", "note", "selling_point", "direction", "script"}:
-            raise CreationError(400, "素材类型无效；评论继续使用原摘录夹。")
+        # Case expressions and video hooks only; reviews stay in the review store's picks.
+        if value.get("kind") not in {"case", "video"}:
+            raise CreationError(400, "素材类型无效；素材篮只收案例表达和视频钩子，评论继续使用原摘录夹。")
         product = self._product(value.get("product"))
         if old and old["product"] != product:
             raise CreationError(409, "素材不能改到另一产品。")

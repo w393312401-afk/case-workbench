@@ -12,29 +12,28 @@
 </head>
 <body>
   <div class="sidebar-rail" id="sidebar-rail" aria-label="模块快捷入口" hidden>
-    <button type="button" class="sidebar-rail-menu" id="sidebar-menu" aria-label="打开边栏" aria-controls="workbench-sidebar" aria-expanded="false"><span class="brand-mark" aria-hidden="true">▰</span></button>
+    <button type="button" class="sidebar-rail-menu" id="sidebar-menu" aria-label="打开边栏" aria-controls="workbench-sidebar" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button>
     <nav aria-label="模块图标">
-      <button type="button" class="sidebar-rail-item" data-sidebar-target="home-nav" aria-label="本周"><span data-icon="calendar"></span></button>
+      <button type="button" class="sidebar-rail-item" data-sidebar-target="home-nav" aria-label="工作概览"><span data-icon="calendar"></span></button>
       <button type="button" class="sidebar-rail-item" data-sidebar-target="reviews-nav" aria-label="用户声音"><span data-icon="chat"></span></button>
       <button type="button" class="sidebar-rail-item" data-sidebar-target="directions-nav" aria-label="卖点与方向"><span data-icon="target"></span></button>
-      <button type="button" class="sidebar-rail-item" data-sidebar-target="ai-nav" aria-label="写稿"><span data-icon="writing"></span><span class="sidebar-rail-count" data-sidebar-count hidden></span></button>
+      <button type="button" class="sidebar-rail-item" data-sidebar-target="ai-nav" aria-label="内容创作"><span data-icon="writing"></span><span class="sidebar-rail-count" data-sidebar-count hidden></span></button>
       <button type="button" class="sidebar-rail-item" data-sidebar-target="videos-nav" aria-label="视频数据"><span data-icon="chart"></span></button>
       <button type="button" class="sidebar-rail-item" data-sidebar-target="library-nav" aria-label="案例库"><span data-icon="library"></span></button>
     </nav>
     <div class="sidebar-rail-tools">
-      <button type="button" class="sidebar-rail-item" data-sidebar-target="materials-nav" aria-label="打开素材篮"><span data-icon="basket"></span><span class="sidebar-rail-count" data-sidebar-count hidden></span></button>
+      <button type="button" class="sidebar-rail-item" data-sidebar-target="materials-nav" aria-label="打开摘录篮"><span data-icon="basket"></span><span class="sidebar-rail-count" data-sidebar-count hidden></span></button>
       <button type="button" class="sidebar-rail-item" data-sidebar-target="files-nav" aria-label="设置"><span data-icon="settings"></span></button>
     </div>
   </div>
   <aside class="sidebar" id="workbench-sidebar" aria-label="工作台边栏">
-    <div class="sidebar-heading"><a class="brand" href="#library"><span class="brand-mark">▰</span><span>案例工作台<small>CONTENT WORKSPACE</small></span></a><button type="button" class="sidebar-toggle" id="sidebar-pin" aria-label="固定边栏" title="固定边栏" aria-controls="workbench-sidebar" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg><span>固定</span></button></div>
-    <label class="global-product"><span>当前产品</span><select id="global-product" aria-label="全局产品"><option value="202H">SHARPAL 202H</option></select></label>
+    <div class="sidebar-heading"><label class="global-product"><span>当前产品</span><select id="global-product" aria-label="全局产品"><option value="202H">SHARPAL 202H</option></select></label><button type="button" class="sidebar-toggle" id="sidebar-pin" aria-label="固定边栏" title="固定边栏" aria-controls="workbench-sidebar" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg><span>固定</span></button></div>
     <div class="sidebar-label">内容工作流</div>
     <nav class="workflow-nav" aria-label="内容工作流">
-      <button class="nav-item" id="home-nav" data-page="home"><span data-icon="calendar"></span>本周</button>
+      <button class="nav-item" id="home-nav" data-page="home"><span data-icon="calendar"></span>工作概览</button>
       <button class="nav-item" id="reviews-nav" data-page="reviews"><span data-icon="chat"></span>用户声音</button>
       <button class="nav-item" id="directions-nav" data-page="directions"><span data-icon="target"></span>卖点与方向</button>
-      <button class="nav-item" id="ai-nav" data-page="ai"><span data-icon="writing"></span>写稿<span class="nav-count" id="ai-active-count" hidden></span></button>
+      <button class="nav-item" id="ai-nav" data-page="ai"><span data-icon="writing"></span>内容创作<span class="nav-count" id="ai-active-count" hidden></span></button>
       <button class="nav-item" id="videos-nav" data-page="videos"><span data-icon="chart"></span>视频数据</button>
       <button class="nav-item" id="library-nav" data-page="library"><span data-icon="library"></span>案例库</button>
     </nav>
@@ -49,9 +48,16 @@
       <button class="nav-item" data-view="archived"><span data-icon="archive"></span>已归档<span class="nav-count" id="count-archived">—</span></button>
     </nav>
     </details>
-    <button class="nav-item" id="materials-nav" data-material-open aria-label="打开素材篮"><span data-icon="basket"></span>素材篮<span class="nav-count" data-material-count>0</span></button>
-    <button class="nav-item" id="files-nav" data-page="settings"><span data-icon="settings"></span>设置</button>
-    <div class="sidebar-bottom"><div class="connection"><i id="connection-dot"></i><span id="connection-text">连接本地案例库</span></div><p id="sync-detail" class="sync-detail" role="status" aria-live="polite"></p><p>视频、文案与修订记录<br>都保存在这台电脑上。</p><button class="subtle dark" id="sync-button"><span data-icon="refresh"></span>重新同步</button></div>
+    <div class="sidebar-bottom">
+      <nav class="sidebar-tools" aria-label="工作台工具">
+        <button class="nav-item" id="materials-nav" data-material-open aria-label="打开摘录篮"><span data-icon="basket"></span>摘录篮<span class="nav-count" data-material-count>0</span></button>
+        <button class="nav-item" id="files-nav" data-page="settings"><span data-icon="settings"></span>设置</button>
+      </nav>
+      <details class="connection-status" id="connection-status">
+        <summary class="connection" aria-label="连接状态与同步"><i id="connection-dot"></i><span id="connection-text">连接本地案例库</span><span class="connection-chevron" aria-hidden="true">⌄</span></summary>
+        <div class="connection-menu"><p id="sync-detail" class="sync-detail" role="status" aria-live="polite"></p><p>同步本机案例与阅读目录。</p><button type="button" class="subtle dark" id="sync-button"><span data-icon="refresh"></span><span id="sync-label">同步案例库</span></button></div>
+      </details>
+    </div>
   </aside>
   <main>
     <header class="topbar"><div class="topbar-left"><button type="button" class="sidebar-toggle" id="sidebar-toggle" aria-label="隐藏边栏" title="隐藏边栏" aria-controls="workbench-sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button><a class="navigate-up" id="navigate-up" href="#home" aria-label="返回上一级" title="返回上一级" hidden><span data-icon="back"></span></a><nav id="breadcrumb" aria-label="当前位置">工作空间 <span>/</span> 案例库</nav></div><div class="topbar-right"><button type="button" class="global-search-trigger" id="global-search-open" aria-label="全局搜索（Ctrl+K）"><span data-icon="search"></span><span class="search-label">全局搜索</span><kbd>Ctrl K</kbd></button><button class="secondary compact" id="import-video-top"><span data-icon="video"></span>导入视频</button><button class="primary compact" id="add-top"><span data-icon="plus"></span>收录案例</button></div></header>
@@ -63,7 +69,7 @@
   <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description"><form id="delete-form"><div class="dialog-heading"><div><span class="eyebrow">PERMANENT DELETE</span><h2 id="delete-title">彻底删除已归档案例</h2></div><button type="button" class="icon-button" id="close-delete" aria-label="关闭删除确认"><span data-icon="close"></span></button></div><div id="delete-fields"></div><div class="dialog-footer"><span id="delete-hint">先核对删除清单，再输入案例编号确认。</span><div><button type="button" class="secondary" id="cancel-delete">取消</button><button type="submit" class="danger" id="confirm-delete" disabled><span data-icon="trash"></span>彻底删除</button></div></div></form></dialog>
   <dialog id="bulk-dialog" aria-labelledby="bulk-title"><form id="bulk-form"><div class="dialog-heading"><div><span class="eyebrow">SELECTED CASES</span><h2 id="bulk-title">批量操作</h2></div><button type="button" class="icon-button" id="close-bulk" aria-label="关闭批量操作"><span data-icon="close"></span></button></div><div id="bulk-fields"></div><div class="dialog-footer"><span id="bulk-hint">仅处理本次选定的案例。</span><div><button type="button" class="secondary" id="cancel-bulk">关闭</button><button type="submit" class="danger" id="confirm-bulk" hidden>彻底删除所选案例</button></div></div></form></dialog>
   <div id="video-drop-overlay" class="video-drop-overlay" aria-hidden="true" hidden><div><span data-icon="video"></span><strong id="video-drop-label">松开鼠标，导入视频</strong><p>复制到案例库，原文件保持不变</p></div></div>
-  <dialog id="ai-create-dialog" aria-labelledby="ai-create-title"><form id="ai-create-form"><div class="dialog-heading"><div><h2 id="ai-create-title">AI 协作</h2></div><button type="button" class="icon-button" id="close-ai-create" aria-label="关闭 AI 协作"><span data-icon="close"></span></button></div><div class="ai-create-content"><p class="ai-create-source"><span id="ai-create-case" class="ai-case-context"></span><span id="ai-create-version"></span></p><label class="field ai-create-ask"><span id="ai-create-instruction-label">这次希望怎么做？</span><textarea id="ai-create-instruction" required maxlength="12000" rows="5" placeholder="填写一句具体要求…"></textarea></label><div id="ai-basket-choice" class="ai-basket-choice"></div><details class="ai-advanced" id="ai-create-advanced"><summary><span>模型与技能</span><span class="ai-advanced-summary" id="ai-create-settings-summary"></span></summary><div class="ai-service-row"><p id="ai-create-availability" class="ai-service-status" role="status"></p><button type="button" class="subtle" id="ai-create-check">重新检查</button></div><div id="ai-create-settings"></div></details><div id="ai-create-error" class="ai-error" role="alert" hidden></div></div><div class="dialog-footer"><span id="ai-create-hint">结果是独立候选，提交后可在「写稿」查看进度。</span><div><button type="button" class="secondary" id="cancel-ai-create">取消</button><button type="submit" class="primary" id="submit-ai-create">开始协作</button></div></div></form></dialog>
+  <dialog id="ai-create-dialog" aria-labelledby="ai-create-title"><form id="ai-create-form"><div class="dialog-heading"><div><h2 id="ai-create-title">AI 协作</h2></div><button type="button" class="icon-button" id="close-ai-create" aria-label="关闭 AI 协作"><span data-icon="close"></span></button></div><div class="ai-create-content"><p class="ai-create-source"><span id="ai-create-case" class="ai-case-context"></span><span id="ai-create-version"></span></p><label class="field ai-create-ask"><span id="ai-create-instruction-label">这次希望怎么做？</span><textarea id="ai-create-instruction" required maxlength="12000" rows="5" placeholder="填写一句具体要求…"></textarea></label><div id="ai-basket-choice" class="ai-basket-choice"></div><div id="ai-create-defaults"></div><details class="ai-advanced" id="ai-create-advanced"><summary><span>技能与服务</span><span class="ai-advanced-summary" id="ai-create-settings-summary"></span></summary><div class="ai-service-row"><p id="ai-create-availability" class="ai-service-status" role="status"></p><button type="button" class="subtle" id="ai-create-check">重新检查</button></div><div id="ai-create-settings"></div></details><div id="ai-create-error" class="ai-error" role="alert" hidden></div></div><div class="dialog-footer"><span id="ai-create-hint">结果是独立候选，提交后可在「内容创作」查看进度。</span><div><button type="button" class="secondary" id="cancel-ai-create">取消</button><button type="submit" class="primary" id="submit-ai-create">开始协作</button></div></div></form></dialog>
   <dialog id="ai-delete-dialog" aria-labelledby="ai-delete-title" aria-describedby="ai-delete-description"><form id="ai-delete-form"><div class="dialog-heading"><div><span class="eyebrow">LOCAL RECORDS</span><h2 id="ai-delete-title">删除所选协作记录</h2></div><button type="button" class="icon-button" id="close-ai-delete" aria-label="关闭删除确认"><span data-icon="close"></span></button></div><div class="ai-delete-content"><p id="ai-delete-description">所选任务的要求、历轮回复和候选结果会从这台电脑删除。关联案例及其正式记录不会改变；删除后无法从工作台恢复。</p><p id="ai-delete-count"></p><div id="ai-delete-error" class="ai-error" role="alert" hidden></div></div><div class="dialog-footer"><span id="ai-delete-hint">请确认本次要删除的本地记录。</span><div><button type="button" class="secondary" id="cancel-ai-delete">取消</button><button type="submit" class="danger" id="confirm-ai-delete"><span data-icon="trash"></span>删除本地记录</button></div></div></form></dialog>
   <div id="toast" role="status" hidden></div>
 </body></html>

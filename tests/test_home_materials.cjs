@@ -26,17 +26,38 @@ test('home due videos use both natural week and current product',()=>{
   assert.equal(context.window.WorkbenchHome.dueVideos(videos,week).map(v=>v.video_id).join(','),'1');
   setProduct('');assert.equal(context.window.WorkbenchHome.dueVideos(videos,week).length,2);
 });
-test('home four charts preserve product filter and leave incomplete data empty',()=>{
+test('home loads only work data and keeps unavailable categories distinct from empty ones',async()=>{
   const {context}=harness();
-  context.addCalendarDays=(iso,n)=>{const d=new Date(iso+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);};
-  vm.runInContext(read('perf-dashboard.js'),context);
-  const data={filters:{product:'202H',account:'',period:'8'},summary:{coverage:{last:'2026-10-04',gaps:[]},weeks:[{week:'2026-09-28',complete:true},{week:'2026-10-05',complete:false}]},analytics:{videos:[['1','one','202H','2026-09-28'],['2','two','129N','2026-09-28']],weekly:[[0,'2026-09-28',100,200,20,2,3,41],[1,'2026-09-28',900,1800,100,10,30,9999],[0,'2026-10-05',1,2,1,1,1,12345]],monthly:[],shop_daily:[]},videos:[]};
-  const html=context.window.PerfDashboard.homeMarkup(data);
-  assert.equal((html.match(/class="perf-mini"/g)||[]).length,4);
-  for(const title of ['每周归因 GMV','每周售出件数','每周播放量','每周新发布视频']) assert.ok(html.includes(title));
-  assert.ok(!html.includes('$9,999'));
-  assert.ok(!html.includes('$12,345'));
-  assert.ok(html.includes('$41'));
+  const root={innerHTML:'',querySelectorAll:()=>[],querySelector:()=>null}, breadcrumb={innerHTML:''}, requests=[];
+  context.$=selector=>({'#home-page':root,'#breadcrumb':breadcrumb}[selector] || null);
+  context.window.WorkbenchShell.parse=()=>({page:'home'});
+  context.api=async path=>{requests.push(path);if(path.startsWith('/api/creation'))throw Error('offline');return path.includes('videos')?{videos:[]}:{tasks:[]};};
+  vm.runInContext(read('home.js'),context);
+  await context.window.WorkbenchHome.route();
+  assert.deepEqual(requests,['/api/performance/videos','/api/ai/tasks','/api/creation?product=202H']);
+  assert.ok(root.innerHTML.includes('<h1>工作概览</h1>'));
+  assert.ok(root.innerHTML.includes('待写计划暂时无法读取。'));
+  assert.ok(root.innerHTML.includes('data-home-retry'));
+  assert.match(root.innerHTML,/data-home-tab="plans">下一轮待写<span class="home-tab-count">—</);
+  assert.equal((root.innerHTML.match(/role="tab"/g)||[]).length,4);
+  assert.ok(!root.innerHTML.includes('home-kpi'));
+  assert.ok(!root.innerHTML.includes('home-weekly'));
+  assert.ok(root.innerHTML.includes('#videos?tab=board'));
+});
+
+test('a late home response cannot overwrite another product or page',async()=>{
+  const {context,setProduct}=harness();
+  const root={innerHTML:'untouched',querySelectorAll:()=>[],querySelector:()=>null}, breadcrumb={innerHTML:''}, pending=[];
+  context.$=selector=>({'#home-page':root,'#breadcrumb':breadcrumb}[selector] || null);
+  let page='home';context.window.WorkbenchShell.parse=()=>({page});
+  context.api=()=>new Promise(resolve=>pending.push(resolve));
+  vm.runInContext(read('home.js'),context);
+  const oldProduct=context.window.WorkbenchHome.route();
+  setProduct('129N');pending.splice(0).forEach(resolve=>resolve({}));await oldProduct;
+  assert.equal(root.innerHTML,'untouched');
+  const oldPage=context.window.WorkbenchHome.route();
+  page='videos';pending.splice(0).forEach(resolve=>resolve({}));await oldPage;
+  assert.equal(root.innerHTML,'untouched');
 });
 test('material basket scopes server items and exports sources plus unverified boundary',async()=>{
   const {context,setProduct}=harness();

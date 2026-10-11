@@ -28,7 +28,7 @@ class AILoadingBrowserTests(unittest.TestCase):
         page.on("pageerror", lambda error: errors.append(str(error)))
         self.addCleanup(lambda: self.assertEqual(errors, []))
         page.route("**/api/ai/status", lambda route: pending.append(route))
-        page.route("**/api/ai/options", lambda route: pending.append(route))
+        page.route("**/api/ai/options*", lambda route: pending.append(route))
         task = {"task_id": TASK, "status": "completed", "product": "202H",
                 "action": "variants", "context": {"title": "可立即阅读的写稿记录"},
                 "rounds": [{"round_id": "round-one", "status": "completed",
@@ -54,10 +54,11 @@ class AILoadingBrowserTests(unittest.TestCase):
     def test_saved_reply_is_readable_before_models_and_status_arrive(self):
         page, pending = self.open_writing("/" + TASK)
         page.locator("#ai-rounds").get_by_text("保存的完整脚本", exact=False).wait_for()
-        self.assertTrue(any(route.request.url.endswith("/options") for route in pending))
-        self.assertTrue(page.locator("#ai-continue-model").is_disabled())
+        self.assertTrue(any("/api/ai/options" in route.request.url for route in pending))
+        self.assertEqual(page.locator("#ai-continue-model,#ai-continue-effort").count(), 0)
+        self.assertIn("正在读取全局默认配置", page.locator("#ai-continue-defaults-summary").inner_text())
         self.finish_discovery(pending)
-        page.wait_for_function("() => !document.querySelector('#ai-continue-model').disabled")
+        page.locator("#ai-continue-defaults-summary").get_by_text("使用全局默认", exact=False).wait_for()
         self.assertEqual(page.locator("#ai-rounds").get_by_text("保存的完整脚本", exact=False).count(), 1)
 
 

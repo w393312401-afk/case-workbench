@@ -143,6 +143,7 @@ window.CaseDirections = (() => {
   }
   function catalogURL(product,id="") {
     const query=new URLSearchParams();if(product)query.set("product",product);
+    if(id){query.set("view","page");query.set("include_tasks","0");}
     return "/api/direction-catalog"+(id?"/"+encodeURIComponent(id):"")+(query.size?"?"+query:"");
   }
   function fieldText(value) { return typeof value === "string" ? value : ""; }
@@ -198,7 +199,7 @@ window.CaseDirections = (() => {
       if(g.duplicate_video_ids?.length)node.querySelector(".direction-observations").insertAdjacentHTML("beforebegin",g.duplicate_video_ids.map(v=>`<div class="data-warning direction-duplicate"><p>${v.cross_direction?"同一视频跨方向登记":"同一视频重复登记"}：${esc(v.video_id)}。${v.cross_direction?"请先核对方向与对应稿件；这些记录不能作为各方向的独立表现样本。":"保留各自当前记录，不重复累计。"}</p><ul>${(v.assignments || []).map(a=>`<li><a href="#case/${esc(a.case_id)}">${esc(a.case_id)}</a> · 原产品名 ${esc(a.product || "未提供")} · 方向 ${esc(a.direction_id || "未记录")}</li>`).join("")}</ul></div>`).join(""));
     });
   }
-  let refocusFilter="",filterTimer=0,composing=false;
+  let refocusFilter=null,filterTimer=0,composing=false,listView=null;
   const cancelFilterTimer=()=>{clearTimeout(filterTimer);filterTimer=0;};
   function renderCatalog(catalog,summary,values) {
     cancelFilterTimer();composing=false;
@@ -232,19 +233,32 @@ window.CaseDirections = (() => {
         +(orphanRows.length?`<section class="dir-group"><h2>未关联卖点的方向<small>旧记录 · ${orphanRows.length}</small></h2><ul class="dir-list">${orphanRows.map(item=>pointRow(null,item)).join("")}</ul></section>`:"")}
       <div class="direction-summary-notes">${leadTierLine(summary.lead_tier_counts)}<p>范围内未记录方向的案例 ${summary.unclassified_case_ids?.length || 0} 条${summary.unclassified_case_ids?.length?` · <a href="${esc(pageURL("#library?"+libraryParams))}">查看案例</a>`:""}。</p><details><summary>数据与复盘说明</summary><ul>${(summary.limitations || []).map(note=>`<li>${esc(note)}</li>`).join("")}</ul><p>关联视频去重计数；出单视频只表示其自身窗口内有售出记录，不累计不同窗口的出单量。</p></details></div>`;
     const filterForm=$("#direction-filters");
+    // Only reuse the complete data behind the currently mounted list. Opening the
+    // page again, changing its data scope, or refreshing still reads fresh data.
+    listView={catalog,summary,values,form:filterForm,signature:state.signature,digest:state.digest};
     filterForm.onsubmit=event=>{
       event.preventDefault();const next=new URLSearchParams(),form=new FormData(event.currentTarget);
       for(const [key,value] of form){const text=String(value).trim();if(text&&!(key==="archive"&&text==="active"))next.set(key,text);}
       const target=pageURL("#directions"+(next.size?"?"+next:""));if(location.hash===target)void route();else location.hash=target;
     };
     for(const name of ["tier","status"])$$(`[data-${name}-filter]`).forEach(button=>button.onclick=()=>{filterForm.elements[name].value=button.dataset[name+"Filter"];filterForm.requestSubmit();});
-    const applyFilters=(delay=0)=>{cancelFilterTimer();filterTimer=setTimeout(()=>{filterTimer=0;if(composing||!filterForm.isConnected||pageHash()!==values.hash)return;refocusFilter=document.activeElement?.name||"";filterForm.requestSubmit();},delay);};
+    const applyFilters=(delay=0)=>{
+      cancelFilterTimer();
+      const submit=()=>{
+        filterTimer=0;
+        if(composing||!filterForm.isConnected||pageHash()!==values.hash)return;
+        const active=document.activeElement;
+        refocusFilter=active?.name?{name:active.name,start:active.selectionStart,end:active.selectionEnd}:null;
+        filterForm.requestSubmit();
+      };
+      if(delay)filterTimer=setTimeout(submit,delay);else submit();
+    };
     filterForm.addEventListener("compositionstart",()=>{composing=true;});
-    filterForm.addEventListener("compositionend",()=>{composing=false;applyFilters(300);});
-    filterForm.addEventListener("input",event=>{if(event.target.matches("input[type=text],input:not([type])"))applyFilters(400);});
+    filterForm.addEventListener("compositionend",()=>{composing=false;applyFilters(150);});
+    filterForm.addEventListener("input",event=>{if(!composing&&!event.isComposing&&event.target.matches("input[type=text],input:not([type])"))applyFilters(event.target.value.trim()?150:0);});
     filterForm.addEventListener("change",event=>{if(event.target.matches("select"))applyFilters();});
     filterForm.addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.isComposing){event.preventDefault();applyFilters();}});
-    if(refocusFilter){const field=filterForm.elements[refocusFilter];refocusFilter="";if(field?.focus){field.focus();if(field.setSelectionRange){const end=field.value.length;field.setSelectionRange(end,end);}}}
+    if(refocusFilter){const saved=refocusFilter,field=filterForm.elements[saved.name];refocusFilter=null;if(field?.focus){field.focus();if(field.setSelectionRange&&saved.start!=null)field.setSelectionRange(saved.start,saved.end);}}
     $("#new-selling-point").onclick=()=>openPointEditor();
     $$("[data-edit-point]").forEach(button=>button.onclick=()=>openPointEditor(button.dataset.editPoint));
     $$("[data-adopt-grading]").forEach(button=>button.onclick=()=>openPointEditor(button.dataset.adoptGrading,true));
@@ -253,14 +267,17 @@ window.CaseDirections = (() => {
   function renderDetail(data,values,points=[]) {
     const d=data.direction,p=data.selling_point,group=data.group;
     const variants=d.variants || [], scripts=data.scripts || [],videos=data.videos || [],tasks=data.tasks || [],cases=data.cases || [],plans=data.plans || [];
+    let relatedTouched=false;
+    const taskItems=items=>items.map(task=>`<a class="direction-related-item" href="${esc(pageURL("#ai/"+encodeURIComponent(task.task_id)))}"><strong>${esc(task.case_title || task.case_id || task.task_id)}</strong><span>${esc(taskStatusNames[task.status] || task.status || "状态未提供")} · ${esc(readableDate(task.updated_at))}</span></a>`).join("");
     const planNames={scale:"加码",execution:"换执行",stop:"停测"},planStatus={pending:"待处理",working:"进行中",done:"已完成",cancelled:"已取消"};
     const related=[
       ["scripts","文案版本",scripts,scripts.map(script=>script.script_id || script.id?`<a class="direction-related-item" href="${esc(pageURL("#scripts/"+(script.script_id || script.id)))}"><strong>${esc(script.title)}</strong><span>第 ${esc(script.version || 1)} 版 · ${esc({draft:"草稿",adopted:"已采纳",filmed:"已拍摄",published:"已发布",reviewed:"已复盘",archived:"已归档"}[script.status] || script.status || "")}</span></a>`:`<details class="direction-script"><summary><strong>${esc(script.script_version || "版本未标记")}</strong> ${esc(script.title || script.case_id)}</summary><pre>${esc(script.text || "未记录文案")}</pre><a href="${esc(pageURL("#case/"+script.case_id+"/script"))}">查看案例文案</a></details>`).join(""),"还没有关联的文案版本。"],
       ["videos","关联视频",videos,videos.map(video=>`<a class="direction-related-item" href="${esc(pageURL("#videos?video="+encodeURIComponent(video.video_id)))}"><strong>${esc(video.title || video.video_id)}</strong><span>${esc(video.video_id)}</span></a>`).join(""),"还没有关联视频。"],
-      ["tasks","AI 任务",tasks,tasks.map(task=>`<a class="direction-related-item" href="${esc(pageURL("#ai/"+encodeURIComponent(task.task_id)))}"><strong>${esc(task.case_title || task.case_id || task.task_id)}</strong><span>${esc(taskStatusNames[task.status] || task.status || "状态未提供")} · ${esc(readableDate(task.updated_at))}</span></a>`).join(""),"还没有关联的 AI 协作任务。"],
+      ["tasks","AI 任务",tasks,taskItems(tasks),"还没有关联的 AI 协作任务。"],
       ["cases","关联案例",cases,cases.map(item=>`<a class="direction-related-item" href="${esc(pageURL("#case/"+item.case_id))}"><strong>${esc(item.current?.title || item.title || item.case_id)}</strong><span>${esc(item.case_id)}${item.archived?" · 已归档":""}</span></a>`).join(""),"方向已经独立保存，后续案例可以使用这个编号。"],
     ];
     const firstRelated=(related.find(([, ,list])=>list.length)||related[0])[0];
+    const relatedMarkup=([key,,list,markup,emptyText])=>key==="tasks"&&data.tasks_pending===true?'<p class="context-note" role="status">正在读取 AI 任务…</p>':list.length?`<div class="direction-related-list">${markup}</div>`:`<p class="dir-empty">${esc(emptyText)}</p>`;
     const progressionSelect=(variant,index)=>`<label class="dir-progression"><span class="sr-only">推进结构</span><select data-variant-progression="${index}" aria-label="第 ${index+1} 条的推进结构"><option value="">推进结构未标注</option>${progressions.map(item=>`<option ${variant.progression===item?"selected":""}>${esc(item)}</option>`).join("")}${variant.progression&&!progressions.includes(variant.progression)?`<option selected>${esc(variant.progression)}</option>`:""}</select></label>`;
     $("#breadcrumb").innerHTML=`工作空间 <span>/</span> 卖点与方向 <span>/</span> ${esc(d.direction_id)}`;
     $("#content").innerHTML=`<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || directionURL(d.product))}">${icon("back")}返回卖点与方向</a>
@@ -275,13 +292,13 @@ window.CaseDirections = (() => {
             <div class="dir-variant-chain">${chainSteps({concern:variant.concern,closing:variant.closing},points)}</div>${variant.execution_change?`<p class="dir-change">改动：${esc(variant.execution_change)}</p>`:""}${(variant.chain_issues||[]).length?`<p class="dir-note">${esc(variant.chain_issues.join("；"))}（已发布的记录保持原样）</p>`:""}</div>`).join("")}</div>
           ${!variants.length?messageMarkup("暂未追加执行变体。已有案例仍保留各自的完整方向链。"):""}
           ${(d.history||[]).length?`<details class="direction-history"><summary>旧定义 · ${d.history.length}</summary>${d.history.map(item=>`<div class="direction-definition"><small>${esc(readableDate(item.replaced_at))} 前</small><p class="direction-chain">${esc(directionChain(item))}</p></div>`).join("")}</details>`:""}</section>
-        <section class="section-card dir-card dir-related"><div class="dir-tabs" role="tablist" aria-label="关联内容">${related.map(([key,label,list])=>`<button type="button" role="tab" id="direction-${key}" aria-controls="direction-${key}-panel" aria-selected="${key===firstRelated}" data-related-tab="${key}">${label}<small>${list.length}</small></button>`).join("")}</div>
-          ${related.map(([key,,list,markup,emptyText])=>`<div class="dir-related-panel" role="tabpanel" id="direction-${key}-panel" aria-labelledby="direction-${key}"${key===firstRelated?"":" hidden"}>${list.length?`<div class="direction-related-list">${markup}</div>`:`<p class="dir-empty">${esc(emptyText)}</p>`}</div>`).join("")}</section>
+        <section class="section-card dir-card dir-related"><div class="dir-tabs" role="tablist" aria-label="关联内容">${related.map(([key,label,list])=>`<button type="button" role="tab" id="direction-${key}" aria-controls="direction-${key}-panel" aria-selected="${key===firstRelated}" data-related-tab="${key}">${label}<small>${key==="tasks"&&data.tasks_pending===true?"…":list.length}</small></button>`).join("")}</div>
+          ${related.map(item=>`<div class="dir-related-panel" role="tabpanel" id="direction-${item[0]}-panel" aria-labelledby="direction-${item[0]}"${item[0]==="tasks"&&data.tasks_pending===true?' aria-busy="true"':""}${item[0]===firstRelated?"":" hidden"}>${relatedMarkup(item)}</div>`).join("")}</section>
         ${group?`<div class="direction-section-heading"><h2>案例执行与表现</h2><p class="context-note">每条案例保留自己的方向链、文案版本与统计窗口。</p></div>${groupCard(group)}`:""}
       </div><aside class="dir-aside">
         <section class="dir-card dir-aside-card"><h2>主打卖点</h2>${p?`<p class="dir-aside-title"><span class="dir-code tier-${esc(p.tier)}">${esc(p.code)}</span>${esc(p.title)}</p>${p.rationale?`<p class="dir-aside-text">${esc(p.rationale)}</p>`:""}<dl class="dir-facts"><dt>证据</dt><dd>${esc(p.evidence || "待补充")}</dd></dl>`:'<p class="dir-aside-text">这个方向没有关联卖点。</p>'}</section>
         <section class="dir-card dir-aside-card" id="direction-plans"><h2>下一轮安排</h2><div class="dir-plan-buttons">${[["scale","加码"],["execution","换执行"],["stop","停测"]].map(([action,label])=>`<button type="button" class="secondary compact" data-direction-plan="${action}">${label}</button>`).join("")}</div>
-          ${plans.length?`<ul class="dir-plans">${plans.map(plan=>`<li><strong>${esc(planNames[plan.action] || plan.action)}</strong><span>${esc(planStatus[plan.status] || plan.status)}</span>${plan.note?`<small>${esc(plan.note)}</small>`:""}</li>`).join("")}</ul>`:'<p class="dir-aside-text">选一个写下判断，会出现在「本周」的下一轮待写里。</p>'}</section>
+          ${plans.length?`<ul class="dir-plans">${plans.map(plan=>`<li><strong>${esc(planNames[plan.action] || plan.action)}</strong><span>${esc(planStatus[plan.status] || plan.status)}</span>${plan.note?`<small>${esc(plan.note)}</small>`:""}</li>`).join("")}</ul>`:'<p class="dir-aside-text">选一个写下判断，会出现在「工作概览」的下一轮待写里。</p>'}</section>
         <section class="dir-card dir-aside-card"><h2>记录</h2><dl class="dir-facts"><dt>产品</dt><dd>${esc(d.product)}</dd><dt>案例</dt><dd>${cases.length} 条</dd><dt>视频</dt><dd>${videos.length} 条</dd>${d.performance?.matched_count?`<dt>表现</dt><dd>${esc(performanceText(d.performance))}</dd>`:""}</dl>
           <details class="dir-aside-more"><summary>数据与复盘说明</summary><p>各案例保留各自文案版本、统计窗口与数据来源，不累计不同窗口的售出量。重复登记的视频也保留原始归属提示。</p></details></section>
       </aside></div>`;
@@ -297,15 +314,34 @@ window.CaseDirections = (() => {
     $$("[data-variant-progression]").forEach(select=>select.onchange=()=>{if(select.value)saveMeta({index:Number(select.dataset.variantProgression),progression:select.value});});
     $("#direction-write").onclick=()=>window.CaseAI?.startFromDirection(d);
     $$("[data-direction-plan]").forEach(button=>button.onclick=()=>openPlan(data,button.dataset.directionPlan));
-    $$("[data-related-tab]").forEach(tab=>tab.onclick=()=>{
-      $$("[data-related-tab]").forEach(item=>item.setAttribute("aria-selected",String(item===tab)));
-      $$(".dir-related-panel").forEach(panel=>panel.hidden=panel.id!==`direction-${tab.dataset.relatedTab}-panel`);
-    });
+    const selectRelated=key=>{
+      $$("[data-related-tab]").forEach(item=>item.setAttribute("aria-selected",String(item.dataset.relatedTab===key)));
+      $$(".dir-related-panel").forEach(panel=>panel.hidden=panel.id!==`direction-${key}-panel`);
+    };
+    $$("[data-related-tab]").forEach(tab=>tab.onclick=()=>{relatedTouched=true;selectRelated(tab.dataset.relatedTab);});
+    return {
+      loadingTasks(){
+        $("#direction-tasks small").textContent="…";
+        const panel=$("#direction-tasks-panel");panel.setAttribute("aria-busy","true");panel.innerHTML='<p class="context-note" role="status">正在读取 AI 任务…</p>';
+      },
+      setTasks(items){
+        data.tasks=Array.isArray(items)?items:[];delete data.tasks_pending;
+        related[2][2]=data.tasks;related[2][3]=taskItems(data.tasks);
+        $("#direction-tasks small").textContent=String(data.tasks.length);
+        const panel=$("#direction-tasks-panel");panel.removeAttribute("aria-busy");panel.innerHTML=relatedMarkup(related[2]);
+        if(!relatedTouched&&data.tasks.length&&!scripts.length&&!videos.length)selectRelated("tasks");
+      },
+      taskError(error,retry){
+        $("#direction-tasks small").textContent="—";
+        const panel=$("#direction-tasks-panel");panel.removeAttribute("aria-busy");panel.innerHTML=`<p class="dir-note is-warn" role="alert">${esc(error.message || "AI 任务读取失败")}</p><button type="button" class="secondary" id="direction-task-retry">重新读取</button>`;
+        $("#direction-task-retry").onclick=retry;
+      },
+    };
   }
   async function openPlan(data,action) {
     const labels={scale:"加码",execution:"换执行",stop:"停测"}, d=data.direction;
     let dialog=$("#direction-plan-dialog");if(!dialog){dialog=document.createElement("dialog");dialog.id="direction-plan-dialog";document.body.append(dialog);}
-    dialog.innerHTML=`<form><div class="dialog-heading"><h2>${labels[action]} · ${esc(d.direction_id)}</h2><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div><div class="direction-wizard-body"><label class="field"><span>本轮观察与下一步要求</span><textarea name="note" rows="4" required maxlength="12000" placeholder="写下数据窗口、观察和这次决定的理由"></textarea></label><p class="context-note">保存到本周首页的下一轮安排，保留这次判断。</p><p class="direction-form-error" role="alert"></p></div><div class="dialog-footer"><span></span><div><button type="button" class="secondary" data-close>取消</button><button type="submit" class="primary">保存安排</button></div></div></form>`;
+    dialog.innerHTML=`<form><div class="dialog-heading"><h2>${labels[action]} · ${esc(d.direction_id)}</h2><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div><div class="direction-wizard-body"><label class="field"><span>本轮观察与下一步要求</span><textarea name="note" rows="4" required maxlength="12000" placeholder="写下数据窗口、观察和这次决定的理由"></textarea></label><p class="context-note">保存到「工作概览」的下一轮安排，保留这次判断。</p><p class="direction-form-error" role="alert"></p></div><div class="dialog-footer"><span></span><div><button type="button" class="secondary" data-close>取消</button><button type="submit" class="primary">保存安排</button></div></div></form>`;
     dialog.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>requestClose(dialog));dialog.showModal();trackDraft(dialog);
     let pending=false,requestId=crypto.randomUUID(),catalog;
     try{catalog=await api("/api/creation?product="+encodeURIComponent(d.product));}catch(error){dialog.querySelector("[role=alert]").textContent=error.message;}
@@ -415,17 +451,43 @@ window.CaseDirections = (() => {
       finally{pending=false;if(activeDraft)activeDraft.pending=false;dialog.querySelectorAll("button").forEach(button=>button.disabled=false);}
     };dialog.showModal();trackDraft(dialog);
   }
-  async function route() {
+  async function route(force=false) {
     cancelFilterTimer();composing=false;
     const sequence=++requestSequence,values=routeValues();
     $("#breadcrumb").innerHTML="工作空间 <span>/</span> 卖点与方向";
+    const prior=listView;
+    if(!force&&!values.id&&prior&&prior.form===$("#direction-filters")&&prior.values.hash!==values.hash
+      &&prior.values.product===values.product&&prior.values.archive===values.archive
+      &&prior.signature===state.signature&&prior.digest===state.digest){
+      renderCatalog(prior.catalog,prior.summary,values);return;
+    }
+    listView=null;
     $("#content").innerHTML='<p role="status">正在读取卖点与方向…</p>';
     try {
       if(values.id){
-        // The whole catalog too, only to name the selling-point codes that appear inside the chain.
-        const [data,catalog]=await Promise.all([api(catalogURL(values.product,values.id)),api(catalogURL(values.product)).catch(()=>null)]);
+        const data=await api(catalogURL(values.product,values.id));
         if(sequence!==requestSequence||pageHash()!==values.hash)return;
-        renderDetail(data,values,catalog?.selling_points || []);return;
+        // New servers return the names from the same snapshot as the detail.
+        // Keep older running servers usable until they can be restarted.
+        const points=Array.isArray(data.selling_points)?data.selling_points:
+          (await api(catalogURL(values.product)).catch(()=>null))?.selling_points || [];
+        if(sequence!==requestSequence||pageHash()!==values.hash)return;
+        const detail=renderDetail(data,values,points);
+        if(data.tasks_pending===true){
+          const current=()=>sequence===requestSequence&&pageHash()===values.hash;
+          const loadTasks=async()=>{
+            if(!current())return;
+            detail.loadingTasks();
+            try{
+              const query=new URLSearchParams({product:data.direction.product,direction_id:data.direction.direction_id});
+              const response=await api("/api/ai/tasks?"+query);
+              if(current())detail.setTasks(response.tasks || []);
+            }catch(error){if(current())detail.taskError(error,()=>void loadTasks());}
+          };
+          // Let the complete direction and its controls paint before reading task history.
+          requestAnimationFrame(()=>setTimeout(()=>{if(current())void loadTasks();},0));
+        }
+        return;
       }
       const query=new URLSearchParams({archive:values.archive});if(values.product)query.set("product",values.product);
       const [catalog,summary]=await Promise.all([api(catalogURL(values.product)),api("/api/directions?"+query)]);
@@ -437,6 +499,6 @@ window.CaseDirections = (() => {
   const closeMenus=event=>$$(".dir-menu[open]").forEach(menu=>{if(event.key==="Escape"||!menu.contains(event.target)||event.target.closest("[role=menuitem]"))menu.open=false;});
   window.addEventListener("click",closeMenus,true);window.addEventListener("keydown",event=>{if(event.key==="Escape")closeMenus(event);});
   window.addEventListener("hashchange",cancelFilterTimer);
-  window.addEventListener("workbench:directionchange",()=>{if(state.routeKind==="directions"&&!modalOpen())void route();});
+  window.addEventListener("workbench:directionchange",()=>{listView=null;if(state.routeKind==="directions"&&!modalOpen())void route(true);});
   return {route,openCreate,openPointEditor,modalOpen,beforeNavigate};
 })();

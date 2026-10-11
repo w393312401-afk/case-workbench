@@ -930,3 +930,4 @@ h1{font-weight:700;letter-spacing:-.02em}
   #content .perf-toolbar select{flex:1}
 }
 @media(max-width:760px){#content .perf-toolbar .perf-segment{display:flex;width:100%;flex:1 1 100%;grid-column:1/-1}}
+.ai-format-check{font-size:var(--font-micro);line-height:1.9;margin:6px 0 0;color:var(--warm-ink)}.ai-format-check.repaired{color:var(--green-ink)}

@@ -14,11 +14,13 @@
   const fresh = () => ({ ...defaults, platform: [], nature: [], topic: [], competitor: [] });
   // threads: conversations already fetched (by review id). open / editing: the cards whose conversation / tag editor is
   // expanded; both are kept across repaints. Picks are shared with the global material basket.
-  const rev = { summary: null, data: null, shown: 50, request: 0, threads: {}, open: new Set(), editing: new Set(), filters: fresh() };
-  let searchTimer = null, searchHash = "";
+  const rev = { summary: null, data: null, shown: 50, request: 0, resultQuery: null, threads: {}, threadLoading: {}, open: new Set(), editing: new Set(), filters: fresh() };
+  let searchTimer = null, searchField = null, searchHash = "", submittedSearch = null;
+
   function cancelSearch() {
     clearTimeout(searchTimer);
     searchTimer = null;
+    searchField = null;
     searchHash = "";
   }
   function captureListState() {
@@ -33,6 +35,12 @@
     rev.editing.clear();
   }
 
+  function prepareSearchRefresh() {
+    if (searchTimer === null) return;
+    cancelSearch();
+    rev.shown = 50;
+    save();
+  }
   try {
     const saved = JSON.parse(sessionStorage.getItem("review-library-filters") || "{}");
     for (const key of Object.keys(defaults)) if (key in saved && typeof saved[key] === typeof defaults[key]) rev.filters[key] = saved[key];
@@ -142,13 +150,24 @@
   }
 
   async function loadResults() {
-    const mine = ++rev.request, hash = pageHash();
-    const data = await api(`/api/reviews?${params()}`);
-    if (mine !== rev.request || pageHash() !== hash) return false; // a newer filter change already asked
-    data.facets.competitor ||= {};
-    data.videos ||= {};
-    rev.data = data;
-    return true;
+    const mine = ++rev.request, hash = pageHash(), query = params().toString();
+    const isCurrent = () => mine === rev.request && pageHash() === hash && params().toString() === query;
+    submittedSearch = query;
+    // A pending refresh can contain changed records even when its filters match the displayed data.
+    rev.resultQuery = null;
+    try {
+      const data = await api(`/api/reviews?${query}`);
+      if (!isCurrent()) return false; // input changes invalidate old results before the next debounce fires
+      data.facets.competitor ||= {};
+      data.videos ||= {};
+      rev.data = data;
+      rev.resultQuery = query;
+      return true;
+    } catch (error) {
+      if (!isCurrent()) return false;
+      submittedSearch = null;
+      throw error;
+    }
   }
 
   function highlight(text, terms) {
@@ -256,7 +275,7 @@
       <header class="rev-head"><span class="rev-platform rev-platform-${r.platform}">${esc(labelOf("platform", r.platform))}</span><span class="rev-role rev-role-${r.role}" title="${esc(roleHints[r.role] || "")}">${esc(labelOf("role", r.role))}</span>${stars(r.rating)}${replyBadge(r)}${isNew(r) ? '<span class="rev-badge rev-badge-new" title="最近一次同步新增的评论">新</span>' : ""}<span class="rev-meta rev-date">${meta}</span>${likes}</header>
       ${r.title ? `<h3 class="rev-title">${highlight(r.title, terms)}</h3>` : ""}${body}
       ${r.context ? `<p class="rev-context">在帖子「${esc(r.context.slice(0, 80))}」下</p>` : ""}${videoLine(r)}
-      <footer class="rev-foot"><div class="rev-tags">${tags}</div><div class="rev-actions">${threadButton(r)}<button type="button" class="subtle rev-pick${picked ? " is-on" : ""}" data-pick="${esc(r.id)}" aria-pressed="${picked}" title="放进全局素材篮，写稿时带入">${picked ? "已摘录" : "摘录"}</button><button type="button" class="subtle" data-copy="${esc(r.id)}">复制引用</button><details class="rev-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-edit-tags="${esc(r.id)}" aria-expanded="${editing}">改标签</button><button type="button" role="menuitem" data-review-theme="${esc(r.id)}">关联主题</button>${r.url ? `<a role="menuitem" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">打开原帖</a>` : ""}</div></details></div></footer>
+      <footer class="rev-foot"><div class="rev-tags">${tags}</div><div class="rev-actions">${threadButton(r)}<button type="button" class="subtle rev-pick${picked ? " is-on" : ""}" data-pick="${esc(r.id)}" aria-pressed="${picked}" title="放进全局摘录篮，写稿时带入">${picked ? "已摘录" : "摘录"}</button><button type="button" class="subtle" data-copy="${esc(r.id)}">复制引用</button><details class="rev-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-edit-tags="${esc(r.id)}" aria-expanded="${editing}">改标签</button><button type="button" role="menuitem" data-review-theme="${esc(r.id)}">关联主题</button>${r.url ? `<a role="menuitem" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">打开原帖</a>` : ""}</div></details></div></footer>
       <div class="rev-tag-editor" id="rev-tags-${esc(r.id)}"${editing ? "" : " hidden"}>${editing ? tagEditor(r) : ""}</div>
       <div class="rev-thread" id="rev-thread-${esc(r.id)}" hidden></div></article>`;
   }
@@ -406,7 +425,7 @@
     recent.innerHTML = `近 ${s.new_days || 14} 天新增<span>${num(s.new_recent)}</span>`;
     recent.setAttribute("aria-pressed", String(Boolean(f.since)));
     const basket = $("#rev-basket-toggle");
-    basket.innerHTML = `${icon("folder")}素材篮`;
+    basket.innerHTML = `${icon("folder")}摘录篮`;
     basket.setAttribute("aria-haspopup", "dialog");
   }
 
@@ -452,7 +471,10 @@
     if (!rev.threads[id]) {
       box.innerHTML = '<p class="rev-muted">正在读取对话…</p>';
       try {
-        rev.threads[id] = (await api(`/api/reviews/${id}`)).review.thread || [];
+        rev.threadLoading[id] ||= api(`/api/reviews/${id}`).then(data => {
+          rev.threads[id] = data.review.thread || [];
+        }).finally(() => { delete rev.threadLoading[id]; });
+        await rev.threadLoading[id];
       } catch (error) {
         rev.open.delete(id);
         box.innerHTML = `<div class="data-warning">${esc(error.message)}</div>`;
@@ -464,6 +486,7 @@
   }
 
   async function refresh() {
+    prepareSearchRefresh();
     const hash = pageHash();
     try {
       if (await loadResults()) paintResults();
@@ -475,10 +498,11 @@
 
   // After the records changed: the counts in the summary and the facets of the list are read again.
   async function refreshAll() {
+    prepareSearchRefresh();
     const hash = pageHash();
     try {
-      await Promise.all([loadSummary(), loadResults()]);
-      if (pageHash() !== hash || !$("#rev-results")) return;
+      const [,loaded] = await Promise.all([loadSummary(), loadResults()]);
+      if (!loaded || pageHash() !== hash || !$("#rev-results")) return;
       paintResults();
       paintNotes();
     } catch (error) {
@@ -557,25 +581,49 @@
   }
 
   function bindToolbar() {
-    $("#rev-q").addEventListener("input", (event) => {
-      const field = event.target;
-      rev.filters.q = field.value;
+    const field = $("#rev-q");
+    let composing = false;
+    const isCurrentField = () => field.isConnected && $("#rev-q") === field && pageHash().startsWith("#reviews");
+    const submit = () => {
       cancelSearch();
+      if (composing || !isCurrentField()) return;
+      rev.filters.q = field.value;
+      rev.shown = 50;
+      const query = params().toString();
+      save();
+      if (query === submittedSearch || query === rev.resultQuery) return;
+      void refresh();
+    };
+    const queue = (inputComposing = false) => {
+      if (!isCurrentField()) return;
+      rev.filters.q = field.value;
+      ++rev.request;
+      submittedSearch = null;
+      cancelSearch();
+      if (composing || inputComposing) return;
+      searchField = field;
       searchHash = pageHash();
-      searchTimer = setTimeout(() => {
-        cancelSearch();
-        if (!field.isConnected || $("#rev-q") !== field || !pageHash().startsWith("#reviews")) return;
-        rev.shown = 50;
-        save();
-        refresh();
-      }, 250);
+      searchTimer = setTimeout(submit,150);
+    };
+    field.addEventListener("input", event => queue(event.isComposing));
+    field.addEventListener("compositionstart", () => {
+      composing = true;
+      ++rev.request;
+      submittedSearch = null;
+      cancelSearch();
+    });
+    field.addEventListener("compositionend", () => {composing = false;queue();});
+    field.addEventListener("keydown", event => {
+      if (event.key !== "Enter" || composing || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      submit();
     });
     [["#rev-rating", "rating"], ["#rev-role", "role"], ["#rev-language", "language"], ["#rev-replied", "replied"], ["#rev-video", "video"], ["#rev-sku", "sku"], ["#rev-sort", "sort"]].forEach(([selector, key]) =>
       $(selector)?.addEventListener("change", (event) => changed({ [key]: event.target.value })));
     [["#rev-brand", "brand"], ["#rev-empty", "empty"], ["#rev-irrelevant", "irrelevant"]].forEach(([selector, key]) =>
       $(selector).addEventListener("change", (event) => changed({ [key]: event.target.checked })));
     // Clearing rebuilds the controls; the drawer stays open when it was.
-    const reset = () => { cancelSearch(); const open = $("#rev-drawer").open; rev.filters = fresh(); rev.shown = 50; save(); render(); refresh(); if (open) $("#rev-drawer").showModal(); };
+    const reset = () => { cancelSearch();const open = $("#rev-drawer").open; rev.filters = fresh(); rev.shown = 50; save(); render(); refresh(); if (open) $("#rev-drawer").showModal(); };
     $("#rev-reset").onclick = reset;
     // Quick filters, e.g. the unanswered TikTok questions: things viewers asked that nobody replied to.
     $$("[data-quick]").forEach((button) => button.onclick = () => { const item = quick[button.dataset.quick]; changed(item.set(!item.on(rev.filters), rev.filters)); });
@@ -590,14 +638,15 @@
     };
     $("#rev-basket-toggle").onclick = () => window.MaterialBasket?.open();
     $("#rev-sync").onclick = async () => {
+      prepareSearchRefresh();
       const hash = pageHash(), button = $("#rev-sync"), box = $("#rev-sync-result");
       button.disabled = true;
       box.className = "context-note";
       box.textContent = "正在同步…";
       try {
         const result = await api("/api/reviews/sync", { method: "POST", body: {} });
-        await Promise.all([loadSummary(),loadResults()]);
-        if (pageHash() !== hash) return;
+        const [,loaded] = await Promise.all([loadSummary(),loadResults()]);
+        if (!loaded || pageHash() !== hash) return;
         render();
         const note = $("#rev-sync-result");
         note.className = result.failed.length || result.missing_sources.length || result.state_error ? "data-warning" : "context-note";
@@ -699,7 +748,7 @@
     const isCurrent = () => sequence === routeSequence && hash === pageHash();
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 用户声音";
     // A background route check must leave the current draft to its scheduled search.
-    if (searchTimer !== null && $("#rev-q")?.isConnected && searchHash === hash && product === renderedProduct) return;
+    if (searchTimer !== null && searchField?.isConnected && searchHash === hash && product === renderedProduct) return;
     const restored = window.WorkbenchShell?.listState?.("reviews", product);
     if (restored?.filters) {
       cancelSearch();

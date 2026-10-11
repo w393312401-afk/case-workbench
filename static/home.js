@@ -1,7 +1,7 @@
 "use strict";
 
 // The calendar week is independent of the last week for which exports exist.
-// Layout: four counters, then one tabbed list of this week's work, then the eight-week charts.
+// One counted tab list keeps this week's work together; trends live in Video Data.
 window.WorkbenchHome = (() => {
   let sequence = 0, chosenTab = null, undoTimer = null, renderedProduct = null;
   const url = (hash, product) => window.WorkbenchShell?.url(hash, product) || hash;
@@ -59,14 +59,6 @@ window.WorkbenchHome = (() => {
     return `<div class="home-row home-case"><span class="home-row-main"><a href="${esc(url(`#case/${item.case_id}/${missing[0][1]}`))}"><strong>${esc(title)}</strong></a><span class="home-missing"><small>待补</small>${missing.map(([label, tab]) => `<a class="home-chip is-warn" href="${esc(url(`#case/${item.case_id}/${tab}`))}">${esc(label)}</a>`).join("")}</span></span></div>`;
   }
 
-  function weeklyMarkup(summary, analytics, videos, product, pending = false) {
-    const charts = pending ? '<p class="home-empty" role="status">正在读取周图…</p>'
-      : summary && analytics ? window.PerfDashboard?.homeMarkup({ summary, analytics, videos, filters:{ account:"",product,period:"8" } }) || empty("周图模块暂时不可用，请刷新页面。")
-      : empty("周图暂时无法读取。", `<button type="button" class="secondary compact" data-home-retry>${icon("refresh")}重新读取</button>`);
-    const noWeekly = summary && !summary.weeks?.length;
-    return `<div class="home-section-heading"><div><h2 id="home-weekly-title">最近 8 周</h2><p>后台数据截至 ${esc(summary?.coverage?.last || "尚未导入")}；以下为每周视频明细口径，数据缺口保留为空。</p></div>${more("#videos?tab=board", "完整视频看板")}</div>${noWeekly ? empty("尚无可用周数据，请先在视频数据中导入后台报表。", `<a class="secondary compact" href="${esc(url("#videos"))}">${icon("chart")}去导入后台报表</a>`) : charts}`;
-  }
-
   function bindRetry(root) {
     root.querySelectorAll("[data-home-retry]").forEach(button => button.onclick = () => void route());
   }
@@ -74,8 +66,8 @@ window.WorkbenchHome = (() => {
   function render(data, results, product, week) {
     const root = $("#home-page"); if (!root) return;
     renderedProduct = product;
-    const [summary, analytics, videosData, tasksData, creation] = data;
-    const failed = results.map((result,index) => result.status === "rejected" ? ["周数据概况","周图","视频列表","写稿任务","待写计划"][index] : null).filter(Boolean);
+    const [videosData, tasksData, creation] = data;
+    const failed = results.map((result,index) => result.status === "rejected" ? ["视频列表","写稿任务","待写计划"][index] : null).filter(Boolean);
     const videos = videosData?.videos || [], due = dueVideos(videos,week);
     const pending = state.cases.filter(item => !item.archived && matches(item)).map(item => ({item,missing:missingCase(item)})).filter(row => row.missing.length).sort((a,b) => b.missing.length-a.missing.length);
     const caseProducts = new Map(state.cases.map(item => [item.case_id, item.product]));
@@ -97,34 +89,26 @@ window.WorkbenchHome = (() => {
     ];
     // Open the tab chosen earlier in this session; otherwise the first one with work waiting.
     const active = tabs.find(tab => tab.key === chosenTab) || tabs.find(tab => tab.count) || tabs[0];
-    const kpi = tab => `<button type="button" class="home-kpi${tab.count ? " has-work" : ""}${tab === active ? " is-selected" : ""}" data-home-kpi="${tab.key}"><strong>${tab.count ?? "—"}</strong><span>${esc(tab.label)}</span></button>`;
-
-    root.innerHTML = `<div class="page-heading home-heading"><div><span class="eyebrow">THIS WEEK</span><h1>本周</h1><p><span>${week.start} — ${week.end}</span><span class="home-product">${esc(product || "全部产品")}</span></p></div><div class="home-heading-actions"><button type="button" class="subtle" data-material-open>${icon("folder")}素材篮</button><a class="secondary compact" href="${esc(url("#directions"))}">${icon("layers")}查看测试方向</a></div></div>`
+    root.innerHTML = `<div class="page-heading home-heading"><div><span class="eyebrow">OVERVIEW</span><h1>工作概览</h1><p><span>${week.start} — ${week.end}</span><span class="home-product">${esc(product || "全部产品")}</span></p></div><div class="home-heading-actions"><a class="secondary compact" href="${esc(url("#videos?tab=board"))}">${icon("chart")}完整视频看板</a></div></div>`
       + (failed.length ? `<div class="data-warning">${esc(failed.join("、"))}暂时无法读取。<button type="button" class="subtle" data-home-retry>重新读取</button></div>` : "")
-      + `<div class="home-kpis" role="group" aria-label="本周待办数量">${tabs.map(kpi).join("")}</div>`
-      + `<section class="section-card home-section home-work" aria-label="本周要处理"><div class="home-tabs" role="tablist">${tabs.map(tab => `<button type="button" role="tab" id="${tab.id}" aria-controls="${tab.id}-panel" aria-selected="${tab === active}" tabindex="${tab === active ? 0 : -1}" data-home-tab="${tab.key}">${esc(tab.label)}<span class="home-tab-count">${tab.count ?? "—"}</span></button>`).join("")}</div>`
-      + tabs.map(tab => `<div class="home-panel" role="tabpanel" id="${tab.id}-panel" aria-labelledby="${tab.id}"${tab === active ? "" : " hidden"}><div class="home-panel-head"><div><h2 class="home-panel-title">${esc(tab.label)}<span class="home-tab-count">${tab.count ?? "—"}</span></h2><p>${esc(tab.hint)}</p></div>${tab.link}</div>${tab.body}</div>`).join("") + `</section>`
-      + `<section id="home-weekly-section" class="section-card home-section" aria-labelledby="home-weekly-title">${weeklyMarkup(summary,analytics,videos,product,results[1]?.status === "pending")}</section>`;
+      + `<section class="section-card home-section home-work" aria-labelledby="home-work-title"><h2 id="home-work-title">本周待办</h2><div class="home-tabs" role="tablist" aria-label="本周待办">${tabs.map(tab => `<button type="button" role="tab" id="${tab.id}" aria-controls="${tab.id}-panel" aria-selected="${tab === active}" tabindex="${tab === active ? 0 : -1}" data-home-tab="${tab.key}">${esc(tab.label)}<span class="home-tab-count">${tab.count ?? "—"}</span></button>`).join("")}</div>`
+      + tabs.map(tab => `<div class="home-panel" role="tabpanel" tabindex="0" id="${tab.id}-panel" aria-labelledby="${tab.id}"${tab === active ? "" : " hidden"}><div class="home-panel-head"><p>${esc(tab.hint)}</p>${tab.link}</div>${tab.body}</div>`).join("") + `</section>`;
 
-    if (results[1]?.status !== "pending") window.PerfDashboard?.bind(root.querySelector("#home-weekly-section"));
     const select = (key, focus = false) => {
       chosenTab = key;
       root.querySelectorAll("[data-home-tab]").forEach(tab => { const on = tab.dataset.homeTab === key; tab.setAttribute("aria-selected", on); tab.tabIndex = on ? 0 : -1; if (on && focus) tab.focus(); });
       root.querySelectorAll(".home-panel").forEach(panel => panel.hidden = panel.getAttribute("aria-labelledby") !== tabs.find(tab => tab.key === key).id);
-      root.querySelectorAll("[data-home-kpi]").forEach(card => card.classList.toggle("is-selected", card.dataset.homeKpi === key));
     };
     root.querySelectorAll("[data-home-tab]").forEach(tab => {
       tab.onclick = () => select(tab.dataset.homeTab);
       tab.onkeydown = event => {
-        const step = {ArrowRight:1,ArrowLeft:-1}[event.key]; if (!step) return;
+        const step = {ArrowRight:1,ArrowLeft:-1}[event.key];
+        if (!step && !["Home","End"].includes(event.key)) return;
         event.preventDefault();
         const index = tabs.findIndex(item => item.key === tab.dataset.homeTab);
-        select(tabs[(index + step + tabs.length) % tabs.length].key, true);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + step + tabs.length) % tabs.length;
+        select(tabs[next].key, true);
       };
-    });
-    root.querySelectorAll("[data-home-kpi]").forEach(card => card.onclick = () => {
-      select(card.dataset.homeKpi);
-      root.querySelector(".home-work").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
     });
     root.querySelector("[data-home-start-writing]")?.addEventListener("click", () => window.CaseAI?.startBlank());
     root.querySelectorAll("[data-home-plan-write]").forEach(button => button.onclick = async () => {
@@ -145,7 +129,7 @@ window.WorkbenchHome = (() => {
         await api("/api/plans", {method:"POST",body:{revision:creation.revision,request_id:crypto.randomUUID(),plan:{...plan,status}}});
         if (window.WorkbenchShell?.parse().page === "home" && selectedProduct() === product) await route();
         offerUndo(plan, status);
-      } catch (error) { toast(error.status === 409 ? "计划已在其他页面更新，请重新读取本周后再操作。" : error.message,true); }
+      } catch (error) { toast(error.status === 409 ? "计划已在其他页面更新，请重新读取工作概览后再操作。" : error.message,true); }
       finally { button.disabled = false; }
     });
     root.querySelectorAll(".home-menu").forEach(menu => menu.addEventListener("toggle", () => {
@@ -180,24 +164,14 @@ window.WorkbenchHome = (() => {
     const saved = window.WorkbenchShell?.listState?.("home", product);
     if (["due", "tasks", "plans", "cases"].includes(saved?.tab)) chosenTab = saved.tab;
     else if (!$("[data-home-tab]")) chosenTab = null;
-    $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 本周";
-    if (!$("#home-page")) $("#content").innerHTML = '<div id="home-page"><div class="page-heading"><div><span class="eyebrow">THIS WEEK</span><h1>本周</h1><p role="status">正在汇总本周工作…</p></div></div></div>';
+    $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 工作概览";
+    if (!$("#home-page")) $("#content").innerHTML = '<div id="home-page"><div class="page-heading"><div><span class="eyebrow">OVERVIEW</span><h1>工作概览</h1><p role="status">正在汇总本周工作…</p></div></div></div>';
     const isCurrent = () => seq === sequence && selectedProduct() === product && window.WorkbenchShell?.parse().page === "home";
-    const results = Array.from({length:5}, () => ({status:"pending"}));
+    const results = Array.from({length:3}, () => ({status:"pending"}));
     const read = (index,path) => api(path).then(value => { results[index] = {status:"fulfilled",value}; }, reason => { results[index] = {status:"rejected",reason}; });
-    const charts = read(1,"/api/performance/analytics");
-    await Promise.all([read(0,"/api/performance/summary"),read(2,"/api/performance/videos"),read(3,"/api/ai/tasks"),read(4,`/api/creation?product=${encodeURIComponent(product)}`)]);
+    await Promise.all([read(0,"/api/performance/videos"),read(1,"/api/ai/tasks"),read(2,`/api/creation?product=${encodeURIComponent(product)}`)]);
     if (!isCurrent()) return;
     render(results.map(result => result.status === "fulfilled" ? result.value : null),results,product,week);
-    if (results[1].status !== "pending") return;
-    await charts;
-    if (!isCurrent()) return;
-    // Only replace the charts: late analytics must not reset the selected tab or plan buttons.
-    const section = $("#home-weekly-section");
-    if (!section) return;
-    section.innerHTML = weeklyMarkup(results[0].value,results[1].value,results[2].value?.videos || [],product);
-    window.PerfDashboard?.bind(section);
-    bindRetry(section);
   }
   const captureListState = () => {
     const active = document.querySelector('[data-home-tab][aria-selected="true"]');

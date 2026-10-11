@@ -39,6 +39,13 @@ class SettingsBrowserTests(unittest.TestCase):
         page.set_content('<div id="breadcrumb"></div><main id="content"></main>')
         page.add_style_tag(path=str(ROOT / "static" / "style.css"))
         page.add_style_tag(path=str(ROOT / "static" / "settings.css"))
+        responses = {
+            "/api/ai/preferences": {"preferences": {"model": None, "reasoning_effort": None}},
+            "/api/ai/options": {"models": [], "default_settings": {"model": None, "reasoning_effort": None}, "defaults_configured": True},
+            "/api/data/preferences": {"ok": True},
+            "/api/data/status": {"settings": {"enabled": False, "directory": "", "interval_days": 1, "time": "02:00", "keep": 14}, "backups": []},
+            **responses,
+        }
         page.evaluate("data => { window.responses = data; }", responses)
         page.add_script_tag(content=r'''
           const $ = (selector, root = document) => root.querySelector(selector);
@@ -97,7 +104,7 @@ class SettingsBrowserTests(unittest.TestCase):
         self.assertEqual(page.evaluate("window.actions"), [
             {"copy": "C:/isolated/records"}, {"open": "evidence"}, {"navigation": True}, {"copy": source},
         ])
-        self.assertEqual(page.evaluate("window.calls"), ["/api/ai/status", "/api/performance/summary", "/api/ai/claude/login"])
+        self.assertEqual(page.evaluate("window.calls.filter(path => !path.startsWith('/api/data/') && !['/api/ai/preferences','/api/ai/options'].includes(path))"), ["/api/ai/status", "/api/performance/summary", "/api/ai/claude/login"])
         self.assertFalse(page.evaluate("Boolean(window.injected)"))
 
     def test_independent_failure_retries_and_shutdown_status(self):
@@ -162,7 +169,7 @@ class SettingsBrowserTests(unittest.TestCase):
         page.get_by_text("已连接 Claude 订阅", exact=True).wait_for()
         self.assertIn("订阅：pro", page.locator("#settings-claude-detail").inner_text())
         self.assertFalse(page.get_by_role("button", name="检查 Claude", exact=True).is_disabled())
-        self.assertEqual(page.evaluate("window.calls"), [
+        self.assertEqual(page.evaluate("window.calls.filter(path => !path.startsWith('/api/data/') && !['/api/ai/preferences','/api/ai/options'].includes(path))"), [
             "/api/ai/status", "/api/performance/summary", "/api/ai/claude/login", "/api/ai/status",
         ])
         self.assertTrue(page.evaluate("window.aiStatuses.at(-1).providers.claude.available"))
@@ -213,7 +220,7 @@ class SettingsBrowserTests(unittest.TestCase):
         calls_before_leaving = page.evaluate("window.calls")
         page.clock.run_for(15000)
         self.assertEqual(page.evaluate("window.calls"), calls_before_leaving)
-        self.assertEqual(page.evaluate("window.requests.filter(call => call.method === 'POST')"), [])
+        self.assertEqual(page.evaluate("window.requests.filter(call => call.method === 'POST' && !call.path.startsWith('/api/data/'))"), [])
 
     def test_claude_authorization_poll_expires_after_five_minutes(self):
         page = self.open_page({
@@ -277,7 +284,7 @@ class SettingsBrowserTests(unittest.TestCase):
         page.wait_for_function("window.requests.filter(call => call.path === '/api/ai/claude/login').length === 2")
         self.assertEqual(page.get_by_label("填写回调链接或授权码", exact=True).input_value(), "")
         self.assertEqual(page.locator("#settings-claude-reopen").get_attribute("href"), AUTH_URL)
-        self.assertEqual(page.evaluate("window.requests.filter(call => call.method === 'POST')"), [])
+        self.assertEqual(page.evaluate("window.requests.filter(call => call.method === 'POST' && !call.path.startsWith('/api/data/'))"), [])
 
     def test_callback_submits_current_attempt_once_and_keeps_input_until_connection_is_ready(self):
         page = self.open_page({

@@ -243,17 +243,20 @@ class DirectionBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator(".direction-observations .case-table").count(), 0)
         self.assertEqual(page.locator(".direction-table thead th").all_text_contents(),
                          ["当前案例", "播放量", "商品点击", "售出件数", "CTOR", "统计窗口", "销售数据表"])
-        geometry = page.locator(".direction-observations").evaluate("""element => {
-          const table = element.querySelector('table'), cells = [...table.querySelectorAll('thead th')];
-          return {available:element.clientWidth, table:table.getBoundingClientRect().width,
-                  widths:cells.map(cell => cell.getBoundingClientRect().width),
-                  rowHeight:table.querySelector('tbody tr').getBoundingClientRect().height};
-        }""")
-        self.assertLessEqual(geometry["table"], geometry["available"] + 1)
-        self.assertGreaterEqual(geometry["widths"][0], 200)
-        self.assertTrue(all(60 <= width <= 100 for width in geometry["widths"][1:5]))
-        self.assertLess(geometry["rowHeight"], 140)
-        self.assertFalse(page.locator(".direction-summary-notes details").evaluate("el => el.open"))
+        for width in (1265, 1511):
+            with self.subTest(desktop_width=width):
+                page.set_viewport_size({"width": width, "height": 900})
+                geometry = page.locator(".direction-observations").evaluate("""element => {
+                  const table = element.querySelector('table'), cells = [...table.querySelectorAll('thead th')];
+                  return {available:element.clientWidth, table:table.getBoundingClientRect().width,
+                          widths:cells.map(cell => cell.getBoundingClientRect().width),
+                          rowHeight:table.querySelector('tbody tr').getBoundingClientRect().height};
+                }""")
+                self.assertLessEqual(geometry["table"], geometry["available"] + 1)
+                self.assertGreaterEqual(geometry["widths"][0], 200)
+                self.assertTrue(all(60 <= cell_width <= 100 for cell_width in geometry["widths"][1:5]))
+                self.assertLess(geometry["rowHeight"], 140)
+        self.assertFalse(page.locator(".dir-aside-more").evaluate("el => el.open"))
         self.assertFalse(page.locator(".direction-definition-details").evaluate("el => el.open"))
         d = current["test_direction"]
         self.assertEqual(page.locator(".direction-preview").text_content().strip(),

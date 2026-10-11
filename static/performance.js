@@ -39,7 +39,6 @@
   } catch {
     /* Filters fall back to defaults without browser storage. */
   }
-
   let searchTimer = null;
   function cancelSearch() {
     clearTimeout(searchTimer);
@@ -67,21 +66,26 @@
     const sequence = ++perf.loadSequence;
     perf.analyticsLoading = true;
     perf.catalogLoading = true;
-    // The table and toolbar need only these two reads; the chart and direction catalog follow independently.
+    // Sales reads share a server lock. Finish the table's reads before giving charts that lock.
     const core = Promise.all([api("/api/performance/summary"), api("/api/performance/videos")]).then(([summary, data]) => {
       if (sequence !== perf.loadSequence) return;
       perf.summary = summary;
       perf.videos = data.videos;
       window.WorkbenchShell?.registerProducts(perf.videos.map(video => video.product));
     });
-    const analytics = api("/api/performance/analytics").catch(() => null).then(data => {
+    const supplements = core.then(async () => {
+      // The route renders the table/toolbar in the same turn; yield before optional requests begin.
+      await new Promise(resolve => setTimeout(resolve,0));
+      return sequence === perf.loadSequence && pageHash().startsWith("#videos");
+    });
+    const analytics = supplements.then(active => active ? api("/api/performance/analytics").catch(() => null) : undefined).then(data => {
       if (sequence !== perf.loadSequence) return;
-      perf.analytics = data;
+      if (data !== undefined) perf.analytics = data;
       perf.analyticsLoading = false;
     });
-    const catalog = window.CaseDirectionPicker.fetchCatalog().catch(() => null).then(data => {
+    const catalog = supplements.then(active => active ? window.CaseDirectionPicker.fetchCatalog().catch(() => null) : undefined).then(data => {
       if (sequence !== perf.loadSequence) return;
-      perf.catalog = data;
+      if (data !== undefined) perf.catalog = data;
       perf.catalogLoading = false;
     });
     perf.coreLoading = core;
@@ -444,6 +448,9 @@
     if (!["board", "list"].includes(perf.filters.tab)) perf.filters.tab = "board";
     if (window.PerfDashboard && !(perf.filters.period in window.PerfDashboard.periods)) perf.filters.period = "all";
     if (window.PerfDashboard && !(perf.filters.metric in window.PerfDashboard.metrics)) perf.filters.metric = "gmv";
+    if (!["board", "list"].includes(perf.filters.tab)) perf.filters.tab = "board";
+    if (window.PerfDashboard && !(perf.filters.period in window.PerfDashboard.periods)) perf.filters.period = "all";
+    if (window.PerfDashboard && !(perf.filters.metric in window.PerfDashboard.metrics)) perf.filters.metric = "gmv";
     const videoId = linked.get("video");
     perf.pendingVideo = videoId || "";
     if (videoId) {
@@ -477,7 +484,6 @@
   const closeMenus = (event) => $$(".perf-menu[open]").forEach((menu) => { if (event.key === "Escape" || !menu.contains(event.target)) menu.open = false; });
   window.addEventListener("click", closeMenus, true);
   window.addEventListener("keydown", (event) => { if (event.key === "Escape") closeMenus(event); });
-
   window.addEventListener("hashchange", cancelSearch);
 
   window.CasePerformance = { route, captureListState, leaveList: cancelSearch, reviewMaterial: () => reviewMaterial() };

@@ -55,7 +55,11 @@ class DirectionPickerBrowserTests(unittest.TestCase):
         performance.build_exports(folder)
         self.server.app.performance.sources = [folder]
         self.assertEqual(self.request("POST", "/api/performance/sync", {})[0], 200)
-        return self.open_page(f"#/202H/videos?video={VIDEO}")
+        page = self.open_page(f"#/202H/videos?video={VIDEO}")
+        drawer = page.locator("#perf-video-drawer")
+        drawer.wait_for(state="visible")
+        drawer.locator("[data-drawer-close]").click()
+        return page
 
     def video_editor(self, page):
         cell = page.locator(f'[data-direction-video="{VIDEO}"]')

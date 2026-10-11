@@ -325,8 +325,19 @@ function syncDetail(text, problem = false) {
     el.classList.toggle("problem", problem);
   }
   $("#sync-button")?.classList.toggle("attention", problem);
+  updateConnectionStatus();
   const connection = $(".connection");
   if (connection) { connection.title = `${$("#connection-text").textContent} · ${text} · 视频、文案与修订记录保存在本机`; connection.tabIndex = 0; }
+}
+function updateConnectionStatus() {
+  const status = $("#connection-status");
+  if (!status) return;
+  const problem = $("#connection-dot").classList.contains("offline") || $("#sync-detail").classList.contains("problem");
+  // Reveal recovery once per failure, without reopening after every background check.
+  if (problem && !status.classList.contains("has-problem")) status.open = true;
+  status.classList.toggle("has-problem", problem);
+  const label = $("#sync-label");
+  if (label && !$("#sync-button").disabled) label.textContent = problem ? "重试同步" : "同步案例库";
 }
 function timeText(date) {
   return date.toLocaleTimeString("zh-CN", { hour12: false });
@@ -341,6 +352,7 @@ function online(ok) {
   $("#connection-dot").classList.toggle("offline", !ok);
   $("#connection-text").textContent = ok ? "已连接本地案例库" : "连接暂时中断";
   $(".connection").title = `${$("#connection-text").textContent} · ${$("#sync-detail").textContent}`;
+  updateConnectionStatus();
 }
 function group(item) {
   const manual = state.navigation[item.case_id];
@@ -696,7 +708,7 @@ function updateNav() {
     "active",
     hash === "#ai" || hash.startsWith("#ai/"),
   );
-  $("#ai-nav").title = "写稿";
+  $("#ai-nav").title = "内容创作";
   $("#files-nav").title = "设置";
   window.WorkbenchShell?.update();
 }
@@ -824,12 +836,12 @@ async function refresh(quiet = false) {
     online(inconsistent);
     syncDetail(
       inconsistent
-        ? "索引与案例记录不一致，请点“重新同步”修复"
+        ? "索引与案例记录不一致，请点“重试同步”修复"
         : `无法连接本地服务 · 最近成功检查 ${state.lastChecked ? timeText(state.lastChecked) : "无"}`,
       true,
     );
     showError(
-      `${error.message}。可点击“重新同步”更新目录；服务未启动时，请双击“打开案例工作台”。`,
+      `${error.message}。可在底部连接状态中重试同步；服务未启动时，请双击“打开案例工作台”。`,
     );
   } finally {
     state.polling = false;
@@ -911,7 +923,7 @@ const routeTable = {
   scripts: async ({ keepScroll }) => window.CaseScripts?.route(keepScroll),
   production: async ({ keepScroll }) => window.CaseProduction?.route(keepScroll),
   videos: async () => window.CasePerformance?.route(),
-  directions: async () => window.CaseDirections?.route(),
+  directions: async ({ force }) => window.CaseDirections?.route(force),
   reviews: async () => window.CaseReviews?.route(),
   settings: async () => window.WorkbenchSettings?.render(),
 };
@@ -1048,14 +1060,20 @@ $("#import-video-top").onclick = () => openVideoPicker(null);
 $("#sync-button").onclick = async () => {
   const button = $("#sync-button");
   button.disabled = true;
+  $("#sync-label").textContent = "正在同步…";
   try {
     await api("/api/sync", { method: "POST", body: {} });
     await refresh();
-    toast("案例和阅读目录已同步");
+    if (!$("#connection-status").classList.contains("has-problem")) {
+      $("#connection-status").open = false;
+      toast("案例和阅读目录已同步");
+    }
   } catch (error) {
+    syncDetail(`同步未完成：${error.message}`, true);
     toast(error.message, true);
   } finally {
     button.disabled = false;
+    updateConnectionStatus();
   }
 };
 $("#edit-form").addEventListener("input", (event) => {

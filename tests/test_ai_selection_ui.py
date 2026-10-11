@@ -133,7 +133,7 @@ class AISelectionBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator("#ai-selected-count").inner_text(), "已选 1 条")
         page.locator("#ai-delete-selected").click()
         page.locator("#confirm-ai-delete").click()
-        page.locator("#ai-task-list .empty").wait_for()
+        page.locator("#ai-task-list .ai-start").get_by_role("heading", name="开始写稿", exact=True).wait_for()
         page.wait_for_function("() => !document.querySelector('#ai-delete-dialog').open")
         self.assertEqual(entries.count(), 0)
         self.assertTrue(page.locator("#ai-select-all").is_disabled())

@@ -6,6 +6,11 @@
 .settings-symbol { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-alt); color: var(--green-ink); flex-shrink: 0; }
 .settings-symbol svg { width: 18px; height: 18px; }
 .settings-note { color: var(--muted-soft); line-height: 1.8; margin: 8px 0; overflow-wrap: anywhere; }
+.settings-model-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 18px; margin: 20px 0 12px; max-width: 760px; }
+.settings-model-grid label { display: grid; gap: 8px; font-size: var(--font-meta); }
+.settings-model-grid select { width: 100%; min-width: 0; padding: 11px 12px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.settings-model-grid select:disabled { opacity: .6; }
+.settings-model-card .settings-actions { margin: 18px 0 12px; }
 .settings-status { font-weight: 600; margin: 0 0 6px; display: flex; align-items: center; gap: 8px; }
 .settings-status::before { content: ""; width: 7px; height: 7px; background: var(--muted-soft); border-radius: 50%; flex-shrink: 0; }
 .settings-status[data-status="available"]::before { background: var(--green); }
@@ -33,12 +38,56 @@
 .settings-claude-callback-form .settings-note { margin: 0; font-size: var(--font-meta); }
 .settings-claude-callback-form textarea { width: 100%; min-width: 0; resize: vertical; min-height: 76px; font-size: var(--font-body); line-height: 1.7; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); }
 .settings-claude-error { color: var(--danger-ink); }
+.settings-data-transfer { display: grid; grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); gap: 30px; padding: 18px 0 24px; }
+.settings-data-transfer h3, .settings-backup-form h3 { font-size: var(--font-body); margin: 0; }
+.settings-data-file-label { display: block; margin: 12px 0 8px; color: var(--muted-soft); }
+.settings-data-transfer input[type="file"] { width: 100%; font-size: var(--font-meta); color: var(--ink); }
+.settings-data-transfer input[type="file"]::file-selector-button { padding: 8px 12px; margin-right: 10px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; cursor: pointer; }
+.settings-data-import-preview { padding: 16px; margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-alt); }
+#settings-data-import-summary { white-space: pre-line; font-size: var(--font-meta); overflow-wrap: anywhere; line-height: 1.8; }
+.settings-data-warning { margin: 12px 0; padding: 11px 13px; border-radius: 8px; background: var(--surface-warm); color: var(--warm-ink); font-size: var(--font-meta); line-height: 1.8; overflow-wrap: anywhere; }
+.settings-data-check { display: inline-flex; align-items: flex-start; gap: 8px; color: var(--ink); font-size: var(--font-meta); line-height: 1.7; }
+.settings-data-check input[type="checkbox"] { flex-shrink: 0; margin: 4px 0 0; accent-color: var(--accent); width: 15px; height: 15px; }
+.settings-data-import-preview > button { margin-top: 14px; }
+.settings-backup-form { border-top: 1px solid var(--line); padding-top: 22px; }
+.settings-backup-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 20px; }
+.settings-backup-directory-label { display: block; font-size: var(--font-meta); margin-bottom: 8px; }
+.settings-backup-directory { display: flex; gap: 10px; }
+.settings-backup-directory input { flex: 1; min-width: 0; }
+.settings-backup-directory input, .settings-backup-grid input { padding: 10px 12px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; width: 100%; }
+.settings-backup-directory button { flex-shrink: 0; }
+.settings-backup-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 20px 0; }
+.settings-backup-grid label { display: grid; align-content: start; gap: 8px; font-size: var(--font-meta); }
+.settings-backup-grid small { color: var(--muted-soft); }
+.settings-data-progress { padding: 12px 15px; border-radius: 8px; background: var(--surface-blue); color: var(--blue-ink); margin-top: 18px; font-size: var(--font-meta); line-height: 1.8; }
+.settings-backup-state { border-top: 1px solid var(--line); padding-top: 18px; margin-top: 22px; }
+.settings-backup-state dl { display: flex; flex-wrap: wrap; gap: 15px 40px; margin: 0; }
+.settings-backup-state dl > div { min-width: 180px; }
+.settings-backup-state dt { font-size: var(--font-meta); color: var(--muted-soft); }
+.settings-backup-state dd { margin: 7px 0 0; font-size: var(--font-body); }
+.settings-backup-history { margin-top: 15px; }
+.settings-backup-history summary { font-size: var(--font-meta); color: var(--muted); cursor: pointer; }
+.settings-backup-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px 20px; padding: 12px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.settings-backup-item strong { font-weight: 500; font-size: var(--font-meta); min-width: 0; }
+.settings-backup-item span { color: var(--muted-soft); flex-shrink: 0; font-size: var(--font-meta); }
+.settings-data-result { width: min(620px, 94vw); padding: 24px; }
+.settings-data-result h2 { font-size: 18px; margin-bottom: 16px; }
+.settings-data-result p { white-space: pre-line; overflow-wrap: anywhere; line-height: 1.9; margin-bottom: 22px; }
 @media (max-width: 1000px) {
   .settings-overview { grid-template-columns: 1fr; gap: 0; }
   .settings-location { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 570px) {
+  .settings-model-grid { grid-template-columns: 1fr; gap: 14px; }
+  .settings-model-grid select { font-size: 16px; }
   .settings-page .settings-card { padding: 18px; }
   .settings-source { align-items: flex-start; flex-direction: column; gap: 8px; }
   .settings-claude-callback-form textarea { font-size: 16px; }
+  .settings-data-transfer { grid-template-columns: 1fr; gap: 25px; }
+  .settings-backup-heading { align-items: flex-start; flex-direction: column; }
+  .settings-backup-directory { flex-direction: column; }
+  .settings-backup-directory button { align-self: flex-start; }
+  .settings-backup-grid { grid-template-columns: 1fr; gap: 14px; }
+  .settings-backup-directory input, .settings-backup-grid input { font-size: 16px; }
+  .settings-backup-item { flex-direction: column; gap: 4px; }
 }

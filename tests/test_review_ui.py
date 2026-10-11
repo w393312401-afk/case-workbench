@@ -286,8 +286,6 @@ class ReviewPageTests(unittest.TestCase):
         basket.locator("[data-material-note]").wait_for()
         self.assertEqual(basket.locator("[data-material-note]").input_value(), "夹具晃的画面别用")
         basket.locator("[data-material-clear]").click()
-        self.assertEqual(basket.locator("[data-material-clear]").inner_text(), "再点一次，清空当前产品")
-        basket.locator("[data-material-clear]").click()
         basket.get_by_role("heading", name="还没有素材").wait_for()
         basket.locator("[data-material-close]").click()
         unpicked = self.card(page, "That’s a lot of wobble").get_by_role("button", name="摘录").first

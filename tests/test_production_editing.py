@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -28,22 +29,33 @@ def inspect_reply(gaps=(), voice_end=400, shots=((0, 25), (25, 50), (50, 200))):
     markers = [{"frame": f, "color": "Blue", "name": f"#{n}", "note": "", "duration": 10, "custom": f"workbench-group:{{job}}:{n}"}
                for n, f in ((1, 0), (2, 120), (3, 260))]
     markers += [{"frame": a, "color": "Red", "name": "缺素材｜切纸结果", "note": "需补实拍", "duration": b - a, "custom": "missing"} for a, b in gaps]
-    return {"ok": True, "name": "Lab261010-202-1", "start_frame": 0, "end_frame": voice_end, "fps": "29.97",
-            "tracks": {"video": [{"index": 1, "name": "视频 1", "items": [{"start": a, "end": b, "name": "素材.mp4"} for a, b in shots]}],
-                       "audio": [{"index": 1, "name": "音频 1", "items": []},
-                                 {"index": 2, "name": "配音", "items": [{"start": 0, "end": voice_end, "name": "x_配音"}]}]},
+    videos = [{"start": a, "end": b, "name": "素材.mp4", "uid": f"v-{i}", "media_id": "source-1", "media_path": "C:/media/source.mp4",
+               "source_start": a, "source_end": b, "enabled": True, "properties": {}, "has_audio": True, "linked_ids": [f"a-{i}"]}
+              for i, (a, b) in enumerate(shots)]
+    originals = [{**item, "uid": f"a-{i}", "linked_ids": [f"v-{i}"]} for i, item in enumerate(videos)]
+    return {"ok": True, "name": "Lab261010-202-1", "unique_id": "uid-1", "start_frame": 0, "end_frame": voice_end,
+            "fps": "29.97", "width": "1080", "height": "1920", "saved": True, "other_shots": [], "dedup_complete": True,
+            "tracks": {"video": [{"index": 1, "name": "视频 1", "locked": False, "enabled": True, "items": videos}],
+                       "audio": [{"index": 1, "name": "音频 1", "locked": False, "enabled": True, "items": originals},
+                                 {"index": 2, "name": "配音", "locked": False, "enabled": True,
+                                  "items": [{"start": 0, "end": voice_end, "name": "x_配音", "uid": "voice-1", "media_id": "voice-media",
+                                             "media_path": "C:/media/voice.wav", "source_start": 0, "source_end": voice_end,
+                                             "enabled": True, "properties": {"AudioVolume": -3}, "linked_ids": []}]}]},
             "markers": markers}
 
 
 class Runner:
     def __init__(self):
-        self.calls, self.inspect = [], inspect_reply()
+        self.calls, self.inspect, self.final_inspect = [], inspect_reply(), None
 
     def __call__(self, args, input, **options):
         request = json.loads(input.decode("utf-8"))
         self.calls.append(request)
         if request["command"] == "inspect":
-            body = json.loads(json.dumps(self.inspect).replace("{job}", self.job))
+            reply = self.final_inspect if request.get("save") and self.final_inspect is not None else self.inspect
+            if isinstance(reply, Exception):
+                raise reply
+            body = json.loads(json.dumps(reply).replace("{job}", self.job))
         elif request["command"] == "build":
             body = {"ok": True, "name": request["prefix"] + "1", "unique_id": "uid-1", "start_frame": 0, "end_frame": 400,
                     "audio_items": [{"start": 0, "end": 400}], "markers": [{"frame": m["frame"]} for m in request["markers"]]}
@@ -75,6 +87,8 @@ class Editor:
 class EditBench(Bench, EditingWorkbenchMixin):
     def __init__(self, root, editor):
         super().__init__(root, FakeEleven())
+        self.ai = SimpleNamespace(resolve_default_settings=lambda body, effort_key: {
+            "model": body.get("model", "claude-default"), effort_key: body.get(effort_key)})
         self.editor, self.runner = editor, Runner()
         self.resolve = ResolveBridge(runner=self.runner)
         self.ledger_dir = Path(root) / "davinci-ledger"
@@ -130,7 +144,7 @@ class EditingTests(unittest.TestCase):
         job = self.timeline_job()
         started = self.start(job)["edit"]
         edit = self.wait(job["id"])
-        self.assertEqual((edit["status"], edit["report"]["questions"]), ("completed", ["开头要不要换切纸？"]))
+        self.assertEqual((edit["status"], edit["execution_status"], edit["report"]["questions"]), ("needs_repair", "completed", ["开头要不要换切纸？"]))
         self.assertEqual((edit["summary"]["shots"], edit["summary"]["group_markers"], edit["summary"]["voice_changed"]), (3, 3, False))
         self.assertEqual(edit["summary"]["uncovered"], [{"start": 200, "end": 400, "seconds": 6.67}])
         call = self.editor.calls[0]
@@ -138,6 +152,7 @@ class EditingTests(unittest.TestCase):
         self.assertEqual(profile["tools"], ["Read", "Write", "Edit", "Glob", "Grep"])
         self.assertIn("mcp__resolve__run_script", profile["allowed"])
         self.assertFalse(any("unsafe" in tool for tool in profile["allowed"]))
+        self.assertIn("mcp__resolve__run_script_unsafe", profile["denied"])
         self.assertEqual(profile["dirs"], [str(self.bench.ledger_dir)])
         folder = Path(call["cwd"])
         self.assertEqual(folder.name, started["id"])
@@ -149,6 +164,9 @@ class EditingTests(unittest.TestCase):
             self.assertIn(text, handoff)
         self.assertIn(handoff, call["prompt"])
         self.assertFalse(self.bench.resolve.busy())
+        self.assertEqual(edit["baseline"]["tracks"]["audio"][1]["items"][0]["source_start"], 0)
+        self.assertTrue(self.bench.runner.calls[-1]["save"])
+        self.assertEqual(edit["validation"]["issues"][0]["code"], "unmarked_picture_gap")
         self.assertEqual(self.bench.production.public("202H")["product_settings"]["material_timelines"], ["蓝点折刀成品素材"])
 
     def test_stop_cancels_and_a_second_run_is_refused_while_one_runs(self):
@@ -198,6 +216,271 @@ class EditingTests(unittest.TestCase):
         self.assertIn("$davinci-product-video-editing", result["prompt"])
         self.assertIn("音画同步", result["prompt"])
 
+    def test_complete_timeline_awaits_user_review_and_gap_timeline_requires_material(self):
+        for expected, reply in (("awaiting_review", inspect_reply(shots=((0, 200), (200, 400)))),
+                                ("needs_material", inspect_reply(gaps=((200, 400),)))):
+            with self.subTest(status=expected):
+                job = self.timeline_job()
+                self.bench.runner.inspect = reply
+                self.bench.runner.final_inspect = None
+                self.start(job)
+                edit = self.wait(job["id"])
+                self.assertEqual((edit["status"], edit["validation"]["status"]), (expected, expected))
+                self.assertEqual(edit["execution_status"], "completed")
+
+    def test_malformed_and_exceptional_readback_never_leave_locks_or_running_status(self):
+        for reply in ({"ok": True, "tracks": []}, RuntimeError("worker 返回损坏")):
+            with self.subTest(reply=reply):
+                job = self.timeline_job()
+                self.bench.runner.final_inspect = reply
+                self.start(job)
+                edit = self.wait(job["id"])
+                self.assertEqual((edit["status"], edit["execution_status"]), ("verification_failed", "completed"))
+                self.assertFalse(self.bench.resolve.busy())
+                self.assertFalse(self.bench.edit_running())
+
+    def test_catalog_write_failure_is_recovered_without_reediting(self):
+        job = self.timeline_job()
+        self.bench.runner.inspect = inspect_reply(shots=((0, 200), (200, 400)))
+        original = self.bench.production.mutate
+        def mutate(kind, body, extra=None):
+            if kind == "edit_finish":
+                raise OSError("磁盘暂不可写")
+            return original(kind, body, extra)
+        with patch.object(self.bench.production, "mutate", side_effect=mutate):
+            started = self.start(job)["edit"]
+            self.wait(job["id"])
+        journal = self.bench.production.root / "edits" / started["id"] / "result.json"
+        self.assertEqual(json.loads(journal.read_text(encoding="utf-8"))["result"]["status"], "awaiting_review")
+        self.assertFalse(self.bench.resolve.busy())
+        recovered = self.bench.recover_edit_results()
+        self.assertEqual(recovered["recovered"], [started["id"]])
+        edit = self.bench.production.job(job["id"])["edits"][-1]
+        self.assertEqual(edit["status"], "awaiting_review")
+        self.assertEqual(len(self.editor.calls), 1)
+        self.assertEqual(self.bench.recover_edit_results()["recovered"], [])
+
+    def test_recheck_allows_manual_sound_adjustment_but_preserves_failed_execution(self):
+        self.editor.error = "Claude 超时"
+        job = self.timeline_job()
+        self.bench.runner.inspect = inspect_reply(shots=((0, 200), (200, 400)))
+        self.start(job)
+        edit = self.wait(job["id"])
+        self.bench.runner.inspect["tracks"]["audio"][1]["items"][0]["properties"]["AudioVolume"] = -10
+        self.bench.runner.inspect["tracks"]["audio"][1]["enabled"] = False
+        result = self.bench.recheck_edit(job["id"], edit["id"], {"request_id": uuid4().hex})["edit"]
+        self.assertEqual((result["status"], result["execution_status"]), ("awaiting_review", "failed"))
+        self.assertEqual(len(self.editor.calls), 1)
+        self.assertTrue(self.bench.runner.calls[-1]["save"])
+
+    def test_old_completed_without_baseline_cannot_be_declared_verified(self):
+        job = self.timeline_job()
+        self.bench.runner.inspect = inspect_reply(shots=((0, 200), (200, 400)))
+        self.start(job)
+        edit = self.wait(job["id"])
+        data = self.bench.production.read()
+        old = next(item for item in data["jobs"] if item["id"] == job["id"])["edits"][-1]
+        old.pop("baseline")
+        old["status"] = "completed"
+        self.bench.production.write(data)
+        result = self.bench.recheck_edit(job["id"], edit["id"], {"request_id": uuid4().hex})["edit"]
+        self.assertEqual(result["status"], "needs_repair")
+        self.assertIn("baseline_missing", [item["code"] for item in result["validation"]["issues"]])
+
+    def test_invalid_recheck_request_has_no_resolve_effect(self):
+        job = self.timeline_job()
+        self.start(job)
+        edit = self.wait(job["id"])
+        calls = len(self.bench.runner.calls)
+        with self.assertRaises(VoiceError) as caught:
+            self.bench.recheck_edit(job["id"], edit["id"], {"request_id": "bad"})
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(len(self.bench.runner.calls), calls)
+
+    def test_malformed_preflight_spends_nothing_and_unlocks_resolve(self):
+        job = self.timeline_job()
+        self.bench.runner.inspect = {"ok": True, "tracks": {"video": [], "audio": []}}
+        with self.assertRaises(VoiceError) as caught:
+            self.start(job)
+        self.assertEqual(caught.exception.status, 502)
+        self.assertFalse(self.bench.resolve.busy())
+        self.assertEqual(self.editor.calls, [])
+
+    def test_first_result_file_failure_retains_memory_and_does_not_repeat_ai(self):
+        job = self.timeline_job()
+        self.bench.runner.inspect = inspect_reply(shots=((0, 200), (200, 400)))
+        with patch.object(self.bench, "_write_edit_journal", side_effect=OSError("result file unavailable")):
+            started = self.start(job)["edit"]
+            edit = self.wait(job["id"])
+            self.assertEqual((edit["status"], edit["execution_status"]), ("verification_failed", "completed"))
+            self.assertIn("result_persistence_failed", [issue["code"] for issue in edit["validation"]["issues"]])
+            self.assertTrue(self.bench.edit_pending(started["id"])["result_pending"])
+            for action in (lambda: self.start(job), lambda: self.bench.recheck_edit(job["id"], started["id"], {"request_id": uuid4().hex})):
+                with self.assertRaises(VoiceError) as caught:
+                    action()
+                self.assertEqual(caught.exception.status, 503)
+            self.assertEqual(len(self.editor.calls), 1)
+        recovered = self.bench.recover_edit_results()
+        self.assertEqual(recovered["recovered"], [started["id"]])
+        self.assertEqual(self.bench.production.job(job["id"])["edits"][-1]["status"], "awaiting_review")
+        self.assertIsNone(self.bench.edit_pending(started["id"]))
+        self.assertFalse(self.bench.resolve.busy())
+
+    def test_both_persistence_destinations_failed_keep_the_complete_memory_result(self):
+        job = self.timeline_job()
+        self.bench.runner.inspect = inspect_reply(shots=((0, 200), (200, 400)))
+        original = self.bench.production.mutate
+        def cannot_finish(kind, body, extra=None):
+            if kind == "edit_finish":
+                raise OSError("catalog unavailable")
+            return original(kind, body, extra)
+        with patch.object(self.bench, "_write_edit_journal", side_effect=OSError("journal unavailable")), \
+             patch.object(self.bench.production, "mutate", side_effect=cannot_finish):
+            started = self.start(job)["edit"]
+            self.wait(job["id"])
+            self.assertFalse(self.bench.edit_running())
+            self.assertFalse(self.bench.resolve.busy())
+            pending = self.bench.edit_pending(started["id"])
+            self.assertEqual(pending["execution_status"], "completed")
+            self.assertEqual(self.bench._edit_pending[started["id"]]["result"]["validation"]["status"], "awaiting_review")
+            with self.assertRaises(VoiceError) as caught:
+                self.start(job)
+            self.assertEqual(caught.exception.status, 503)
+            self.assertEqual(len(self.editor.calls), 1)
+        self.assertEqual(self.bench.recover_edit_results()["recovered"], [started["id"]])
+        self.assertEqual(self.bench.production.job(job["id"])["edits"][-1]["status"], "awaiting_review")
+
+    def test_restart_without_a_result_file_can_recheck_real_baseline(self):
+        job = self.timeline_job()
+        self.bench.runner.inspect = inspect_reply(shots=((0, 200), (200, 400)))
+        original = self.bench.production.mutate
+        def cannot_finish(kind, body, extra=None):
+            if kind == "edit_finish":
+                raise OSError("catalog unavailable")
+            return original(kind, body, extra)
+        with patch.object(self.bench, "_write_edit_journal", side_effect=OSError("journal unavailable")), \
+             patch.object(self.bench.production, "mutate", side_effect=cannot_finish):
+            started = self.start(job)["edit"]
+            self.wait(job["id"])
+        self.bench._edit_pending.clear()  # Memory is gone after a process restart.
+        self.bench.production.interrupt_running()
+        self.assertEqual(self.bench.production.job(job["id"])["edits"][-1]["status"], "interrupted")
+        with self.assertRaises(VoiceError) as caught:
+            self.start(job)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(len(self.editor.calls), 1)
+        result = self.bench.recheck_edit(job["id"], started["id"], {"request_id": uuid4().hex})["edit"]
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertEqual(len(self.editor.calls), 1)
+
+    def test_busy_recheck_refuses_without_changing_existing_validation(self):
+        job = self.timeline_job()
+        self.bench.runner.inspect = inspect_reply(shots=((0, 200), (200, 400)))
+        self.start(job)
+        edit = self.wait(job["id"])
+        before = self.bench.production.read()
+        calls = len(self.bench.runner.calls)
+        self.bench.resolve.lock.acquire()
+        try:
+            with self.assertRaises(VoiceError) as caught:
+                self.bench.recheck_edit(job["id"], edit["id"], {"request_id": uuid4().hex})
+            self.assertEqual(caught.exception.status, 409)
+            self.assertEqual(self.bench.production.read(), before)
+            self.assertEqual(len(self.bench.runner.calls), calls)
+        finally:
+            self.bench.resolve.lock.release()
+
+    def test_recheck_holds_resolve_until_catalog_commit_to_prevent_late_old_pass(self):
+        job = self.timeline_job()
+        self.bench.runner.inspect = inspect_reply(shots=((0, 200), (200, 400)))
+        self.start(job)
+        edit = self.wait(job["id"])
+        entered, release = threading.Event(), threading.Event()
+        results, errors = [], []
+        original = self.bench.production.mutate
+        def mutate(kind, body, extra=None):
+            if kind == "edit_recheck" and threading.current_thread().name == "old-recheck":
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("test timed out")
+            return original(kind, body, extra)
+        def old_check():
+            try:
+                results.append(self.bench.recheck_edit(job["id"], edit["id"], {"request_id": uuid4().hex}))
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(self.bench.production, "mutate", side_effect=mutate):
+            old = threading.Thread(target=old_check, name="old-recheck")
+            old.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertTrue(self.bench.resolve.busy())
+                self.bench.runner.final_inspect = {**self.bench.runner.inspect, "saved": False}
+                calls = len(self.bench.runner.calls)
+                with self.assertRaises(VoiceError) as caught:
+                    self.bench.recheck_edit(job["id"], edit["id"], {"request_id": uuid4().hex})
+                self.assertEqual(caught.exception.status, 409)
+                self.assertEqual(len(self.bench.runner.calls), calls)
+            finally:
+                release.set()
+                old.join(5)
+        self.assertFalse(old.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(results[0]["edit"]["status"], "awaiting_review")
+        latest = self.bench.recheck_edit(job["id"], edit["id"], {"request_id": uuid4().hex})["edit"]
+        self.assertEqual(latest["status"], "verification_failed")
+        self.assertEqual(self.bench.production.job(job["id"])["edits"][-1]["validation"], latest["validation"])
+        self.assertFalse(self.bench.resolve.busy())
+
+    def test_delayed_same_request_checks_replay_again_under_resolve_lock(self):
+        job = self.timeline_job()
+        body = {"request_id": uuid4().hex, "timeline": job["timelines"][-1]["unique_id"], "materials": [], "mode": "explain"}
+        entered, release = threading.Event(), threading.Event()
+        original = self.bench.production.replay
+        delayed_calls, results, errors = [], [], []
+        def replay(kind, request):
+            result = original(kind, request)
+            if kind == "edit_start" and threading.current_thread().name == "delayed-start" and not delayed_calls:
+                delayed_calls.append(True)
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError("test timed out")
+            return result
+        def delayed_start():
+            try:
+                results.append(self.bench.start_edit(job["id"], body))
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(self.bench.production, "replay", side_effect=replay):
+            delayed = threading.Thread(target=delayed_start, name="delayed-start")
+            delayed.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                first = self.bench.start_edit(job["id"], body)
+                self.wait(job["id"])
+            finally:
+                release.set()
+                delayed.join(5)
+        self.assertFalse(delayed.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(results[0]["edit"]["id"], first["edit"]["id"])
+        self.assertEqual(len(self.editor.calls), 1)
+        self.assertEqual(len(self.bench.production.job(job["id"])["edits"]), 1)
+        self.assertFalse(self.bench.resolve.busy())
+
+    def test_cached_mutate_result_does_not_launch_new_edit_identity(self):
+        job = self.timeline_job()
+        body = {"request_id": uuid4().hex, "timeline": job["timelines"][-1]["unique_id"], "materials": [], "mode": "explain"}
+        first = self.bench.start_edit(job["id"], body)
+        self.wait(job["id"])
+        original = self.bench.production.replay
+        with patch.object(self.bench.production, "replay", side_effect=lambda kind, value: None if kind == "edit_start" else original(kind, value)):
+            repeated = self.bench.start_edit(job["id"], body)
+        self.assertEqual(repeated["edit"]["id"], first["edit"]["id"])
+        self.assertEqual(len(self.editor.calls), 1)
+        self.assertFalse(self.bench.edit_running())
+        self.assertFalse(self.bench.resolve.busy())
+
 
 class SummaryTests(unittest.TestCase):
     def test_gaps_long_shots_and_changed_voiceover(self):
@@ -214,7 +497,7 @@ class SummaryTests(unittest.TestCase):
     def test_handoff_keeps_table_cells_on_one_line(self):
         job = {"id": "PRD-0123456789ab", "title": "稿", "script_id": "SCR-0123456789ab", "script_version": 1, "direction_id": "",
                "variant_label": "", "lines": [{"number": 1, "spoken": "A | B", "zh": "甲\n乙", "proof": "", "tags": "", "evidence": ""}]}
-        take = {"model_id": "eleven_v4", "duration": 2.0, "groups": [{"start": 0.1, "end": 1.8}]}
+        take = {"model_id": "eleven_v4", "duration": 2.0, "groups": [{"number": 1, "start": 0.1, "end": 1.8, "coverage": 1.0}]}
         config = {"project": "202H", "fps": "29.97", "width": 1080, "height": 1920}
         text = handoff_markdown(job, take, {"name": "Lab261010-202-1", "unique_id": "u", "frames": 59}, config, mode="explain",
                                 instruction="", materials=[], ledger="L", notes={}, voice_label="Zack")

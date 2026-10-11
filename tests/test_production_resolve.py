@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 APP = Path(__file__).resolve().parents[1]
@@ -22,6 +23,31 @@ from workbench_production import meaning_markers
 class FakeItem:
     def __init__(self, start, end, media=None):
         self.start, self.end, self.media = start, end, media
+        self.uid = "ITEM-" + uuid4().hex[:8]
+
+    def GetUniqueId(self):
+        return self.uid
+
+    def GetMediaPoolItem(self):
+        return self.media
+
+    def GetName(self):
+        return self.media.props.get("Clip Name", "audio") if self.media else "clip"
+
+    def GetSourceStartFrame(self):
+        return 0
+
+    def GetSourceEndFrame(self):
+        return self.end - self.start
+
+    def GetClipEnabled(self):
+        return True
+
+    def GetProperty(self):
+        return {"AudioVolume": 0.0}
+
+    def GetLinkedItems(self):
+        return []
 
     def GetStart(self):
         return self.start
@@ -33,6 +59,13 @@ class FakeItem:
 class FakeClip:
     def __init__(self, path):
         self.path, self.props = path, {}
+        self.uid = "MEDIA-" + uuid4().hex[:8]
+
+    def GetUniqueId(self):
+        return self.uid
+
+    def GetClipProperty(self):
+        return {"File Path": str(self.path), "Audio Ch": "1", "Online Status": "Online", **self.props}
 
     def SetClipProperty(self, key, value):
         self.props[key] = value
@@ -44,9 +77,27 @@ class FakeTimeline:
         self.name, self.uid = name, "TL-" + uuid4().hex[:8]
         self.tracks, self.track_names, self.items, self.markers = ["stereo"], {}, {}, {}
         self.settings, self.fail_marker = None, fail_marker
+        self.timecode = "01:00:00:00"
 
     def GetName(self):
         return self.name
+
+    def SetName(self, name):
+        self.name = name
+        return True
+
+    def GetSetting(self, key):
+        values = {"timelineFrameRate": "29.97", "timelineResolutionWidth": "1080", "timelineResolutionHeight": "1920"}
+        return (self.settings or {}).get(key, values[key])
+
+    def GetTrackName(self, kind, index):
+        return self.track_names.get(index, kind + str(index))
+
+    def GetIsTrackEnabled(self, kind, index):
+        return True
+
+    def GetIsTrackLocked(self, kind, index):
+        return False
 
     def GetUniqueId(self):
         return self.uid
@@ -82,12 +133,23 @@ class FakeTimeline:
         return dict(self.markers)
 
     def GetItemListInTrack(self, kind, index):
-        return self.items.get(index, [])
+        return self.items.get(index, []) if kind == "audio" else []
+
+    def SetCurrentTimecode(self, timecode):
+        self.timecode = timecode
+        return True
+
+    def GetCurrentTimecode(self):
+        return self.timecode
 
 
 class FakeFolder:
     def __init__(self, name):
         self.name, self.children = name, []
+        self.clips = []
+
+    def GetClipList(self):
+        return self.clips
 
     def GetName(self):
         return self.name
@@ -117,6 +179,7 @@ class FakeMediaPool:
     def ImportMedia(self, paths):
         clip = FakeClip(paths[0])
         self.clips.append(clip)
+        self.current.clips.append(clip)
         return [clip]
 
     def CreateEmptyTimeline(self, name):
@@ -139,6 +202,8 @@ class FakeMediaPool:
 
     def DeleteClips(self, clips):
         self.deleted.extend(clips)
+        for folder in [self.root, *self.root.children]:
+            folder.clips = [clip for clip in folder.clips if clip not in clips]
         return True
 
 
@@ -242,6 +307,25 @@ class WorkerTests(unittest.TestCase):
                                    input=json.dumps({"command": "nope"}).encode(), capture_output=True, timeout=60)
         self.assertEqual(json.loads(completed.stdout.decode("utf-8")), {"ok": False, "error": "未知的达芬奇操作。"})
 
+    def test_restore_recovers_timeline_and_playhead(self):
+        project = FakeProject(names=["自己的时间线", "素材时间线"])
+        own = project.items[0]
+        project.current = project.items[1]
+        result = worker.restore(FakeResolve(project), {"project": "202H", "unique_id": own.uid,
+                                                       "name": own.name, "timecode": "01:00:12:03"})
+        self.assertIs(project.current, own)
+        self.assertEqual(result, {"name": own.name, "timecode": "01:00:12:03"})
+
+    def test_restore_reports_playhead_failure_or_unchanged_readback(self):
+        project = FakeProject(names=["自己的时间线"])
+        own = project.items[0]
+        request = {"project": "202H", "unique_id": own.uid, "name": own.name, "timecode": "01:00:12:03"}
+        for accepted in (False, True):
+            with self.subTest(accepted=accepted), patch.object(own, "SetCurrentTimecode", return_value=accepted):
+                with self.assertRaises(worker.WorkerError) as caught:
+                    worker.restore(FakeResolve(project), request)
+                self.assertIn("播放头", str(caught.exception))
+
 
 class FakeRunner:
     def __init__(self, reply=None):
@@ -254,7 +338,7 @@ class FakeRunner:
             body = self.reply
         elif request["command"] == "build":
             markers = [{"frame": item["frame"], "duration": item["duration"], "custom": item["custom"]} for item in request["markers"]]
-            body = {"ok": True, "name": request["prefix"] + "1", "unique_id": "uid-1", "start_frame": 0, "end_frame": 400,
+            body = {"ok": True, "saved": True, "name": request["prefix"] + "1", "unique_id": "uid-1", "start_frame": 0, "end_frame": 400,
                     "audio_items": [{"start": 0, "end": 400}], "markers": markers}
         elif request["command"] == "status":
             body = {"ok": True, "version": "21.1.0.14", "project": "202H", "fps": "29.97", "width": "1080", "height": "1920",
@@ -289,7 +373,8 @@ class BuildTests(unittest.TestCase):
 
     def test_markers_tile_the_voiceover_from_frame_zero(self):
         job = {"id": "PRD-0123456789ab", "lines": [{"number": n, "spoken": f"Line {n}", "zh": "", "proof": "", "tags": "", "evidence": ""} for n in (1, 2, 3)]}
-        take = {"duration": 6.0, "groups": [{"start": 0.4, "end": 1.9}, {"start": 2.0, "end": 3.9}, {"start": 4.0, "end": 5.8}]}
+        take = {"duration": 6.0, "groups": [{"number": n, "start": a, "end": b, "coverage": 1.0}
+                                             for n, a, b in ((1, 0.4, 1.9), (2, 2.0, 3.9), (3, 4.0, 5.8))]}
         markers = meaning_markers(job, take, "29.97")
         self.assertEqual([(m["frame"], m["duration"]) for m in markers], [(0, 60), (60, 60), (120, 59)])
         self.assertIn("画面要证明什么：待补", markers[0]["note"])

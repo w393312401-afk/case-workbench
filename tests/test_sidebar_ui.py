@@ -54,6 +54,36 @@ class SidebarBrowserTests(unittest.TestCase):
     def rail_button(self, page, target):
         return page.locator(f'#sidebar-rail [data-sidebar-target="{target}"]')
 
+    def assert_sidebar_icons_aligned(self, page, *, visible_only=False):
+        # Native scrollIntoView/focus dispatches its scroll event on the next frame.
+        page.wait_for_function("""() => Math.abs(
+          document.querySelector('#sidebar-rail').scrollTop -
+          document.querySelector('#workbench-sidebar').scrollTop
+        ) <= 1""")
+        rows = page.evaluate("""() => {
+          const rail = document.querySelector('#sidebar-rail').getBoundingClientRect();
+          const panel = document.querySelector('#workbench-sidebar').getBoundingClientRect();
+          return [...document.querySelectorAll('#sidebar-rail [data-sidebar-target]')].map(button => {
+            const source = document.getElementById(button.dataset.sidebarTarget);
+            const left = button.querySelector('[data-icon]').getBoundingClientRect();
+            const right = source.querySelector('[data-icon]').getBoundingClientRect();
+            return {
+              target: source.id, left: left.y + left.height / 2, right: right.y + right.height / 2,
+              visible: !button.hidden && !source.hidden && left.height > 0 && right.height > 0 &&
+                left.top >= rail.top && left.bottom <= Math.min(rail.bottom, innerHeight) &&
+                right.top >= panel.top && right.bottom <= Math.min(panel.bottom, innerHeight),
+            };
+          });
+        }""")
+        checked = [row for row in rows if row["visible"]] if visible_only else rows
+        self.assertGreater(len(checked), 0)
+        if not visible_only:
+            self.assertEqual(len(checked), 8)
+            self.assertTrue(all(row["visible"] for row in checked))
+        for row in checked:
+            with self.subTest(aligned_module=row["target"]):
+                self.assertAlmostEqual(row["left"], row["right"], delta=1)
+
     def test_toggle_pins_and_persists_the_desktop_preference(self):
         page = self.open_page()
         page.locator("#case-search").wait_for()
@@ -61,12 +91,21 @@ class SidebarBrowserTests(unittest.TestCase):
         self.assertTrue(page.locator(".topbar #sidebar-toggle").is_visible())
         self.assertTrue(page.locator("#workbench-sidebar").is_visible())
         self.assertTrue(page.locator("#sidebar-rail").is_hidden())
+        self.assertEqual(page.locator(".workflow-nav .nav-item").all_inner_texts(), [
+            "工作概览", "用户声音", "卖点与方向", "内容创作", "视频数据", "案例库",
+        ])
+        workflow = page.locator(".workflow-nav").bounding_box()
+        tools = page.locator(".sidebar-tools").bounding_box()
+        self.assertGreater(tools["y"], workflow["y"] + workflow["height"] + 20)
         expanded = page.locator("main").bounding_box()
         page.locator("#sidebar-toggle").click()
         self.wait_collapsed(page)
         self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "collapsed")
         self.assertTrue(page.locator("#sidebar-rail").is_visible())
         self.assertTrue(page.locator("#workbench-sidebar").is_hidden())
+        rail_workflow = page.locator("#sidebar-rail nav").bounding_box()
+        rail_tools = page.locator(".sidebar-rail-tools").bounding_box()
+        self.assertGreater(rail_tools["y"], rail_workflow["y"] + rail_workflow["height"] + 20)
         self.assertLess(page.locator("main").bounding_box()["x"], expanded["x"])
         page.reload()
         page.locator("#case-search").wait_for()
@@ -145,7 +184,7 @@ class SidebarBrowserTests(unittest.TestCase):
         self.assertEqual(page.evaluate("location.hash"), before_hash)
         self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "collapsed")
 
-    def test_popup_fits_its_content_short_screens_and_distinguishes_active_from_hover(self):
+    def test_popup_aligns_icons_on_tall_and_short_screens_and_distinguishes_active_from_hover(self):
         page = self.open_page(preference="collapsed")
         page.locator("#case-search").wait_for()
         before_hash = page.evaluate("location.hash")
@@ -153,10 +192,12 @@ class SidebarBrowserTests(unittest.TestCase):
         self.wait_peek(page)
         popup = page.locator("#workbench-sidebar")
         bounds = popup.bounding_box()
-        # The panel should end near its own controls instead of filling 900px.
-        self.assertLess(bounds["height"], 800)
+        # The panel shares the rail's row positions, including the bottom tools.
+        self.assertLessEqual(bounds["height"], 884)
         self.assertGreaterEqual(bounds["y"], 0)
         self.assertLessEqual(bounds["y"] + bounds["height"], 900)
+        self.assertEqual(page.locator('#workbench-sidebar .brand, .sidebar-rail .brand-mark').count(), 0)
+        self.assert_sidebar_icons_aligned(page)
         active = page.locator("#library-nav")
         active_style = active.evaluate("node => ({background: getComputedStyle(node).backgroundColor, color: getComputedStyle(node).color})")
         preview = page.locator("#reviews-nav")
@@ -169,12 +210,17 @@ class SidebarBrowserTests(unittest.TestCase):
         self.assertEqual(page.evaluate("location.hash"), before_hash)
         self.assert_route(page, "library")
 
+        page.set_viewport_size({"width": 1280, "height": 720})
+        self.wait_peek(page)
+        self.assert_sidebar_icons_aligned(page)
         page.set_viewport_size({"width": 1280, "height": 420})
         self.wait_peek(page)
         bounds = popup.bounding_box()
         self.assertLessEqual(bounds["height"], 404)
         self.assertLessEqual(bounds["y"] + bounds["height"], 420)
         self.assertTrue(popup.evaluate("node => node.scrollHeight > node.clientHeight"))
+        self.assert_sidebar_icons_aligned(page, visible_only=True)
+        page.locator("#connection-status > summary").click()
         for selector in ("#files-nav", "#sync-button"):
             with self.subTest(short_screen_control=selector):
                 control = page.locator(selector)
@@ -184,8 +230,74 @@ class SidebarBrowserTests(unittest.TestCase):
                 self.assertGreaterEqual(visible["y"], bounds["y"])
                 self.assertLessEqual(visible["y"] + visible["height"], bounds["y"] + bounds["height"])
                 self.assertEqual(page.evaluate("document.activeElement.id"), selector[1:])
+                self.assert_sidebar_icons_aligned(page, visible_only=True)
         self.assertEqual(page.evaluate("location.hash"), before_hash)
         self.assert_no_overflow(page)
+
+    def test_sync_menu_reveals_connection_failure_and_supports_retry(self):
+        page = self.open_page()
+        page.locator("#case-search").wait_for()
+        status = page.locator("#connection-status")
+        self.assertFalse(status.evaluate("node => node.open"))
+        self.assertTrue(page.locator("#sync-button").is_hidden())
+        status.locator("summary").click()
+        self.assertTrue(page.locator("#sync-button").is_visible())
+        page.locator("#sync-button").focus()
+        page.keyboard.press("Escape")
+        self.assertFalse(status.evaluate("node => node.open"))
+        self.assert_route(page, "library")
+
+        state_calls, sync_calls = [], []
+
+        def state_read(route):
+            state_calls.append(route.request.url)
+            if len(state_calls) == 1:
+                route.fulfill(status=503, content_type="application/json", body=json.dumps({"error": "temporary connection failure"}))
+            else:
+                route.continue_()
+
+        def sync(route):
+            sync_calls.append(route.request.url)
+            if len(sync_calls) == 1:
+                route.fulfill(status=503, content_type="application/json", body=json.dumps({"error": "temporary sync failure"}))
+            else:
+                route.continue_()
+
+        page.route("**/api/state*", state_read)
+        page.route("**/api/sync", sync)
+        page.evaluate("refresh()")
+        page.locator("#connection-status[open] #sync-button").wait_for()
+        self.assertEqual(page.locator("#sync-label").inner_text(), "重试同步")
+        page.locator("#sync-button").click()
+        page.locator("#sync-detail").get_by_text("temporary sync failure", exact=False).wait_for()
+        self.assertTrue(status.evaluate("node => node.open"))
+        self.assertEqual(page.locator("#sync-label").inner_text(), "重试同步")
+        page.locator("#sync-button").click()
+        page.wait_for_function("() => !document.querySelector('#connection-status').open && !document.querySelector('#sync-button').disabled")
+        self.assertEqual(len(sync_calls), 2)
+        self.assertEqual(page.locator("#connection-text").inner_text(), "已连接本地案例库")
+        self.assertTrue(page.locator("#error-banner").is_hidden())
+        self.assertTrue(page.locator("#sync-button").is_hidden())
+
+    def test_content_subpages_keep_the_content_creation_module_selected(self):
+        page = self.open_page("#/202H/ai")
+        page.locator("#ai-task-list").wait_for()
+        for route, ready in (("scripts", "#script-query"), ("production", ".production-main")):
+            with self.subTest(subpage=route):
+                page.goto(f"{self.base}/#/202H/{route}")
+                page.locator(ready).wait_for()
+                self.assertEqual(page.locator(".workflow-nav .nav-item.active").inner_text().strip(), "内容创作")
+                self.assertEqual(page.locator("#ai-nav").get_attribute("aria-current"), "page")
+                page.locator("#sidebar-toggle").click()
+                self.wait_collapsed(page)
+                self.assertEqual(self.rail_button(page, "ai-nav").get_attribute("aria-current"), "page")
+                self.rail_button(page, "ai-nav").click()
+                page.locator("#ai-task-list").wait_for()
+                self.assert_route(page, "ai")
+                page.mouse.move(1200, 100)
+                self.wait_peek(page, False)
+                page.locator("#sidebar-toggle").click()
+                self.wait_collapsed(page, False)
 
     def test_rail_clicks_open_the_original_modules_and_material_basket(self):
         reviews = self.request("GET", "/api/reviews")[2]["reviews"]
@@ -278,7 +390,7 @@ class SidebarBrowserTests(unittest.TestCase):
                 break
         self.assertTrue(page.evaluate("document.querySelector('#workbench-sidebar').contains(document.activeElement)"))
         # Hovering out must preserve the panel while keyboard navigation is in it.
-        page.locator("#workbench-sidebar .brand").hover()
+        page.locator("#workbench-sidebar .sidebar-heading").hover()
         page.mouse.move(1200, 100)
         page.wait_for_timeout(200)
         self.wait_peek(page)
@@ -318,7 +430,7 @@ class SidebarBrowserTests(unittest.TestCase):
         self.assertTrue(self.rail_button(page, "files-nav").is_visible())
         # Switching back to the mouse clears keyboard mode, even if the
         # product select is then left focused after changing its value.
-        page.locator("#workbench-sidebar .sidebar-label").click()
+        page.locator("#workbench-sidebar .sidebar-heading").click(position={"x": 1, "y": 1})
         picker.focus()
         picker.select_option("202H")
         self.assert_route(page, "library")

@@ -88,7 +88,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
             with self.subTest(action=action):
                 self.assertEqual(page.locator("#script-list .script-card").count(), 1)
                 link = page.locator("#script-list .script-card")
-                scroll = self.enter_detail(page, link, "#script-derive")
+                scroll = self.enter_detail(page, link, "#script-production-toggle")
                 self.assertEqual(page.locator("#navigate-up").get_attribute("href"), "#/202H/scripts")
                 self.assertEqual(page.locator("#content .back-link").inner_text().strip(), "返回脚本版本")
                 self.leave_detail(page, action)
@@ -123,7 +123,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
                 for selector in ("#navigate-up", "#content .back-link"):
                     self.assertEqual(page.locator(selector).get_attribute("href"), "#/all/production")
                 if action == "breadcrumb":
-                    page.locator("#breadcrumb").get_by_role("link", name="制作单", exact=True).click()
+                    page.locator("#breadcrumb").get_by_role("link", name="内容制作", exact=True).click()
                 else:
                     page.locator("#content .back-link").click()
                 self.assert_return(page, "#/all/production", "#production-archived", scroll)
@@ -140,7 +140,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
             with self.subTest(action=action):
                 link = page.locator(f'[data-ai-task-id="{task["task_id"]}"] .ai-task-card')
                 scroll = self.enter_detail(page, link, "#ai-rounds")
-                self.assertEqual(page.locator("#content .back-link").inner_text().strip(), "返回写稿")
+                self.assertEqual(page.locator("#content .back-link").inner_text().strip(), "返回内容创作")
                 self.leave_detail(page, action)
                 self.assert_return(page, "#/202H/ai", "#ai-task-list", scroll)
                 self.assertEqual(page.locator('[data-ai-filter="completed"]').get_attribute("aria-pressed"), "true")
@@ -151,9 +151,9 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
         page.locator("#script-query").fill("导航目标")
         page.locator("#script-status-filter").select_option("adopted")
         page.locator("#script-list .script-card").click()
-        page.locator("#script-derive").wait_for()
+        page.locator("#script-production-toggle").wait_for()
         page.reload()
-        page.locator("#script-derive").wait_for()
+        page.locator("#script-production-toggle").wait_for()
         self.assertEqual(page.locator("#content .back-link").get_attribute("href"), "#/all/scripts")
         page.locator("#content .back-link").click()
         page.locator("#script-query").wait_for()
@@ -172,7 +172,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
         page = self.open_page("#/all/scripts")
         page.locator("#script-query").fill("导航子版本")
         page.locator("#script-list .script-card").click()
-        page.locator("#script-derive").wait_for()
+        page.locator("#script-production-toggle").wait_for()
         page.get_by_role("link", name="查看上一版本", exact=True).click()
         page.locator("#content h1").get_by_text("导航目标脚本", exact=True).wait_for()
         self.assertEqual(page.evaluate("location.hash"), f'#/202H/scripts/{self.script["id"]}')
@@ -186,7 +186,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
     def test_direct_all_product_production_deep_link_has_consistent_parent(self):
         page = self.open_page(f'#/all/production/{self.job["id"]}')
         page.locator("#job-archive").wait_for()
-        breadcrumb = page.locator("#breadcrumb").get_by_role("link", name="制作单", exact=True)
+        breadcrumb = page.locator("#breadcrumb").get_by_role("link", name="内容制作", exact=True)
         for link in (breadcrumb, page.locator("#navigate-up"), page.locator("#content .back-link")):
             self.assertEqual(link.get_attribute("href"), "#/all/production")
         page.locator("#content .back-link").click()

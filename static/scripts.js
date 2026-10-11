@@ -77,7 +77,7 @@ window.CaseScripts = (() => {
   async function route(keepScroll = false) {
     const hash = pageHash(), seq = ++workspace.sequence, tail = hash.replace(/^#scripts\/?/,'').split('?')[0];
     const mounted = keepScroll && !tail && workspace.listProduct === currentProduct() ? captureListState() : null;
-    $('#breadcrumb').innerHTML = `工作空间 <span>/</span> 写稿 <span>/</span> ${tail ? '脚本详情' : '脚本版本'}`;
+    $('#breadcrumb').innerHTML = `工作空间 <span>/</span> 内容创作 <span>/</span> ${tail ? '脚本详情' : '脚本版本'}`;
     $('#content').innerHTML = skeletonMarkup(2);
     try {
       if (tail) {
@@ -101,7 +101,7 @@ window.CaseScripts = (() => {
   function renderList(data,mounted = null) {
     workspace.listProduct = currentProduct();
     const scripts = data.scripts || [];
-    $('#content').innerHTML = `<div class="page-heading"><div><h1>脚本版本</h1><p>采纳的正文与每次改稿分别保存，登记视频后连接销售表现和案例结论。新增一份用顶栏的「保存脚本」。</p></div></div><nav class="scripts-tabs" aria-label="写稿内容"><a href="${esc(url('#ai'))}">协作任务</a><a href="${esc(url('#scripts'))}" aria-current="page">脚本版本</a><a href="${esc(url('#production'))}">制作视频</a></nav><div class="script-list-filters"><label class="search">${icon('search')}<input id="script-query" type="search" placeholder="搜索标题、正文或方向编号" aria-label="搜索脚本"></label><label class="script-status-choice"><span>状态</span><select id="script-status-filter"><option value="">全部</option>${Object.entries(labels).map(([key,value]) => `<option value="${key}">${value}</option>`).join('')}</select></label></div><div id="script-list"></div>`;
+    $('#content').innerHTML = `<div class="page-heading"><div><h1>脚本版本</h1><p>采纳的正文与每次改稿分别保存，登记视频后连接销售表现和案例结论。新增一份用顶栏的「保存脚本」。</p></div></div><nav class="scripts-tabs" aria-label="内容创作"><a href="${esc(url('#ai'))}">协作任务</a><a href="${esc(url('#scripts'))}" aria-current="page">脚本版本</a><a href="${esc(url('#production'))}">内容制作</a></nav><div class="script-list-filters"><label class="search">${icon('search')}<input id="script-query" type="search" placeholder="搜索标题、正文或方向编号" aria-label="搜索脚本"></label><label class="script-status-choice"><span>状态</span><select id="script-status-filter"><option value="">全部</option>${Object.entries(labels).map(([key,value]) => `<option value="${key}">${value}</option>`).join('')}</select></label></div><div id="script-list"></div>`;
     const saved = window.WorkbenchShell?.listState?.('scripts',currentProduct()) || mounted;
     if (saved) {
       $('#script-query').value = typeof saved.q === 'string' ? saved.q : '';
@@ -118,18 +118,50 @@ window.CaseScripts = (() => {
   function renderDetail(data) {
     const script = data.script, id = scriptId(script), source = script.source || {};
     const performanceItem = {sales_data:data.sales_data || {status:script.video_id ? 'not_found' : 'missing_video_id'},current:{metrics:{video_id:script.video_id || ''}}};
-    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#scripts',script.product))}">${icon('back')}返回脚本版本</a><div class="page-heading"><div><span class="eyebrow">SCRIPT VERSION</span><h1>${esc(script.title || '未命名脚本')}</h1><p>${esc(script.product)} · ${esc(script.direction_id || '未指定方向')} · <span class="script-status ${esc(script.status || 'draft')}">${esc(labels[script.status] || script.status || '草稿')}</span></p></div><div class="scripts-start-actions"><button class="secondary" id="script-derive">改成新版本</button><button class="secondary" id="script-produce">制作视频</button><button class="primary" id="script-case">${script.case_id ? '补充案例结论' : '沉淀为案例'}</button></div></div><div class="script-detail-grid"><section class="section-card script-body"><div class="section-title-row"><h2>采用正文</h2><button class="subtle" id="script-copy">${icon('copy')}复制正文</button></div><pre>${esc(script.text || '')}</pre>${script.translation_zh ? `<h2>中文对照</h2><pre>${esc(script.translation_zh)}</pre>` : ''}</section><aside><section class="section-card"><h2>拍摄与发布</h2><dl class="script-facts"><dt>脚本版本</dt><dd>${esc(id)}</dd><dt>视频 ID</dt><dd>${esc(script.video_id || '尚未登记')}</dd><dt>发布日期</dt><dd>${esc(script.published_on || '尚未登记')}</dd></dl><button class="secondary" id="script-release">登记进度与视频</button><p class="context-note">同一视频按视频 ID 匹配销售数据。拍摄不同版本时请分别登记。</p></section><section class="section-card"><h2>来源与版本</h2><p>${esc(readableDate(script.created_at))}</p>${source.task_id ? `<p><a href="${esc(url(`#ai/${encodeURIComponent(source.task_id)}`,script.product))}">查看来源 AI 任务</a></p>` : '<p>手动整理的正文</p>'}${sourceCase(script) ? `<p><a href="${esc(url(`#case/${encodeURIComponent(sourceCase(script))}`,script.product))}">查看${script.case_id ? '关联' : '参考'}案例</a></p>` : ''}${script.parent_id ? `<p><a href="${esc(url(`#scripts/${encodeURIComponent(script.parent_id)}`,script.product))}">查看上一版本</a></p>` : ''}${script.direction_id ? `<p><a href="${esc(url(`#directions/${encodeURIComponent(script.direction_id)}`,script.product))}">查看方向</a></p>` : ''}${script.note ? `<p>${esc(script.note)}</p>` : ''}</section></aside></div><section id="script-sales">${typeof renderPerformanceSection === 'function' ? renderPerformanceSection(performanceItem) : ''}</section>`;
+    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#scripts',script.product))}">${icon('back')}返回脚本版本</a><div class="page-heading"><div><span class="eyebrow">SCRIPT VERSION</span><h1>${esc(script.title || '未命名脚本')}</h1><p>${esc(script.product)} · ${esc(script.direction_id || '未指定方向')} · <span class="script-status ${esc(script.status || 'draft')}">${esc(labels[script.status] || script.status || '草稿')}</span></p></div><div class="script-detail-actions"><button class="primary" id="script-production-toggle" type="button" aria-expanded="false" aria-controls="script-production-choices" disabled>正在读取制作单…</button><details class="script-more-actions" id="script-more-actions"><summary>更多操作</summary><div><button class="subtle" id="script-derive">改成新版本</button><button class="subtle" id="script-case">${script.case_id ? '补充案例结论' : '沉淀为案例'}</button></div></details></div></div><p class="context-note script-production-note" id="script-production-note" role="status" hidden></p><section class="section-card script-production-choices" id="script-production-choices" aria-label="选择制作单或制作形式" hidden></section><div class="script-detail-grid"><section class="section-card script-body"><div class="section-title-row"><h2>采用正文</h2><button class="subtle" id="script-copy">${icon('copy')}复制正文</button></div><pre>${esc(script.text || '')}</pre>${script.translation_zh ? `<h2>中文对照</h2><pre>${esc(script.translation_zh)}</pre>` : ''}</section><aside><section class="section-card"><h2>拍摄与发布</h2><dl class="script-facts"><dt>脚本版本</dt><dd>${esc(id)}</dd><dt>视频 ID</dt><dd>${esc(script.video_id || '尚未登记')}</dd><dt>发布日期</dt><dd>${esc(script.published_on || '尚未登记')}</dd></dl><button class="secondary" id="script-release">登记进度与视频</button><p class="context-note">同一视频按视频 ID 匹配销售数据。拍摄不同版本时请分别登记。</p></section><section class="section-card"><h2>来源与版本</h2><p>${esc(readableDate(script.created_at))}</p>${source.task_id ? `<p><a href="${esc(url(`#ai/${encodeURIComponent(source.task_id)}`,script.product))}">查看来源 AI 任务</a></p>` : '<p>手动整理的正文</p>'}${sourceCase(script) ? `<p><a href="${esc(url(`#case/${encodeURIComponent(sourceCase(script))}`,script.product))}">查看${script.case_id ? '关联' : '参考'}案例</a></p>` : ''}${script.parent_id ? `<p><a href="${esc(url(`#scripts/${encodeURIComponent(script.parent_id)}`,script.product))}">查看上一版本</a></p>` : ''}${script.direction_id ? `<p><a href="${esc(url(`#directions/${encodeURIComponent(script.direction_id)}`,script.product))}">查看方向</a></p>` : ''}${script.note ? `<p>${esc(script.note)}</p>` : ''}</section></aside></div><section id="script-sales">${typeof renderPerformanceSection === 'function' ? renderPerformanceSection(performanceItem) : ''}</section>`;
     $('#script-copy').onclick = () => copyText(script.text || '','脚本正文已复制');
     $('#script-derive').onclick = () => openManual(script);
-    $('#script-produce').onclick = () => window.CaseProduction?.fromScript(script);
     $('#script-release').onclick = () => openStatus(script,data.revision);
     $('#script-case').onclick = () => openCase(script,script.case_id || '');
     if (source.case_id && source.case_id !== script.case_id) {
-      $('#script-case').insertAdjacentHTML('afterend','<button class="secondary" id="script-write-source">写回参考案例</button>');
+      $('#script-case').insertAdjacentHTML('afterend','<button class="subtle" id="script-write-source">写回参考案例</button>');
       $('#script-write-source').onclick = () => openCase(script,source.case_id);
     }
     const history = script.history || [];
     if (history.length) $('#script-sales').insertAdjacentHTML('beforebegin',`<details class="section-card script-history"><summary>查看进度记录（${history.length} 条）</summary><ol>${history.map(entry => `<li><strong>${esc(labels[entry.status] || entry.status)}</strong> · ${esc(readableDate(entry.at))}${entry.video_id ? ` · 视频 ${esc(entry.video_id)}` : ''}${entry.note ? `<p>${esc(entry.note)}</p>` : ''}</li>`).join('')}</ol></details>`);
+    const more = $('#script-more-actions');
+    $$('button',more).forEach(button => button.addEventListener('click',() => {more.open = false;}));
+    void loadScriptProduction(script);
+  }
+  async function loadScriptProduction(script) {
+    const toggle = $('#script-production-toggle'), panel = $('#script-production-choices'), note = $('#script-production-note');
+    const hash = pageHash(), seq = workspace.sequence;
+    toggle.disabled = true;toggle.textContent = '正在读取制作单…';toggle.setAttribute('aria-expanded','false');panel.hidden = true;panel.innerHTML = '';
+    note.hidden = true;note.textContent = '';
+    try {
+      const data = await api(`/api/production?product=${encodeURIComponent(script.product || '')}`);
+      if (seq !== workspace.sequence || hash !== pageHash() || !toggle.isConnected) return;
+      if (!Array.isArray(data.jobs) || !Array.isArray(data.carousels)) throw new Error('制作单列表不完整，请重新读取。');
+      const sameScript = item => item.script_id === scriptId(script) && !item.archived && item.status !== 'archived';
+      const existing = [...data.jobs.filter(sameScript).map(item => ({...item,kind:'video'})),...data.carousels.filter(sameScript).map(item => ({...item,kind:'carousel'}))]
+        .sort((a,b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')));
+      const videoLabels = {draft:'待配音',voiced:'已配音',timeline:'已建时间线',editing:'剪辑中',awaiting_review:'待人工审查',approved:'人工审查通过',needs_material:'待补素材',needs_repair:'待修正',verification_failed:'核验未完成',unverified:'旧记录待核验',completed:'旧记录待核验',failed:'剪辑失败',cancelled:'剪辑已停止',interrupted:'剪辑已中断'};
+      const carouselLabels = {draft:'待选底图',picking:'选图中',picked:'底图已选齐',ready:'底图已选齐',reviewing:'成图待核对',approved:'成图已确认',published:'已登记发布'};
+      const create = '<div class="script-production-create"><button type="button" class="secondary" id="script-produce">制作视频</button><button type="button" class="secondary" id="script-produce-carousel">制作图文</button></div>';
+      panel.innerHTML = existing.length ? `<h2>关联制作单 <small>${existing.length} 张</small></h2><p class="context-note">选择要接着处理的制作单。</p><div class="script-production-links">${existing.map(item => {
+        const carousel = item.kind === 'carousel', status = (carousel ? carouselLabels : videoLabels)[item.status] || '查看进度';
+        const href = url(`#production/${encodeURIComponent(item.id)}`,item.product || script.product);
+        return `<a class="script-production-link" href="${esc(href)}"><span><strong>${esc(item.title || script.title || '未命名制作单')}</strong><small>${carousel ? '图文' : '视频'} · ${esc(item.id)}${item.updated_at || item.created_at ? ` · ${esc(readableDate(item.updated_at || item.created_at))}` : ''}</small></span><span>${esc(status)}${item.status === 'awaiting_review' && !carousel ? ' · 去审查' : ' · 打开'}</span></a>`;
+      }).join('')}</div><details class="script-production-new"><summary>新建另版</summary><p class="context-note">已有制作单会保留，另建一张用于不同的制作版本。</p>${create}</details>` : `<h2>选择制作形式</h2><p class="context-note">这条脚本还没有未归档的制作单。选定形式后核对内容，再创建制作单。</p>${create}`;
+      toggle.textContent = existing.length ? '继续制作' : '开始制作';toggle.disabled = false;
+      toggle.onclick = () => {panel.hidden = !panel.hidden;toggle.setAttribute('aria-expanded',String(!panel.hidden));};
+      $('#script-produce').onclick = () => window.CaseProduction?.fromScript(script);
+      $('#script-produce-carousel').onclick = () => window.CaseProduction?.fromScriptCarousel(script);
+    } catch (error) {
+      if (seq !== workspace.sequence || hash !== pageHash() || !toggle.isConnected) return;
+      note.textContent = `暂时无法核对已有制作单：${fail(error)}。重新读取后可继续或新建。`;note.hidden = false;
+      toggle.textContent = '重新读取制作单';toggle.disabled = false;toggle.onclick = () => void loadScriptProduction(script);
+    }
   }
   async function openManual(parent = null) {
     const product = parent?.product || currentProduct();if (!product) {toast('请先选择一个具体产品。',true);return;}

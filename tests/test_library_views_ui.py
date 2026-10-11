@@ -113,7 +113,7 @@ class LibraryViewsTests(unittest.TestCase):
         close_library_filters(page)
         page.locator("#library-save-view-button").click()
         page.locator('#library-save-view [name="view_name"]').fill("达人正向筛选")
-        page.get_by_role("button",name="保存视图",exact=True).click()
+        page.locator("#library-save-view").get_by_role("button",name="保存视图",exact=True).click()
         page.wait_for_function("()=>document.querySelector('#library-saved-view').value.startsWith('custom-') && document.querySelector('#library-saved-view').value!=='custom-original12'")
         saved_id=page.locator("#library-saved-view").input_value()
         page.reload();page.locator("#case-search").wait_for()
