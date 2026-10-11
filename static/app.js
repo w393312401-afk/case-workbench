@@ -11,6 +11,12 @@ const esc = (value) =>
       ],
   );
 const icons = {
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18M8 14h2m4 0h2m-8 4h2"/>',
+  target: '<circle cx="11" cy="13" r="8"/><circle cx="11" cy="13" r="4"/><path d="m11 13 9-9m-5 0h5v5"/>',
+  writing: '<path d="m16 3 5 5-12 12H4v-5ZM13 6l5 5M4 20h16"/>',
+  library: '<path d="M3 3h4v18H3ZM9 3h4v18H9Zm6 1 3-1 3 17-3 1Z"/><path d="M3 7h4m2 0h4m3-1 3-1"/>',
+  basket: '<path d="m8 3-4 5m12-5 4 5M3 8h18l-2 12H5ZM9 12v4m6-4v4"/>',
+  settings: '<path d="m10 3-.6 2.4-1.8 1-2.4-.7-2 3.4L5 10.8v2.4l-1.8 1.7 2 3.4 2.4-.7 1.8 1L10 21h4l.6-2.4 1.8-1 2.4.7 2-3.4-1.8-1.7v-2.4l1.8-1.7-2-3.4-2.4.7-1.8-1L14 3Z"/><circle cx="12" cy="12" r="3"/>',
   grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
   spark:
     '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/>',
@@ -911,6 +917,7 @@ const routeTable = {
 };
 async function route(keepScroll = false, force = false) {
   const n = ++routeSequence, previous = state.routeKind;
+  const previousLibraryHash = state.libraryHash;
   const incoming = window.WorkbenchShell.parse();
   if (window.CaseScripts?.beforeNavigate && !window.CaseScripts.beforeNavigate(location.hash)) {
     window.WorkbenchShell.update();
@@ -924,12 +931,13 @@ async function route(keepScroll = false, force = false) {
     window.WorkbenchShell.update();
     return;
   }
-  if (previous === "case" && incoming.page !== "case") cleanupDetailWorkspace();
   if (previous === "library" && incoming.page !== "library") {
     clearTimeout(searchTimer);
     cardThumbnailObserver?.disconnect();
     rememberLibraryPosition();
   }
+  window.WorkbenchShell.beginNavigation(incoming);
+  if (previous === "case" && incoming.page !== "case") cleanupDetailWorkspace();
   const parsed = window.WorkbenchShell.canonicalize();
   let page = parsed.page;
   const hash = window.WorkbenchShell.legacyHash();
@@ -945,8 +953,11 @@ async function route(keepScroll = false, force = false) {
   await routeTable[page]({ n, caseRoute, keepScroll, force });
   if (n !== routeSequence) return;
   updateNav();
-  if (page === "library" && previous === "case") {
-    requestAnimationFrame(() => window.scrollTo(0, state.libraryScrollY));
+  const restoredScroll = window.WorkbenchShell.finishNavigation();
+  if (restoredScroll !== null) {
+    requestAnimationFrame(() => { if (n === routeSequence) window.scrollTo(0, restoredScroll); });
+  } else if (page === "library" && previous === "case" && window.WorkbenchShell.url(previousLibraryHash) === location.hash) {
+    requestAnimationFrame(() => { if (n === routeSequence) window.scrollTo(0, state.libraryScrollY); });
   } else if (!keepScroll) window.scrollTo(0, 0);
 }
 
@@ -1090,17 +1101,7 @@ document.addEventListener("keydown", (event) => {
   }
   if ($$("dialog[open]").length) return;
   if (event.key === "Escape") {
-    const destination = caseLocation()
-      ? state.libraryHash
-      : (window.WorkbenchShell?.legacyHash() || location.hash).startsWith("#ai/")
-        ? "#ai"
-        : (window.WorkbenchShell?.legacyHash() || location.hash).startsWith("#directions/")
-          ? (window.WorkbenchShell?.url("#directions") || "#directions")
-        : ["scripts", "production"].includes(state.routeKind)
-          ? window.WorkbenchShell.url("#ai")
-        : ["home", "settings", "videos", "reviews", "directions"].includes(state.routeKind)
-          ? state.libraryHash
-          : null;
+    const destination = ["home", "library"].includes(state.routeKind) ? null : window.WorkbenchShell.parentURL();
     if (destination) {
       event.preventDefault();
       location.hash = destination;

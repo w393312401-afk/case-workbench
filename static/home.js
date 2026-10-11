@@ -3,7 +3,7 @@
 // The calendar week is independent of the last week for which exports exist.
 // Layout: four counters, then one tabbed list of this week's work, then the eight-week charts.
 window.WorkbenchHome = (() => {
-  let sequence = 0, chosenTab = null, undoTimer = null;
+  let sequence = 0, chosenTab = null, undoTimer = null, renderedProduct = null;
   const url = (hash, product) => window.WorkbenchShell?.url(hash, product) || hash;
   const selectedProduct = () => window.WorkbenchShell?.product() || "";
   const matches = item => !window.WorkbenchShell || window.WorkbenchShell.matchesProduct(item.product);
@@ -73,6 +73,7 @@ window.WorkbenchHome = (() => {
 
   function render(data, results, product, week) {
     const root = $("#home-page"); if (!root) return;
+    renderedProduct = product;
     const [summary, analytics, videosData, tasksData, creation] = data;
     const failed = results.map((result,index) => result.status === "rejected" ? ["周数据概况","周图","视频列表","写稿任务","待写计划"][index] : null).filter(Boolean);
     const videos = videosData?.videos || [], due = dueVideos(videos,week);
@@ -176,6 +177,9 @@ window.WorkbenchHome = (() => {
 
   async function route() {
     const seq = ++sequence, product = selectedProduct(), week = currentWeek();
+    const saved = window.WorkbenchShell?.listState?.("home", product);
+    if (["due", "tasks", "plans", "cases"].includes(saved?.tab)) chosenTab = saved.tab;
+    else if (!$("[data-home-tab]")) chosenTab = null;
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 本周";
     if (!$("#home-page")) $("#content").innerHTML = '<div id="home-page"><div class="page-heading"><div><span class="eyebrow">THIS WEEK</span><h1>本周</h1><p role="status">正在汇总本周工作…</p></div></div></div>';
     const isCurrent = () => seq === sequence && selectedProduct() === product && window.WorkbenchShell?.parse().page === "home";
@@ -195,5 +199,9 @@ window.WorkbenchHome = (() => {
     window.PerfDashboard?.bind(section);
     bindRetry(section);
   }
-  return { route, currentWeek, dueVideos, missingCase };
+  const captureListState = () => {
+    const active = document.querySelector('[data-home-tab][aria-selected="true"]');
+    return active ? { product: renderedProduct, tab: active.dataset.homeTab } : null;
+  };
+  return { route, currentWeek, dueVideos, missingCase, captureListState };
 })();

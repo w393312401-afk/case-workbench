@@ -15,6 +15,24 @@
   // threads: conversations already fetched (by review id). open / editing: the cards whose conversation / tag editor is
   // expanded; both are kept across repaints. Picks are shared with the global material basket.
   const rev = { summary: null, data: null, shown: 50, request: 0, threads: {}, open: new Set(), editing: new Set(), filters: fresh() };
+  let searchTimer = null, searchHash = "";
+  function cancelSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+    searchHash = "";
+  }
+  function captureListState() {
+    if (!$("#rev-results")) return null;
+    const filters = { ...rev.filters, q: $("#rev-q")?.value ?? rev.filters.q };
+    listKeys.forEach(key => { filters[key] = [...rev.filters[key]]; });
+    const query = hashQuery(filters);
+    return { product: renderedProduct, filters, shown: rev.shown, open: [...rev.open], hash: pageURL(`#reviews${query ? `?${query}` : ""}`) };
+  }
+  function leaveList() {
+    cancelSearch();
+    rev.editing.clear();
+  }
+
   try {
     const saved = JSON.parse(sessionStorage.getItem("review-library-filters") || "{}");
     for (const key of Object.keys(defaults)) if (key in saved && typeof saved[key] === typeof defaults[key]) rev.filters[key] = saved[key];
@@ -347,6 +365,7 @@
   }
 
   function render() {
+    cancelSearch();
     const f = rev.filters, s = rev.summary, sources = s.platforms.filter((p) => p.total).length;
     const select = (id, label, options, value) => `<label class="rev-field"><span>${label}</span><select id="${id}">${options.map(([k, v]) => `<option value="${esc(k)}" ${String(k) === String(value) ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>`;
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 用户声音";
@@ -368,9 +387,11 @@
         </div><section class="rev-filters" id="rev-filters" aria-label="标签"></section>
         <fieldset class="rev-toggles"><legend>默认隐藏的内容</legend><label><input type="checkbox" id="rev-brand" ${f.brand ? "checked" : ""}> 品牌或达人账号的回复</label><label><input type="checkbox" id="rev-empty" ${f.empty ? "checked" : ""}> 只打星没写字的评价</label><label><input type="checkbox" id="rev-irrelevant" ${f.irrelevant ? "checked" : ""}> 没提到产品的评论</label></fieldset></div>
         <div class="rev-drawer-foot"><button type="button" class="subtle" id="rev-reset">清除全部</button><button type="button" class="primary" data-drawer-close id="rev-drawer-done">显示结果</button></div></dialog></div>`;
+    renderedProduct = currentProduct();
     bindToolbar();
-    paintResults();
+    const conversations = paintResults();
     paintNotes();
+    return conversations;
   }
 
   // The buttons and notes that depend on the records: what is new, how many are picked, what was changed by hand.
@@ -390,6 +411,7 @@
   }
 
   function paintResults() {
+    const conversations = [];
     const active = activeFilters(), inDrawer = active.filter(([key]) => drawerKeys.has(key)).length;
     $("#rev-sources").innerHTML = sourceBar();
     $("#rev-active").innerHTML = activeMarkup(active);
@@ -402,18 +424,23 @@
     $("#rev-results").innerHTML = resultsMarkup();
     $("#rev-count").textContent = `${num(rev.data.total)} 条`;
     $("#rev-query-note").innerHTML = queryNote(rev.data);
-    $("#rev-more")?.addEventListener("click", () => { rev.shown += 50; refresh(); });
+    $("#rev-more")?.addEventListener("click", () => { cancelSearch(); rev.shown += 50; refresh(); });
     // A repaint (more results, another filter) replaces the cards; conversations that were open stay open.
     for (const id of rev.open) {
       const box = document.getElementById(`rev-thread-${id}`);
       if (box && rev.threads[id]) { box.innerHTML = threadMarkup(rev.threads[id]); box.hidden = false; }
+      else if (box) {
+        const button = $("[data-thread]", box.closest(".rev-card"));
+        if (button) conversations.push(toggleThread(button, true));
+      }
     }
+    return conversations;
   }
 
-  async function toggleThread(button) {
+  async function toggleThread(button, restore = false) {
     const id = button.dataset.thread, box = document.getElementById(`rev-thread-${id}`);
     if (!box) return;
-    if (rev.open.has(id)) {
+    if (rev.open.has(id) && !restore) {
       rev.open.delete(id);
       box.hidden = true;
       button.setAttribute("aria-expanded", "false");
@@ -521,6 +548,7 @@
 
   // Any change of the filters: back to the first page of results, remembered, and shown in the address.
   function changed(next) {
+    cancelSearch();
     Object.assign(rev.filters, next);
     if ("replied" in next && $("#rev-replied")) $("#rev-replied").value = rev.filters.replied;
     rev.shown = 50;
@@ -529,18 +557,25 @@
   }
 
   function bindToolbar() {
-    let timer;
     $("#rev-q").addEventListener("input", (event) => {
-      rev.filters.q = event.target.value;
-      clearTimeout(timer);
-      timer = setTimeout(() => { rev.shown = 50; save(); refresh(); }, 250);
+      const field = event.target;
+      rev.filters.q = field.value;
+      cancelSearch();
+      searchHash = pageHash();
+      searchTimer = setTimeout(() => {
+        cancelSearch();
+        if (!field.isConnected || $("#rev-q") !== field || !pageHash().startsWith("#reviews")) return;
+        rev.shown = 50;
+        save();
+        refresh();
+      }, 250);
     });
     [["#rev-rating", "rating"], ["#rev-role", "role"], ["#rev-language", "language"], ["#rev-replied", "replied"], ["#rev-video", "video"], ["#rev-sku", "sku"], ["#rev-sort", "sort"]].forEach(([selector, key]) =>
       $(selector)?.addEventListener("change", (event) => changed({ [key]: event.target.value })));
     [["#rev-brand", "brand"], ["#rev-empty", "empty"], ["#rev-irrelevant", "irrelevant"]].forEach(([selector, key]) =>
       $(selector).addEventListener("change", (event) => changed({ [key]: event.target.checked })));
     // Clearing rebuilds the controls; the drawer stays open when it was.
-    const reset = () => { const open = $("#rev-drawer").open; rev.filters = fresh(); rev.shown = 50; save(); render(); refresh(); if (open) $("#rev-drawer").showModal(); };
+    const reset = () => { cancelSearch(); const open = $("#rev-drawer").open; rev.filters = fresh(); rev.shown = 50; save(); render(); refresh(); if (open) $("#rev-drawer").showModal(); };
     $("#rev-reset").onclick = reset;
     // Quick filters, e.g. the unanswered TikTok questions: things viewers asked that nobody replied to.
     $$("[data-quick]").forEach((button) => button.onclick = () => { const item = quick[button.dataset.quick]; changed(item.set(!item.on(rev.filters), rev.filters)); });
@@ -647,6 +682,7 @@
   window.addEventListener("keydown", (event) => { if (event.key === "Escape") closeMenus(event); });
 
   let rendered = false, renderedProduct = null, filterProduct = null, routeSequence = 0;
+  window.addEventListener("hashchange", cancelSearch);
   window.addEventListener("workbench:basketchange", event => {
     if (event.detail?.source === "global" && pageHash().startsWith("#reviews") && $("#rev-results")) void refreshAll().catch(error => toast(error.message));
   });
@@ -662,21 +698,40 @@
     const hash = pageHash(), product = currentProduct(), sequence = ++routeSequence;
     const isCurrent = () => sequence === routeSequence && hash === pageHash();
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 用户声音";
+    // A background route check must leave the current draft to its scheduled search.
+    if (searchTimer !== null && $("#rev-q")?.isConnected && searchHash === hash && product === renderedProduct) return;
+    const restored = window.WorkbenchShell?.listState?.("reviews", product);
+    if (restored?.filters) {
+      cancelSearch();
+      rev.filters = fresh();
+      for (const key of Object.keys(defaults)) {
+        if (typeof restored.filters[key] === typeof defaults[key]) rev.filters[key] = restored.filters[key];
+      }
+      rev.shown = Number.isFinite(restored.shown) ? Math.max(50, Math.trunc(restored.shown)) : 50;
+      rev.open = new Set(Array.isArray(restored.open) ? restored.open.filter(id => typeof id === "string") : []);
+      rev.editing.clear();
+      filterProduct = product;
+    }
     // Product context is owned by the shell. Saved filters only control this page's other dimensions.
     if (rendered && hash.startsWith("#reviews") && $("#rev-results")) {
       const next = routeFilters(product);
-      if (product === renderedProduct && hashQuery(next) === hashQuery()) return;
+      if (!restored && product === renderedProduct && hashQuery(next) === hashQuery()) return;
       rev.filters = next;
       filterProduct = product;
-      rev.shown = 50;
+      if (!restored) rev.shown = 50;
       try {
         if (!await loadResults() || !isCurrent()) return;
-        render();
+        const conversations = render();
+        if (restored) {
+          await Promise.all(conversations);
+          if (!isCurrent()) return;
+        }
         renderedProduct = product;
         save();
       } catch (error) {if (isCurrent()) toast(error.message);}
       return;
     }
+    rev.editing.clear();
     $("#content").innerHTML = skeletonMarkup(3);
     try {
       const linked = filtersFromHash();
@@ -684,7 +739,7 @@
       // Valid saved filters can fetch the list and its summary at the same time.
       rev.filters = routeFilters(product,null);
       filterProduct = product;
-      if (linked) rev.shown = 50;
+      if (linked && !restored) rev.shown = 50;
       const requested = params().toString();
       const initialRead = loadResults().then(loaded => ({loaded}),error => ({error}));
       const [,initial] = await Promise.all([loadSummary(),initialRead]);
@@ -697,7 +752,11 @@
         if (initial.error) throw initial.error;
         if (!initial.loaded) return;
       }
-      render();
+      const conversations = render();
+      if (restored) {
+        await Promise.all(conversations);
+        if (!isCurrent()) return;
+      }
       rendered = true;
       renderedProduct = product;
       save();
@@ -727,5 +786,5 @@
     section.append(box);
   }
 
-  window.CaseReviews = { route, decorateCase };
+  window.CaseReviews = { route, decorateCase, captureListState, leaveList };
 })();

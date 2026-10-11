@@ -1,0 +1,359 @@
+"""Sidebar interactions against the shell's disposable library and browser profile."""
+from __future__ import annotations
+
+import json
+import unittest
+
+import test_shell_ui as shell
+
+
+class SidebarBrowserTests(unittest.TestCase):
+    # Reuse the isolated fixture without inheriting its unrelated test methods.
+    setUpClass = classmethod(shell.ShellBrowserTests.setUpClass.__func__)
+    tearDownClass = classmethod(shell.ShellBrowserTests.tearDownClass.__func__)
+    setUp = shell.ShellBrowserTests.setUp
+    stop_server = shell.ShellBrowserTests.stop_server
+    request = shell.ShellBrowserTests.request
+    make_playable_video = shell.ShellBrowserTests.make_playable_video
+    assert_route = shell.ShellBrowserTests.assert_route
+    assert_no_overflow = shell.ShellBrowserTests.assert_no_overflow
+
+    def open_page(self, route="#library", *, width=1280, preference=None, touch=False):
+        context = self.browser.new_context(
+            viewport={"width": width, "height": 900}, has_touch=touch,
+        )
+        self.addCleanup(context.close)
+        if preference is not None:
+            # Set only the initial preference, so reloads can verify later writes.
+            context.add_init_script(
+                "if (localStorage.getItem('workbench-sidebar-v1') === null) "
+                "localStorage.setItem('workbench-sidebar-v1', " + json.dumps(preference) + ");"
+            )
+        page = context.new_page()
+        page.set_default_timeout(10000)
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        self.addCleanup(lambda: self.assertEqual(errors, [], "Browser JavaScript errors"))
+        page.goto(self.base + "/" + route)
+        page.locator("#connection-text").get_by_text("已连接本地案例库").wait_for(state="attached")
+        page.locator("#sidebar-toggle").wait_for(state="attached")
+        return page
+
+    def wait_collapsed(self, page, collapsed=True):
+        page.wait_for_function(
+            "expected => document.documentElement.classList.contains('sidebar-collapsed') === expected",
+            arg=collapsed,
+        )
+
+    def wait_peek(self, page, opened=True):
+        page.wait_for_function(
+            "expected => document.documentElement.classList.contains('sidebar-peek') === expected",
+            arg=opened,
+        )
+
+    def rail_button(self, page, target):
+        return page.locator(f'#sidebar-rail [data-sidebar-target="{target}"]')
+
+    def test_toggle_pins_and_persists_the_desktop_preference(self):
+        page = self.open_page()
+        page.locator("#case-search").wait_for()
+        self.wait_collapsed(page, False)
+        self.assertTrue(page.locator(".topbar #sidebar-toggle").is_visible())
+        self.assertTrue(page.locator("#workbench-sidebar").is_visible())
+        self.assertTrue(page.locator("#sidebar-rail").is_hidden())
+        expanded = page.locator("main").bounding_box()
+        page.locator("#sidebar-toggle").click()
+        self.wait_collapsed(page)
+        self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "collapsed")
+        self.assertTrue(page.locator("#sidebar-rail").is_visible())
+        self.assertTrue(page.locator("#workbench-sidebar").is_hidden())
+        self.assertLess(page.locator("main").bounding_box()["x"], expanded["x"])
+        page.reload()
+        page.locator("#case-search").wait_for()
+        self.wait_collapsed(page)
+        self.rail_button(page, "library-nav").hover()
+        self.wait_peek(page)
+        self.assertEqual(page.locator("#sidebar-pin").inner_text().strip(), "固定")
+        page.locator("#sidebar-pin").click()
+        self.wait_collapsed(page, False)
+        self.wait_peek(page, False)
+        self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "expanded")
+        page.reload()
+        page.locator("#case-search").wait_for()
+        self.wait_collapsed(page, False)
+        self.assertTrue(page.locator("#workbench-sidebar").is_visible())
+        self.assertAlmostEqual(page.locator("main").bounding_box()["x"], expanded["x"], delta=1)
+
+    def test_medium_screen_defaults_to_collapsed_and_honors_an_explicit_preference(self):
+        page = self.open_page(width=820)
+        page.locator("#case-search").wait_for()
+        self.wait_collapsed(page)
+        self.assertTrue(page.locator("#sidebar-rail").is_visible())
+        self.assert_no_overflow(page)
+        page.locator("#sidebar-toggle").click()
+        self.wait_collapsed(page, False)
+        page.reload()
+        page.locator("#case-search").wait_for()
+        self.wait_collapsed(page, False)
+        self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "expanded")
+        self.assert_no_overflow(page)
+
+    def test_hover_transfers_into_the_popup_without_navigation_or_content_reflow(self):
+        page = self.open_page(preference="collapsed")
+        page.locator("#case-search").wait_for()
+        before_hash = page.evaluate("location.hash")
+        before_main = page.locator("main").bounding_box()
+        trigger = self.rail_button(page, "reviews-nav")
+        page.mouse.move(1200, 100)
+        # A quick pass through the icon rail must cancel pending opening.
+        trigger.dispatch_event("pointerenter", {"pointerType": "mouse"})
+        trigger.dispatch_event("pointerleave", {"pointerType": "mouse"})
+        page.locator("#sidebar-rail").dispatch_event("pointerleave", {"pointerType": "mouse"})
+        page.wait_for_timeout(300)
+        self.assertFalse(page.locator("html").evaluate("node => node.classList.contains('sidebar-peek')"))
+        self.assertTrue(page.locator("#workbench-sidebar").is_hidden())
+        self.assertEqual(page.evaluate("location.hash"), before_hash)
+        # A deliberate, stable hover still reveals the full panel.
+        trigger.hover()
+        self.wait_peek(page)
+        self.assertTrue(page.locator("#workbench-sidebar").is_visible())
+        page.wait_for_function("() => getComputedStyle(document.querySelector('#workbench-sidebar')).opacity === '1'")
+        rail = page.locator("#sidebar-rail").bounding_box()
+        popup = page.locator("#workbench-sidebar").bounding_box()
+        target_box = page.locator("#reviews-nav").bounding_box()
+        self.assertGreaterEqual(popup["x"], rail["x"] + rail["width"] - 1)
+        # Give the user time to cross the small corridor between icon and panel.
+        trigger_box = trigger.bounding_box()
+        gap_x = (rail["x"] + rail["width"] + popup["x"]) / 2
+        page.mouse.move(gap_x, trigger_box["y"] + trigger_box["height"] / 2)
+        page.wait_for_timeout(175)
+        self.assertTrue(page.locator("html").evaluate("node => node.classList.contains('sidebar-peek')"))
+        page.mouse.move(target_box["x"] + target_box["width"] / 2,
+                        target_box["y"] + target_box["height"] / 2)
+        page.wait_for_timeout(350)
+        self.wait_peek(page)
+        self.assertEqual(page.evaluate("location.hash"), before_hash)
+        self.assertTrue(page.locator("#material-basket-dialog").is_hidden())
+        after_main = page.locator("main").bounding_box()
+        for dimension in ("x", "width"):
+            self.assertAlmostEqual(after_main[dimension], before_main[dimension], delta=1)
+        self.assert_no_overflow(page)
+        # Leave both the rail and the popup; the grace period then expires.
+        page.mouse.move(1200, 100)
+        self.wait_peek(page, False)
+        self.assertTrue(page.locator("#workbench-sidebar").is_hidden())
+        self.assertEqual(page.evaluate("location.hash"), before_hash)
+        self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "collapsed")
+
+    def test_popup_fits_its_content_short_screens_and_distinguishes_active_from_hover(self):
+        page = self.open_page(preference="collapsed")
+        page.locator("#case-search").wait_for()
+        before_hash = page.evaluate("location.hash")
+        self.rail_button(page, "reviews-nav").hover()
+        self.wait_peek(page)
+        popup = page.locator("#workbench-sidebar")
+        bounds = popup.bounding_box()
+        # The panel should end near its own controls instead of filling 900px.
+        self.assertLess(bounds["height"], 800)
+        self.assertGreaterEqual(bounds["y"], 0)
+        self.assertLessEqual(bounds["y"] + bounds["height"], 900)
+        active = page.locator("#library-nav")
+        active_style = active.evaluate("node => ({background: getComputedStyle(node).backgroundColor, color: getComputedStyle(node).color})")
+        preview = page.locator("#reviews-nav")
+        preview.hover()
+        preview_style = preview.evaluate("node => ({background: getComputedStyle(node).backgroundColor, color: getComputedStyle(node).color})")
+        self.assertNotEqual(active_style["background"], preview_style["background"])
+        self.assertNotEqual(active_style["color"], preview_style["color"])
+        self.assertNotEqual(preview_style["background"], "rgba(0, 0, 0, 0)")
+        self.assertEqual(active.evaluate("node => getComputedStyle(node).backgroundColor"), active_style["background"])
+        self.assertEqual(page.evaluate("location.hash"), before_hash)
+        self.assert_route(page, "library")
+
+        page.set_viewport_size({"width": 1280, "height": 420})
+        self.wait_peek(page)
+        bounds = popup.bounding_box()
+        self.assertLessEqual(bounds["height"], 404)
+        self.assertLessEqual(bounds["y"] + bounds["height"], 420)
+        self.assertTrue(popup.evaluate("node => node.scrollHeight > node.clientHeight"))
+        for selector in ("#files-nav", "#sync-button"):
+            with self.subTest(short_screen_control=selector):
+                control = page.locator(selector)
+                control.scroll_into_view_if_needed()
+                control.focus()
+                visible = control.bounding_box()
+                self.assertGreaterEqual(visible["y"], bounds["y"])
+                self.assertLessEqual(visible["y"] + visible["height"], bounds["y"] + bounds["height"])
+                self.assertEqual(page.evaluate("document.activeElement.id"), selector[1:])
+        self.assertEqual(page.evaluate("location.hash"), before_hash)
+        self.assert_no_overflow(page)
+
+    def test_rail_clicks_open_the_original_modules_and_material_basket(self):
+        reviews = self.request("GET", "/api/reviews")[2]["reviews"]
+        quote = next(item for item in reviews if item["text"] == "That’s a lot of wobble")
+        self.server.app.reviews.set_pick(quote["id"], True)
+        page = self.open_page(preference="collapsed")
+        for target, name, ready in [
+            ("reviews-nav", "reviews", "#rev-page"),
+            ("files-nav", "settings", ".settings-page"),
+            ("library-nav", "library", "#case-search"),
+        ]:
+            with self.subTest(module=target):
+                self.rail_button(page, target).click()
+                page.locator(ready).wait_for()
+                self.assert_route(page, name)
+                self.wait_collapsed(page)
+        before_hash = page.evaluate("location.hash")
+        self.rail_button(page, "materials-nav").click()
+        basket = page.locator("#material-basket-dialog[open]")
+        basket.get_by_text(quote["text"], exact=True).wait_for()
+        self.assertEqual(page.evaluate("location.hash"), before_hash)
+        basket.locator("[data-material-close]").click()
+        self.assertTrue(page.locator("#material-basket-dialog").is_hidden())
+        self.assertEqual(page.evaluate("location.hash"), before_hash)
+        self.wait_collapsed(page)
+
+    def test_touch_menu_and_escape_restore_focus_to_the_rail_trigger(self):
+        page = self.open_page(preference="collapsed", touch=True)
+        page.locator("#case-search").wait_for()
+        page.locator("#sidebar-menu").tap()
+        self.wait_peek(page)
+        page.locator("#library-nav").focus()
+        page.keyboard.press("Escape")
+        self.wait_peek(page, False)
+        self.assertEqual(page.evaluate("document.activeElement.id"), "sidebar-menu")
+        self.wait_collapsed(page)
+        trigger = self.rail_button(page, "reviews-nav")
+        trigger.hover()
+        self.wait_peek(page)
+        page.locator("#reviews-nav").hover()
+        page.locator("#reviews-nav").focus()
+        page.keyboard.press("Escape")
+        self.wait_peek(page, False)
+        self.assertEqual(page.evaluate("document.activeElement.dataset.sidebarTarget"), "reviews-nav")
+        self.assert_route(page, "library")
+        for route, name, ready, tail in [
+            ("#/202H/settings", "settings", ".settings-page", ""),
+            (f"#case/{self.identifier}", "case", ".detail-heading", "/" + self.identifier),
+        ]:
+            with self.subTest(escape_on=name):
+                page.goto(self.base + "/" + route)
+                page.locator(ready).wait_for()
+                self.assert_route(page, name, tail=tail)
+                before_hash = page.evaluate("location.hash")
+                trigger.hover()
+                self.wait_peek(page)
+                page.locator("#reviews-nav").hover()
+                page.locator("#reviews-nav").focus()
+                page.keyboard.press("Escape")
+                self.wait_peek(page, False)
+                self.assertEqual(page.evaluate("location.hash"), before_hash)
+                self.assert_route(page, name, tail=tail)
+                self.assertEqual(page.evaluate("document.activeElement.dataset.sidebarTarget"), "reviews-nav")
+
+    def test_product_selection_keyboard_focus_and_async_rail_updates(self):
+        page = self.open_page(preference="collapsed")
+        page.locator("#case-search").wait_for()
+        page.evaluate("WorkbenchShell.registerProducts(['129N'])")
+        self.rail_button(page, "reviews-nav").hover()
+        self.wait_peek(page)
+        picker = page.locator("#global-product")
+        picker.focus()
+        picker.select_option("129N")
+        self.assert_route(page, "library", product="129N")
+        self.assertEqual(page.evaluate("document.activeElement.id"), "global-product")
+        # A closed native picker may retain focus after a mouse selection;
+        # that stale focus must not keep the hovering panel open.
+        page.mouse.move(1200, 100)
+        self.wait_peek(page, False)
+        self.assert_route(page, "library", product="129N")
+
+        # Enter the rail with a real Tab, then continue into the full panel.
+        page.evaluate("() => { document.body.tabIndex = -1; document.body.focus(); }")
+        page.keyboard.press("Tab")
+        self.assertEqual(page.evaluate("document.activeElement.id"), "sidebar-menu")
+        self.wait_peek(page)
+        for _ in range(12):
+            page.keyboard.press("Tab")
+            if page.evaluate("document.querySelector('#workbench-sidebar').contains(document.activeElement)"):
+                break
+        self.assertTrue(page.evaluate("document.querySelector('#workbench-sidebar').contains(document.activeElement)"))
+        # Hovering out must preserve the panel while keyboard navigation is in it.
+        page.locator("#workbench-sidebar .brand").hover()
+        page.mouse.move(1200, 100)
+        page.wait_for_timeout(200)
+        self.wait_peek(page)
+        self.assertTrue(page.evaluate("document.querySelector('#workbench-sidebar').contains(document.activeElement)"))
+
+        # The originals remain the authority for async counts and availability.
+        page.evaluate("""() => {
+          const materials = document.querySelector('#materials-nav .nav-count');
+          materials.textContent = '7'; materials.hidden = false;
+          const ai = document.querySelector('#ai-active-count');
+          ai.textContent = '3'; ai.hidden = false;
+          document.querySelector('#files-nav').hidden = true;
+        }""")
+        material_badge = self.rail_button(page, "materials-nav").locator("[data-sidebar-count]")
+        ai_badge = self.rail_button(page, "ai-nav").locator("[data-sidebar-count]")
+        page.wait_for_function("""() =>
+          document.querySelector('[data-sidebar-target="materials-nav"] [data-sidebar-count]').textContent === '7' &&
+          document.querySelector('[data-sidebar-target="ai-nav"] [data-sidebar-count]').textContent === '3' &&
+          document.querySelector('[data-sidebar-target="files-nav"]').hidden
+        """)
+        self.assertTrue(material_badge.is_visible())
+        self.assertTrue(ai_badge.is_visible())
+        self.assertTrue(self.rail_button(page, "files-nav").is_hidden())
+        page.evaluate("""() => {
+          document.querySelector('#materials-nav .nav-count').textContent = '0';
+          document.querySelector('#ai-active-count').hidden = true;
+          document.querySelector('#files-nav').hidden = false;
+        }""")
+        page.wait_for_function("""() =>
+          document.querySelector('[data-sidebar-target="materials-nav"] [data-sidebar-count]').hidden &&
+          document.querySelector('[data-sidebar-target="ai-nav"] [data-sidebar-count]').hidden &&
+          !document.querySelector('[data-sidebar-target="files-nav"]').hidden
+        """)
+        self.assertEqual(material_badge.inner_text(), "0")
+        self.assertTrue(material_badge.is_hidden())
+        self.assertTrue(ai_badge.is_hidden())
+        self.assertTrue(self.rail_button(page, "files-nav").is_visible())
+        # Switching back to the mouse clears keyboard mode, even if the
+        # product select is then left focused after changing its value.
+        page.locator("#workbench-sidebar .sidebar-label").click()
+        picker.focus()
+        picker.select_option("202H")
+        self.assert_route(page, "library")
+        page.mouse.move(1200, 100)
+        self.wait_peek(page, False)
+        self.assert_route(page, "library")
+
+    def test_mobile_tabs_and_product_picker_survive_a_saved_collapsed_preference(self):
+        page = self.open_page(width=390, preference="collapsed", touch=True)
+        page.locator("#case-search").wait_for()
+        self.assertTrue(page.locator("#sidebar-toggle").is_hidden())
+        self.assertTrue(page.locator("#sidebar-rail").is_hidden())
+        self.assertTrue(page.locator("#global-product").is_visible())
+        self.assert_no_overflow(page)
+        page.locator("#reviews-nav").tap()
+        page.locator("#rev-page").wait_for()
+        self.assert_route(page, "reviews")
+        tab = page.locator("#reviews-nav").bounding_box()
+        self.assertGreater(tab["y"], 800)
+        page.evaluate("WorkbenchShell.registerProducts(['129N'])")
+        page.locator("#global-product").select_option("129N")
+        self.assert_route(page, "reviews", product="129N")
+        page.locator("#library-nav").tap()
+        page.locator("#case-search").wait_for()
+        self.assert_route(page, "library", product="129N")
+        page.reload()
+        page.locator("#case-search").wait_for()
+        self.assert_route(page, "library", product="129N")
+        self.assertTrue(page.locator("#sidebar-toggle").is_hidden())
+        self.assertTrue(page.locator("#sidebar-rail").is_hidden())
+        self.assertTrue(page.locator("#global-product").is_visible())
+        self.assertTrue(page.locator("#library-nav").is_visible())
+        self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "collapsed")
+        self.assert_no_overflow(page)
+
+
+if __name__ == "__main__":
+    unittest.main()

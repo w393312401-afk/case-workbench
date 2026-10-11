@@ -198,8 +198,10 @@ window.CaseDirections = (() => {
       if(g.duplicate_video_ids?.length)node.querySelector(".direction-observations").insertAdjacentHTML("beforebegin",g.duplicate_video_ids.map(v=>`<div class="data-warning direction-duplicate"><p>${v.cross_direction?"同一视频跨方向登记":"同一视频重复登记"}：${esc(v.video_id)}。${v.cross_direction?"请先核对方向与对应稿件；这些记录不能作为各方向的独立表现样本。":"保留各自当前记录，不重复累计。"}</p><ul>${(v.assignments || []).map(a=>`<li><a href="#case/${esc(a.case_id)}">${esc(a.case_id)}</a> · 原产品名 ${esc(a.product || "未提供")} · 方向 ${esc(a.direction_id || "未记录")}</li>`).join("")}</ul></div>`).join(""));
     });
   }
-  let refocusFilter="";
+  let refocusFilter="",filterTimer=0,composing=false;
+  const cancelFilterTimer=()=>{clearTimeout(filterTimer);filterTimer=0;};
   function renderCatalog(catalog,summary,values) {
+    cancelFilterTimer();composing=false;
     const {params,product,archive}=values;
     const tier=["S","A","B"].includes(params.get("tier"))?params.get("tier"):"";
     const query=params.get("q") || "", direction=params.get("direction") || "";
@@ -236,8 +238,7 @@ window.CaseDirections = (() => {
       const target=pageURL("#directions"+(next.size?"?"+next:""));if(location.hash===target)void route();else location.hash=target;
     };
     for(const name of ["tier","status"])$$(`[data-${name}-filter]`).forEach(button=>button.onclick=()=>{filterForm.elements[name].value=button.dataset[name+"Filter"];filterForm.requestSubmit();});
-    let filterTimer=0,composing=false;
-    const applyFilters=(delay=0)=>{clearTimeout(filterTimer);filterTimer=setTimeout(()=>{if(composing)return;refocusFilter=document.activeElement?.name||"";filterForm.requestSubmit();},delay);};
+    const applyFilters=(delay=0)=>{cancelFilterTimer();filterTimer=setTimeout(()=>{filterTimer=0;if(composing||!filterForm.isConnected||pageHash()!==values.hash)return;refocusFilter=document.activeElement?.name||"";filterForm.requestSubmit();},delay);};
     filterForm.addEventListener("compositionstart",()=>{composing=true;});
     filterForm.addEventListener("compositionend",()=>{composing=false;applyFilters(300);});
     filterForm.addEventListener("input",event=>{if(event.target.matches("input[type=text],input:not([type])"))applyFilters(400);});
@@ -262,7 +263,7 @@ window.CaseDirections = (() => {
     const firstRelated=(related.find(([, ,list])=>list.length)||related[0])[0];
     const progressionSelect=(variant,index)=>`<label class="dir-progression"><span class="sr-only">推进结构</span><select data-variant-progression="${index}" aria-label="第 ${index+1} 条的推进结构"><option value="">推进结构未标注</option>${progressions.map(item=>`<option ${variant.progression===item?"selected":""}>${esc(item)}</option>`).join("")}${variant.progression&&!progressions.includes(variant.progression)?`<option selected>${esc(variant.progression)}</option>`:""}</select></label>`;
     $("#breadcrumb").innerHTML=`工作空间 <span>/</span> 卖点与方向 <span>/</span> ${esc(d.direction_id)}`;
-    $("#content").innerHTML=`<a class="back-link" href="${esc(directionURL(d.product))}">${icon("back")}卖点与方向</a>
+    $("#content").innerHTML=`<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || directionURL(d.product))}">${icon("back")}返回卖点与方向</a>
       <div class="page-heading dir-detail-heading"><div><p class="dir-meta">${p?`<span class="dir-code tier-${esc(p.tier)}">${esc(p.code)}</span>`:""}<span>${esc(d.direction_id)}</span>${statusChip(d.status)}${d.lead_tier&&d.lead_tier!=="S"?`<span class="dir-flag" title="${esc(d.notes||"方向应由 S 级卖点主打")}">${esc(d.lead_tier)} 级主打</span>`:""}</p><h1>${esc(p?.title || d.main_difference)}</h1></div>
         <div class="dir-detail-actions"><button type="button" class="secondary" id="direction-edit">${icon("edit")}编辑方向</button><button type="button" class="primary" id="direction-write">${icon("edit")}用这个方向写稿</button></div></div>
       <div class="dir-layout"><div class="dir-primary">
@@ -415,6 +416,7 @@ window.CaseDirections = (() => {
     };dialog.showModal();trackDraft(dialog);
   }
   async function route() {
+    cancelFilterTimer();composing=false;
     const sequence=++requestSequence,values=routeValues();
     $("#breadcrumb").innerHTML="工作空间 <span>/</span> 卖点与方向";
     $("#content").innerHTML='<p role="status">正在读取卖点与方向…</p>';
@@ -434,6 +436,7 @@ window.CaseDirections = (() => {
   }
   const closeMenus=event=>$$(".dir-menu[open]").forEach(menu=>{if(event.key==="Escape"||!menu.contains(event.target)||event.target.closest("[role=menuitem]"))menu.open=false;});
   window.addEventListener("click",closeMenus,true);window.addEventListener("keydown",event=>{if(event.key==="Escape")closeMenus(event);});
+  window.addEventListener("hashchange",cancelFilterTimer);
   window.addEventListener("workbench:directionchange",()=>{if(state.routeKind==="directions"&&!modalOpen())void route();});
   return {route,openCreate,openPointEditor,modalOpen,beforeNavigate};
 })();

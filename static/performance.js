@@ -3,6 +3,7 @@
 // TikTok Shop video data: imported exports, follow-up status and case links.
 (() => {
   const pageHash = () => window.WorkbenchShell?.legacyHash() || location.hash;
+  const pageURL = hash => window.WorkbenchShell?.url(hash) || hash;
   const currentProduct = () => window.WorkbenchShell ? window.WorkbenchShell.product() : perf.filters.product;
   const productMatches = value => window.WorkbenchShell ? window.WorkbenchShell.matchesProduct(value) : !currentProduct() || String(value || "").toLowerCase().includes(currentProduct().toLowerCase());
   const statusOrder = ["focus", "follow", "watch", "pending", "drop", "incomplete"];
@@ -27,15 +28,33 @@
     week: ["本周 GMV", (v) => v.this_week_gmv || 0, "desc"],
     reviews: ["评论", (v) => v.review_comments || 0, "desc"],
   };
+  const filterDefaults = { q: "", account: "", product: "", status: "", range: "recent", sort: "posted", dir: "desc", tab: "board", period: "all", metric: "gmv" };
   const perf = {
     videos: null, summary: null, analytics: null, catalog: null, loading: null, coreLoading: null, analyticsReady: null, catalogReady: null, loadSequence: 0, routeSequence: 0, analyticsLoading: false, catalogLoading: false, shown: 200,
-    filters: { q: "", account: "", product: "", status: "", range: "recent", sort: "posted", dir: "desc", tab: "board", period: "all", metric: "gmv" },
-    openVideo: "",
+    filters: { ...filterDefaults },
+    openVideo: "", renderedProduct: null,
   };
   try {
     Object.assign(perf.filters, JSON.parse(sessionStorage.getItem("video-data-filters") || "{}"));
   } catch {
     /* Filters fall back to defaults without browser storage. */
+  }
+
+  let searchTimer = null;
+  function cancelSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+  function captureListState() {
+    if (!$("#perf-board") && !$("#perf-results")) return null;
+    const filters = { ...perf.filters };
+    const field = $("#perf-q");
+    if (field) filters.q = field.value;
+    const query = new URLSearchParams();
+    for (const key of Object.keys(filterDefaults)) {
+      if (key !== "product" && filters[key] && filters[key] !== filterDefaults[key]) query.set(key, filters[key]);
+    }
+    return { product: perf.renderedProduct, filters, shown: perf.shown, hash: pageURL(`#videos${query.size ? `?${query}` : ""}`) };
   }
 
   const statusNames = { focus: "重点复制", follow: "跟进", watch: "观察", drop: "放弃", pending: "待数据", incomplete: "数据不全" };
@@ -150,6 +169,7 @@
   }
 
   function render() {
+    cancelSearch();
     perf.filters.product = currentProduct();
     const s = perf.summary, f = perf.filters, board = f.tab === "board";
     const rows = board ? [] : filtered();
@@ -170,6 +190,7 @@
       ${board ? `<div id="perf-board" class="perf-board" role="tabpanel" aria-labelledby="perf-tab-board">${boardMarkup()}</div>`
         : `<div id="perf-status-slot">${statusMarkup(filtered(true))}</div><div id="perf-results" role="tabpanel" aria-labelledby="perf-tab-list">${tableMarkup(rows)}</div>`}
       <dialog id="perf-video-drawer" class="rev-drawer perf-video-drawer" aria-labelledby="perf-video-title"></dialog>`;
+    perf.renderedProduct = currentProduct();
     bind();
     syncToolbar();
   }
@@ -271,11 +292,17 @@
   }
 
   function bind() {
-    let timer;
     $("#perf-q")?.addEventListener("input", (event) => {
-      perf.filters.q = event.target.value;
-      clearTimeout(timer);
-      timer = setTimeout(() => { perf.shown = 200; saveFilters(); rerenderResults(); }, 150);
+      const field = event.target;
+      perf.filters.q = field.value;
+      cancelSearch();
+      searchTimer = setTimeout(() => {
+        cancelSearch();
+        if (!field.isConnected || $("#perf-q") !== field || !pageHash().startsWith("#videos")) return;
+        perf.shown = 200;
+        saveFilters();
+        rerenderResults();
+      }, 150);
     });
     $$("[data-perf-period]").forEach((button) => (button.onclick = () => { perf.filters.period = button.dataset.perfPeriod; saveFilters(); refresh(); }));
     const drawer = $("#perf-video-drawer");
@@ -398,13 +425,32 @@
   async function route() {
     const hash = pageHash(), sequence = ++perf.routeSequence;
     const isCurrent = () => sequence === perf.routeSequence && pageHash() === hash && hash.startsWith("#videos");
+    const restored = window.WorkbenchShell?.listState?.("videos", currentProduct());
+    if (restored?.filters) {
+      for (const key of Object.keys(filterDefaults)) {
+        if (typeof restored.filters[key] === typeof filterDefaults[key]) perf.filters[key] = restored.filters[key];
+      }
+    }
+    if (restored && Number.isFinite(restored.shown)) perf.shown = Math.max(200, Math.trunc(restored.shown));
     perf.filters.product = currentProduct();
-    const videoId = new URLSearchParams(hash.split("?")[1] || "").get("video");
+    const linked = new URLSearchParams(hash.split("?")[1] || "");
+    for (const key of ["q", "account", "status", "range", "sort", "dir", "period", "metric"]) {
+      if (linked.has(key)) perf.filters[key] = linked.get(key);
+    }
+    if (!(perf.filters.range in ranges)) perf.filters.range = "recent";
+    if (!(perf.filters.sort in sortColumns)) perf.filters.sort = "posted";
+    if (!["asc", "desc"].includes(perf.filters.dir)) perf.filters.dir = "desc";
+    if (perf.filters.status && !statusOrder.includes(perf.filters.status)) perf.filters.status = "";
+    if (!["board", "list"].includes(perf.filters.tab)) perf.filters.tab = "board";
+    if (window.PerfDashboard && !(perf.filters.period in window.PerfDashboard.periods)) perf.filters.period = "all";
+    if (window.PerfDashboard && !(perf.filters.metric in window.PerfDashboard.metrics)) perf.filters.metric = "gmv";
+    const videoId = linked.get("video");
+    perf.pendingVideo = videoId || "";
     if (videoId) {
       Object.assign(perf.filters, { q: videoId, account: "", status: "", range: "all", tab: "list" });
-      perf.pendingVideo = videoId;
-      perf.shown = 200;
+      if (!restored) perf.shown = 200;
     }
+    if (["board", "list"].includes(linked.get("tab"))) perf.filters.tab = linked.get("tab");
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 视频数据";
     if (!perf.videos || (!$("#perf-board") && !$("#perf-results"))) $("#content").innerHTML = skeletonMarkup(3);
     try {
@@ -432,5 +478,7 @@
   window.addEventListener("click", closeMenus, true);
   window.addEventListener("keydown", (event) => { if (event.key === "Escape") closeMenus(event); });
 
-  window.CasePerformance = { route, reviewMaterial: () => reviewMaterial() };
+  window.addEventListener("hashchange", cancelSearch);
+
+  window.CasePerformance = { route, captureListState, leaveList: cancelSearch, reviewMaterial: () => reviewMaterial() };
 })();

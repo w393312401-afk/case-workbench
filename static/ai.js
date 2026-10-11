@@ -424,13 +424,30 @@ window.CaseAI = (() => {
       $('#confirm-ai-delete').innerHTML = `${icon('trash')}删除本地记录`;updateListSelection();
     }
   }
+  function captureListState() {
+    const list = $('#ai-task-list'), grouping = $('#ai-group-by'), selectedFilter = $('[data-ai-filter][aria-pressed="true"]');
+    if (ai.page !== 'list' || !list?.isConnected || !grouping?.isConnected || !selectedFilter?.isConnected) return null;
+    return {filter:selectedFilter.dataset.aiFilter,groupBy:grouping.value,product:ai.listProduct};
+  }
+  function restoreListState(saved) {
+    ai.filter = saved && Object.hasOwn(listFilters,saved.filter) ? saved.filter : 'all';
+    ai.lastList = '';ai.selected.clear();$('#content').classList.remove('ai-selecting');
+    const grouping = $('#ai-group-by');if (grouping) grouping.value = saved?.groupBy === 'case' ? 'case' : 'direction';
+    $$('[data-ai-filter]').forEach(button => button.setAttribute('aria-pressed',String(button.dataset.aiFilter === ai.filter)));
+    const toggle = $('#ai-select-toggle');if (toggle) {toggle.setAttribute('aria-pressed','false');toggle.textContent = '选择';}
+    const toolbar = $('#ai-selection-toolbar');if (toolbar) toolbar.hidden = true;
+  }
   async function renderList(keepScroll,sequence) {
     if (ai.page !== 'list' || !$('#ai-task-list')) {
+      const saved = window.WorkbenchShell?.listState?.('ai',window.WorkbenchShell?.product() || '');
+      restoreListState(saved);
       ai.page = 'list';ai.task = null;ai.lastList = '';
+      ai.listProduct = window.WorkbenchShell?.product() || '';
       $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 写稿';
       $('#content').innerHTML = `<div class="page-heading ai-list-heading"><div><h1>写稿</h1><p>从方向、案例或空白要求开始，检查候选后采纳为脚本版本。</p></div><button type="button" class="ai-service-pill" id="ai-check-service" title="重新检查 AI 服务"><i></i><span id="ai-service-label">${esc(availabilityText())}</span></button></div><nav class="scripts-tabs" aria-label="写稿内容"><a href="${esc(pageURL('#ai'))}" aria-current="page">协作任务</a><a href="${esc(pageURL('#scripts'))}">脚本版本</a><a href="${esc(pageURL('#production'))}">制作视频</a></nav>
         <div class="ai-list-toolbar"><div class="ai-segment" role="group" aria-label="按状态筛选">${Object.entries(listFilters).map(([key,[label]]) => `<button type="button" data-ai-filter="${key}" aria-pressed="${(ai.filter || 'all') === key}">${label}<small data-ai-filter-count="${key}"></small></button>`).join('')}</div><label class="ai-group-choice"><span>分组</span><select id="ai-group-by"><option value="direction">按方向</option><option value="case">按案例</option></select></label><button type="button" class="subtle" id="ai-select-toggle" aria-pressed="false">选择</button></div>
         <div class="ai-selection-toolbar" id="ai-selection-toolbar" hidden><div class="ai-selection-main"><label class="select-all"><input type="checkbox" id="ai-select-all">全选</label><span id="ai-selected-count" class="selection-count">已选 0 条</span><span id="ai-selection-note" class="selection-count"></span></div><button type="button" class="danger-outline" id="ai-delete-selected" disabled>${icon('trash')}删除本地记录</button></div><div id="ai-list-error" class="ai-error" role="alert" hidden></div><div id="ai-task-list">${skeletonMarkup(2)}</div>`;
+      $('#ai-group-by').value = saved?.groupBy === 'case' ? 'case' : 'direction';
       $('#ai-check-service').onclick = async () => {await Promise.all([checkStatus(true),loadOptions(true)]);paintService();};
       $('#ai-group-by').onchange = () => {ai.lastList = '';void renderList(true,ai.sequence);};
       $$('[data-ai-filter]').forEach(button => button.onclick = () => {ai.filter = button.dataset.aiFilter;$$('[data-ai-filter]').forEach(item => item.setAttribute('aria-pressed',String(item === button)));ai.lastList = '';void renderList(true,ai.sequence);});
@@ -619,7 +636,7 @@ window.CaseAI = (() => {
   function renderTaskShell(task,keepScroll) {
     ai.page = task.task_id;
     $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 写稿 <span>/</span> 任务详情';
-    $('#content').innerHTML = `<a class="back-link" href="#ai">${icon('back')}全部协作任务</a><div class="page-heading ai-task-heading"><div><p class="ai-task-meta"><span class="ai-status" id="ai-task-status"></span><span>${esc(actions[task.action] || 'AI 协作')}</span></p><h1>${esc(contextTitle(task))}</h1></div><button type="button" class="secondary compact" id="ai-cancel-task">取消处理</button></div>
+    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || pageURL('#ai'))}">${icon('back')}返回写稿</a><div class="page-heading ai-task-heading"><div><p class="ai-task-meta"><span class="ai-status" id="ai-task-status"></span><span>${esc(actions[task.action] || 'AI 协作')}</span></p><h1>${esc(contextTitle(task))}</h1></div><button type="button" class="secondary compact" id="ai-cancel-task">取消处理</button></div>
       <div class="ai-task-context">${taskContextMarkup(task)}<span>独立候选，不改动案例正文</span></div><p id="ai-stale-warning" class="ai-stale-warning" hidden>案例已经更新。这个任务继续使用开始时的案例版本；若要基于新版讨论，请回到案例重新发起任务。</p>
       <div class="ai-task-progress"><p id="ai-task-progress" role="status"></p><small id="ai-stream-status" class="ai-stream-status"></small></div><p class="ai-error" id="ai-task-error" role="alert" hidden></p><div id="ai-rounds"></div>
       <section class="ai-continue-card ai-composer" aria-label="继续一起修改"><form id="ai-continue-form"><label class="sr-only" for="ai-continue-instruction">下一步要求</label><textarea id="ai-continue-instruction" maxlength="12000" rows="2" required placeholder="继续一起修改：例如保留第二版的推进结构，把正文压缩到 30 秒。"></textarea>
@@ -799,7 +816,14 @@ window.CaseAI = (() => {
   }
   async function routeAI(keepScroll = false) {
     const hash = pageHash(), sequence = ++ai.sequence;
-    if (hash === '#ai') {closeStream();await renderList(keepScroll,sequence);return;}
+    if (hash === '#ai') {
+      const product = window.WorkbenchShell?.product() || '';
+      if (ai.page === 'list' && $('#ai-task-list')) {
+        const saved = window.WorkbenchShell?.listState?.('ai',product);
+        if (saved || ai.listProduct !== product) {restoreListState(saved);ai.listProduct = product;}
+      }
+      closeStream();await renderList(keepScroll,sequence);return;
+    }
     if (!hash.startsWith('#ai/')) return;
     const id = decodeURIComponent(hash.slice(4));
     if (ai.task?.task_id === id && alignTaskProduct(ai.task)) return;
@@ -850,5 +874,5 @@ window.CaseAI = (() => {
   if (state.detail && pageHash() === `#case/${state.detail.case_id}` && !$('.ai-case-actions')) void mountCaseActions(state.detail);
   const closeMenus = event => $$('.ai-menu[open]').forEach(menu => {if (event.key === 'Escape' || !menu.contains(event.target)) menu.open = false;});
   window.addEventListener('click',closeMenus,true);window.addEventListener('keydown',event => {if (event.key === 'Escape') closeMenus(event);});
-  return {mountCaseActions,startWriting,startFromDirection,startBlank,startWithMaterials,modalOpen,hasUnsavedInput,refreshAvailability,route:routeAI};
+  return {mountCaseActions,startWriting,startFromDirection,startBlank,startWithMaterials,modalOpen,hasUnsavedInput,refreshAvailability,captureListState,route:routeAI};
 })();
