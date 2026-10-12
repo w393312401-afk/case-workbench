@@ -223,6 +223,7 @@ class CarouselImageTests(unittest.TestCase):
             self.assertEqual(len(generation["images"]), 1 if number == 1 else 2)
             self.assertEqual(len(review["images"]), 2 if number == 1 else 3)
             self.assertEqual(generation["schema"]["required"], ["file", "summary"])
+            self.assertIn('<skill name="tiktok-photo-commerce">\n---\nname: tiktok-photo-commerce', generation["prompt"])
             self.assertIn("observed_title_lines", review["schema"]["required"])
             if number > 1:
                 self.assertEqual(generation["snapshot"]["style_reference"]["scope"], "style_only")
@@ -724,6 +725,9 @@ class CarouselImageHTTPTests(unittest.TestCase):
                 allow_open=False, ai_bridge=FakeBridge())
         self.bench = self.server.app
         self.bench.carousel_image_root = root / "existing-images"
+        photo = Path(self.bench.edit_skill_dir).parent / "tiktok-photo-commerce"
+        photo.mkdir(parents=True, exist_ok=True)
+        (photo / "SKILL.md").write_text("---\nname: tiktok-photo-commerce\n---\n# 图文", encoding="utf-8")
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
         self.thread.start()
         self.closed = False

@@ -26,6 +26,7 @@ DISABLED_FEATURES = ("apps", "plugins", "browser_use", "browser_use_external", "
 ENABLED_FEATURES = ("code_mode_host", "view_image")
 MAX_FILE_BYTES = 1024 * 1024
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_SKILL_BYTES = 512 * 1024
 
 
 def _toml(value):
@@ -264,6 +265,21 @@ class CodexStillsBridge(CodexBridge):
         client = CodexBridge(self.executable, timeout=timeout, startup_timeout=self.startup_timeout, popen_factory=spawn)
         return client._session(directory, cancel, progress, on_event)
 
+    @staticmethod
+    def _skill_text(selected):
+        """Codex loads only skills registered in its own skill roots, never the task-folder copy given as a skill
+        input, so the copy's text goes into the developer instructions, as the Claude bridge does in its system prompt."""
+        texts = []
+        for skill in selected:
+            path = Path(skill["path"])
+            if path.stat().st_size > MAX_SKILL_BYTES:
+                raise BridgeError("技能文件过大，未截断加载。")
+            try:
+                texts.append(f'\n\n<skill name="{skill["name"]}">\n{path.read_text(encoding="utf-8-sig")}\n</skill>')
+            except (OSError, UnicodeError):
+                raise BridgeError("技能文件当前无法读取，本次未启动。") from None
+        return "".join(texts)
+
     def run(self, prompt, *, cwd, on_progress, cancel_event, model=None, reasoning_effort=None, skills=None, on_event=None, profile=None):
         if not isinstance(prompt, str) or not prompt.strip():
             raise BridgeError("请填写找底图的制作要求。")
@@ -282,6 +298,7 @@ class CodexStillsBridge(CodexBridge):
         selected = self._skills(skills)
         if any(not Path(skill["path"]).is_relative_to(directory) for skill in selected):
             raise BridgeError("本次找底图只使用任务目录内的技能副本。")
+        skill_text = self._skill_text(selected)
         base = {"features": {**{name: False for name in DISABLED_FEATURES}, **{name: True for name in ENABLED_FEATURES}}, "web_search": "disabled",
                 "sandbox_mode": "workspace-write", "approval_policy": "never",
                 "sandbox_workspace_write": {"writable_roots": writable_roots, "network_access": False, "exclude_slash_tmp": True, "exclude_tmpdir_env_var": True}}
@@ -329,7 +346,7 @@ class CodexStillsBridge(CodexBridge):
                 thread_config["model_reasoning_effort"] = reasoning_effort
             params = {"cwd": str(directory), "ephemeral": True, "sandbox": "workspace-write", "approvalPolicy": "never", "config": thread_config,
                       "dynamicTools": self._file_tools(settings),
-                      "developerInstructions": settings["rules"] + self.TASK_RULES}
+                      "developerInstructions": settings["rules"] + self.TASK_RULES + skill_text}
             if model is not None:
                 params["model"] = model
             result = session.request("thread/start", params)

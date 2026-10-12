@@ -25,6 +25,16 @@ GRID_LIMIT = 1560
 CAPTION_HEIGHT = 24
 NOTE_FIELDS = {"summary": 500, "subject": 120}
 CODE = re.compile(r"[A-Za-z]+\d+")
+UNSURE = "待核"
+# What a clip's label is worth to the edit: only a clip-labeling label bound to this clip stands for having seen it.
+LABEL_STATUS = {"verified": "已核标签", "unsure": "标签待核，需看图", "manual": "手写标签，需看图", "none": "无标签，需看图"}
+
+
+def label_status(clip):
+    labels, verified = clip.get("labels") or [], clip.get("verified_labels") or []
+    if any(UNSURE in label for label in labels):
+        return "unsure"
+    return "verified" if verified else "manual" if labels else "none"
 
 
 def _identity(clip):
@@ -97,7 +107,8 @@ def build_candidates(listing):
                           "record": [clip["start"], clip["end"]], "source": [left, right], "frames": clip["end"] - clip["start"],
                           "free": free, "free_frames": sum(b - a for a, b in free),
                           "used_by": sorted({name for _, _, name in overlapping if name}),
-                          "media_id": clip.get("media_id"), "media_path": clip.get("media_path") or "", "has_audio": clip.get("has_audio")})
+                          "media_id": clip.get("media_id"), "media_path": clip.get("media_path") or "", "has_audio": clip.get("has_audio"),
+                          "label_status": label_status(clip)})
     unique = {}
     for candidate in found:
         unique.setdefault(candidate["key"], candidate)
@@ -201,23 +212,27 @@ def write_task_files(folder, found, index, entries, listing):
             "missing": listing.get("missing") or [], "used_complete": bool(listing.get("used_complete")), "candidates": listed}
     (Path(folder) / "candidates.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     lines = ["# 候选画面", "",
-             "每行一个素材片段：候选编号｜标签｜素材时间线位置（帧，半开）｜时长｜可用范围｜对照图｜画面描述。",
+             "每行一个素材片段：候选编号｜标签｜标签状态｜素材时间线位置（帧，半开）｜时长｜可用范围｜对照图｜画面描述。",
+             "「已核标签」是打标签技能看过画面后写的，可直接按标签选材；其余状态的片段，选用前先看对照图或已有描述。",
              "可用范围按实时工程里其他成片时间线算出，源帧坐标；已被用尽的片段没有列出。", ""]
     for name in data["materials"]:
         rows = [item for item in listed if item["timeline"] == name]
         lines += [f"## {name}（{len(rows)} 个可用片段）", ""]
         for item in rows:
-            text = item["description"]["summary"] if item["description"] else "未描述，请看对照图"
+            text = item["description"]["summary"] if item["description"] else ("—" if item["label_status"] == "verified" else "未描述，请看对照图")
             if item["description"] and item["description"].get("subject"):
                 text += f"；主体：{item['description']['subject']}"
             if item["description"] and item["description"].get("cta") is not None:
                 text += "；有号召手势" if item["description"]["cta"] else "；无号召手势"
-            lines.append(f"- {item['key']}｜{item['label'] or '无标签'}｜[{item['record'][0]}, {item['record'][1]})｜{item['frames']} 帧｜"
+            lines.append(f"- {item['key']}｜{item['label'] or '无标签'}｜{LABEL_STATUS[item['label_status']]}｜"
+                         f"[{item['record'][0]}, {item['record'][1]})｜{item['frames']} 帧｜"
                          f"{_describe_free(item)}｜{item['grid'] or '无对照图'}｜{text}")
         lines.append("")
     (Path(folder) / "candidates.md").write_text("\n".join(lines), encoding="utf-8")
     return {"clips": len(found), "listed": len(listed), "used_up": len(found) - len(listed),
             "described": sum(1 for item in listed if item["description"]),
+            "verified": sum(1 for item in listed if item["label_status"] == "verified"),
+            "to_look": sum(1 for item in listed if item["label_status"] != "verified" and not item["description"]),
             "grids": sum(1 for item in listed if item["grid"])}
 
 

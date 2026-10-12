@@ -18,12 +18,12 @@ from PIL import Image
 
 import resolve_worker
 from edit_candidates import (VisualIndex, build_candidates, candidate_key, compose_grid, merge_notes, rank_by_relevance, sample_frames,
-                             source_span, write_task_files)
+                             label_status, source_span, write_task_files)
 from test_production_editing import EditBench, Editor, Runner
 
 CLIPS = [
     {"uid": "item-1", "start": 0, "end": 60, "name": "a.mp4", "media_id": "m1", "media_path": "C:/media/a.mp4",
-     "source_start": 0, "source_end": 60, "has_audio": True, "labels": ["调节夹具间距 BK001"]},
+     "source_start": 0, "source_end": 60, "has_audio": True, "labels": ["调节夹具间距 BK001"], "verified_labels": ["调节夹具间距 BK001"]},
     {"uid": "item-2", "start": 60, "end": 260, "name": "a.mp4", "media_id": "m1", "media_path": "C:/media/a.mp4",
      "source_start": 100, "source_end": 300, "has_audio": True, "labels": ["连续推磨 BK002"]},
     {"uid": "item-3", "start": 260, "end": 300, "name": "b.mp4", "media_id": "m2", "media_path": "C:/media/b.mp4",
@@ -52,6 +52,13 @@ class CandidateTests(unittest.TestCase):
     def test_inclusive_source_end_becomes_half_open_at_normal_speed(self):
         self.assertEqual(source_span({"start": 0, "end": 60, "source_start": 0, "source_end": 59}), (0, 60))
         self.assertEqual(source_span({"start": 0, "end": 30, "source_start": 0, "source_end": 59}), (0, 59))
+
+    def test_only_a_clip_labeling_label_bound_to_the_clip_counts_as_seen(self):
+        found = {item["label"]: item["label_status"] for item in build_candidates(LISTING)}
+        self.assertEqual((found["调节夹具间距 BK001"], found["连续推磨 BK002"]), ("verified", "manual"))
+        unsure = {**CLIPS[0], "labels": ["合盖 手势待核 BK009"], "verified_labels": ["合盖 手势待核 BK009"]}
+        self.assertEqual(label_status(unsure), "unsure")
+        self.assertEqual(label_status({**CLIPS[0], "labels": [], "verified_labels": []}), "none")
 
     def test_clips_worded_like_the_script_come_first(self):
         found = build_candidates(LISTING)
@@ -111,8 +118,8 @@ class CandidateTests(unittest.TestCase):
 
 
 class Item:
-    def __init__(self, uid, start, end, source, labels=()):
-        self.uid, self.start, self.end, self.source, self.labels = uid, start, end, source, labels
+    def __init__(self, uid, start, end, source, labels=(), custom=""):
+        self.uid, self.start, self.end, self.source, self.labels, self.custom = uid, start, end, source, labels, custom
 
     def GetUniqueId(self): return self.uid
     def GetStart(self): return self.start
@@ -121,7 +128,7 @@ class Item:
     def GetSourceStartFrame(self): return self.source
     def GetSourceEndFrame(self): return self.source + self.end - self.start
     def GetClipEnabled(self): return True
-    def GetMarkers(self): return {index: {"name": label} for index, label in enumerate(self.labels)}
+    def GetMarkers(self): return {index: {"name": label, "customData": self.custom} for index, label in enumerate(self.labels)}
     def GetMediaPoolItem(self):
         class Media:
             def GetUniqueId(self): return "m1"
@@ -187,14 +194,27 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(resolve_worker.timecode(17982, "29.97", True), "00:10:00;00")
 
     def test_candidates_list_material_clips_and_where_other_edits_used_them(self):
-        material = Timeline("Buck110折刀成品素材", "mat-1", [Item("i1", 0, 60, 0, ["夹具 BK001"]), Item("i2", 60, 120, 60)])
+        material = Timeline("Buck110折刀成品素材", "mat-1", [Item("i1", 0, 60, 0, ["夹具 BK001"], "material_index_v1:i1"),
+                                                         Item("i2", 60, 120, 60, ["手写 推磨"], "material_index_v1:other")])
         edit = Timeline("Lab261008-202-1", "e1", [Item("x", 0, 20, 70)])
         backup = Timeline("Lab261008-202-1_重剪前备份_1009", "b1", [Item("y", 0, 20, 0)])
         target = Timeline("Zack261011-202-1", "t1", [Item("z", 0, 20, 0)])
         reply = resolve_worker.candidates(Resolve(Project([material, edit, backup, target])),
                                           {"project": "202H", "materials": [], "target_uid": "t1"})
-        self.assertEqual([clip["labels"] for clip in reply["materials"][0]["clips"]], [["夹具 BK001"], []])
+        self.assertEqual([(clip["labels"], clip["verified_labels"]) for clip in reply["materials"][0]["clips"]],
+                         [(["夹具 BK001"], ["夹具 BK001"]), (["手写 推磨"], [])])
         self.assertEqual([(item["timeline_name"], item["source_start"]) for item in reply["used"]], [("Lab261008-202-1", 70)])
+
+    def test_copied_timeline_labels_count_while_the_marker_is_still_in_the_visible_clip(self):
+        class Copied(Item):
+            def __init__(self, uid, marker, left=100):
+                super().__init__(uid, 0, 60, left, ["研磨 BK011"], "material_index_v1:old-id")
+                self.marker, self.left = marker, left
+            def GetLeftOffset(self): return self.left
+            def GetMarkers(self): return {self.marker: {"name": "研磨 BK011", "customData": self.custom}}
+        material = Timeline("Buck110折刀成品素材", "mat-1", [Copied("i1", 130), Copied("i2", 20)])
+        reply = resolve_worker.candidates(Resolve(Project([material])), {"project": "202H", "materials": [], "target_uid": ""})
+        self.assertEqual([clip["verified_labels"] for clip in reply["materials"][0]["clips"]], [["研磨 BK011"], []])
 
     def test_frames_land_on_the_expected_clip_before_exporting(self):
         material = Timeline("素材", "mat-1", [Item("i1", 0, 60, 0), Item("i2", 60, 120, 60)])
@@ -275,11 +295,13 @@ class PreparedEditTests(unittest.TestCase):
         commands = [call["command"] for call in self.bench.runner.calls]
         self.assertEqual(commands.count("frames"), 1)
         self.assertLess(commands.index("restore"), commands.index("inspect", commands.index("candidates")))
-        self.assertEqual(edit["preparation"]["new_grids"], 2)
+        # BK001 has a clip-labeling label, so only the hand-labelled BK002 needs a contact image.
+        self.assertEqual((edit["preparation"]["new_grids"], edit["preparation"]["verified"]), (1, 1))
+        self.assertEqual([call["shots"][0]["key"].split("-")[0] for call in self.bench.runner.calls if call["command"] == "frames"], ["BK002"])
         self.assertEqual(edit["visual_notes"], {"saved": 2, "rejected": 0})
         prompt = self.editor.calls[0]["prompt"]
         self.assertIn("## 候选画面（工作台已整理）", prompt)
-        self.assertIn("已有画面描述 0 个", prompt)
+        self.assertIn("1 个片段是「已核标签」", prompt)
         folder = Path(self.editor.calls[0]["cwd"])
         self.assertIn((folder / "handoff.md").read_text(encoding="utf-8"), prompt)
         self.assertFalse((folder / "stills" / "_prepare").exists())
@@ -288,7 +310,7 @@ class PreparedEditTests(unittest.TestCase):
         job = self.bench.production.job(job["id"])
         edit = self.run_edit(job)
         self.assertNotIn("frames", [call["command"] for call in self.bench.runner.calls])
-        self.assertEqual((edit["preparation"]["described"], edit["preparation"]["grids"]), (2, 2))
+        self.assertEqual((edit["preparation"]["described"], edit["preparation"]["grids"], edit["preparation"]["to_look"]), (2, 1, 0))
         folder = Path(self.editor.calls[1]["cwd"])
         self.assertIn("看过 连续推磨 BK002", (folder / "candidates.md").read_text(encoding="utf-8"))
 
@@ -296,8 +318,8 @@ class PreparedEditTests(unittest.TestCase):
         job = self.helper.timeline_job()
         with patch("workbench_editing.PREPARE_BUDGET", -1):
             edit = self.run_edit(job)
-        self.assertEqual((edit["preparation"]["new_grids"], edit["preparation"]["deferred"]), (0, 2))
-        self.assertIn("另有 2 个片段这次来不及导出对照图", self.editor.calls[0]["prompt"])
+        self.assertEqual((edit["preparation"]["new_grids"], edit["preparation"]["deferred"]), (0, 1))
+        self.assertIn("另有 1 个需看图的片段这次来不及导出对照图", self.editor.calls[0]["prompt"])
         self.assertIn("无对照图", (Path(self.editor.calls[0]["cwd"]) / "candidates.md").read_text(encoding="utf-8"))
 
     def test_preparation_failure_lets_the_ai_look_at_footage_itself(self):

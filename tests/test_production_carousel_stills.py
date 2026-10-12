@@ -113,6 +113,10 @@ class StillBench(Bench, CarouselWorkbenchMixin, CarouselStillsMixin, EditingWork
         self.edit_skill_dir = Path(root) / "skills" / "davinci-product-video-editing"
         (self.edit_skill_dir / "references").mkdir(parents=True)
         (self.edit_skill_dir / "references" / "sharpal-202h.md").write_text("标记词", encoding="utf-8")
+        photo = Path(root) / "skills" / "tiktok-photo-commerce"
+        (photo / "references").mkdir(parents=True)
+        (photo / "SKILL.md").write_text("---\nname: tiktok-photo-commerce\n---\n# 图文证据边界", encoding="utf-8")
+        (photo / "references" / "production.md").write_text("制作规则", encoding="utf-8")
         self.carousel_image_root = Path(root) / "图文素材"
 
 
@@ -169,6 +173,8 @@ class StillTests(unittest.TestCase):
         self.assertIn("mcp__resolve__run_script_unsafe", call["profile"]["denied"])
         self.assertEqual(call["profile"]["dirs"], [])
         self.assertIn("refs/sharpal-202h.md", call["prompt"])
+        self.assertEqual(call["skills"], [{"name": "tiktok-photo-commerce", "path": str(Path(call["cwd"]) / "skill" / "SKILL.md")}])
+        self.assertTrue((Path(call["cwd"]) / "skill" / "references" / "production.md").is_file())
         self.assertIn("| 1 | 钩子 |", call["prompt"])
 
     def test_codex_tool_failure_without_manifest_is_failed_and_preserves_explanation(self):

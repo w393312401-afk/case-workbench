@@ -507,6 +507,21 @@ def timecode(frame, fps, drop):
             f"{frame // nominal % 60:02d}{separator}{frame % nominal:02d}")
 
 
+def clip_label(item, uid, frame, info):
+    """A clip-labeling marker still describing what this clip shows.
+
+    Its customData names the clip it was written for; copying a timeline gives clips new IDs while the markers
+    travel with them, so an older ID is accepted while the marker stays inside the visible part of the clip.
+    A marker outside that part means the clip was trimmed after labeling, whatever its ID."""
+    custom = str(info.get("customData") or "")
+    if not custom.startswith("material_index_v1:"):
+        return False
+    left = optional(item, "GetLeftOffset")
+    if left is None:
+        return custom == f"material_index_v1:{uid}"
+    return left <= frame < left + item.GetEnd() - item.GetStart()
+
+
 def candidates(resolve, request):
     """Every clip of the material timelines with its labels and source range, and where other edits already used that media."""
     project = current_project(resolve, request["project"])
@@ -524,8 +539,9 @@ def candidates(resolve, request):
                 value = inspect_item(item, minimal=True)
                 if not value["media_id"] and not value["media_path"]:
                     continue
-                markers = optional(item, "GetMarkers") or {}
-                value.update(track=index, labels=[info.get("name") for _, info in sorted(markers.items()) if info.get("name")])
+                markers = [(frame, info) for frame, info in sorted((optional(item, "GetMarkers") or {}).items()) if info.get("name")]
+                value.update(track=index, labels=[info["name"] for _, info in markers],
+                             verified_labels=[info["name"] for frame, info in markers if clip_label(item, value["uid"], frame, info)])
                 clips.append(value)
                 media_ids.add(value["media_id"])
                 media_paths.add(os.path.normcase(value["media_path"]))

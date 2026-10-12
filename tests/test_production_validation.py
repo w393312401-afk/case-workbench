@@ -55,6 +55,21 @@ class ValidationTests(unittest.TestCase):
         marker["name"], marker["note"] = "缺素材｜切纸结果", ""
         self.assertIn("invalid_missing_marker", self.codes(self.check(post)))
 
+    def test_gaps_reported_in_the_final_json_cover_missing_picture_without_markers(self):
+        post = inspection()
+        post["tracks"]["video"][0]["items"] = post["tracks"]["video"][0]["items"][:2]
+        self.assertIn("unmarked_picture_gap", self.codes(self.check(post)))
+        # A range a few frames off still declares the empty stretch it overlaps.
+        result, summary = validate_edit(post, JOB, TIMELINE, inspection(edited=False),
+                                        report={"gaps": [{"start": 62, "end": 88, "need": "切纸结果特写，1 秒"}]})
+        self.assertEqual(result["status"], "needs_material")
+        self.assertEqual([(gap["start"], gap["end"], gap["name"]) for gap in summary["gaps"]], [(60, 90, "切纸结果特写，1 秒")])
+        stale = self.check(post, report={"gaps": [{"start": 62, "end": 88, "need": "切纸"}, {"start": 0, "end": 10, "need": "开头"}]})
+        self.assertEqual(stale["status"], "needs_repair")
+        self.assertIn("reported_gap_not_gap", self.codes(stale))
+        malformed = self.check(post, report={"gaps": [{"start": "60", "end": 90}]})
+        self.assertIn("unmarked_picture_gap", self.codes(malformed))
+
     def test_same_duration_replacement_movement_and_property_change_are_detected(self):
         for key, value in (("media_id", "replacement"), ("source_start", 1), ("start", 1001), ("properties", {"AudioVolume": -12})):
             with self.subTest(field=key):

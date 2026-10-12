@@ -61,15 +61,17 @@ def candidates_section(stats=None, error=""):
     lines = ["## 候选画面（工作台已整理）", "",
              f"- 清单：当前目录 candidates.md（同内容 candidates.json）。素材片段共 {stats['clips']} 个，列出可用的 {stats['listed']} 个，"
              f"另有 {stats['used_up']} 个已被其他成片用尽未列出。可用范围按实时工程里的其他成片时间线算出，账本仍按技能核对。",
-             f"- 已有画面描述 {stats['described']} 个（以前的剪辑看过），初筛和选材直接用描述；判断取决于细节（号召手势、锁紧、擦拭、磨板目数等）时再打开对照图核实。",
-             f"- 对照图 {stats['grids']} 张：candidates/<候选编号>.jpg，是同一片段按时间顺序取的 3 或 6 帧（左上到右下，格内标序号和相对片段起点的帧偏移）。"
-             "看一张对照图即算查看了这个片段的开始、中间、结束。",
-             *([f"- 另有 {stats['deferred']} 个片段这次来不及导出对照图（先导出了和本条口播用词最接近的），"
-                "清单里标「无对照图」；用到时按技能自己导出静帧。"] if stats.get("deferred") else []),
+             f"- 按标签选材：{stats['verified']} 个片段是「已核标签」（打标签技能看过画面后写的），直接按标签文字选，不看图、不导出静帧。"
+             "标签带「CTA手势」的是号召手势片段，只能放在结尾；已核标签不带它就按非号召处理。",
+             f"- 其余片段（标签待核、手写标签或无标签）中还有 {stats['to_look']} 个没有描述，选用前先看 candidates/<候选编号>.jpg 对照图"
+             "（同一片段按时间顺序的 3 或 6 帧，看一张即算看过开始、中间、结束）；已有画面描述的"
+             f" {stats['described']} 个直接用描述。",
+             *([f"- 另有 {stats['deferred']} 个需看图的片段这次来不及导出对照图，清单里标「无对照图」；能用已核标签的片段替代就不用它们，"
+                "确实要用时按技能自己导出静帧。"] if stats.get("deferred") else []),
              *([f"- 有 {stats['problems']} 个片段没能导出对照图，用到时按技能自己查看。"] if stats.get("problems") else []),
-             "- 先按标签和描述（文字）给每个意群挑出候选，再一次并行打开几张对照图，不要逐帧导出；对照图判断不了动作方向或需要更细的入出点时，才按技能自己导出静帧。",
-             "- 每看完一批对照图，就把看过片段的描述追加写入当前目录 visual-notes.json（一个 JSON 数组，覆盖写入完整数组）；"
-             "工作台会存下来，下次剪辑同一批素材直接用文字。任务中途停止也会保留已写入的描述。格式：", "", "```json", NOTES_EXAMPLE, "```", ""]
+             "- 先用已核标签给每个意群排好镜头；已核标签凑不齐时，才去看需看图片段的对照图。",
+             "- 看过对照图的片段，把描述写入当前目录 visual-notes.json（一个 JSON 数组，覆盖写入完整数组），工作台会存下来供以后复用。格式：",
+             "", "```json", NOTES_EXAMPLE, "```", ""]
     return "\n".join(lines)
 
 
@@ -169,7 +171,8 @@ def handoff_markdown(job, take, timeline, config, *, mode, instruction, material
         lines += ["## 写稿时列的补拍清单（素材里可能还没有）", ""] + [f"- {item}" for item in notes["pickups"]] + [""]
     lines += ["## 交付", "",
               "- 在目标时间线上按技能剪辑：画面放视频轨，逐片原声放音频 1，配音轨不动；不导出、不渲染。",
-              "- 没有合适素材的意群按技能留空，并打红色「缺素材｜…」范围标记。",
+              "- 没有合适素材的意群按技能原位留空，不在时间线上打缺素材标记；每处空段写进最后 json 的 gaps（start/end 为目标时间线帧，半开，"
+              "从第 0 帧算；need 写对应口播、所需动作与部件、景别和时长）。",
               "- 剪完保存工程。最终回复先用几句话说明做了什么、哪些地方缺素材，最后附一个 json 代码块：",
               "", "```json",
               '{"timeline": "目标时间线名", "shots": 0, "materials": ["实际用到的素材时间线"], '
@@ -302,7 +305,7 @@ class EditingWorkbenchMixin:
         path = folder / f"{identifier}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
         path.write_text(text, encoding="utf-8")
         prompt = (f"使用 ${SKILL_NAME}。按交接文件 {path} 在达芬奇里完成剪辑：项目「{config['project']}」，目标时间线「{timeline['name']}」，"
-                  f"模式「{MODES[mode]}」。没有合适素材就按技能留空并打缺素材标记；剪好、核验并保存后结束，字幕和声音由我处理。")
+                  f"模式「{MODES[mode]}」。没有合适素材就按技能原位留空，在回复里列明缺口，不打缺素材标记；剪好、核验并保存后结束，字幕和声音由我处理。")
         return {"path": str(path), "prompt": prompt}
 
     def start_edit(self, identifier, body):
@@ -562,7 +565,9 @@ class EditingWorkbenchMixin:
                 raise ValueError("达芬奇没有返回素材片段清单")
             found = build_candidates(listing)
             entries = index.load()
-            needed = [item for item in found if item["free_frames"] >= MIN_FREE_FRAMES and item["item_uid"] and not index.grid(item["key"])]
+            # A clip-labeling label means the clip was already looked at; contact images are only for the rest.
+            needed = [item for item in found if item["free_frames"] >= MIN_FREE_FRAMES and item["item_uid"]
+                      and item["label_status"] != "verified" and not index.grid(item["key"])]
             if needed:
                 try:
                     self._export_grids(edit_id, folder, config, index, entries, rank_by_relevance(needed, wanted_text), cancel, stats)
@@ -655,7 +660,7 @@ class EditingWorkbenchMixin:
             record = next(item for item in job.get("edits", []) if item["id"] == edit_id)
             inspect = self.resolve.run("inspect", {"project": config["project"], "unique_id": timeline["unique_id"],
                                                    "name": timeline["name"], "materials": record.get("materials", []), "save": True}, timeout=120, held=True)
-            validation, summary = validate_edit(inspect, job, timeline, baseline, execution_status=execution_status)
+            validation, summary = validate_edit(inspect, job, timeline, baseline, execution_status=execution_status, report=final_report(output))
         except Exception as exc:
             readback_error = str(exc)[:1000] or type(exc).__name__
             validation = failed_validation("readback_failed", readback_error)
@@ -709,7 +714,8 @@ class EditingWorkbenchMixin:
                                                        "name": edit["timeline_name"], "materials": edit.get("materials", []), "save": True},
                                            timeout=120, held=True)
                 extra = judge(inspect, job, edit, timeline, take) if judge else {}
-                validation, summary = validate_edit(inspect, job, timeline, extra.get("baseline", edit.get("baseline")), recheck=True)
+                validation, summary = validate_edit(inspect, job, timeline, extra.get("baseline", edit.get("baseline")), recheck=True,
+                                                    report=edit.get("report"))
             except VoiceError:
                 raise
             except Exception as exc:

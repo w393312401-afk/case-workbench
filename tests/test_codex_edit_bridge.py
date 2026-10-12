@@ -87,6 +87,8 @@ class CodexEditBridgeTests(unittest.TestCase):
         self.assertEqual(thread["config"]["model_reasoning_effort"], "xhigh")
         self.assertEqual((turn["model"], turn["effort"]), ("actual-stills-model", "medium"))
         self.assertEqual(turn["input"][1], {"type": "skill", "name": "editing", "path": str(skill)})
+        # Codex ignores a task-folder copy as a skill input, so its text must be in the instructions.
+        self.assertIn(f'<skill name="editing">\n{skill.read_text(encoding="utf-8")}\n</skill>', thread["developerInstructions"])
         self.assertEqual(turn["sandboxPolicy"]["writableRoots"], [str(self.job), str(self.ledger)])
         self.assertFalse(turn["sandboxPolicy"]["networkAccess"])
         self.assertEqual(thread["config"]["sandbox_workspace_write"]["writable_roots"], [str(self.job), str(self.ledger)])

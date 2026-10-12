@@ -113,6 +113,16 @@ def normalize_review(answer, slide, size, aspect, *, requirements=None, scope=No
     return review
 
 
+def skill_block(folder):
+    """The photo skill goes into the prompt itself: a copy left in refs/ is used only if the model chooses to open it."""
+    path = Path(folder) / "refs" / "SKILL.md"
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        raise VoiceError(503, "图文技能文件无法读取，本张未生成。") from None
+    return f'\n<skill name="tiktok-photo-commerce">\n{text}\n</skill>\n'
+
+
 def generation_prompt(snapshot):
     slide, requirements = snapshot["slide"], snapshot.get("requirements", {})
     mode = requirements.get("mode", "photo_preserving")
@@ -502,7 +512,9 @@ class CarouselImagesMixin:
                     if reference.is_file():
                         (work / "refs").mkdir(exist_ok=True)
                         shutil.copyfile(reference, work / "refs" / reference.name)
-                (work / "prompt.txt").write_text(generation_prompt(snapshot), encoding="utf-8")
+                if not (work / "refs" / "SKILL.md").is_file():
+                    raise VoiceError(503, f"没有找到图文技能（{refs}），无法生成。")
+                (work / "prompt.txt").write_text(generation_prompt(snapshot) + skill_block(work), encoding="utf-8")
                 snapshots.append((snapshot, work, base))
             stages = {str(slide["number"]): {"prepare": {"status": "completed", "started_at": started, "finished_at": now()},
                       **{phase: {"status": "pending", "started_at": "", "finished_at": ""}
@@ -601,7 +613,7 @@ class CarouselImagesMixin:
                 if snapshot.get("style_reference"):
                     images.append(str(folder / snapshot["style_reference"]["file"]))
                 try:
-                    answer = self.image_generator.run(generation_prompt(snapshot), cwd=str(folder), images=images, cancel_event=cancel,
+                    answer = self.image_generator.run(generation_prompt(snapshot) + skill_block(folder), cwd=str(folder), images=images, cancel_event=cancel,
                         on_progress=lambda text: self._image_progress(generation_id, f"第 {number} 张：{text}"), timeout=IMAGE_TIMEOUT,
                         schema=GENERATION_SCHEMA)
                 except BaseException as exc:

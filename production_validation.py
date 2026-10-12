@@ -102,7 +102,25 @@ def _intervals_uncovered(intervals, start, end):
     return uncovered
 
 
-def engineering_summary(inspect, job, record, fps=None):
+def reported_gaps(report, voice_end):
+    """Missing-footage gaps as the edit's final json declares them; the timeline itself carries no gap markers."""
+    found, gaps = [], report.get("gaps") if isinstance(report, dict) else None
+    for gap in gaps if isinstance(gaps, list) else []:
+        if not isinstance(gap, dict):
+            continue
+        left, right = gap.get("start"), gap.get("end")
+        if type(left) is not int or type(right) is not int or not 0 <= left < right <= voice_end:
+            continue
+        found.append({"start": left, "end": right, "need": str(gap.get("need") or "").strip()[:300]})
+    return found
+
+
+def _declared(spans, picture_gaps):
+    """Picture gaps a declaration touches. A reported range need not hit exact frames: overlapping one is enough."""
+    return [(a, b) for a, b in picture_gaps if any(max(a, left) < min(b, right) for left, right in spans)]
+
+
+def engineering_summary(inspect, job, record, fps=None, report=None):
     inspect = snapshot(inspect)
     fps = inspect["fps"]
     start, actual_rate = inspect["start_frame"], rate(fps)
@@ -119,6 +137,11 @@ def engineering_summary(inspect, job, record, fps=None):
             and marker["duration"] > 0 and str(marker.get("note") or "").strip()]
     intervals = [(left, right) for left, right, _ in shots]
     raw_uncovered = _intervals_uncovered(intervals, 0, voice_end)
+    declared = reported_gaps(report, voice_end)
+    for left, right in _declared([(gap["start"], gap["end"]) for gap in declared], raw_uncovered):
+        need = "；".join(gap["need"] for gap in declared if max(left, gap["start"]) < min(right, gap["end"]) and gap["need"])
+        gaps.append({"start": left, "end": right, "name": need or "缺素材", "note": "", "seconds": round(left / actual_rate, 2),
+                     "source": "report"})
     uncovered = _intervals_uncovered(intervals + [(gap["start"], gap["end"]) for gap in gaps], 0, voice_end)
     prefix = f"workbench-group:{job['id']}:"
     groups = [marker for marker in inspect["markers"] if str(marker.get("custom") or "").startswith(prefix)]
@@ -135,11 +158,13 @@ def failed_validation(code, message, **details):
             "issues": [{"code": code, "message": str(message)[:1000], "severity": "failure", **details}], "checks": {}}
 
 
-def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="completed", require_saved=True, recheck=False):
-    """Compare immutable baseline details and check edited source structure."""
+def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="completed", require_saved=True, recheck=False, report=None):
+    """Compare immutable baseline details and check edited source structure.
+
+    Missing footage is declared in the edit's final json (`report["gaps"]`); red gap markers from older edits still count."""
     try:
         inspect = snapshot(inspect)
-        summary = engineering_summary(inspect, job, timeline)
+        summary = engineering_summary(inspect, job, timeline, report=report)
     except Exception as exc:
         return failed_validation("readback_invalid", str(exc)), None
     issues, checks = [], {}
@@ -232,7 +257,7 @@ def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="co
             checks["track_properties_preserved"] = tracks_preserved
 
     if summary["uncovered"]:
-        issue("unmarked_picture_gap", "配音范围内仍有画面空段，没有合法的缺素材范围标记。", ranges=summary["uncovered"])
+        issue("unmarked_picture_gap", "配音范围内仍有画面空段，剪辑回复里没有报为缺素材。", ranges=summary["uncovered"])
     valid_gaps = []
     for marker in inspect["markers"]:
         if not GAP_NAME.match(marker.get("name") or ""):
@@ -248,9 +273,14 @@ def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="co
             issue("missing_marker_not_gap", "缺素材标记没有准确对应当前画面空段，请核对或移除旧标记。", frame=left)
             continue
         valid_gaps.append({"start": left, "end": right, "name": marker.get("name"), "note": marker.get("note")})
+    picture_gaps = [(gap["start"], gap["end"]) for gap in summary["picture_gaps"]]
+    for gap in reported_gaps(report, summary["voice_frames"]):
+        if not _declared([(gap["start"], gap["end"])], picture_gaps):
+            issue("reported_gap_not_gap", "剪辑回复报的缺素材区间在时间线上已有画面，请核对。", ranges=[gap])
+    valid_gaps += [gap for gap in summary["gaps"] if gap.get("source") == "report"]
     checks["picture_coverage"] = not summary["uncovered"]
     if valid_gaps:
-        issue("missing_material", "已保留并标明缺素材空段，须补齐素材后重新核验。", "material", ranges=valid_gaps)
+        issue("missing_material", "已保留并报明缺素材空段，须补齐素材后重新核验。", "material", ranges=valid_gaps)
 
     videos = [item for track in inspect["tracks"]["video"] for item in track["items"]]
     audio = [item for track in inspect["tracks"]["audio"] if track is not voice for item in track["items"]]
