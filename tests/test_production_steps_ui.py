@@ -23,7 +23,7 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         self.timelines = ["蓝点折刀成品素材", "Lab261011-202-1", "户外猎刀成品素材", "混剪素材"]
         page = self.open_page()
         steps = page.locator(".production-steps")
-        self.assertEqual(steps.locator("[data-step] span").all_inner_texts(), ["意群表", "配音", "达芬奇时间线", "AI 剪辑与审查"])
+        self.assertEqual(steps.locator("[data-step] span").all_inner_texts(), ["脚本", "配音", "达芬奇时间线", "AI 剪辑与人工审查"])
         self.assertEqual(steps.locator('[aria-selected="true"]').get_attribute("data-step"), "edit")
         page.locator("#edit-panel").wait_for()
         for hidden in ("#voice-panel", "#timeline-panel"):
@@ -82,10 +82,10 @@ class CarouselStepsBrowserTests(CarouselBrowserTests):
         self.assertEqual(steps.locator('[aria-selected="true"]').get_attribute("data-step"), "pick")
         self.assertEqual(steps.locator("[data-step]").evaluate_all("nodes => nodes.map(node => node.dataset.step)"),
                          ["slides", "pick", "images", "delivery"])
-        self.assertTrue(page.locator("#still-form").is_visible())
+        self.assertTrue(page.locator("#still-panel").is_visible())
         for hidden in ("#carousel-images-panel", "#carousel-delivery-panel"):
             self.assertFalse(page.locator(hidden).is_visible())
-        options = page.locator('#still-form input[name="material"]')
+        options = page.locator('#still-panel input[name="material"]')
         options.first.wait_for()
         self.assertEqual(options.evaluate_all("nodes => nodes.map(node => [node.value, node.checked])"), [["蓝点折刀成品素材", True]])
 

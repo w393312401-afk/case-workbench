@@ -1,5 +1,11 @@
 /* Scoped to the copied public front end; the local workbench is untouched. */
 .public-text-mode [data-public-hidden="true"],
+.public-text-mode #task-activity-open,
+.public-text-mode #task-activity-dialog,
+.public-text-mode #task-activity-log-dialog,
+.public-text-mode #task-activity-notices,
+.public-text-mode .task-activity-logs,
+.public-text-mode .activity-settings,
 .public-text-mode .video-panel,
 .public-text-mode .card-media,
 .public-text-mode .archive-notice,

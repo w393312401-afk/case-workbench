@@ -57,7 +57,7 @@ class ServiceShutdownTests(unittest.TestCase):
         status, _, result = self.request("GET", "/api/service/status")
         self.assertEqual(status, 200, result)
         self.assertEqual(result, {"app": "video-case-workbench", "pid": os.getpid(),
-            "token": self.token, "shutdown_supported": True, "shutting_down": False,
+            "token": self.token, "shutdown_supported": True, "shutting_down": False, "code_stale": False,
             "paths": {"records": str(self.skill / "cases"), "library": str(self.runtime / "library")}})
         self.assertEqual(self.request("GET", "/api/service/status", headers={"Origin": "https://external.invalid"})[0], 403)
 

@@ -173,15 +173,13 @@ class FinishedImportTests(unittest.TestCase):
         self.error(400, self.import_images)
         self.assertFalse(self.current().get("finished_imports"))
 
-    def test_import_cannot_claim_pending_review_as_confirmation(self):
+    def test_import_allows_explicit_manual_confirmation_without_ai_review(self):
         output = self.import_images()["outputs"][0]
-        self.error(409, self.approve, output, acknowledge=True)
-        self.review(output)
         approved = self.approve(output)["carousel"]["slides"][0]
         self.assertEqual(approved["output_id"], output["id"])
         self.assertEqual(approved["outputs"][0]["approval_actor"], "assistant_on_user_authorization")
 
-    def test_failed_candidate_and_repeated_import_keep_confirmed_good_version(self):
+    def test_manual_selection_can_replace_old_confirmed_image_despite_legacy_review_findings(self):
         output = self.import_images()["outputs"][0]
         self.review(output)
         self.approve(output)
@@ -195,10 +193,10 @@ class FinishedImportTests(unittest.TestCase):
         result = self.bench.import_finished_images(self.identifier, self.body(directory="set-new", requirements=output["requirements_snapshot"]))
         candidate = result["outputs"][0]
         self.review(candidate, "needs_fix")
-        self.error(409, self.approve, candidate, acknowledge=True)
-        self.error(409, self.bench.select_carousel_output, self.identifier, self.body(slide=1, output_id=candidate["id"]))
+        self.bench.select_carousel_output(self.identifier, self.body(slide=1, output_id=candidate["id"]))
+        self.approve(candidate)
         current = self.current()["slides"][0]
-        self.assertEqual(current["output_id"], output["id"])
+        self.assertEqual(current["output_id"], candidate["id"])
         self.assertTrue(current["outputs"][0]["approved"])
 
     def test_review_failure_retries_only_review_and_late_run_cannot_replace_new(self):
@@ -216,7 +214,7 @@ class FinishedImportTests(unittest.TestCase):
         self.assertTrue(late["review"]["stale"])
         self.assertEqual(late["output"]["review"]["review_id"], ids[1])
         self.assertEqual(late["output"]["review"]["status"], "pass")
-        self.error(409, self.approve, output)  # Only visual/text was read; product/evidence remain unchecked.
+        self.approve(output)  # Manual confirmation does not require an AI review scope.
         self.assertFalse(self.current()["generations"])
         self.assertEqual(len(self.current()["slides"][0]["outputs"]), 1)
 
@@ -243,7 +241,7 @@ class FinishedImportTests(unittest.TestCase):
              "input_signature": output["input_signature"], "requirements_signature": output.get("requirements_signature"), "scope": ["visual", "text", "product", "evidence"]})
         self.store.interrupt_running()
         self.assertEqual(self.current()["slides"][0]["outputs"][0]["review"]["status"], "review_failed")
-        self.error(409, self.approve, output, acknowledge=True)
+        self.approve(output)
         self.review(output)
         self.approve(output)
         self.assertEqual((root / output["file"]).read_bytes(), original)

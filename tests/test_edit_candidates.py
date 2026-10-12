@@ -41,13 +41,30 @@ class CandidateTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
 
-    def test_free_ranges_follow_other_edits_in_source_frames(self):
-        found = {item["label"]: item for item in build_candidates(LISTING)}
+    def test_archived_free_ranges_require_explicit_opt_in(self):
+        found = {item["label"]: item for item in build_candidates(LISTING, deduplicate_source_ranges=True)}
         self.assertEqual(found["调节夹具间距 BK001"]["free"], [[0, 60]])
         self.assertEqual(found["连续推磨 BK002"]["free"], [[100, 150], [180, 300]])
         self.assertEqual(found["连续推磨 BK002"]["used_by"], ["Lab261008-202-1"])
         self.assertEqual(found["合箱号召 BK003"]["free_frames"], 0)
         self.assertTrue(found["调节夹具间距 BK001"]["key"].startswith("BK001-"))
+
+    def test_default_candidates_include_full_previously_used_and_short_clips(self):
+        short = {**CLIPS[2], "uid": "short", "start": 300, "end": 304, "source_start": 0, "source_end": 4}
+        listing = {**LISTING, "materials": [{**LISTING["materials"][0], "clips": [*CLIPS, short, CLIPS[0]]}]}
+        with patch("edit_candidates._intervals_uncovered", side_effect=AssertionError("deduplication must stay inactive")):
+            found = build_candidates(listing)
+        self.assertEqual(len(found), 5)
+        self.assertTrue(all(item["free"] == [item["source"]] and item["used_by"] == [] for item in found))
+        folder = self.root / "full-task"
+        stats = write_task_files(folder, found, VisualIndex(self.root / "index", "202H"), {}, listing)
+        self.assertEqual((stats["listed"], stats["used_up"]), (5, 0))
+        data = json.loads((folder / "candidates.json").read_text(encoding="utf-8"))
+        self.assertFalse(data["dedup_enabled"])
+        self.assertFalse(data["used_complete"])
+        text = (folder / "candidates.md").read_text(encoding="utf-8")
+        self.assertIn("BK003", text)
+        self.assertNotIn("已被用尽的片段没有列出", text)
 
     def test_inclusive_source_end_becomes_half_open_at_normal_speed(self):
         self.assertEqual(source_span({"start": 0, "end": 60, "source_start": 0, "source_end": 59}), (0, 60))
@@ -89,13 +106,13 @@ class CandidateTests(unittest.TestCase):
 
     def test_task_files_link_grids_list_free_clips_and_reuse_descriptions(self):
         index = VisualIndex(self.root / "index", "202H")
-        found = build_candidates(LISTING)
+        found = build_candidates(LISTING, deduplicate_source_ranges=True)
         index.frames.mkdir(parents=True)
         first = found[0]
         Image.new("RGB", (10, 10)).save(index.frames / f"{first['key']}.jpg")
         entries = {first["key"]: {"description": {"summary": "手调夹具间距，特写", "cta": False}}}
         folder = self.root / "task"
-        stats = write_task_files(folder, found, index, entries, LISTING)
+        stats = write_task_files(folder, found, index, entries, LISTING, deduplicate_source_ranges=True)
         self.assertEqual((stats["listed"], stats["used_up"], stats["described"], stats["grids"]), (2, 1, 1, 1))
         text = (folder / "candidates.md").read_text(encoding="utf-8")
         self.assertIn("手调夹具间距，特写；无号召手势", text)
@@ -193,17 +210,27 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(resolve_worker.timecode(1800, "29.97", True), "00:01:00;02")
         self.assertEqual(resolve_worker.timecode(17982, "29.97", True), "00:10:00;00")
 
-    def test_candidates_list_material_clips_and_where_other_edits_used_them(self):
+    def test_archived_candidates_usage_scan_requires_explicit_opt_in(self):
         material = Timeline("Buck110折刀成品素材", "mat-1", [Item("i1", 0, 60, 0, ["夹具 BK001"], "material_index_v1:i1"),
                                                          Item("i2", 60, 120, 60, ["手写 推磨"], "material_index_v1:other")])
         edit = Timeline("Lab261008-202-1", "e1", [Item("x", 0, 20, 70)])
         backup = Timeline("Lab261008-202-1_重剪前备份_1009", "b1", [Item("y", 0, 20, 0)])
         target = Timeline("Zack261011-202-1", "t1", [Item("z", 0, 20, 0)])
         reply = resolve_worker.candidates(Resolve(Project([material, edit, backup, target])),
-                                          {"project": "202H", "materials": [], "target_uid": "t1"})
+                                          {"project": "202H", "materials": [], "target_uid": "t1", "deduplicate_source_ranges": True})
         self.assertEqual([(clip["labels"], clip["verified_labels"]) for clip in reply["materials"][0]["clips"]],
                          [(["夹具 BK001"], ["夹具 BK001"]), (["手写 推磨"], [])])
         self.assertEqual([(item["timeline_name"], item["source_start"]) for item in reply["used"]], [("Lab261008-202-1", 70)])
+
+    def test_default_candidates_never_read_other_edits(self):
+        material = Timeline("Buck110折刀成品素材", "mat-1", [Item("i1", 0, 60, 0, ["夹具 BK001"], "material_index_v1:i1")])
+        edit = Timeline("Lab261008-202-1", "e1", [])
+        with patch.object(edit, "GetTrackCount", side_effect=AssertionError("other edits must not be scanned")):
+            reply = resolve_worker.candidates(Resolve(Project([material, edit])), {"project": "202H", "materials": []})
+        self.assertEqual(len(reply["materials"][0]["clips"]), 1)
+        self.assertEqual(reply["used"], [])
+        self.assertFalse(reply["used_complete"])
+        self.assertFalse(reply["dedup_enabled"])
 
     def test_copied_timeline_labels_count_while_the_marker_is_still_in_the_visible_clip(self):
         class Copied(Item):
@@ -294,11 +321,11 @@ class PreparedEditTests(unittest.TestCase):
         edit = self.run_edit(job)
         commands = [call["command"] for call in self.bench.runner.calls]
         self.assertEqual(commands.count("frames"), 1)
-        self.assertLess(commands.index("restore"), commands.index("inspect", commands.index("candidates")))
-        # BK001 has a clip-labeling label, so only the hand-labelled BK002 needs a contact image.
-        self.assertEqual((edit["preparation"]["new_grids"], edit["preparation"]["verified"]), (1, 1))
-        self.assertEqual([call["shots"][0]["key"].split("-")[0] for call in self.bench.runner.calls if call["command"] == "frames"], ["BK002"])
-        self.assertEqual(edit["visual_notes"], {"saved": 2, "rejected": 0})
+        self.assertIn("restore", commands)
+        # BK001 has a clip-labeling label; both hand-labelled clips remain available even if previously used.
+        self.assertEqual((edit["preparation"]["new_grids"], edit["preparation"]["verified"]), (2, 1))
+        self.assertCountEqual([shot["key"].split("-")[0] for call in self.bench.runner.calls if call["command"] == "frames" for shot in call["shots"]], ["BK002", "BK003"])
+        self.assertEqual(edit["visual_notes"], {"saved": 3, "rejected": 0})
         prompt = self.editor.calls[0]["prompt"]
         self.assertIn("## 候选画面（工作台已整理）", prompt)
         self.assertIn("1 个片段是「已核标签」", prompt)
@@ -310,7 +337,7 @@ class PreparedEditTests(unittest.TestCase):
         job = self.bench.production.job(job["id"])
         edit = self.run_edit(job)
         self.assertNotIn("frames", [call["command"] for call in self.bench.runner.calls])
-        self.assertEqual((edit["preparation"]["described"], edit["preparation"]["grids"], edit["preparation"]["to_look"]), (2, 1, 0))
+        self.assertEqual((edit["preparation"]["described"], edit["preparation"]["grids"], edit["preparation"]["to_look"]), (3, 2, 0))
         folder = Path(self.editor.calls[1]["cwd"])
         self.assertIn("看过 连续推磨 BK002", (folder / "candidates.md").read_text(encoding="utf-8"))
 
@@ -318,9 +345,35 @@ class PreparedEditTests(unittest.TestCase):
         job = self.helper.timeline_job()
         with patch("workbench_editing.PREPARE_BUDGET", -1):
             edit = self.run_edit(job)
-        self.assertEqual((edit["preparation"]["new_grids"], edit["preparation"]["deferred"]), (0, 1))
-        self.assertIn("另有 1 个需看图的片段这次来不及导出对照图", self.editor.calls[0]["prompt"])
+        self.assertEqual((edit["preparation"]["new_grids"], edit["preparation"]["deferred"]), (0, 2))
+        self.assertIn("另有 2 个需看图的片段这次来不及导出对照图", self.editor.calls[0]["prompt"])
         self.assertIn("无对照图", (Path(self.editor.calls[0]["cwd"]) / "candidates.md").read_text(encoding="utf-8"))
+
+    def test_every_step_reaches_the_run_log_while_the_edit_runs(self):
+        class Activity:
+            def __init__(self):
+                self.lines = []
+            def record(self, run_id, **fields):
+                if "message" in fields:
+                    self.lines.append((run_id, fields["message"]))
+            def delete_owner(self, owner_id):
+                pass
+        self.bench.activity = Activity()
+        original = self.editor.run
+
+        def talking(prompt, *, cwd, on_event, **options):
+            on_event({"type": "message", "text": "先排第 1 个意群：\n夹具 BK001", "complete": True})
+            on_event({"type": "message", "text": "半句", "complete": False})
+            return original(prompt, cwd=cwd, on_event=on_event, **options)
+
+        self.editor.run = talking
+        job = self.helper.timeline_job()
+        edit = self.run_edit(job)
+        lines = [line for run_id, line in self.bench.activity.lines if run_id == "edit:" + edit["id"]]
+        self.assertIn("正在导出候选片段对照图 0/2（新素材首次较慢，导出过的以后直接复用）。", lines)
+        self.assertIn("正在调用 执行达芬奇脚本。", lines)
+        self.assertIn("AI：先排第 1 个意群： 夹具 BK001", lines)
+        self.assertNotIn("AI：半句", lines)
 
     def test_preparation_failure_lets_the_ai_look_at_footage_itself(self):
         self.bench.runner.listing = {"error": "x"}

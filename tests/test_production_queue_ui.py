@@ -102,7 +102,7 @@ class ProductionQueueBrowserTests(unittest.TestCase):
         page.locator("#production-status").select_option("ready")
         self.assertEqual(page.locator(".production-card").count(), 1)
         self.assertEqual(self.row(page, ready).count(), 1)
-        page.locator("#production-type").select_option("video")
+        page.locator('[data-type="video"]').click()
         self.assertEqual(page.locator(".production-card").count(), 0)
         page.locator("#production-status").select_option("awaiting_review")
         self.assertEqual(page.locator(".production-card").count(), 1)
@@ -118,15 +118,87 @@ class ProductionQueueBrowserTests(unittest.TestCase):
         ready, held = self.carousel(1), []
         page = self.open_queue(hold_delivery=held)
         self.assertNotEqual(self.row(page, ready).get_attribute("data-production-state"), "ready")
-        page.locator("#production-type").select_option("carousel")
+        page.locator('[data-type="carousel"]').click()
         page.locator("#production-status").select_option("ready")
         self.assertEqual(page.locator(".production-card").count(), 0)
         self.assertEqual(len(held), 1)
         held.pop().fulfill(status=200, content_type="application/json", body=json.dumps({"items": self.deliveries}))
         self.row(page, ready).get_by_text("领取成品", exact=True).wait_for()
-        self.assertEqual(page.locator("#production-type").input_value(), "carousel")
+        self.assertEqual(page.locator('[data-type="carousel"]').get_attribute("aria-pressed"), "true")
         self.assertEqual(page.locator("#production-status").input_value(), "ready")
         self.assertEqual(page.locator(".production-card").count(), 1)
+
+    def test_type_is_a_pick_one_control_and_the_choice_survives_a_reload(self):
+        self.job(1)
+        self.carousel(2)
+        page = self.open_queue()
+        self.assertEqual(page.locator("#production-type button").count(), 3)
+        self.assertEqual(page.locator('[data-type="all"]').get_attribute("aria-pressed"), "true")
+        page.locator('[data-type="carousel"]').click()
+        self.assertEqual(page.locator(".production-card").count(), 1)
+        page.reload()
+        page.locator("#production-queue").wait_for()
+        page.locator("#production-queue-status").wait_for(state="hidden")
+        self.assertEqual(page.locator('[data-type="carousel"]').get_attribute("aria-pressed"), "true")
+        self.assertEqual(page.locator(".production-card").count(), 1)
+        page.locator('[data-type="all"]').click()
+        page.reload()
+        page.locator("#production-queue").wait_for()
+        self.assertEqual(page.locator('[data-type="all"]').get_attribute("aria-pressed"), "true")
+
+    def test_batch_mode_selects_rows_without_opening_them_and_sends_one_request(self):
+        first, second = self.carousel(1), self.carousel(2)
+        old = self.job(3, archived=True)
+        page = self.open_queue()
+        sent = []
+
+        def batch(route):
+            body = json.loads(route.request.post_data)
+            sent.append(body)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({
+                "action": body["action"], "changed": len(body["items"]), "failed": 0, "skipped": 0,
+                "results": [{**item, "ok": True, "warnings": []} for item in body["items"]]}))
+
+        page.route("**/api/production/orders/batch", batch)
+        page.locator("#production-archived").check()
+        self.assertTrue(page.locator("#production-batchbar").is_hidden())
+        page.locator("#production-batch-toggle").click()
+        page.locator("#production-batchbar").wait_for()
+        hash_before = page.evaluate("location.hash")
+        self.row(page, first).click()
+        self.assertEqual(page.evaluate("location.hash"), hash_before)
+        self.assertEqual(self.row(page, first).get_attribute("aria-checked"), "true")
+        self.assertIn("已选 1 张", page.locator(".production-batch-count").inner_text())
+        self.assertTrue(page.locator('[data-batch="restore"]').is_disabled())
+        page.locator('[data-batch="all"]').click()
+        self.assertIn("已选 3 张", page.locator(".production-batch-count").inner_text())
+        page.locator('[data-batch="archive"]').click()
+        for _ in range(50):
+            if sent:
+                break
+            page.wait_for_timeout(100)
+        self.assertEqual((sent[0]["action"], sorted(item["id"] for item in sent[0]["items"])),
+                         ("archive", sorted([first["id"], second["id"]])))
+        self.assertTrue(all(item["kind"] == "carousel" for item in sent[0]["items"]))
+        page.locator('[data-batch="all"]').click()
+        page.locator('[data-batch="restore"]').click()
+        for _ in range(50):
+            if len(sent) > 1:
+                break
+            page.wait_for_timeout(100)
+        self.assertEqual((sent[1]["action"], [item["id"] for item in sent[1]["items"]]), ("restore", [old["id"]]))
+        self.assertEqual(sent[1]["items"][0]["kind"], "job")
+        # Deleting needs no archiving: every selected row goes, archived or not.
+        page.locator('[data-batch="all"]').click()
+        self.assertFalse(page.locator('[data-batch="delete"]').is_disabled())
+        page.locator('[data-batch="delete"]').click()
+        page.locator('.production-dialog input[name="sure"]').check()
+        page.locator(".production-dialog [data-submit]").click()
+        for _ in range(50):
+            if len(sent) > 2:
+                break
+            page.wait_for_timeout(100)
+        self.assertEqual((sent[2]["action"], len(sent[2]["items"])), ("delete", 3))
 
     def test_healthy_service_details_live_only_in_settings_and_errors_clear_after_recheck(self):
         self.job(1)

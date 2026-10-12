@@ -683,13 +683,8 @@ class CreationWorkbenchMixin:
             plan = self._writing_plan(body, direction)
             if plan:
                 context["writing_plan"] = plan
-            if "carousel" in body:
-                if type(body["carousel"]) is not bool:
-                    raise CreationError(400, "图文版开关格式无效。")
-                if body["carousel"] and body.get("action") != "variants":
-                    raise CreationError(400, "图文版只用于生成变体。")
-                if body["carousel"]:
-                    context["carousel"] = True
+            if body.get("carousel"):
+                raise CreationError(400, "写稿不再同时出图文版：脚本定稿后，用口播稿的意群表配合图文技能另做逐张表。")
             if body.get("plan_id"):
                 plan = next((item for item in self.creation.public()["plans"] if item["id"] == body["plan_id"]), None)
                 if not plan:

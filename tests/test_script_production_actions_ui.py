@@ -50,9 +50,34 @@ class ScriptProductionActionsBrowserTests(unittest.TestCase):
         page.locator('.production-dialog [data-close]').first.click()
         page.locator("#script-produce-carousel").click()
         page.locator(".production-dialog[open]").wait_for()
-        self.assertIn("创建图文制作单", page.locator(".production-dialog").inner_text())
+        self.assertIn("用图文技能生成逐张表", page.locator(".production-dialog").inner_text())
         self.assertEqual(self.app.production.public()["carousels"], [])
         self.assertFalse(page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth"))
+
+    def test_carousel_goes_through_the_photo_skill_table_before_a_job_is_created(self):
+        from pathlib import Path
+        from test_ai_tasks import FakeBridge
+        from test_production_carousel_table import TABLE
+        photo = Path(self.app.edit_skill_dir).parent / "tiktok-photo-commerce"
+        (photo / "references").mkdir(parents=True, exist_ok=True)
+        (photo / "SKILL.md").write_text("---\nname: tiktok-photo-commerce\n---\n# 图文", encoding="utf-8")
+        bridge = FakeBridge(output=TABLE)
+        self.app.ai.bridge = bridge
+        page = self.detail_page()
+        page.locator("#script-production-toggle").click()
+        page.locator("#script-produce-carousel").click()
+        page.locator(".production-dialog[open] [data-submit]").click()
+        page.get_by_text("核对图文逐张表").wait_for(timeout=15000)
+        self.assertEqual(self.app.production.public()["carousels"], [])
+        self.assertEqual([item["name"] for item in bridge.calls[-1]["skills"]], ["tiktok-photo-commerce"])
+        self.assertIn("Hook 1", page.locator(".production-dialog").inner_text())
+        page.locator(".production-dialog[open] [data-submit]").click()
+        for _ in range(150):
+            if self.app.production.public()["carousels"]:
+                break
+            page.wait_for_timeout(100)
+        carousels = self.app.production.public()["carousels"]
+        self.assertEqual((len(carousels), carousels[0]["script_id"]), (1, self.script["id"]))
 
     def test_multiple_jobs_only_offer_exact_active_script_links_and_explicit_new_version(self):
         listing = {"jobs": [self.item("PRD-111111111111", status="awaiting_review"),

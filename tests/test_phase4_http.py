@@ -158,7 +158,7 @@ class CreationHTTPTests(unittest.TestCase):
             ({"variants": [], "new_variant_count": 0}, 400),
             ({"variants": [], "new_variant_count": 6}, 400),
             ({"variants": [{"index": 1, "progression": "逐件对照"}], "action": "review"}, 400),
-            ({"variants": [{"index": 1, "progression": "逐件对照"}], "carousel": "yes"}, 400),
+            ({"variants": [{"index": 1, "progression": "逐件对照"}], "carousel": True}, 400),
             ({"instruction": "核对资料", "action": "review", "carousel": True}, 400),
         ]
         for extra, code in rejected:
@@ -166,7 +166,7 @@ class CreationHTTPTests(unittest.TestCase):
             self.assertEqual(status, code, (extra, data))
         self.assertEqual(self.request("GET", "/api/ai/tasks")[2]["tasks"], [])
         body = {**base, "request_id": uuid4().hex, "instruction": "  ",
-                "variants": [{"index": 0, "progression": None}, {"index": 1, "progression": "逐件对照"}], "new_variant_count": 1, "carousel": True}
+                "variants": [{"index": 0, "progression": None}, {"index": 1, "progression": "逐件对照"}], "new_variant_count": 1}
         status, _, data = self.request("POST", "/api/ai/tasks", body)
         self.assertEqual(status, 200, data)
         task = data["task"]
@@ -179,12 +179,12 @@ class CreationHTTPTests(unittest.TestCase):
         self.assertEqual([item["number"] for item in plan["variants"]], [1, 2])
         self.assertEqual(plan["variants"][1]["execution_change"], "逐件替换")
         self.assertEqual((plan["new_variant_count"], plan["used_progressions"]), (1, ["逐件对照"]))
-        self.assertEqual(task["rounds"][0]["instruction"], "按所选 2 条已登记变体（#1、#2）各写一条，另提出 1 条建议新增变体，每条附图文版。")
-        self.assertTrue(task["context"]["carousel"])
+        self.assertEqual(task["rounds"][0]["instruction"], "按所选 2 条已登记变体（#1、#2）各写一条，另提出 1 条建议新增变体。")
+        self.assertNotIn("carousel", task["context"])
         self.assertEqual(task["rounds"][0]["read_estimates"],
                          [{"label": "变体 #1 基准", "words": 9, "seconds": 4}, {"label": "变体 #2 · 逐件对照", "words": 4, "seconds": 2}])
         prompt = bridge.calls[-1]["prompt"]
-        self.assertIn("本轮用户打开了图文版", prompt)
+        self.assertNotIn("图文版", prompt)
         self.assertIn("意群表", prompt)
         self.assertNotIn("简明原生度评分", prompt)
         self.assertIn("每条变体各写一条候选", prompt)

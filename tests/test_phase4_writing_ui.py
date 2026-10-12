@@ -245,16 +245,16 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
         self.assertTrue(submit.is_disabled())
         self.assertEqual(page.locator("#ai-create-instruction-label").inner_text(), "这次希望怎么做？")
         page.locator('[data-variant-index="1"]').check()
-        self.assertFalse(page.locator("#ai-carousel").is_checked())
-        page.locator("#ai-carousel").check()
-        self.assertIn("将按 1 条变体各写一稿，每条附图文版", page.locator("#ai-create-hint").inner_text())
+        self.assertEqual(page.locator("#ai-carousel").count(), 0)
+        self.assertIn("将按 1 条变体各写一稿", page.locator("#ai-create-hint").inner_text())
+        self.assertNotIn("图文版", page.locator("#ai-create-hint").inner_text())
         submit.click()
         page.locator("#ai-rounds").wait_for()
         task = self.request("GET", "/api/ai/tasks")[2]["tasks"][0]
         detail = self.request("GET", "/api/ai/tasks/" + task["task_id"])[2]["task"]
         self.assertEqual([item["number"] for item in detail["context"]["writing_plan"]["variants"]], [2])
-        self.assertEqual(detail["rounds"][0]["instruction"], "按所选 1 条已登记变体（#2）各写一条，每条附图文版。")
-        self.assertTrue(detail["context"]["carousel"])
+        self.assertEqual(detail["rounds"][0]["instruction"], "按所选 1 条已登记变体（#2）各写一条。")
+        self.assertNotIn("carousel", detail["context"])
 
 
 if __name__ == "__main__":

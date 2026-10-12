@@ -1,7 +1,8 @@
-"""Read-only engineering checks for editable Resolve timelines.
+"""Optional engineering checks for editable Resolve timelines.
 
-Passing these checks means the timeline can be handed to the user for review. It
-does not approve pictures, subtitles, sound, or a rendered export.
+The default editing delivery does not call these checks. A manual request can
+still inspect engineering structure; it does not approve pictures, subtitles,
+sound, or a rendered export. Explicitly disabled source deduplication is skipped.
 """
 from __future__ import annotations
 
@@ -168,6 +169,9 @@ def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="co
     except Exception as exc:
         return failed_validation("readback_invalid", str(exc)), None
     issues, checks = [], {}
+    # New editing sessions explicitly disable deduplication. Old saved snapshots
+    # without this field retain their original verification contract.
+    dedup_enabled = inspect.get("dedup_enabled") is not False
 
     def issue(code, message, severity="repair", **details):
         issues.append({"code": code, "message": message, "severity": severity, **details})
@@ -300,7 +304,7 @@ def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="co
             continue
         ranges.append({"media_id": item.get("media_id"), "media_path": item.get("media_path"), "source_start": left,
                        "source_end": right, "start": item["start"], "end": item["end"], "uid": item.get("uid")})
-        for previous in ranges[:-1]:
+        for previous in ranges[:-1] if dedup_enabled else []:
             if _same_source(item, previous) and max(left, previous["source_start"]) < min(right, previous["source_end"]):
                 source_unique = False
                 issue("source_range_reused", "同一源媒体的区间在这条时间线中重复使用。", items=[previous.get("uid"), item.get("uid")])
@@ -316,14 +320,16 @@ def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="co
             pairing_ok = False
             issue("original_audio_unpaired", "视频切片缺少媒体、源区间和位置一致的逐片原声链接。", item=item.get("uid"))
     if structural_unknown:
-        issue("source_structure_unverified", "镜头源身份、源区间、音源或链接资料不完整，无法核验原声和去重。", "failure",
+        message = "镜头源身份、源区间、音源或链接资料不完整，无法核验原声" + ("和去重。" if dedup_enabled else "。")
+        issue("source_structure_unverified", message, "failure",
               items=sorted(set(structural_unknown)))
-    checks["source_ranges_unique"] = source_unique and not structural_unknown
+    if dedup_enabled:
+        checks["source_ranges_unique"] = source_unique and not structural_unknown
     checks["original_audio_paired"] = pairing_ok and not structural_unknown
-    if inspect.get("dedup_complete") is not True or not isinstance(inspect.get("other_shots"), list):
+    if dedup_enabled and (inspect.get("dedup_complete") is not True or not isinstance(inspect.get("other_shots"), list)):
         issue("external_sources_unverified", "相关成片的源区间回读不完整，尚不能确认新增镜头没有跨片重复。", "failure")
         checks["external_source_ranges_unique"] = False
-    else:
+    elif dedup_enabled:
         checks["external_source_ranges_unique"] = True
         previous_videos = [item for track in (baseline or {}).get("tracks", {}).get("video", []) for item in track["items"]]
         for item in videos:
@@ -357,4 +363,5 @@ def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="co
     return {"schema_version": 1, "status": status, "issues": issues, "checked_at": now(), "checks": checks,
             "source_ranges": ranges, "saved": inspect.get("saved"), "baseline_available": bool(baseline),
             "manual_scope": list(MANUAL_SCOPE),
-            "source_scope": "本条时间线内及相关成片的源区间；既有镜头可在本版修订中保留"}, summary
+            "dedup_enabled": dedup_enabled, "dedup_status": "checked" if dedup_enabled else "disabled",
+            "source_scope": "本条时间线内及相关成片的源区间；既有镜头可在本版修订中保留" if dedup_enabled else "素材去重已归档停用，本次未计算"}, summary

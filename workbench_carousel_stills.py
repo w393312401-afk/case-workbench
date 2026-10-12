@@ -9,8 +9,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import shutil
+import tempfile
 import threading
 from uuid import uuid4
 
@@ -19,6 +22,7 @@ from direction_store import now
 from elevenlabs_client import VoiceError
 from resolve_bridge import locate_mcp
 from workbench_editing import EDIT_MODELS, EFFORTS, FILE_TOOLS, RESOLVE_DENIED, RESOLVE_TOOLS, final_report
+from task_activity import record_activity, safe_error
 
 SEARCH_TIMEOUT = 90 * 60
 PHOTO_SKILL = "tiktok-photo-commerce"
@@ -220,6 +224,9 @@ class CarouselStillsMixin:
             self._reserve(search_id)
             self._progress(search_id, f"正在启动 {record['client_label']}。")
             result = self.production.mutate("carousel_search_start", body, record)
+            record_activity(self, "stills:" + search_id, kind="stills", owner_id=identifier, source_id=search_id,
+                            product=item.get("product", ""), case_id=item.get("case_id"), title="找底图 · " + (item.get("title") or identifier), step="stills",
+                            status="running", phase="寻找候选图", message="正在从素材时间线寻找底图")
         except Exception:
             self._forget(search_id)
             self.resolve.lock.release()
@@ -239,6 +246,11 @@ class CarouselStillsMixin:
                     "carousel_id": identifier, "search_id": search_id}, {"status": "failed", "finished_at": now(),
                     "output": "", "error": "找底图进程未能启动，请重试。", "report": None, "problems": [],
                     "readback_error": "", "candidates": []})
+                record_activity(self, "stills:" + search_id, status="failed", phase="启动失败", message="找底图进程未能启动，请重试")
+            except Exception:
+                record_activity(self, "stills:" + search_id, status="needs_attention", phase="结果待恢复",
+                                message="找底图未能启动，失败记录暂未保存")
+                raise
             finally:
                 self._forget(search_id)
             raise VoiceError(503, "找底图进程未能启动，已保留失败记录，请重试。") from exc
@@ -287,6 +299,7 @@ class CarouselStillsMixin:
         candidates, problems = [], []
         try:
             self._progress(search_id, "正在整理候选图。")
+            record_activity(self, "stills:" + search_id, phase="整理候选图", message="正在核对并保存候选底图")
             candidates, problems = self._collect_candidates(identifier, search_id, folder)
         except Exception as exc:  # A broken manifest must not leave the run "running".
             problems.append(f"整理候选图失败：{exc}"[:300])
@@ -297,6 +310,15 @@ class CarouselStillsMixin:
         try:
             self.production.mutate("carousel_search_finish", {"request_id": "finish-" + search_id, "carousel_id": identifier,
                                                               "search_id": search_id}, result)
+            activity_status = "needs_attention" if status == "completed" else status
+            message = {"completed": "候选底图已保存，待逐张选用" if candidates else "找底图已结束，暂无可用候选图",
+                       "cancelled": "找底图已停止，已保存候选仍保留", "failed": "找底图失败。" + safe_error(error)}.get(status, "找底图已中断")
+            record_activity(self, "stills:" + search_id, status=activity_status, phase="候选图结果已保存",
+                            message=message, result_count=len(candidates), event_key="saved:" + status)
+        except Exception:
+            record_activity(self, "stills:" + search_id, status="needs_attention", phase="结果待恢复",
+                            message="找底图已结束，结果暂未保存", event_key="result_pending")
+            raise
         finally:
             self._forget(search_id)
 
@@ -366,10 +388,112 @@ class CarouselStillsMixin:
                 raise VoiceError(409, "这次找底图已经结束。")
             return self.cancel_task(search_id, "这次找底图已经结束。")
 
+    def delete_still_search(self, identifier, search_id, body):
+        """Delete one finished 找底图 record with its local folder and the candidates only it produced.
+
+        body.preview=true only reports what would go. Candidates chosen as a base stay; DaVinci is never touched."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        with self.lock:
+            self._edits()
+            if search_id in self._edit_live or search_id in self._edit_pending:
+                raise VoiceError(409, "这次找底图还在运行或结果尚未保存，请等它结束后再删除。")
+        if body.get("preview") is not True:
+            prior = self.production.replay("carousel_search_delete", {**body, "carousel_id": identifier, "search_id": search_id})
+            if prior:
+                return {**prior, "warnings": []}
+        item = self.production.carousel(identifier)
+        search = next((entry for entry in item.get("searches", []) if entry["id"] == search_id), None)
+        if not search:
+            raise VoiceError(404, "这次找底图记录不存在。")
+        if item["archived"]:
+            raise VoiceError(409, "图文制作单已归档，请恢复后再删除找底图记录。")
+        if search.get("status") == "running":
+            raise VoiceError(409, "这次找底图还在运行，请先停止或等它结束。")
+        carousel_root = self._carousel_dir(identifier).resolve()
+        folder = carousel_root / "searches" / search_id
+        present = folder.is_dir() and not folder.is_symlink() and folder.resolve().parent == carousel_root / "searches"
+        owned, kept = [], 0
+        for slide in item["slides"]:
+            base_id = (slide.get("base") or {}).get("id")
+            for candidate in slide.get("candidates", []):
+                if candidate.get("search_id") == search_id:
+                    if candidate["id"] == base_id:
+                        kept += 1
+                    else:
+                        owned.append(candidate)
+
+        def file_size(path):
+            try:
+                return path.lstat().st_size if path.is_file() else 0
+            except OSError:
+                return 0
+        candidate_bytes = sum(file_size(carousel_root / str(entry.get(name) or "")) for entry in owned for name in ("file", "thumb"))
+        if body.get("preview") is True:
+            size, files = self._edit_folder_size(folder) if present else (0, 0)
+            return {"search_id": search_id, "bytes": size + candidate_bytes, "files": files, "candidates": len(owned),
+                    "kept_as_base": kept, "slides": search.get("slides", []), "started_at": search.get("started_at", "")}
+        self._validate_edit_request(body)
+        result = self.production.mutate("carousel_search_delete", {**body, "carousel_id": identifier, "search_id": search_id})
+        warnings = []
+
+        def unlock(function, path, _):
+            os.chmod(path, 0o700)
+            function(path)
+        for entry in result.get("removed_candidates", []):
+            for name in ("file", "thumb"):
+                relative = str(entry.get(name) or "")
+                target = (carousel_root / relative).resolve()
+                if relative and target.is_relative_to(carousel_root / "candidates") and target.is_file():
+                    try:
+                        target.unlink()
+                    except OSError as exc:
+                        warnings.append(f"记录已删除，但有候选文件没有清理干净：{exc}")
+        if present:
+            try:
+                shutil.rmtree(folder, onerror=unlock)
+            except OSError as exc:
+                warnings.append(f"记录已删除，但本地文件夹没有清理干净：{exc}")
+            if folder.exists():
+                warnings.append(f"记录已删除，但本地文件夹仍有残留，可手动删除：{folder}")
+        try:
+            activity = getattr(self, "activity", None)
+            if activity is not None:
+                activity.delete_source(identifier, search_id)
+        except Exception:
+            pass
+        return {**result, "warnings": warnings}
+
     def choose_base(self, identifier, body):
         if not isinstance(body, dict):
             raise VoiceError(400, "参数格式无效。")
-        return self.production.mutate("carousel_base", {**body, "carousel_id": identifier})
+        result = self.production.mutate("carousel_base", {**body, "carousel_id": identifier})
+        # Only one base image is kept per slide: the files of the candidates that were not chosen go with their records.
+        self._remove_candidate_files(identifier, result)
+        return result
+
+    def tidy_candidates(self, identifier, body):
+        """Slides that already have a base drop every other candidate, files included."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        result = self.production.mutate("carousel_tidy", {**body, "carousel_id": identifier})
+        self._remove_candidate_files(identifier, result)
+        return {"carousel": result["carousel"], "removed": len(result.get("removed_candidates", []))}
+
+    def _remove_candidate_files(self, identifier, result):
+        root = self._carousel_dir(identifier).resolve()
+        keep = {str((slide.get("base") or {}).get(name) or "") for slide in result["carousel"]["slides"] for name in ("file", "thumb")}
+        keep |= {str(entry.get(name) or "") for slide in result["carousel"]["slides"] for entry in slide.get("candidates", [])
+                 for name in ("file", "thumb")}
+        for entry in result.get("removed_candidates", []):
+            for name in ("file", "thumb"):
+                relative = str(entry.get(name) or "")
+                target = (root / relative).resolve()
+                if relative and relative not in keep and target.is_relative_to(root / "candidates") and target.is_file():
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
 
     def carousel_image(self, identifier, candidate_id, size):
         item = self.production.carousel(identifier)
@@ -412,6 +536,49 @@ class CarouselStillsMixin:
         if not target.is_file():
             _thumbnail(path, target)
         return target
+
+    def import_uploaded_image(self, identifier, slide, filename, data, request_id):
+        """Store a picture the user supplied (any location on their machine) as a candidate for one slide."""
+        import io
+        from PIL import Image, ImageOps, UnidentifiedImageError
+        if not isinstance(request_id, str) or not re.fullmatch(r"[\w-]{10,100}", request_id):
+            raise VoiceError(400, "缺少保存标识，请刷新后重试。")
+        digest = hashlib.sha256(data).hexdigest()
+        body = {"request_id": request_id, "carousel_id": identifier, "slide": slide, "upload_sha256": digest}
+        prior = self.production.replay("carousel_import", body)
+        if prior:
+            return prior
+        item = self.production.carousel(identifier)
+        if item["archived"]:
+            raise VoiceError(409, "图文制作单已归档，请恢复后再添加图片。")
+        if slide not in {entry["number"] for entry in item["slides"]}:
+            raise VoiceError(400, "要添加到哪一张无效。")
+        try:
+            with Image.open(io.BytesIO(data)) as probe:
+                probe.verify()
+            with Image.open(io.BytesIO(data)) as opened:
+                image_format = opened.format
+                if image_format not in {"PNG", "JPEG", "WEBP"}:
+                    raise VoiceError(400, "只支持 PNG、JPG、WebP 图片。")
+                if opened.width * opened.height > 100_000_000:
+                    raise VoiceError(400, "图片像素太大（超过 1 亿像素）。")
+                image = ImageOps.exif_transpose(opened)
+                image.load()
+        except VoiceError:
+            raise
+        except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+            raise VoiceError(400, "这个文件不是可读取的 PNG、JPG 或 WebP 图片。") from None
+        stem = re.sub(r"[^\w一-鿿-]+", "_", Path(str(filename or "上传图片")).stem).strip("_")[:40] or "upload"
+        suffix = ".jpg" if image_format == "JPEG" else ".png"
+        with tempfile.TemporaryDirectory(prefix="upload-") as scratch:
+            made = Path(scratch) / f"{stem}{suffix}"
+            if image_format == "JPEG":
+                image.convert("RGB").save(made, "JPEG", quality=95, subsampling=0)
+            else:
+                image.save(made, "PNG")
+            candidate = self._store_candidate(identifier, made, slide=slide, origin="upload", reason=f"用户上传：{str(filename)[:80]}",
+                                              upload_sha256=digest, original_name=str(filename)[:200], evidence=False)
+        return self.production.mutate("carousel_import", body, candidate)
 
     def import_folder_image(self, identifier, body):
         if not isinstance(body, dict):

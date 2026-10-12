@@ -356,7 +356,7 @@ class CarouselImageTests(unittest.TestCase):
         self.assertEqual(item["generations"][-1]["status"], "cancelled")
         output = item["slides"][0]["outputs"][0]
         self.assertEqual((output["approved"], output["review"]["status"]), (False, "review_failed"))
-        self.assert_error(409, self.approve, 1, acknowledge=True)
+        self.assertTrue(self.approve(1)["slides"][0]["outputs"][0]["approved"])
         self.generator.block_stage = None
         self.recheck(1)
         self.approve(1)
@@ -483,7 +483,7 @@ class CarouselImageTests(unittest.TestCase):
         self.assertEqual(completed_outputs, [item["slides"][0]["outputs"][0]["id"]])
         self.assertEqual(item["slides"][0]["outputs"][0]["summary"], summary)
 
-    def test_review_exception_or_invalid_response_retains_candidate_and_requires_independent_retry(self):
+    def test_legacy_review_failure_retains_candidate_and_allows_manual_confirmation(self):
         for mode in ("error", "malformed"):
             with self.subTest(mode=mode):
                 self.generator.review_mode = mode
@@ -491,7 +491,7 @@ class CarouselImageTests(unittest.TestCase):
                 output = item["slides"][0]["outputs"][-1]
                 self.assertEqual((item["generations"][-1]["status"], output["review"]["status"], output["approved"]),
                                  ("completed", "review_failed", False))
-                self.assert_error(409, self.approve, 1, output["id"], acknowledge=True)
+                self.assertTrue(self.approve(1, output["id"])["slides"][0]["outputs"][-1]["approved"])
                 self.generator.review_mode = "pass"
                 before_calls = len(self.generator.calls)
                 retry = self.recheck(1, output["id"])
@@ -500,13 +500,13 @@ class CarouselImageTests(unittest.TestCase):
                 self.assertEqual(retry["sha256"], output["sha256"])
                 self.assertTrue(self.approve(1, output["id"])["slides"][0]["outputs"][-1]["approved"])
 
-    def test_observed_words_override_nominal_pass_and_warn_before_confirmation(self):
+    def test_legacy_review_findings_do_not_block_manual_confirmation(self):
         self.generator.review_mode = "wrong_words"
         item = self.generate(slides=[1])
         review = item["slides"][0]["outputs"][0]["review"]
         self.assertEqual(review["status"], "needs_fix")
         self.assertEqual(next(check for check in review["checks"] if check["id"] == "text")["status"], "fail")
-        self.assert_error(409, self.approve, 1)
+        self.assertTrue(self.approve(1)["slides"][0]["outputs"][0]["approved"])
         self.assertEqual([(slide["title_lines"], slide["body"]) for slide in item["slides"]], self.words)
 
     def test_changed_base_or_output_bytes_cannot_be_confirmed(self):
@@ -573,20 +573,20 @@ class CarouselImageTests(unittest.TestCase):
         self.assertTrue(slide["outputs"][0]["approved"])
         candidate = slide["outputs"][-1]
         self.assertEqual(candidate["review"]["status"], "review_failed")
-        self.assert_error(409, self.approve, 1, candidate["id"], acknowledge=True)
+        self.assertTrue(self.approve(1, candidate["id"])["slides"][0]["outputs"][-1]["approved"])
         self.generator.review_mode = "pass"
         retry = self.recheck(1, candidate["id"])
         self.assertEqual(retry["sha256"], candidate["sha256"])
-        self.assertEqual(self.current()["slides"][0]["output_id"], old["output_id"])
+        self.assertEqual(self.current()["slides"][0]["output_id"], candidate["id"])
 
-    def test_partial_scope_cannot_support_confirmation_and_retries_are_bound(self):
+    def test_partial_legacy_review_does_not_block_manual_confirmation_and_retries_are_bound(self):
         self.generate(slides=[1])
         output = self.current()["slides"][0]["outputs"][0]
         self.bench.start_carousel_review(self.item["id"], self.body(slide=1, output_id=output["id"], scope=["text"]))
         item = self.wait()
         reviewed = item["slides"][0]["outputs"][0]
         self.assertEqual(reviewed["review"]["scope"], ["text"])
-        self.assert_error(409, self.approve, 1, acknowledge=True)
+        self.assertTrue(self.approve(1)["slides"][0]["outputs"][0]["approved"])
         completed = self.recheck(1)
         self.assertEqual(completed["review"]["file_sha256"], completed["sha256"])
         self.assertEqual(completed["review"]["input_signature"], completed["input_signature"])
@@ -683,24 +683,131 @@ class CarouselImageTests(unittest.TestCase):
         self.assertEqual(candidate["latest_review_id"], started["review"]["id"])
         self.assertEqual(candidate["review_runs"][-1]["status"], "interrupted")
         self.assertEqual(candidate["review"]["execution_status"], "interrupted")
-        self.assert_error(409, self.approve, 1, acknowledge=True)
+        self.assertTrue(self.approve(1)["slides"][0]["outputs"][0]["approved"])
         self.generator.block_stage = None
         retried = self.recheck(1)
         self.assertEqual(retried["sha256"], output["sha256"])
         self.assertEqual(retried["review"]["status"], "pass")
 
-    def test_generated_delivery_includes_each_actual_review_input_prompt_and_receipt(self):
+    def test_generated_delivery_contains_only_images_with_original_bytes(self):
         self.complete_group()
         self.approve_all()
         record = self.bench.create_carousel_delivery(self.item["id"], self.body())["delivery"]
         with zipfile.ZipFile(self.bench.carousel_delivery_file(self.item["id"], record["id"])) as archive:
+            self.assertEqual(archive.namelist(), ["01.png", "02.png", "03.png"])
             for number in (1, 2, 3):
-                for filename in ("input.json", "prompt.txt", "receipt.json"):
-                    self.assertIn(f"records/reviews/{number:02d}-{filename}", archive.namelist())
-                receipt = json.loads(archive.read(f"records/reviews/{number:02d}-receipt.json"))
                 output = self.current()["slides"][number - 1]["outputs"][0]
-                self.assertEqual(receipt["file_sha256"], output["sha256"])
-                self.assertEqual(receipt["status"], "completed")
+                source = self.bench.carousel_output(self.item["id"], output["id"], "full")
+                self.assertEqual(archive.read(f"{number:02d}.png"), source.read_bytes())
+
+    def use_direct_images(self):
+        self.generator.direct_image_edit = True
+        self.generator.review_available = False
+        self.generator.source = "cockpit_image_edit"
+
+    def test_direct_edit_saves_candidate_without_review_or_agent_skill_dependency(self):
+        self.use_direct_images()
+        self.bench.edit_skill_dir = Path("does-not-exist")
+        self.generator.review_mode = "error"
+        item = self.generate(slides=[1])
+        output = item["slides"][0]["outputs"][0]
+        self.assertEqual(len(self.generator.calls), 1)
+        self.assertFalse(self.generator.calls[0]["read_only"])
+        self.assertNotIn("review", output)
+        self.assertNotIn("review_runs", output)
+        self.assertEqual(output["origin"], "cockpit_image_edit")
+        self.assertTrue(output["direct_image_edit"])
+        self.assertFalse(output["approved"])
+        self.assertEqual(item["generations"][-1]["stages"]["1"]["review"]["status"], "skipped")
+        self.assertNotIn("内置 imagegen", self.generator.calls[0]["prompt"])
+        self.assertNotIn("input.json", self.generator.calls[0]["prompt"])
+        self.assertFalse((self.bench._carousel_dir(item["id"]) / "reviews").exists())
+        self.assertTrue(self.approve(1)["slides"][0]["outputs"][0]["approved"])
+        self.assert_error(409, self.recheck, 1)
+
+    def test_direct_edit_keeps_first_manual_gate_and_uses_its_style_for_remaining_images(self):
+        self.use_direct_images()
+        first = self.generate()
+        self.assertEqual(first["generations"][-1]["status"], "awaiting_first_approval")
+        self.assertEqual(len(self.generator.calls), 1)
+        self.assertFalse(self.bench.carousel_first_preflight(self.item["id"])["ready"])
+        self.approve(1)
+        self.assertTrue(self.bench.carousel_first_preflight(self.item["id"])["ready"])
+        item = self.generate(slides=[2, 3])
+        self.assertEqual(len(self.generator.calls), 3)
+        for call in self.generator.calls[1:]:
+            self.assertEqual(len(call["images"]), 2)
+            self.assertEqual(call["snapshot"]["style_reference"]["scope"], "style_only")
+            self.assertNotEqual(call["snapshot"]["base_sha256"], first["slides"][0]["outputs"][0]["base_sha256"])
+        self.approve_all()
+        record = self.bench.create_carousel_delivery(item["id"], self.body())["delivery"]
+        with zipfile.ZipFile(self.bench.carousel_delivery_file(item["id"], record["id"])) as archive:
+            self.assertEqual(archive.namelist(), ["01.png", "02.png", "03.png"])
+
+    def test_direct_edit_resume_uses_saved_candidate_without_another_call(self):
+        self.use_direct_images()
+        first = self.generate(slides=[1])
+        item = self.generate(slides=[1])
+        self.assertEqual(len(self.generator.calls), 1)
+        self.assertEqual(len(item["slides"][0]["outputs"]), 1)
+        self.assertEqual(item["slides"][0]["output_id"], first["slides"][0]["output_id"])
+        self.assertEqual(item["generations"][-1]["stages"]["1"]["generation"]["status"], "skipped")
+
+    def test_direct_edit_native_dimensions_and_encoded_bytes_survive_confirmation(self):
+        self.use_direct_images()
+        original_run = self.generator.run
+        encoded = []
+        def native_result(prompt, **options):
+            original_run(prompt, **options)
+            path = Path(options["cwd"]) / "render.webp"
+            Image.new("RGB", (1024, 1536), "orange").save(path, format="WEBP", quality=85)
+            encoded.append(path.read_bytes())
+            return json.dumps({"file": path.name, "summary": ""})
+        self.generator.run = native_result
+        item = self.generate(slides=[1])
+        output = item["slides"][0]["outputs"][0]
+        self.assertEqual((output["width"], output["height"]), (1024, 1536))
+        self.assertEqual(self.bench.carousel_output(item["id"], output["id"], "full").read_bytes(), encoded[0])
+        self.approve(1)
+        self.assertTrue(self.bench.carousel_first_preflight(item["id"])["ready"])
+
+    def test_direct_edit_failure_does_not_retry_or_replace_confirmed_image(self):
+        self.use_direct_images()
+        self.generate(slides=[1])
+        old = self.approve(1)["slides"][0]
+        self.generator.file_mode = "error"
+        item = self.generate(slides=[1], redo=True)
+        self.assertEqual(len(self.generator.calls), 2)
+        self.assertEqual(item["generations"][-1]["status"], "failed")
+        self.assertEqual(item["slides"][0]["output_id"], old["output_id"])
+        self.assertTrue(item["slides"][0]["outputs"][0]["approved"])
+
+    def test_direct_edit_always_calls_channel_instead_of_local_caption_composition(self):
+        self.use_direct_images()
+        item = self.generate(slides=[1], requirements={"mode": "layout_only", "caption_style": "rugged"})
+        self.assertEqual(len(self.generator.calls), 1)
+        self.assertFalse(self.generator.calls[0]["read_only"])
+        output = item["slides"][0]["outputs"][0]
+        self.assertEqual(output["origin"], "cockpit_image_edit")
+        self.assertIsNone(output["layout_receipt"])
+
+    def test_direct_edit_can_preserve_identical_reference_bytes_from_channel(self):
+        self.use_direct_images()
+        self.generator.file_mode = "copy"
+        item = self.generate(slides=[1])
+        output = item["slides"][0]["outputs"][0]
+        self.assertEqual(output["sha256"], output["base_sha256"])
+        self.assertTrue(self.approve(1)["slides"][0]["outputs"][0]["approved"])
+
+    def test_direct_edit_manual_confirmation_accepts_previous_needs_fix_image(self):
+        self.generator.review_mode = "wrong_words"
+        item = self.generate(slides=[1])
+        output = item["slides"][0]["outputs"][0]
+        self.assertEqual(output["review"]["status"], "needs_fix")
+        self.use_direct_images()
+        self.bench.select_carousel_output(item["id"], self.body(slide=1, output_id=output["id"]))
+        self.assertTrue(self.approve(1)["slides"][0]["outputs"][0]["approved"])
+        self.assertTrue(self.bench.carousel_first_preflight(item["id"])["ready"])
 
 
 class CarouselImageHTTPTests(unittest.TestCase):
@@ -720,7 +827,7 @@ class CarouselImageHTTPTests(unittest.TestCase):
         silence = patch.object(http_fixture.SERVER.Handler, "log_message", lambda *args: None)
         silence.start()
         self.addCleanup(silence.stop)
-        with patch.object(http_fixture.SERVER, "CodexImageBridge", return_value=self.generator):
+        with patch.object(http_fixture.SERVER, "CockpitImageBridge", return_value=self.generator):
             self.server = http_fixture.SERVER.make_server(root / "skill", root / "runtime", port=0,
                 allow_open=False, ai_bridge=FakeBridge())
         self.bench = self.server.app

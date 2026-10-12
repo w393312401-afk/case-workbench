@@ -187,9 +187,10 @@
     }
     const up = document.querySelector("#navigate-up");
     if (up) {
-      up.hidden = !parsed.tail.length && !["scripts", "production"].includes(parsed.page);
+      // Every module offers a return control; only the workspace home has no parent.
+      up.hidden = parsed.page === "home" && !parsed.tail.length;
       up.href = parentURL(parsed);
-      const parentLabel = parsed.page === "case" ? "案例库" : parsed.tail.length ? pageLabels[page] : "内容创作";
+      const parentLabel = parsed.page === "case" ? "案例库" : parsed.tail.length ? pageLabels[page] : ["scripts", "production"].includes(page) ? "内容创作" : "工作概览";
       up.title = `返回${parentLabel}`;
       up.setAttribute("aria-label", up.title);
     }

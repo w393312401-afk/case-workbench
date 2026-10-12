@@ -110,7 +110,7 @@ class CarouselPublishTests(unittest.TestCase):
     def reload_application(self):
         previous = self.bench
         previous.ai.shutdown()
-        with patch.object(http_fixture.SERVER, "CodexImageBridge", return_value=self.generator):
+        with patch.object(http_fixture.SERVER, "CockpitImageBridge", return_value=self.generator):
             self.bench = http_fixture.SERVER.Workbench(previous.store.root, previous.runtime,
                 allow_open=False, ai_bridge=FakeBridge(), performance_sources=[])
         self.bench.carousel_image_root = previous.carousel_image_root

@@ -313,7 +313,7 @@
   --font-body: 14px;
   --font-meta: 13px;
   --font-micro: 12px;
-  --detail-sticky-top: 154px;
+  --detail-sticky-top: calc(154px + var(--topbar-h));
   --detail-gap: 22px;
   --detail-orange: var(--accent-text);
   --detail-selected: color-mix(in srgb, var(--accent) 9%, var(--surface));
@@ -333,7 +333,7 @@
 
 .case-dock {
   position: sticky;
-  top: 0;
+  top: var(--topbar-h);
   z-index: 12;
   margin-bottom: 20px;
   background: var(--paper);
@@ -931,3 +931,5 @@ h1{font-weight:700;letter-spacing:-.02em}
 }
 @media(max-width:760px){#content .perf-toolbar .perf-segment{display:flex;width:100%;flex:1 1 100%;grid-column:1/-1}}
 .ai-format-check{font-size:var(--font-micro);line-height:1.9;margin:6px 0 0;color:var(--warm-ink)}.ai-format-check.repaired{color:var(--green-ink)}
+#code-stale-banner{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:50;display:flex;gap:12px;align-items:center;max-width:min(720px,calc(100vw - 32px));padding:10px 14px;border-radius:12px;background:#8a4b00;color:#fff;box-shadow:0 8px 24px rgba(0,0,0,.35);font-size:14px;line-height:1.5}
+#code-stale-banner button{flex:none;border:1px solid rgba(255,255,255,.55);background:transparent;color:#fff;border-radius:8px;padding:4px 10px;cursor:pointer}

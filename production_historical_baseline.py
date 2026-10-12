@@ -230,11 +230,13 @@ def _restore_historical_baseline(production_root, job, edit, timeline, take):
                 handoff["width"], handoff["height"], handoff["fps"]):
             _refuse("原交接文件与独立建线前配置矛盾。")
         try:
-            expected = meaning_markers(old_job, old_take, timeline["fps"])
+            candidates = [meaning_markers(old_job, old_take, timeline["fps"], legacy=legacy) for legacy in (False, True)]
         except Exception:
             _refuse("独立配音意群资料无法重建完整标记。")
-        expected = [{**marker, "color": "Blue", "duration": min(marker["duration"], timeline["frames"] - marker["frame"])} for marker in expected]
-        if not _markers_equal(markers, expected) or len(handoff["ranges"]) != len(expected):
+        candidates = [[{**marker, "color": "Blue", "duration": min(marker["duration"], timeline["frames"] - marker["frame"])}
+                       for marker in expected] for expected in candidates]
+        expected = next((rows for rows in candidates if _markers_equal(markers, rows)), None)
+        if expected is None or len(handoff["ranges"]) != len(expected):
             _refuse("历史意群标记的区间、文字、备注或颜色与独立原稿资料矛盾。")
         if any(handoff["ranges"].get(marker["number"]) != (marker["frame"], marker["frame"] + marker["duration"]) for marker in expected):
             _refuse("原交接文件的意群区间与历史快照矛盾。")

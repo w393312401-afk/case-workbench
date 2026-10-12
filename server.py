@@ -23,6 +23,21 @@ from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 APP_ROOT = Path(__file__).resolve().parent
+
+
+def code_signature():
+    """Newest modification time of the program's own Python files; compared with the value at start-up to notice
+    that the running process predates an update (static pages are read from disk on every load, the backend is not)."""
+    newest = 0
+    for path in APP_ROOT.glob("*.py"):
+        try:
+            newest = max(newest, path.stat().st_mtime_ns)
+        except OSError:
+            continue
+    return newest
+
+
+CODE_AT_START = code_signature()
 DEFAULT_CONFIG = json.loads((APP_ROOT / "config.json").read_text(encoding="utf-8"))
 sys.path.insert(0, str(APP_ROOT))
 sys.path.insert(0, str(Path(DEFAULT_CONFIG["skill_root"]) / "scripts"))
@@ -44,17 +59,21 @@ from workbench_production import ProductionWorkbenchMixin
 from resolve_bridge import ResolveBridge
 from workbench_editing import EditingWorkbenchMixin
 from workbench_carousel import CarouselWorkbenchMixin
+from workbench_carousel_table import CarouselTableMixin
 from workbench_carousel_stills import CarouselStillsMixin
+from workbench_carousel_clips import CarouselClipsMixin
+from workbench_order_delete import OrderDeleteMixin
 from workbench_carousel_images import CarouselImagesMixin
 from workbench_carousel_import import CarouselFinishedImportMixin
 from workbench_carousel_delivery import CarouselDeliveryMixin
 from workbench_carousel_publish import CarouselPublishMixin
-from codex_image_bridge import CodexImageBridge
+from cockpit_image_bridge import CockpitImageBridge
 from codex_stills_bridge import CodexStillsBridge
 from codex_edit_bridge import CodexEditBridge
 from data_transfer import DataTransfer, TransferError, pick_directory
 from data_backup import BackupError, MAX_BYTES
 from data_lease import ServerLease
+from task_activity import ActivityStore, ActivityError, reconcile_activity
 
 EXTENSIONS = {
     "video": {".mp4", ".webm", ".mov", ".m4v"},
@@ -238,7 +257,7 @@ def review_request(query):
     return filters, numbers("limit", 50), numbers("offset", 0), one("sort", "likes")
 
 
-class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, CarouselWorkbenchMixin, CarouselStillsMixin, CarouselImagesMixin, CarouselFinishedImportMixin, CarouselDeliveryMixin, CarouselPublishMixin):
+class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, CarouselWorkbenchMixin, CarouselTableMixin, CarouselStillsMixin, CarouselClipsMixin, OrderDeleteMixin, CarouselImagesMixin, CarouselFinishedImportMixin, CarouselDeliveryMixin, CarouselPublishMixin):
     def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=()):
         self.store = CachedCaseStore(skill_root)
         self.runtime = Path(runtime_root).resolve()
@@ -261,10 +280,11 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
         self.directions = DirectionStore(self.runtime, self.store.root, self.lock)
         self.creation = CreationStore(self.runtime, self.lock)
         self.production = ProductionStore(self.runtime, self.lock)
+        self.activity = ActivityStore(self.runtime)
         self.voices = ElevenLabsClient()
         self.resolve = ResolveBridge()
         self.ai = AITaskManager(self.store, self.runtime, self.lock, bridge=ai_bridge,
-                                review_digest=self.review_digest, sales_resolver=self.sales)
+                                review_digest=self.review_digest, sales_resolver=self.sales, activity=self.activity)
         # Editing uses the selected local client with a task-specific restricted tool profile.
         self.editor = getattr(self.ai.bridge, "claude", None)
         codex = getattr(self.ai.bridge, "codex", None)
@@ -274,11 +294,14 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
         self.ledger_dir = self.runtime / "davinci-ledger"
         self.carousel_image_root = APP_ROOT / "图文素材"  # existing carousel folders, only read from
         self.carousel_finished_root = APP_ROOT / "图文成品"  # explicit finished-package import boundary
-        self.image_generator = CodexImageBridge()
+        image_config = DEFAULT_CONFIG.get("image_generation") or {}
+        self.image_generator = CockpitImageBridge(parameters_file=image_config.get("parameters_file"),
+                                                   auth_config=image_config.get("auth_config"))
         self.recover_edit_results()
         self.production.interrupt_running()
+        reconcile_activity(self)
         self.data_transfer = DataTransfer(self.store.root, self.runtime, APP_ROOT,
-            locks=(self.lock, self.reviews.lock, self.performance.lock),
+            locks=(self.lock, self.reviews.lock, self.performance.lock, self.activity.lock),
             validator=self.validate_imported_data, ensure_idle=self.ensure_data_idle,
             on_restore=self.reload_imported_data, extra_sources=performance_sources)
         self.performance.sources = list(self.data_transfer.manager.extra_sources)
@@ -302,6 +325,7 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
 
     def reload_imported_data(self):
         with self.lock:
+            self.activity.reload(reset_epoch=True)
             self.requests.clear()
             self.structure_cache.clear()
             self.state_cache = self.products_cache = self.review_product_sources = self.direction_sync_cache = None
@@ -332,6 +356,7 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
             self.reviews.state_error = None
             self.reviews.state.saves += 1
             self.production.interrupt_running()
+            reconcile_activity(self)
             render_library(self.store.root, self.library)
 
     def claude_settings(self, action, body):
@@ -1097,6 +1122,7 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
                     self.requests = {request: value for request, value in self.requests.items()
                         if value[1].get("case", {}).get("case_id") != identifier}
                     self.directions.forget_case(identifier)
+                    self.activity.delete_case(identifier)
                     self.cleanup_creation_case(identifier)
                     self.state_cache = None
             # Do not keep deleted case bodies in old save/archive replay caches.
@@ -1148,7 +1174,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # Page polling hits these every few seconds; successful polls would bury
     # real requests and errors in server.log.
-    QUIET_POLLS = ("/api/state", "/api/ai/tasks", "/api/ai/status", "/api/ai/claude/login")
+    QUIET_POLLS = ("/api/state", "/api/ai/tasks", "/api/ai/status", "/api/ai/claude/login", "/api/activity")
 
     def log_request(self, code="-", size="-"):
         path = urlparse(getattr(self, "path", "") or "").path
@@ -1204,7 +1230,7 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
-            if self.command == "POST" and path != "/api/service/shutdown":
+            if self.command == "POST" and path not in {"/api/service/shutdown", "/api/service/restart"}:
                 self.server.begin_write()
                 post_admitted = True
             if self.command in {"GET", "HEAD"}:
@@ -1212,12 +1238,24 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(409, "总数据正在导入，请稍后刷新。")
                 if path == "/api/data/status":
                     return self.output(200, self.app.data_transfer.status())
+                if path == "/api/activity":
+                    accepted = {"after", "limit", "before", "product", "filter", "owner_id", "source_id"}
+                    activity_query = parse_qs(parsed.query, keep_blank_values=True)
+                    if activity_query.keys() - accepted or any(len(values) != 1 for values in activity_query.values()):
+                        raise ApiError(400, "运行记录筛选参数无效。")
+                    return self.output(200, self.app.activity.feed(**{key: values[0] for key, values in activity_query.items()}))
+                activity_logs = re.fullmatch(r"/api/activity/([A-Za-z0-9_:.\-]{1,300})/logs", path)
+                if activity_logs:
+                    if query.keys() - {"after_seq", "limit"} or any(len(values) != 1 for values in query.values()):
+                        raise ApiError(400, "运行日志分页参数无效。")
+                    return self.output(200, self.app.activity.logs(activity_logs.group(1), **{key: values[0] for key, values in query.items()}))
                 download = re.fullmatch(r"/api/data/download/([A-Za-z0-9_-]{32})", path)
                 if download:
                     return self.file(self.app.data_transfer.download(download.group(1)), download=True)
                 if path == "/api/service/status":
                     return self.output(200, {"app": "video-case-workbench", "pid": os.getpid(),
                         "token": self.app.token, "shutdown_supported": True, "shutting_down": self.server.shutting_down,
+                        "code_stale": code_signature() > CODE_AT_START,
                         "paths": {"records": str(self.app.store.root / "cases"), "library": str(self.app.library)}})
                 if path == "/api/state":
                     snapshot = self.app.state()
@@ -1259,6 +1297,9 @@ class Handler(BaseHTTPRequestHandler):
                     if len(task_id) != 1 or len(round_id) != 1 or not re.fullmatch(r"AIT-[0-9a-f]{12}", task_id[0]) or not re.fullmatch(r"AIR-[0-9a-f]{12}", round_id[0]):
                         raise ApiError(400, "候选轮次参数无效。")
                     return self.output(200, self.app.carousel_variants(task_id[0], round_id[0]))
+                table_read = re.fullmatch(r"/api/production/carousel-tables/(TBL-[0-9a-f]{12})", path)
+                if table_read:
+                    return self.output(200, {"table": self.app.carousel_table(table_read.group(1))})
                 delivery_download = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/deliveries/(DLV-[0-9a-f]{12})/download", path)
                 if delivery_download:
                     downloaded = self.file(self.app.carousel_delivery_file(*delivery_download.groups()), download=True)
@@ -1273,6 +1314,23 @@ class Handler(BaseHTTPRequestHandler):
                 if carousel_image:
                     size = query.get("size", ["thumb"])[0]
                     return self.file(self.app.carousel_image(*carousel_image.groups(), "full" if size == "full" else "thumb"))
+                clip_frame = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/clips/([A-Za-z0-9]+-[0-9a-f]{8})/frame", path)
+                if clip_frame:
+                    frame, size = query.get("frame", [""]), query.get("size", ["view"])
+                    if len(frame) != 1 or len(size) != 1:
+                        raise ApiError(400, "帧参数无效。")
+                    return self.file(self.app.clip_frame(clip_frame.group(1), clip_frame.group(2), frame[0], size[0]))
+                clip_strip = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/clips/([A-Za-z0-9]+-[0-9a-f]{8})/strip", path)
+                if clip_strip:
+                    return self.file(self.app.clip_strip(clip_strip.group(1), clip_strip.group(2)))
+                clip_info = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/clips/([A-Za-z0-9]+-[0-9a-f]{8})", path)
+                if clip_info:
+                    self.app.production.carousel(clip_info.group(1))
+                    return self.output(200, self.app.clip_info(clip_info.group(2)))
+                clip_list = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/clips", path)
+                if clip_list:
+                    return self.output(200, self.app.carousel_clips(clip_list.group(1), query.get("materials", []),
+                                                                    query.get("refresh", [""])[0] == "1"))
                 folder_list = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/folder-images", path)
                 if folder_list:
                     return self.output(200, self.app.folder_images(folder_list.group(1)))
@@ -1407,6 +1465,8 @@ class Handler(BaseHTTPRequestHandler):
                 files.update({"/" + name: name for name in ("shell.js", "shell.css", "settings.js", "settings.css", "global-search.js", "global-search.css", "navigation.css", "library.css", "detail.css", "inline-editor.js", "inline-editor.css", "direction-picker.js", "direction-picker.css", "home.js", "home.css", "material-basket.js", "material-basket.css", "scripts.js", "scripts.css", "production.js", "production.css", "writing.css", "reviews-layout.css", "demo.js")})
                 if path in files:
                     return self.file(APP_ROOT / "static" / files[path], cache=True)
+                if path in {"/activity.js", "/activity.css"}:
+                    return self.file(APP_ROOT / "static" / path[1:], cache=True)
                 if path == "/directions.css":
                     return self.file(APP_ROOT / "static" / "directions.css", cache=True)
                 raise ApiError(404, "页面不存在。")
@@ -1414,6 +1474,10 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/upload":
                     post_body_unread = False  # upload handles its own bounded rejection drain.
                     return self.upload(query)
+                carousel_upload = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/upload", path)
+                if carousel_upload:
+                    post_body_unread = False  # the upload handler reads or drains its own body.
+                    return self.carousel_upload(carousel_upload.group(1), query)
                 if path == "/api/data/import/inspect":
                     try:
                         length = int(self.headers.get("Content-Length", "-1"))
@@ -1433,6 +1497,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(400, "提交内容不是有效数据。")
                 if not isinstance(body, dict):
                     raise ApiError(400, "提交内容格式错误。")
+                if path == "/api/activity/read":
+                    return self.output(200, self.app.activity.read(body))
+                if path == "/api/activity/notify-claim":
+                    return self.output(200, self.app.activity.claim(body))
                 if path == "/api/data/settings":
                     return self.output(200, self.app.data_transfer.save_settings(body))
                 if path == "/api/data/preferences":
@@ -1458,6 +1526,15 @@ class Handler(BaseHTTPRequestHandler):
                         raise ApiError(400, "当前系统不支持打开本地文件夹。")
                     subprocess.Popen(["explorer.exe", directory])
                     return self.output(200, {"ok": True})
+                if path == "/api/service/restart":
+                    if body:
+                        raise ApiError(400, "重启服务只接受空对象。")
+                    self.server.check_restart_ready()
+                    creation = (subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
+                    # The launcher asks this process to shut down through the same checks, starts the new one and exits.
+                    subprocess.Popen([sys.executable, "-X", "utf8", str(APP_ROOT / "launcher.pyw"), "--no-browser"], cwd=str(APP_ROOT),
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creation)
+                    return self.output(200, {"ok": True, "pid": os.getpid()})
                 if path == "/api/service/shutdown":
                     if body:
                         raise ApiError(400, "关闭服务只接受空对象。")
@@ -1503,23 +1580,35 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.save_production_settings(body))
                 if path == "/api/production/jobs":
                     return self.output(200, self.app.create_production_job(body))
+                if path == "/api/production/orders/batch":
+                    return self.output(200, self.app.batch_orders(body))
+                if path == "/api/production/carousel-tables":
+                    return self.output(200, self.app.start_carousel_table(body))
+                table_cancel = re.fullmatch(r"/api/production/carousel-tables/(TBL-[0-9a-f]{12})/cancel", path)
+                if table_cancel:
+                    return self.output(200, self.app.cancel_carousel_table(table_cancel.group(1)))
                 if path == "/api/production/carousels":
                     return self.output(200, self.app.create_carousel(body))
                 search_cancel = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/searches/(STS-[0-9a-f]{12})/cancel", path)
                 if search_cancel:
                     return self.output(200, self.app.cancel_still_search(*search_cancel.groups()))
+                search_delete = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/searches/(STS-[0-9a-f]{12})/delete", path)
+                if search_delete:
+                    return self.output(200, self.app.delete_still_search(*search_delete.groups(), body))
                 image_cancel = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/generations/(IMG-[0-9a-f]{12})/cancel", path)
                 if image_cancel:
                     return self.output(200, self.app.cancel_image_generation(*image_cancel.groups()))
                 review_cancel = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/reviews/(REV-[0-9a-f]{12})/cancel", path)
                 if review_cancel:
                     return self.output(200, self.app.cancel_image_generation(*review_cancel.groups()))
-                carousel_action = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/(slides|archive|search|base|import|import-finished|generate|recheck|select-output|requirements|preflight|approval|delivery|publication)", path)
+                carousel_action = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/(slides|archive|delete|search|clip-picks|base|tidy|import|clip-frame|reveal|import-finished|generate|recheck|select-output|requirements|preflight|approval|delivery|publication)", path)
                 if carousel_action:
                     identifier, action = carousel_action.groups()
                     handler = {"slides": self.app.save_carousel_slides, "archive": self.app.archive_carousel,
-                               "search": self.app.start_still_search, "base": self.app.choose_base,
-                               "import": self.app.import_folder_image, "generate": self.app.start_image_generation,
+                               "delete": self.app.delete_carousel_order, "clip-picks": self.app.ai_pick_clips,
+                               "search": self.app.start_still_search, "base": self.app.choose_base, "tidy": self.app.tidy_candidates,
+                               "import": self.app.import_folder_image, "clip-frame": self.app.use_clip_frame,
+                               "reveal": self.app.reveal_clip, "generate": self.app.start_image_generation,
                                "import-finished": self.app.import_finished_images, "recheck": self.app.start_carousel_review,
                                "select-output": self.app.select_carousel_output, "requirements": self.app.save_carousel_requirements,
                                "preflight": self.app.carousel_delivery_preflight,
@@ -1532,16 +1621,19 @@ class Handler(BaseHTTPRequestHandler):
                 edit_recheck = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/edits/(EDT-[0-9a-f]{12})/recheck", path)
                 if edit_recheck:
                     return self.output(200, self.app.recheck_edit(*edit_recheck.groups(), body))
+                edit_delete = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/edits/(EDT-[0-9a-f]{12})/delete", path)
+                if edit_delete:
+                    return self.output(200, self.app.delete_edit(*edit_delete.groups(), body))
                 edit_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/edits/(EDT-[0-9a-f]{12})/(approval|baseline)", path)
                 if edit_action:
                     identifier, edit_id, action = edit_action.groups()
                     handler = {"approval": self.app.approve_edit, "baseline": self.app.adopt_edit_baseline}[action]
                     return self.output(200, handler(identifier, edit_id, body))
-                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|archive|timeline|open|edit|handoff|recover)", path)
+                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|archive|delete|timeline|open|edit|handoff|recover)", path)
                 if job_action:
                     identifier, action = job_action.groups()
                     handler = {"takes": self.app.generate_take, "select": self.app.select_take,
-                               "lines": self.app.save_job_lines, "archive": self.app.archive_job,
+                               "lines": self.app.save_job_lines, "archive": self.app.archive_job, "delete": self.app.delete_job_order,
                                "timeline": self.app.build_timeline, "open": self.app.open_timeline,
                                "edit": self.app.start_edit, "handoff": self.app.edit_handoff,
                                "recover": self.app.recover_production_operation}[action]
@@ -1614,7 +1706,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, {"ok": True})
                 raise ApiError(404, "操作不存在。")
             raise ApiError(405, "不支持此操作。")
-        except ApiError as exc:
+        except (ApiError, ActivityError) as exc:
             # On Windows, closing with an unread POST body can reset the socket
             # before the browser receives the useful 403 response. Drain small,
             # bounded bodies only; never wait indefinitely for a rejected upload.
@@ -1708,6 +1800,37 @@ class Handler(BaseHTTPRequestHandler):
         if not 0 <= length <= limit:
             raise ApiError(413, "文件过大或长度未知。视频支持最大 2GB，其他附件最大 30MB。")
         return length
+
+    def carousel_upload(self, identifier, query):
+        """One local picture (PNG/JPG/WebP, at most 25 MB) as a candidate base for a slide; the body is the raw file."""
+        limit = 25 * 1024 ** 2
+        try:
+            try:
+                slide = int(query.get("slide", [""])[0])
+            except ValueError:
+                raise ApiError(400, "要添加到哪一张无效。")
+            length = int(self.headers.get("Content-Length", "-1"))
+            if not 0 < length <= limit:
+                raise ApiError(413, "图片为空或超过 25 MB。")
+        except (ApiError, ValueError) as error:
+            timeout = self.connection.gettimeout()
+            try:
+                rejected = int(self.headers.get("Content-Length", "0"))
+                if 0 < rejected <= 4 * 1024 * 1024:
+                    self.connection.settimeout(1)
+                    self.rfile.read(rejected)
+            except (OSError, ValueError):
+                pass
+            finally:
+                self.connection.settimeout(timeout)
+            if isinstance(error, ApiError):
+                raise
+            raise ApiError(400, "图片长度无效。")
+        data = self.rfile.read(length)
+        if len(data) != length:
+            raise ApiError(400, "图片没有完整上传，请重试。")
+        return self.output(200, self.app.import_uploaded_image(identifier, slide, query.get("name", [""])[0],
+                                                               data, query.get("request_id", [""])[0]))
 
     def upload(self, query):
         kind = query.get("kind", [""])[0]
@@ -1869,6 +1992,35 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
             self.data_maintenance = False
             self._write_gate.notify_all()
 
+    def _activity_blocker(self):
+        """Why the service must not stop right now, or None. Never interrupts: running work is only reported."""
+        tasks = self.app.ai.list_tasks()
+        if any(task.get("status") in {"queued", "running", "stopping"}
+               or task.get("busy") or task.get("stopping") for task in tasks):
+            return "AI 协作仍在运行或停止中，请完成后再重新启动。"
+        if self.app.edit_running():
+            return "AI 剪辑仍在运行，请等它结束或先停止，再重新启动。"
+        if getattr(self.app, "_voicing_jobs", set()):
+            return "配音仍在运行，请等它完成后再重新启动。"
+        if getattr(self.app, "image_running", lambda: False)():
+            return "图文出图仍在运行，请等它结束或先停止，再重新启动。"
+        if getattr(self.app, "carousel_table_running", lambda: False)():
+            return "图文逐张表仍在生成，请等它完成或先停止，再重新启动。"
+        return None
+
+    def check_restart_ready(self):
+        """Refuse unless nothing is saving, importing or running; reserves nothing."""
+        with self._write_gate:
+            if self._shutting_down:
+                raise ApiError(409, "工作台已经在重启，请稍候。")
+            if self.data_maintenance or self._active_writes:
+                raise ApiError(409, "工作台正在保存或处理操作，请完成后重试。")
+            if getattr(self.app, "data_transfer", None) and self.app.data_transfer.busy:
+                raise ApiError(409, "总数据备份或导入导出正在进行，请完成后重试。")
+        message = self._activity_blocker()
+        if message:
+            raise ApiError(409, message)
+
     def prepare_shutdown(self):
         with self._write_gate:
             if self._shutting_down:
@@ -1881,16 +2033,9 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
             # taking the app/AI lock, so finishing writes cannot deadlock it.
             self._shutting_down = True
         try:
-            tasks = self.app.ai.list_tasks()
-            if any(task.get("status") in {"queued", "running", "stopping"}
-                   or task.get("busy") or task.get("stopping") for task in tasks):
-                raise ApiError(409, "AI 协作仍在运行或停止中，请完成后再重新启动。")
-            if self.app.edit_running():
-                raise ApiError(409, "AI 剪辑仍在运行，请等它结束或先停止，再重新启动。")
-            if getattr(self.app, "_voicing_jobs", set()):
-                raise ApiError(409, "配音仍在运行，请等它完成后再重新启动。")
-            if getattr(self.app, "image_running", lambda: False)():
-                raise ApiError(409, "图文出图仍在运行，请等它结束或先停止，再重新启动。")
+            message = self._activity_blocker()
+            if message:
+                raise ApiError(409, message)
         except Exception:
             with self._write_gate:
                 self._shutting_down = False
@@ -1907,6 +2052,7 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
             self.app.data_transfer.close()
             getattr(self.app, "stop_images", lambda: None)()
             self.app.stop_edits()
+            getattr(self.app, "stop_carousel_tables", lambda: None)()
             self.app.ai.shutdown()
             close = getattr(self.app.ai.bridge, "close", None)
             if callable(close):

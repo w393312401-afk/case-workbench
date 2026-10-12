@@ -1,4 +1,4 @@
-"""Carousel phase three: isolated Codex image jobs, independent visual review and human approval."""
+"""Carousel image generation and manual selection of current image files."""
 from __future__ import annotations
 
 import copy
@@ -16,8 +16,9 @@ from PIL import Image
 from codex_bridge import BridgeCancelled, BridgeError
 from direction_store import fingerprint, now
 from elevenlabs_client import VoiceError
-from production_store import carousel_input_signature
+from production_store import carousel_input_signature, carousel_confirmation_current
 from workbench_carousel_stills import IMAGE_TYPES, _thumbnail
+from task_activity import record_activity, safe_error
 
 ASPECTS = {"3:4": 3 / 4, "9:16": 9 / 16}
 CHECKS = {"visual": "画面与排版", "text": "文字准确", "product": "商品对照", "evidence": "实拍证据"}
@@ -25,6 +26,11 @@ REVIEW_SCOPES = tuple(CHECKS)
 MAX_CONCURRENCY = 2
 IMAGE_TIMEOUT = 30 * 60
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
+IMAGE_SAFE_FRAME_PROMPT = """排版安全框：画布左右各留至少 8% 画布宽度，上下各留至少 8% 画布高度。
+标题、正文及其描边、阴影、文字装饰须完整落在中央安全区内，不贴边、不越界、不裁字，四周保留清楚留白。
+文字较长时自然换行或适度缩小字号，不能删改锁定英文文案；文字底板不得遮挡商品或实拍证据。
+即使参考图的文字贴边，也必须按本次安全框重新排版，不照搬贴边布局；通过背景留白和文字布局实现边距，不裁掉商品或效果证据。
+安全框仅作为构图参考，最终图片不绘制安全框边线、辅助线或边距标注。"""
 GENERATION_SCHEMA = {"type": "object", "properties": {"file": {"type": "string"}, "summary": {"type": "string"}},
                      "required": ["file", "summary"], "additionalProperties": False}
 REVIEW_SCHEMA = {"type": "object", "properties": {
@@ -143,10 +149,31 @@ style_reference 仅参考首张的色调、环境和文字层级，不能复制�
 标题行：{json.dumps(slide['title_lines'], ensure_ascii=False)}
 正文：{json.dumps(slide.get('body', ''), ensure_ascii=False)}
 保留精确英文原文、自然断句及清楚留白，不增加中文或额外广告字。文字不得遮住主体或证据。
+{IMAGE_SAFE_FRAME_PROMPT}
 普通排字不要求再次生图；不得未经需要对已合格成图做蒙版修复。
 将本次真实选定结果明确复制到当前工作目录 render.png；只能读取本任务明确提供的参考文件。
 不得扫描 generated_images 领取其他任务的图片，不修改输入、input.json 或 refs，不读取业务库或操作达芬奇。
 若无法完成明确失败。最终仅返回 {{"file":"render.png","summary":"实际完成内容及限制"}}。
+"""
+
+
+def direct_image_prompt(snapshot):
+    """Send image content instructions to the edit endpoint, with no agent commands."""
+    requirements, slide = snapshot["requirements"], snapshot["slide"]
+    visual = {key: copy.deepcopy(requirements[key]) for key in
+              ("mode", "editable_regions", "protected_product", "protected_evidence", "hands_authorized",
+               "style", "instruction", "caption_area", "caption_style") if key in requirements}
+    visual.update(aspect=snapshot["aspect"], title_lines=slide["title_lines"], body=slide.get("body", ""),
+                  role=slide.get("role", ""), forbidden=slide.get("forbidden", ""))
+    reference_rule = ("第二张参考图仅提供首张风格：沿用色调、背景环境和文字层级，不能复制其商品、动作或数量。"
+                      if snapshot.get("style_reference") else "")
+    return f"""根据第一张产品实拍参考，制作一张 TikTok 商品图文图片。
+保留本张商品的形状、数量、部件和动作，准确呈现锁定英文标题与正文，文字清晰且不遮挡商品。
+{reference_rule}
+本次画面要求：{json.dumps(visual, ensure_ascii=False)}
+{IMAGE_SAFE_FRAME_PROMPT}
+手部仅在 hands_authorized 为 true 时可按要求改变。不要增加中文、额外广告字或未要求的商品。
+只输出最终图片。
 """
 
 
@@ -167,6 +194,9 @@ def review_prompt(snapshot):
 
 
 class CarouselImagesMixin:
+    def _direct_image_edit(self):
+        return bool(getattr(getattr(self, "image_generator", None), "direct_image_edit", False))
+
     def _image_tasks(self):
         if not hasattr(self, "_image_live"):
             self._image_live, self._image_cancel = {}, {}
@@ -184,8 +214,13 @@ class CarouselImagesMixin:
     def _image_progress(self, generation_id, message):
         with self.lock:
             live = self._image_tasks().get(generation_id)
-            if live is not None:
-                live.update(progress=str(message)[:600], updated_at=now())
+            cancel = self._image_cancel.get(generation_id)
+            if live is None or (cancel is not None and cancel.is_set()):
+                return
+            message = str(message)[:600]
+            live.update(progress=message, updated_at=now())
+            prefix = "image_review:" if live.get("kind") == "review" else "images:"
+            record_activity(self, prefix + generation_id, message=message)
 
     def carousel_images_live(self, item):
         for generation in item.get("generations", []):
@@ -233,7 +268,7 @@ class CarouselImagesMixin:
                                        or output["aspect"] != item.get("image_aspect", output["aspect"])
                                        or missing or changed or reference_changed)
                 output["stale_reason"] = "成图文件已丢失，请重新登记" if missing else "成图文件已变化，请重新登记" if changed else "商品参考已变化，请重新登记并核对" if reference_changed else "底图或要求已改变，需重做" if output["stale"] else ""
-                if output["stale"]:
+                if output["stale"] or (output.get("approved") and not carousel_confirmation_current(item, slide, output)):
                     output["approved"] = False
         item["status"] = self.production._carousel_status(item)
         return item
@@ -250,9 +285,16 @@ class CarouselImagesMixin:
             value.setdefault("started_at", now())
         elif status not in {"pending"}:
             value.setdefault("finished_at", now())
-        return self.production.mutate("carousel_generation_stage", {
+        result = self.production.mutate("carousel_generation_stage", {
             "request_id": "stage-" + uuid4().hex, "carousel_id": identifier,
             "generation_id": generation_id, "slide": number, "stage": stage}, value)
+        phases = {"generation": "生成", "layout": "排版", "review": "核对", "confirmation": "人工确认", "package": "打包"}
+        states = {"pending": "待处理", "running": "进行中", "completed": "已完成", "failed": "未完成",
+                  "skipped": "已跳过", "cancelled": "已停止", "interrupted": "已中断"}
+        phase = f"第 {number} 张 · {phases.get(stage, '处理')}"
+        record_activity(self, "images:" + generation_id, phase=phase,
+                        message=phase + states.get(status, "状态已更新"))
+        return result
 
     @staticmethod
     def _snapshot(item, slide, aspect):
@@ -338,6 +380,8 @@ class CarouselImagesMixin:
             prior = self.production.replay("carousel_review_start", body)
             if prior:
                 return prior
+            if self._direct_image_edit():
+                raise VoiceError(409, "图片可直接选用并人工确认，无需自动核对。")
             if not self.image_status().get("available"):
                 raise VoiceError(503, "本机 Codex 核对暂不可用，请检查登录后重试；已有成图保留。")
             item = self.production.carousel(identifier)
@@ -372,8 +416,14 @@ class CarouselImagesMixin:
             cancel = self._image_cancel[review_id] = threading.Event()
             tasks[review_id] = {"kind": "review", "carousel_id": identifier, "output_id": output["id"],
                                 "progress": f"第 {slide['number']} 张：正在独立核对已有成图。", "updated_at": now()}
+            activity_started = False
             try:
                 result = self.production.mutate("carousel_review_start", body, record)
+                activity_started = True
+                record_activity(self, "image_review:" + review_id, kind="image_review", owner_id=identifier,
+                                source_id=review_id, product=item.get("product", ""), case_id=item.get("case_id"),
+                                title="图片核对 · " + (item.get("title") or identifier), step="image_review", status="running", phase="独立核对",
+                                message=f"正在独立核对第 {slide['number']} 张成图")
                 thread = threading.Thread(target=self._run_review, daemon=True, name=f"review-{review_id}",
                     args=(identifier, slide["number"], output, record, snapshot, folder, images, cancel))
                 tasks[review_id]["handle"] = thread
@@ -381,6 +431,18 @@ class CarouselImagesMixin:
             except Exception:
                 tasks.pop(review_id, None)
                 self._image_cancel.pop(review_id, None)
+                if activity_started:
+                    try:
+                        self.production.mutate("carousel_review_finish", {"request_id": "review-finish-" + review_id,
+                            "carousel_id": identifier, "slide": slide["number"], "output_id": output["id"], "review_id": review_id},
+                            {"status": "failed", "finished_at": now(), "error": "核对进程未能启动，请重试。", "review": None,
+                             "file_sha256": output["sha256"], "input_signature": record["input_signature"], "scope": scope,
+                             "requirements_signature": snapshot["requirements_signature"]})
+                        record_activity(self, "image_review:" + review_id, status="failed", phase="启动失败",
+                                        message="核对进程未能启动，成图仍保留")
+                    except Exception:
+                        record_activity(self, "image_review:" + review_id, status="needs_attention", phase="记录待恢复",
+                                        message="核对进程未能启动，失败记录暂未保存")
                 raise
             return result
 
@@ -419,7 +481,20 @@ class CarouselImagesMixin:
                 (folder / "receipt.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
                 saved = self.production.mutate("carousel_review_finish", {"request_id": "review-finish-" + review_id,
                     "carousel_id": identifier, "slide": number, "output_id": output["id"], "review_id": review_id}, result)
+                if not generation_id:
+                    outcome = saved["output"]["review"]
+                    activity_status = "needs_attention" if status == "completed" else status
+                    message = ("图片核对已结束，待人工确认" if outcome.get("status") == "pass" else "图片核对已结束，存在待处理提示")
+                    if status != "completed":
+                        message = "图片核对已停止，成图仍保留" if status == "cancelled" else "图片核对失败。" + safe_error(error)
+                    record_activity(self, "image_review:" + review_id, status=activity_status, phase="核对结果已保存",
+                                    message=message, result_count=1, event_key="saved:" + status)
                 return saved["output"]["review"]
+            except Exception:
+                if not generation_id:
+                    record_activity(self, "image_review:" + review_id, status="needs_attention", phase="结果待恢复",
+                                    message="图片核对已结束，结果暂未保存", event_key="result_pending")
+                raise
             finally:
                 if not generation_id:
                     with self.lock:
@@ -457,8 +532,9 @@ class CarouselImagesMixin:
                         "revision": body.get("revision"), "carousel_id": identifier, "requirements": canonical})
                     item = saved["carousel"]
             requirements = carousel_requirements(item)
-            if requirements["mode"] != "layout_only" and not self.image_status().get("available"):
-                raise VoiceError(503, "Codex 生图暂不可用，请检查本机 Codex 登录。")
+            if (self._direct_image_edit() or requirements["mode"] != "layout_only") and not self.image_status().get("available"):
+                raise VoiceError(503, "图生图渠道暂不可用，请检查渠道配置。" if self._direct_image_edit()
+                                 else "Codex 生图暂不可用，请检查本机 Codex 登录。")
             wanted = body.get("slides")
             if wanted is None:
                 wanted = [slide["number"] for slide in item["slides"] if slide.get("base") and slide["status"] != "approved"]
@@ -476,7 +552,7 @@ class CarouselImagesMixin:
             gated = len(slides) > 1 and not first_ready
             if gated:
                 if first_slide["number"] not in wanted:
-                    raise VoiceError(409, "请先完成首张核对、选版与确认，再继续余图。")
+                    raise VoiceError(409, "请先选用并确认首张，再继续余图。")
                 slides = [copy.deepcopy(first_slide)]
             generation_id = "IMG-" + uuid4().hex[:12]
             folder = self._carousel_dir(identifier) / "generations" / generation_id
@@ -502,19 +578,24 @@ class CarouselImagesMixin:
                     snapshot["style_reference"] = {"file": style.name, "sha256": image_hash(style), "output_id": first_output["id"], "scope": "style_only"}
                 reusable = next((output for output in reversed(slide.get("outputs", [])) if not body.get("redo") and
                     output.get("input_signature") == snapshot["input_signature"] and not output.get("input_changed") and
+                    not output.get("stale") and output.get("base_sha256") == snapshot["base_sha256"] and
                     (not output.get("requirements_signature") or output.get("requirements_signature") == snapshot["requirements_signature"]) and
-                    output.get("review", {}).get("status") in {"pending", "review_failed", "uncertain", "running"}), None)
+                    (self._direct_image_edit() or output.get("review", {}).get("status") in {"pending", "review_failed", "uncertain", "running"})), None)
                 if reusable:
                     snapshot["reuse_output_id"] = reusable["id"]
                 (work / "input.json").write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
-                refs = Path(self.edit_skill_dir).parent / "tiktok-photo-commerce"
-                for reference in (refs / "SKILL.md", refs / "references" / "production.md"):
-                    if reference.is_file():
-                        (work / "refs").mkdir(exist_ok=True)
-                        shutil.copyfile(reference, work / "refs" / reference.name)
-                if not (work / "refs" / "SKILL.md").is_file():
-                    raise VoiceError(503, f"没有找到图文技能（{refs}），无法生成。")
-                (work / "prompt.txt").write_text(generation_prompt(snapshot) + skill_block(work), encoding="utf-8")
+                if self._direct_image_edit():
+                    prompt = direct_image_prompt(snapshot)
+                else:
+                    refs = Path(self.edit_skill_dir).parent / "tiktok-photo-commerce"
+                    for reference in (refs / "SKILL.md", refs / "references" / "production.md"):
+                        if reference.is_file():
+                            (work / "refs").mkdir(exist_ok=True)
+                            shutil.copyfile(reference, work / "refs" / reference.name)
+                    if not (work / "refs" / "SKILL.md").is_file():
+                        raise VoiceError(503, f"没有找到图文技能（{refs}），无法生成。")
+                    prompt = generation_prompt(snapshot) + skill_block(work)
+                (work / "prompt.txt").write_text(prompt, encoding="utf-8")
                 snapshots.append((snapshot, work, base))
             stages = {str(slide["number"]): {"prepare": {"status": "completed", "started_at": started, "finished_at": now()},
                       **{phase: {"status": "pending", "started_at": "", "finished_at": ""}
@@ -527,8 +608,14 @@ class CarouselImagesMixin:
             self._image_tasks()[generation_id] = {"kind": "generation", "progress": "正在准备首张。" if gated else "正在继续未完成的张。",
                 "updated_at": now(), "carousel_id": identifier}
             cancel = self._image_cancel[generation_id] = threading.Event()
+            activity_started = False
             try:
                 result = self.production.mutate("carousel_generation_start", body, record)
+                activity_started = True
+                record_activity(self, "images:" + generation_id, kind="images", owner_id=identifier,
+                                source_id=generation_id, product=item.get("product", ""), case_id=item.get("case_id"),
+                                title="出图 · " + (item.get("title") or identifier), step="images", status="running", phase="准备出图",
+                                message="正在准备首张成图" if gated else "正在生成本次成图")
                 thread = threading.Thread(target=self._run_image_generation, name=f"images-{generation_id}", daemon=True,
                     args=(identifier, generation_id, snapshots, cancel, gated))
                 self._image_tasks()[generation_id]["handle"] = thread
@@ -536,6 +623,16 @@ class CarouselImagesMixin:
             except Exception:
                 self._image_tasks().pop(generation_id, None)
                 self._image_cancel.pop(generation_id, None)
+                if activity_started:
+                    try:
+                        self.production.mutate("carousel_generation_finish", {"request_id": "finish-" + generation_id,
+                            "carousel_id": identifier, "generation_id": generation_id}, {"status": "failed", "finished_at": now(),
+                            "error": "出图进程未能启动，请重试。", "problems": []})
+                        record_activity(self, "images:" + generation_id, status="failed", phase="启动失败",
+                                        message="出图进程未能启动，请重试")
+                    except Exception:
+                        record_activity(self, "images:" + generation_id, status="needs_attention", phase="记录待恢复",
+                                        message="出图进程未能启动，失败记录暂未保存")
                 raise
             return result
 
@@ -544,7 +641,6 @@ class CarouselImagesMixin:
 
     def carousel_first_preflight(self, identifier):
         """Read-only eligibility check; a single slide is never a complete package."""
-        from production_store import carousel_review_current
         with self.lock:
             item = self.production.carousel(identifier)
             slide = item["slides"][0] if item.get("slides") else None
@@ -555,8 +651,8 @@ class CarouselImagesMixin:
             else:
                 if not output.get("approved"):
                     problems.append("请先确认首张。")
-                if not carousel_review_current(item, slide, output):
-                    problems.append("首张核对没有绑定当前文件、文案与完整核对范围。")
+                if output.get("approved") and not carousel_confirmation_current(item, slide, output):
+                    problems.append("首张确认对应的文件或制作要求已变化。")
                 if output.get("input_changed") or output.get("stale") or output.get("input_signature") != carousel_input_signature(item, slide, output["aspect"]):
                     problems.append("首张制作要求已变化。")
                 try:
@@ -566,10 +662,12 @@ class CarouselImagesMixin:
                     with Image.open(path) as image:
                         image.load()
                         width, height = image.size
-                    if abs(width / height - ASPECTS[output["aspect"]]) / ASPECTS[output["aspect"]] > .025:
+                    if not output.get("direct_image_edit") and abs(width / height - ASPECTS[output["aspect"]]) / ASPECTS[output["aspect"]] > .025:
                         problems.append("首张成图比例不符合要求。")
                     if width != output["width"] or height != output["height"]:
                         problems.append("首张尺寸与记录不一致。")
+                    if output.get("origin") != "external_generated_layout" and image_hash(self._base_path(identifier, slide)) != output.get("base_sha256"):
+                        problems.append("首张底图已变化。")
                     root = self._carousel_dir(identifier).resolve()
                     for reference in output.get("product_reference_files", []):
                         ref = (root / reference["file"]).resolve()
@@ -586,16 +684,20 @@ class CarouselImagesMixin:
             raise BridgeCancelled("cancelled")
         current = self.production.carousel(identifier)
         slide = next(entry for entry in current["slides"] if entry["number"] == number)
+        direct = self._direct_image_edit()
         if snapshot.get("reuse_output_id"):
             output = next(entry for entry in slide["outputs"] if entry["id"] == snapshot["reuse_output_id"])
-            self._stage(identifier, generation_id, number, "generation", "skipped", note="沿用已合法保存的成图，仅重跑核对。", output_id=output["id"])
+            if image_hash(self.carousel_output(identifier, output["id"], "full")) != output["sha256"]:
+                raise BridgeError("已保存成图文件发生变化，请重新出图。")
+            self._stage(identifier, generation_id, number, "generation", "skipped", note="沿用已保存成图。" if direct else "沿用已合法保存的成图，仅重跑核对。", output_id=output["id"])
             self._stage(identifier, generation_id, number, "layout", "skipped", note="已有排版保持原样。")
         else:
             mode = snapshot["requirements"]["mode"]
+            layout_only = mode == "layout_only" and not direct
             summary = ""
-            self._stage(identifier, generation_id, number, "generation", "skipped" if mode == "layout_only" else "running",
-                        note="只排文字，不调用生图。" if mode == "layout_only" else "本张产品参考与首张风格参考分别提供。")
-            if mode == "layout_only":
+            self._stage(identifier, generation_id, number, "generation", "skipped" if layout_only else "running",
+                        note="只排文字，不调用生图。" if layout_only else "本张产品参考与首张风格参考分别提供。")
+            if layout_only:
                 from carousel_layout import export_caption
                 self._stage(identifier, generation_id, number, "layout", "running")
                 area = snapshot["requirements"].get("caption_area")
@@ -613,7 +715,7 @@ class CarouselImagesMixin:
                 if snapshot.get("style_reference"):
                     images.append(str(folder / snapshot["style_reference"]["file"]))
                 try:
-                    answer = self.image_generator.run(generation_prompt(snapshot) + skill_block(folder), cwd=str(folder), images=images, cancel_event=cancel,
+                    answer = self.image_generator.run(direct_image_prompt(snapshot) if direct else generation_prompt(snapshot) + skill_block(folder), cwd=str(folder), images=images, cancel_event=cancel,
                         on_progress=lambda text: self._image_progress(generation_id, f"第 {number} 张：{text}"), timeout=IMAGE_TIMEOUT,
                         schema=GENERATION_SCHEMA)
                 except BaseException as exc:
@@ -621,7 +723,7 @@ class CarouselImagesMixin:
                                 note=str(exc)[:2000])
                     raise
             try:
-                if mode != "layout_only":
+                if not layout_only:
                     manifest = json.loads(answer)
                     if not isinstance(manifest, dict):
                         raise ValueError()
@@ -633,7 +735,7 @@ class CarouselImagesMixin:
                 if not output_path.is_relative_to(folder.resolve()) or output_path.suffix.lower() not in IMAGE_TYPES or output_path == base.resolve():
                     raise ValueError()
                 output_hash = image_hash(output_path)
-                if output_hash == snapshot["base_sha256"] or image_hash(base) != snapshot["base_sha256"]:
+                if (not direct and output_hash == snapshot["base_sha256"]) or image_hash(base) != snapshot["base_sha256"]:
                     raise ValueError()
                 with Image.open(output_path) as image:
                     size = image.size
@@ -646,7 +748,7 @@ class CarouselImagesMixin:
                 message = "后台未返回可用成图，或底图被改动；本次未收录，请检查后重试。"
                 if summary:
                     message += " 后台说明：" + summary
-                self._stage(identifier, generation_id, number, "layout" if mode == "layout_only" else "generation", "failed", note=message)
+                self._stage(identifier, generation_id, number, "layout" if layout_only else "generation", "failed", note=message)
                 raise BridgeError(message) from exc
             output_id = "OUT-" + uuid4().hex[:12]
             target = self._carousel_dir(identifier) / "outputs" / (output_id + output_path.suffix.lower())
@@ -663,19 +765,30 @@ class CarouselImagesMixin:
                       "thumb": f"outputs/thumbs/{output_id}.jpg", "width": size[0], "height": size[1], "sha256": output_hash,
                       "base_id": snapshot["slide"]["base"]["id"], "base_sha256": snapshot["base_sha256"],
                       "input_signature": snapshot["input_signature"], "input_changed": changed, "aspect": snapshot["aspect"],
-                      "instruction": snapshot["instruction"], "created_at": now(), "review": {**unknown_review("成图已保存，等待独立核对。"), "status": "pending"},
-                      "origin": "local_layout" if mode == "layout_only" else "codex_builtin", "model": None,
+                      "instruction": snapshot["instruction"], "created_at": now(),
+                      "origin": "local_layout" if layout_only else getattr(self.image_generator, "source", getattr(self.image_generator, "generation_source", "codex_builtin")), "model": None,
                       "requirements_snapshot": snapshot["requirements"], "requirements_signature": snapshot["requirements_signature"], "summary": summary,
                       "style_reference": snapshot.get("style_reference"),
-                      "layout_receipt": layout_receipt if mode == "layout_only" else None}
+                      "layout_receipt": layout_receipt if layout_only else None}
+            if direct:
+                output["direct_image_edit"] = True
+            else:
+                output["review"] = {**unknown_review("成图已保存，等待独立核对。"), "status": "pending"}
             output = self.production.mutate("carousel_output", {"request_id": "output-" + output_id, "carousel_id": identifier,
                 "generation_id": generation_id, "slide": number}, output)["output"]
-            if mode != "layout_only":
+            if not layout_only:
                 self._stage(identifier, generation_id, number, "generation", "completed", note=summary)
-            self._stage(identifier, generation_id, number, "layout", "completed" if mode == "layout_only" else "skipped",
-                        note="确定性排字已完成。" if mode == "layout_only" else "生成结果已有排版，保持完整画面，未擅自抠手或回贴。")
+            self._stage(identifier, generation_id, number, "layout", "completed" if layout_only else "skipped",
+                        note="确定性排字已完成。" if layout_only else "保存原始生成图片。" if direct else "生成结果已有排版，保持完整画面，未擅自抠手或回贴。")
             if output.get("input_changed"):
                 return [f"第 {number} 张输入已改变；成图留在历史，未替换当前版本。"]
+        if direct:
+            self._stage(identifier, generation_id, number, "review", "skipped", output_id=output["id"])
+            self._stage(identifier, generation_id, number, "confirmation", "pending", output_id=output["id"])
+            self._stage(identifier, generation_id, number, "package", "pending")
+            if cancel.is_set():
+                raise BridgeCancelled("cancelled")
+            return []
         if cancel.is_set():
             self._stage(identifier, generation_id, number, "review", "cancelled", note="成图已保存，可以独立重新核对。")
             raise BridgeCancelled("cancelled")
@@ -720,13 +833,23 @@ class CarouselImagesMixin:
                         self._finish_uncompleted_stages(identifier, generation_id, futures[future], "failed", str(exc))
             if status == "completed" and gated:
                 status = "awaiting_first_approval"
-                problems.append("首张已保存。请先核对、选版和确认首张，再继续余图；尚未创建完整领取包。")
+                problems.append("首张已保存，请先选用并确认，再继续余图。")
         except Exception as exc:
             status, error = "failed", str(exc)[:2000] or "这次任务未完成，已有结果保留。"
         finally:
             try:
-                self.production.mutate("carousel_generation_finish", {"request_id": "finish-" + generation_id, "carousel_id": identifier,
+                saved = self.production.mutate("carousel_generation_finish", {"request_id": "finish-" + generation_id, "carousel_id": identifier,
                     "generation_id": generation_id}, {"status": status, "error": error, "problems": problems, "finished_at": now()})
+                activity_status = "needs_attention" if status in {"completed", "awaiting_first_approval"} else status
+                message = {"awaiting_first_approval": "首张已生成，待确认", "completed": "本次成图已保存，待逐张人工确认",
+                           "cancelled": "出图已停止，已保存结果仍保留",
+                           "failed": "出图未全部完成。" + safe_error(error or " ".join(problems))}.get(status, "出图已中断")
+                record_activity(self, "images:" + generation_id, status=activity_status, phase="出图结果已保存", message=message,
+                                result_count=int(saved.get("generation", {}).get("added") or 0), event_key="saved:" + status)
+            except Exception:
+                record_activity(self, "images:" + generation_id, status="needs_attention", phase="结果待恢复",
+                                message="出图已结束，任务结果暂未保存；已保存成图仍保留", event_key="result_pending")
+                raise
             finally:
                 with self.lock:
                     self._image_tasks().pop(generation_id, None)
@@ -747,6 +870,8 @@ class CarouselImagesMixin:
             event = self._image_cancel.get(generation_id)
             if not live or not event or live["carousel_id"] != identifier:
                 raise VoiceError(409, "这次出图已经结束或不属于这张制作单。")
+            prefix = "image_review:" if live.get("kind") == "review" else "images:"
+            record_activity(self, prefix + generation_id, status="stopping", phase="正在停止", message="已收到停止请求，正在保存已有结果")
             event.set()
             live["progress"] = "正在停止后台 Codex…"
         return {"ok": True}

@@ -743,6 +743,7 @@
     $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 设置";
     $("#content").innerHTML = `<div class="settings-page"><div class="page-heading"><div><span class="eyebrow">WORKSPACE SETTINGS</span><h1>设置</h1><p>设置全局默认模型，管理协作连接、保存的视图与本地文件。</p></div></div>
       ${renderModelSettings()}
+      ${window.TaskActivity?.settingsMarkup?.() || ""}
       ${renderDataSettings()}
       <div class="settings-overview">
         <section class="section-card settings-card" aria-labelledby="settings-ai-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("bot")}</span><h2 id="settings-ai-heading">AI 协作</h2></div><p id="settings-codex-status" class="settings-status" data-status="loading" role="status">正在检查…</p><p id="settings-codex-detail" class="settings-note"></p><p class="settings-note">写稿、审稿和复盘沿用全局默认模型。使用本机 Codex 的登录与额度。</p><div class="settings-actions"><button type="button" class="secondary compact" id="settings-check-codex">${icon("refresh")}重新检查</button><a class="subtle settings-link" href="#ai">查看协作记录 ${icon("arrow")}</a></div></section>
@@ -781,6 +782,7 @@
     void loadSources(panel, sequence);
     bindDataSettings(panel);
     bindModelSettings(panel);
+    window.TaskActivity?.mountSettings?.(panel);
   }
 
   window.WorkbenchSettings = { render };

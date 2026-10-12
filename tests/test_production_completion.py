@@ -7,7 +7,7 @@ import unittest
 import test_production_editing as editing
 import test_server as fixture
 from elevenlabs_client import VoiceError
-from production_validation import MANUAL_SCOPE
+from production_validation import MANUAL_SCOPE, validate_edit
 from resolve_bridge import ResolveBridge
 from workbench_production import meaning_markers
 
@@ -21,11 +21,25 @@ class CompletionTests(unittest.TestCase):
     start = editing.EditingTests.start
     wait = editing.EditingTests.wait
 
-    def finished(self):
+    def skill_finished(self):
         job = self.timeline_job()
         self.bench.runner.inspect = editing.inspect_reply(shots=SHOTS)
         self.start(job)
         return job, self.wait(job["id"])
+
+    def finished(self):
+        """Keep explicit historical verification fixtures for the legacy approval path."""
+        job, edit = self.skill_finished()
+        data = self.bench.production.read()
+        stored = next(item for item in data["jobs"] if item["id"] == job["id"])
+        edit = stored["edits"][-1]
+        edit.pop("completion_policy", None)
+        baseline = json.loads(json.dumps(editing.inspect_reply(shots=())).replace("{job}", job["id"]))
+        post = json.loads(json.dumps(self.bench.runner.inspect).replace("{job}", job["id"]))
+        validation, summary = validate_edit(post, stored, stored["timelines"][-1], baseline)
+        edit.update(baseline=baseline, baseline_at=edit["started_at"], status=validation["status"], validation=validation, summary=summary)
+        self.bench.production.write(data)
+        return job, copy.deepcopy(edit)
 
     def approve(self, job, edit, **values):
         body = {"request_id": uuid4().hex, "approved": True, "reviewed": list(MANUAL_SCOPE), "note": "已导出", **values}
@@ -33,6 +47,83 @@ class CompletionTests(unittest.TestCase):
 
     def recheck(self, job, edit):
         return self.bench.recheck_edit(job["id"], edit["id"], {"request_id": uuid4().hex})
+
+    def test_skill_delivery_finishes_and_confirms_without_resolve_readback(self):
+        job, edit = self.skill_finished()
+        self.assertEqual((edit["status"], edit["completion_policy"]), ("completed", "skill_delivery"))
+        self.assertIsNone(edit["validation"])
+        self.assertEqual(self.bench.production.job(job["id"])["status"], "awaiting_review")
+        calls = len(self.bench.runner.calls)
+        self.bench.runner.final_inspect = RuntimeError("this test must not read Resolve")
+        result = self.approve(job, edit)
+        self.assertTrue(result["approved"])
+        self.assertEqual(result["job"]["status"], "approved")
+        self.assertEqual(result["edit"]["status"], "completed")
+        self.assertEqual(result["edit"]["approval"]["basis"], "human_review")
+        self.assertIsNone(result["edit"]["validation"])
+        self.assertNotIn("verification_history", result["edit"])
+        self.assertEqual(len(self.bench.runner.calls), calls)
+        revoked = self.bench.approve_edit(job["id"], edit["id"], {"request_id": uuid4().hex, "approved": False})
+        self.assertEqual((revoked["approved"], revoked["job"]["status"]), (False, "awaiting_review"))
+        self.assertEqual(len(self.bench.runner.calls), calls)
+
+    def test_skill_delivery_still_requires_manual_confirmation_of_current_version(self):
+        job, edit = self.skill_finished()
+        calls = len(self.bench.runner.calls)
+        for reviewed in ([], list(MANUAL_SCOPE[:2])):
+            with self.assertRaises(VoiceError) as caught:
+                self.approve(job, edit, reviewed=reviewed)
+            self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(len(self.bench.runner.calls), calls)
+        self.start(self.bench.production.job(job["id"]))
+        self.wait(job["id"])
+        with self.assertRaises(VoiceError) as caught:
+            self.approve(job, edit)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIsNone(self.bench.production.job(job["id"])["edits"][0].get("approval"))
+
+    def test_skill_delivery_saved_failure_cannot_be_manually_confirmed(self):
+        job, edit = self.skill_finished()
+        data = self.bench.production.read()
+        stored = next(item for item in data["jobs"] if item["id"] == job["id"])["edits"][-1]
+        for report in ({"saved": False}, {}):
+            with self.subTest(report=report):
+                stored.update(status="completed", report=report)
+                self.bench.production.write(data)
+                with self.assertRaises(VoiceError) as caught:
+                    self.approve(job, edit)
+                self.assertEqual(caught.exception.status, 409)
+                self.assertEqual(self.bench.production.job(job["id"])["status"], "needs_repair")
+
+    def test_skill_delivery_reported_material_gap_cannot_be_confirmed_complete(self):
+        job, edit = self.skill_finished()
+        data = self.bench.production.read()
+        stored = next(item for item in data["jobs"] if item["id"] == job["id"])["edits"][-1]
+        stored["report"]["gaps"] = [{"start": 30, "end": 60, "need": "实拍锁紧旋钮"}]
+        self.bench.production.write(data)
+        self.assertEqual(self.bench.production.job(job["id"])["status"], "needs_material")
+        with self.assertRaises(VoiceError) as caught:
+            self.approve(job, edit)
+        self.assertEqual(caught.exception.status, 409)
+
+    def test_new_pending_result_is_recovery_not_failed_engineering_verification(self):
+        job, edit = self.skill_finished()
+        data = self.bench.production.read()
+        stored = next(item for item in data["jobs"] if item["id"] == job["id"])["edits"][-1]
+        stored.update(status="running", execution_status="running")
+        self.bench.production.write(data)
+        path = self.bench.production.root / "edits" / edit["id"] / "result.json"
+        journal = json.loads(path.read_text(encoding="utf-8"))
+        journal["persisted_at"] = ""
+        path.write_text(json.dumps(journal), encoding="utf-8")
+        before = self.bench.production.path.read_bytes()
+        pending = self.bench.production.job(job["id"])
+        self.assertEqual(pending["status"], "needs_repair")
+        self.assertIsNone(pending["edits"][-1]["validation"])
+        self.assertTrue(pending["edits"][-1]["result_pending"])
+        self.assertIn("结果待恢复", pending["edits"][-1]["error"])
+        self.assertNotIn("核验", pending["edits"][-1]["error"])
+        self.assertEqual(self.bench.production.path.read_bytes(), before)
 
     def test_confirmation_reads_back_saves_and_completes_the_job(self):
         job, edit = self.finished()

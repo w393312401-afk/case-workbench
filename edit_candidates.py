@@ -1,6 +1,6 @@
 """Candidate footage for an AI edit, prepared before the AI starts and remembered across edits.
 
-The workbench lists every material clip with its labels, its source range and the parts other edits already used,
+The workbench lists every material clip with its labels and its full source range,
 and exports a few frames of each clip into one contact image. What an AI later writes about a clip it looked at is
 kept per source range, so the next edit of the same footage reads text instead of looking at the frames again.
 """
@@ -82,10 +82,10 @@ def rank_by_relevance(candidates, wanted_text):
     return [item for _, _, item in sorted(scored, key=lambda value: value[:2])]
 
 
-def build_candidates(listing):
-    """Material clips with their free source ranges; overlap uses half-open source frames, as the validation does."""
+def build_candidates(listing, *, deduplicate_source_ranges=False):
+    """List complete material clips; archived source-range deduplication requires explicit opt-in."""
     used = {}
-    for item in listing.get("used") or []:
+    for item in (listing.get("used") or []) if deduplicate_source_ranges else []:
         span = source_span(item)
         if not span:
             continue
@@ -101,7 +101,8 @@ def build_candidates(listing):
             left, right = span
             spans = used.get(_identity(clip), []) + used.get(f"media:{clip.get('media_id')}", [])
             overlapping = [(a, b, name) for a, b, name in spans if max(a, left) < min(b, right)]
-            free = [list(span) for span in _intervals_uncovered([(a, b) for a, b, _ in overlapping], left, right)]
+            free = ([list(span) for span in _intervals_uncovered([(a, b) for a, b, _ in overlapping], left, right)]
+                    if deduplicate_source_ranges else [[left, right]])
             found.append({"key": candidate_key(clip), "label": " / ".join(clip.get("labels") or []) or clip.get("name") or "",
                           "timeline": material["name"], "timeline_uid": material["unique_id"], "item_uid": clip.get("uid"),
                           "record": [clip["start"], clip["end"]], "source": [left, right], "frames": clip["end"] - clip["start"],
@@ -109,6 +110,8 @@ def build_candidates(listing):
                           "used_by": sorted({name for _, _, name in overlapping if name}),
                           "media_id": clip.get("media_id"), "media_path": clip.get("media_path") or "", "has_audio": clip.get("has_audio"),
                           "label_status": label_status(clip)})
+    if not deduplicate_source_ranges:
+        return found
     unique = {}
     for candidate in found:
         unique.setdefault(candidate["key"], candidate)
@@ -184,19 +187,19 @@ def remember(entries, candidate, **values):
 
 
 def _describe_free(candidate):
-    if candidate["free_frames"] == candidate["frames"] and not candidate["used_by"]:
+    if candidate["free"] == [candidate["source"]] and not candidate["used_by"]:
         return "全段可用"
     spans = " ".join(f"[{a}, {b})" for a, b in candidate["free"])
     return f"可用源帧 {spans}（其余已被 {'、'.join(candidate['used_by']) or '其他成片'} 用过）"
 
 
-def write_task_files(folder, found, index, entries, listing):
+def write_task_files(folder, found, index, entries, listing, *, deduplicate_source_ranges=False):
     """candidates.json/.md in the task folder; contact images are linked in, not copied, when the volume allows."""
     target = Path(folder) / "candidates"
     target.mkdir(parents=True, exist_ok=True)
     listed = []
     for candidate in found:
-        if candidate["free_frames"] < MIN_FREE_FRAMES:
+        if deduplicate_source_ranges and candidate["free_frames"] < MIN_FREE_FRAMES:
             continue
         grid, image = index.grid(candidate["key"]), None
         if grid:
@@ -209,12 +212,14 @@ def write_task_files(folder, found, index, entries, listing):
         description = (entries.get(candidate["key"]) or {}).get("description")
         listed.append({**candidate, "grid": f"candidates/{image.name}" if image else None, "description": description})
     data = {"schema_version": 1, "materials": [material["name"] for material in listing.get("materials") or []],
-            "missing": listing.get("missing") or [], "used_complete": bool(listing.get("used_complete")), "candidates": listed}
+            "missing": listing.get("missing") or [], "dedup_enabled": deduplicate_source_ranges,
+            "used_complete": bool(listing.get("used_complete")) if deduplicate_source_ranges else False, "candidates": listed}
     (Path(folder) / "candidates.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     lines = ["# 候选画面", "",
              "每行一个素材片段：候选编号｜标签｜标签状态｜素材时间线位置（帧，半开）｜时长｜可用范围｜对照图｜画面描述。",
              "「已核标签」是打标签技能看过画面后写的，可直接按标签选材；其余状态的片段，选用前先看对照图或已有描述。",
-             "可用范围按实时工程里其他成片时间线算出，源帧坐标；已被用尽的片段没有列出。", ""]
+             ("可用范围按实时工程里其他成片时间线算出，源帧坐标；已被用尽的片段没有列出。"
+              if deduplicate_source_ranges else "按完整素材源区间提供候选，不因其他成片使用过而排除。"), ""]
     for name in data["materials"]:
         rows = [item for item in listed if item["timeline"] == name]
         lines += [f"## {name}（{len(rows)} 个可用片段）", ""]

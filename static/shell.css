@@ -123,3 +123,7 @@
 @media(max-width:760px){.sidebar-heading{display:contents}}
 @media(max-width:760px){.topbar-left{display:none}}
 @media(prefers-reduced-motion:reduce){html.sidebar-collapsed body>.sidebar{transition:none}}
+
+/* The top bar stays pinned in every module on desktop; content that sticks below it uses --topbar-h. */
+:root{--topbar-h:64px}
+@media(min-width:761px){.topbar{position:sticky;top:0;z-index:20}}

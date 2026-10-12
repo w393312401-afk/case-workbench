@@ -160,6 +160,12 @@ class HistoricalBaselineTests(unittest.TestCase):
         self.assertTrue(validation["checks"]["groups_preserved"])
         self.assertEqual({path: path.read_bytes() for path in before}, before)
 
+    def test_timelines_built_with_the_older_full_marker_note_still_restore(self):
+        for marker in meaning_markers(self.job, self.take, "29.97", legacy=True):
+            self.old_timeline["markers"][str(marker["frame"])]["note"] = marker["note"]
+        self.write_snapshot()
+        self.assertEqual(self.restore()["baseline_origin"], "historical_resume")
+
     def test_same_length_current_voice_replacement_does_not_pass(self):
         baseline = self.restore()["baseline"]
         post = self.current(baseline)

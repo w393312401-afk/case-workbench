@@ -10,16 +10,21 @@ import zipfile
 from PIL import Image, ImageDraw
 
 from codex_bridge import BridgeError
+from production_store import carousel_input_signature
+from uuid import uuid4
 import test_production_carousel_ui as carousel_fixture
 
 
 class ReadOnlyReviewer:
+    direct_image_edit = True
+    source = "cockpit_image_edit"
+
     def __init__(self):
         self.calls = []
         self.fail_next = False
 
     def status(self):
-        return {"available": True, "label": "Isolated read-only review fixture"}
+        return {"available": True, "label": "Isolated read-only review fixture", "source": self.source, "review_available": False}
 
     def run(self, prompt, *, cwd, images, cancel_event, on_progress, read_only=False, **options):
         snapshot = json.loads((Path(cwd) / "input.json").read_text(encoding="utf-8"))
@@ -90,30 +95,34 @@ class CarouselFinishedBrowserTests(unittest.TestCase):
         modal = page.locator(".production-dialog[open]")
         modal.locator('[name="directory"]').fill(str(folder))
         modal.locator('[name="import_hands_authorized"]').check()
-        modal.get_by_role("button", name="登记为待核对候选", exact=True).click()
+        modal.get_by_role("button", name="导入图片", exact=True).click()
         modal.wait_for(state="detached")
         page.locator(".carousel-output").first.wait_for()
 
-    def recheck_ui(self, page, output_id):
-        page.locator(f'[data-output-id="{output_id}"] [data-recheck-output]').click()
-        modal = page.locator(".production-dialog[open]")
-        modal.get_by_text("不会再次生图", exact=False).wait_for()
-        modal.get_by_role("button", name="开始重新核对", exact=True).click()
-        modal.wait_for(state="detached")
-        page.wait_for_function("id => { const n=document.querySelector(`[data-output-id='${id}'] [data-recheck-output]`); return n && !n.disabled; }", arg=output_id)
+    def record_legacy_review(self, output, status='review_failed'):
+        item = self.detail()
+        slide = next(entry for entry in item['slides'] if entry['number'] == output['slide'])
+        signature = carousel_input_signature(item, slide, output['aspect'])
+        run_id = 'REV-' + uuid4().hex[:12]
+        def body(**extra):
+            return {'request_id': uuid4().hex, 'revision': self.app.production.public()['revision'],
+                    'carousel_id': self.carousel['id'], 'slide': output['slide'], 'output_id': output['id'], **extra}
+        self.app.production.mutate('carousel_review_start', body(), {'id': run_id, 'status': 'running',
+            'started_at': '2026-10-11T09:00:00Z', 'file_sha256': output['sha256'],
+            'input_signature': signature, 'requirements_signature': output.get('requirements_signature'),
+            'scope': ['visual', 'text', 'product', 'evidence']})
+        self.app.production.mutate('carousel_review_finish', body(review_id=run_id), {'status': 'completed',
+            'finished_at': '2026-10-11T09:01:00Z', 'file_sha256': output['sha256'], 'input_signature': signature,
+            'review': {'status': status, 'summary': '旧自动核对信息', 'checks': [], 'issues': ['旧问题']}})
 
-    def confirm_ui(self, page, output_id, actor="human"):
+    def confirm_ui(self, page, output_id):
+        card = page.locator(f'[data-output-id="{output_id}"]')
+        if not card.is_visible():
+            card.locator('xpath=ancestor::*[@data-image-slide][1]').locator('[data-image-versions-toggle]').click()
         page.locator(f'[data-output-id="{output_id}"] [data-approve-output]').click()
-        modal = page.locator(".production-dialog[open]")
-        if modal.locator('[name="actor"]').count():
-            self.assertEqual(modal.locator('[name="actor"]').input_value(), "human")
-            modal.locator('[name="actor"]').select_option(actor)
-        if modal.locator('[name="acknowledge"]').count():
-            modal.locator('[name="acknowledge"]').check()
-        modal.get_by_role("button", name="确认并选用", exact=True).click()
         page.locator(f'[data-output-id="{output_id}"] [data-revoke-output]').wait_for(state="attached")
 
-    def test_import_without_base_is_pending_deduplicated_and_can_be_reviewed_without_generation(self):
+    def test_import_without_base_shows_only_images_and_can_be_confirmed_without_generation(self):
         page = self.open_page(f"#production/{self.carousel['id']}")
         page.set_viewport_size({"width": 390, "height": 844})
         page.locator('[data-step="pick"]').click()
@@ -121,54 +130,49 @@ class CarouselFinishedBrowserTests(unittest.TestCase):
         page.locator('[data-step="images"]').click()
         self.import_ui(page, self.folder)
         self.assertEqual(page.locator(".carousel-output").count(), 3)
-        page.locator(".carousel-output").first.get_by_text("模型：未知", exact=False).wait_for()
-        self.assertTrue(page.locator('[data-image-slide="1"] [data-approve-output]').is_disabled())
+        self.assertEqual(page.locator('.carousel-output figcaption,.carousel-output p,.carousel-output details,[data-recheck-output]').count(), 0)
+        self.assertFalse(page.locator('[data-image-slide="1"] [data-approve-output]').is_disabled())
         first = self.detail()["slides"][0]["outputs"][0]
         self.assertFalse(first["approved"])
         self.assertIsNone(first["generation_id"])
         self.import_ui(page, self.folder)
         self.assertEqual(page.locator(".carousel-output").count(), 3)
-        self.recheck_ui(page, first["id"])
-        self.confirm_ui(page, first["id"], actor="assistant_on_user_authorization")
+        self.confirm_ui(page, first["id"])
         confirmed = next(output for output in self.detail()["slides"][0]["outputs"] if output["id"] == first["id"])
-        self.assertEqual(confirmed["approval_actor"], "assistant_on_user_authorization")
-        page.locator(f'[data-output-id="{first["id"]}"] figcaption').get_by_text("确认来源：助手按用户授权核对", exact=True).wait_for()
-        page.wait_for_function("() => { const n=document.querySelector('#carousel-first-preflight [data-preflight-result]'); return n && n.textContent && !n.classList.contains('ai-error'); }")
+        self.assertEqual(confirmed["approval_actor"], "human")
+        self.assertEqual(page.locator('.production-dialog[open]').count(), 0)
         self.assertTrue(self.request("GET", f"/api/production/carousels/{self.carousel['id']}/preflight")[2]["first_ready"])
         self.assertTrue(page.locator("#carousel-prepare-delivery").is_disabled())
-        self.assertTrue(all(call["read_only"] for call in self.reviewer.calls))
+        self.assertEqual(self.reviewer.calls, [])
         self.assertEqual(self.detail()["generations"], [])
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 
-    def test_failed_new_candidate_retains_confirmed_selection_and_independent_retry_can_select(self):
+    def test_old_failed_review_does_not_block_candidate_selection_or_show_reports(self):
         page = self.open_page(f"#production/{self.carousel['id']}")
         self.import_ui(page, self.folder)
         old = self.detail()["slides"][0]["outputs"][0]["id"]
-        self.recheck_ui(page, old)
         self.confirm_ui(page, old)
-        second_folder = self.make_finished("ui-new-candidate", offset=8)
-        self.import_ui(page, second_folder)
+        self.import_ui(page, self.make_finished("ui-new-candidate", offset=8))
         slide = self.detail()["slides"][0]
-        new = slide["outputs"][-1]["id"]
+        new = slide["outputs"][-1]
         self.assertEqual(slide["output_id"], old)
-        self.reviewer.fail_next = True
-        self.recheck_ui(page, new)
-        self.assertTrue(page.locator(f'[data-output-id="{new}"] [data-approve-output]').is_disabled())
-        self.assertEqual(self.detail()["slides"][0]["output_id"], old)
-        page.locator(f'[data-output-id="{new}"] .ai-error').get_by_text("核对暂时失败", exact=False).wait_for()
-        self.recheck_ui(page, new)
-        self.confirm_ui(page, new)
-        self.assertEqual(self.detail()["slides"][0]["output_id"], new)
+        self.record_legacy_review(new)
+        page.reload()
+        page.locator('[data-step="images"]').click()
+        card = page.locator(f'[data-output-id="{new["id"]}"]')
+        self.assertFalse(card.locator('[data-approve-output]').is_disabled())
+        self.assertEqual(card.inner_text(), '确认选用')
+        self.confirm_ui(page, new["id"])
+        self.assertEqual(self.detail()["slides"][0]["output_id"], new["id"])
         self.confirm_ui(page, old)
         self.assertEqual(self.detail()["slides"][0]["output_id"], old)
-        self.assertTrue(all(call["read_only"] for call in self.reviewer.calls))
+        self.assertEqual(self.reviewer.calls, [])
 
     def test_ui_download_tracks_collection_of_selected_bytes_and_keeps_unpublished(self):
         page = self.open_page(f"#production/{self.carousel['id']}")
         self.import_ui(page, self.folder)
         for slide in self.detail()["slides"]:
             output_id = slide["outputs"][0]["id"]
-            self.recheck_ui(page, output_id)
             self.confirm_ui(page, output_id)
         page.locator('[data-step="delivery"]').click()
         # The confirmed group is already packaged; pressing the button reuses that package.
@@ -186,8 +190,7 @@ class CarouselFinishedBrowserTests(unittest.TestCase):
             for number in (1, 2, 3):
                 self.assertEqual(hashlib.sha256(archive.read(f"{number:02}.png")).hexdigest(),
                                  hashlib.sha256((self.folder / "PNG" / f"{number:02}.png").read_bytes()).hexdigest())
-            manifest = json.loads(archive.read("manifest.json"))
-            self.assertEqual(manifest["carousel_id"], self.carousel["id"])
+            self.assertEqual(archive.namelist(), [f"{number:02}.png" for number in (1, 2, 3)])
         page.locator(".delivery-package-state").get_by_text("已领取", exact=False).wait_for()
         page.locator(".delivery-publication-state").get_by_text("未发布", exact=True).wait_for()
         self.assertIsNone(self.detail().get("publication"))
@@ -213,16 +216,10 @@ class CarouselFinishedBrowserTests(unittest.TestCase):
         self.assertEqual(self.reviewer.calls, [])
         self.assertEqual(self.detail()["generations"], [])
 
-    def test_confirmation_conflict_preserves_actor_note_and_requires_manual_retry(self):
+    def test_confirmation_conflict_requires_manual_retry_and_keeps_image_available(self):
         page = self.open_page(f"#production/{self.carousel['id']}")
         self.import_ui(page, self.folder)
         output_id = self.detail()["slides"][0]["outputs"][0]["id"]
-        self.recheck_ui(page, output_id)
-        page.locator(f'[data-output-id="{output_id}"] [data-approve-output]').click()
-        modal = page.locator('.production-dialog[open]')
-        modal.locator('[name="actor"]').select_option("assistant_on_user_authorization")
-        modal.locator('[name="note"]').fill("已按授权核对，保留生成视觉版的实拍证据限制")
-        modal.locator('[name="acknowledge"]').check()
         sent = []
 
         def conflict_once(route):
@@ -236,19 +233,16 @@ class CarouselFinishedBrowserTests(unittest.TestCase):
                 route.continue_()
 
         page.route("**/api/production/carousels/*/approval", conflict_once)
-        modal.get_by_role("button", name="确认并选用", exact=True).click()
-        modal.locator('[data-error]').get_by_text("资料已更新，输入已保留，检查后重试。", exact=False).wait_for()
+        button = page.locator(f'[data-output-id="{output_id}"] [data-approve-output]')
+        button.click()
+        page.locator('#toast').get_by_text("资料已更新，输入已保留，检查后重试。", exact=False).wait_for()
         self.assertEqual(len(sent), 1, "The UI must not auto-submit after refreshing the revision")
-        self.assertEqual(modal.locator('[name="actor"]').input_value(), "assistant_on_user_authorization")
-        self.assertEqual(modal.locator('[name="note"]').input_value(), "已按授权核对，保留生成视觉版的实拍证据限制")
-        self.assertTrue(modal.locator('[name="acknowledge"]').is_checked())
-        modal.get_by_role("button", name="确认并选用", exact=True).click()
-        page.locator(f'[data-output-id="{output_id}"] [data-revoke-output]').wait_for(state="attached")
+        self.assertFalse(button.is_disabled())
+        self.confirm_ui(page, output_id)
         self.assertEqual(len(sent), 2)
         self.assertNotEqual(sent[1]["revision"], sent[0]["revision"])
         saved = next(output for output in self.detail()["slides"][0]["outputs"] if output["id"] == output_id)
-        self.assertEqual(saved["approval_actor"], "assistant_on_user_authorization")
-        self.assertEqual(saved["note"], "已按授权核对，保留生成视觉版的实拍证据限制")
+        self.assertEqual(saved["approval_actor"], "human")
 
 
 if __name__ == "__main__":

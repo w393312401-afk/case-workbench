@@ -31,6 +31,7 @@
     return { product: renderedProduct, filters, shown: rev.shown, open: [...rev.open], hash: pageURL(`#reviews${query ? `?${query}` : ""}`) };
   }
   function leaveList() {
+    moreObserver?.disconnect();
     cancelSearch();
     rev.editing.clear();
   }
@@ -148,6 +149,8 @@
     for (const key of ["new_recent", "picks", "tag_edits"]) summary[key] ||= 0;
     rev.summary = summary;
   }
+
+  let moreObserver = null;
 
   async function loadResults() {
     const mine = ++rev.request, hash = pageHash(), query = params().toString();
@@ -443,7 +446,17 @@
     $("#rev-results").innerHTML = resultsMarkup();
     $("#rev-count").textContent = `${num(rev.data.total)} 条`;
     $("#rev-query-note").innerHTML = queryNote(rev.data);
-    $("#rev-more")?.addEventListener("click", () => { cancelSearch(); rev.shown += 50; refresh(); });
+    moreObserver?.disconnect();
+    const more = $("#rev-more");
+    if (more) {
+      const showMore = () => { moreObserver?.disconnect(); cancelSearch(); rev.shown += 50; refresh(); };
+      more.addEventListener("click", showMore);
+      // Reaching the end of the list loads the next page; the button stays as a fallback.
+      if ("IntersectionObserver" in window) {
+        moreObserver = new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) showMore(); }, { rootMargin: "0px 0px 600px 0px" });
+        moreObserver.observe(more);
+      }
+    }
     // A repaint (more results, another filter) replaces the cards; conversations that were open stay open.
     for (const id of rev.open) {
       const box = document.getElementById(`rev-thread-${id}`);

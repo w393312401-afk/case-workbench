@@ -72,7 +72,7 @@ class CodexEditingTests(unittest.TestCase):
         self.assertFalse((folder / "skill" / "agents").exists())
         self.assertIn((folder / "handoff.md").read_text(encoding="utf-8"), call["prompt"])
         self.assertIn("davinci-product-video-editing", call["profile"]["rules"])
-        self.assertEqual(call["profile"]["dirs"], [str(self.bench.ledger_dir)])
+        self.assertEqual(call["profile"]["dirs"], [])
         self.assertEqual(call["profile"]["mcp"].keys(), {"resolve"})
         self.assertIn("mcp__resolve__run_script", call["profile"]["allowed"])
         self.assertIn("mcp__resolve__run_script_unsafe", call["profile"]["denied"])
@@ -172,23 +172,24 @@ class CodexEditingTests(unittest.TestCase):
         self.assertIsNone(edit["effective_model"])
         self.assertIsNone(edit["effective_effort"])
 
-    def test_codex_result_still_requires_independent_timeline_validation(self):
-        for expected, reply in (("awaiting_review", fixture.inspect_reply(shots=((0, 200), (200, 400)))),
-                                ("needs_material", fixture.inspect_reply(gaps=((200, 400),))),
-                                ("needs_repair", fixture.inspect_reply())):
-            with self.subTest(status=expected):
+    def test_codex_skill_delivery_does_not_add_independent_timeline_validation(self):
+        for reply in (fixture.inspect_reply(shots=((0, 200), (200, 400))),
+                      fixture.inspect_reply(gaps=((200, 400),)), fixture.inspect_reply()):
+            with self.subTest(reply=reply):
                 job = self.timeline_job()
                 self.bench.runner.inspect = reply
                 self.start(job, model="codex-default")
                 edit = self.wait(job["id"])
-                self.assertEqual((edit["status"], edit["validation"]["status"]), (expected, expected))
+                self.assertEqual(edit["status"], "completed")
+                self.assertIsNone(edit["validation"])
                 self.assertEqual(edit["execution_status"], "completed")
-                self.assertIsNotNone(edit["baseline"])
-                self.assertTrue(self.bench.runner.calls[-1]["save"])
+                self.assertIsNone(edit["baseline"])
+                self.assertEqual(edit["completion_policy"], "skill_delivery")
+                self.assertFalse(any(call["command"] == "inspect" for call in self.bench.runner.calls))
                 self.assertFalse(self.bench.resolve.busy())
         self.assertEqual(self.editor.calls, [])
 
-    def test_cancel_reports_native_progress_then_reads_back_and_unlocks_resolve(self):
+    def test_cancel_reports_native_progress_and_unlocks_without_readback(self):
         self.codex.block = True
         job = self.timeline_job()
         started = self.start(job, model="codex-default")["edit"]
@@ -202,8 +203,9 @@ class CodexEditingTests(unittest.TestCase):
         self.bench.cancel_edit(job["id"], started["id"])
         edit = self.wait(job["id"])
         self.assertEqual((edit["status"], edit["execution_status"]), ("cancelled", "cancelled"))
-        self.assertIsNotNone(edit["summary"])
-        self.assertTrue(self.bench.runner.calls[-1]["save"])
+        self.assertIsNone(edit["summary"])
+        self.assertIsNone(edit["validation"])
+        self.assertFalse(any(call["command"] == "inspect" for call in self.bench.runner.calls))
         self.assertFalse(self.bench.resolve.busy())
         self.assertFalse(self.bench.edit_running())
         self.assertEqual(self.editor.calls, [])
@@ -216,7 +218,9 @@ class CodexEditingTests(unittest.TestCase):
         self.assertEqual((edit["status"], edit["execution_status"], edit["error"]),
                          ("failed", "failed", "Codex 测试连接中断"))
         self.assertEqual(edit["effective_model"], "gpt-6.1-sol")
-        self.assertIsNotNone(edit["summary"])
+        self.assertIsNone(edit["summary"])
+        self.assertIsNone(edit["validation"])
+        self.assertFalse(any(call["command"] == "inspect" for call in self.bench.runner.calls))
         self.assertFalse(self.bench.resolve.busy())
         self.assertFalse(self.bench.edit_running())
         self.assertEqual(self.editor.calls, [])
@@ -236,13 +240,13 @@ class CodexEditingTests(unittest.TestCase):
         self.assertEqual(len(self.bench.runner.calls), before)
         self.assertEqual(self.editor.calls, [])
 
-    def test_malformed_readback_records_verification_failure_and_releases_locks(self):
+    def test_unrequested_malformed_readback_does_not_block_delivery(self):
         job = self.timeline_job()
         self.bench.runner.final_inspect = {"ok": True, "tracks": []}
         self.start(job, model="codex-default")
         edit = self.wait(job["id"])
-        self.assertEqual((edit["status"], edit["execution_status"]), ("verification_failed", "completed"))
-        self.assertEqual(edit["validation"]["issues"][0]["code"], "readback_invalid")
+        self.assertEqual((edit["status"], edit["execution_status"]), ("completed", "completed"))
+        self.assertIsNone(edit["validation"])
         self.assertFalse(self.bench.resolve.busy())
         self.assertFalse(self.bench.edit_running())
 

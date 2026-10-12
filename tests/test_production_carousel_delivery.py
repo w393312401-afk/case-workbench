@@ -16,7 +16,7 @@ sys.path.insert(0, str(APP))
 from PIL import Image
 from elevenlabs_client import VoiceError
 import test_production_carousel_images as images_fixture
-from workbench_carousel_delivery import CarouselDeliveryMixin, carousel_selection_signature
+from workbench_carousel_delivery import CarouselDeliveryMixin, carousel_selection_signature, _manifest
 
 
 class DeliveryBench(images_fixture.ImageBench, CarouselDeliveryMixin):
@@ -49,7 +49,7 @@ class CarouselDeliveryTests(unittest.TestCase):
             method(*args, **kwargs)
         self.assertEqual(caught.exception.status, status)
 
-    def test_package_preserves_original_bytes_order_words_and_checked_manifest(self):
+    def test_package_preserves_original_bytes_and_order_without_extra_files(self):
         item = self.ready()
         # Include JPEG and WebP without rewriting the bytes during collection.
         with self.bench.lock:
@@ -62,7 +62,7 @@ class CarouselDeliveryTests(unittest.TestCase):
                     image.save(target)
                 output.update(file=f"outputs/{target.name}", sha256=hashlib.sha256(target.read_bytes()).hexdigest())
             self.bench.production.write(catalog)
-        # Changing encoded bytes invalidates the old review, even when the picture looks the same.
+        # Changing encoded bytes invalidates the old manual confirmation, even when the picture looks the same.
         self.error(409, self.create)
         for number in (2, 3):
             output_id = self.current()["slides"][number - 1]["outputs"][-1]["id"]
@@ -82,12 +82,9 @@ class CarouselDeliveryTests(unittest.TestCase):
                 output = next(entry for entry in slide["outputs"] if entry["id"] == saved["output_id"])
                 source = self.bench.carousel_output(self.identifier, output["id"], "full")
                 self.assertEqual(archive.read(saved["file"]), source.read_bytes())
-            self.assertEqual(archive.read("caption_en.txt").decode(), item["caption_en"])
-            self.assertEqual(archive.read("caption_zh.txt").decode(), item["caption_zh"])
-            manifest = json.loads(archive.read("manifest.json"))
-            self.assertEqual(manifest["slides"], record["slides"])
-            self.assertEqual(manifest["carousel_id"], self.identifier)
-            self.assertIn("发布平台", archive.read("领取说明.txt").decode())
+            self.assertEqual(archive.namelist(), ["01.png", "02.jpg", "03.webp"])
+            self.assertTrue(record["images_only"])
+            self.assertEqual(record["caption_en"], item["caption_en"])
 
     def test_repeat_same_selection_reuses_one_complete_package_and_request_replays(self):
         self.ready()
@@ -99,6 +96,34 @@ class CarouselDeliveryTests(unittest.TestCase):
         self.assertEqual(len(self.current()["deliveries"]), 1)
         folders = list((self.bench._carousel_dir(self.identifier) / "deliveries").iterdir())
         self.assertEqual(len(folders), 1)
+
+    def test_old_information_package_remains_readable_and_new_collection_rebuilds_images_only(self):
+        self.ready()
+        old = self.create()["delivery"]
+        path = self.bench.carousel_delivery_file(self.identifier, old["id"])
+        with zipfile.ZipFile(path) as archive:
+            payloads = {name: archive.read(name) for name in archive.namelist()}
+        old.update(images_only=False, schema_version=2)
+        payloads.update({"caption_en.txt": old["caption_en"].encode(), "caption_zh.txt": old["caption_zh"].encode(),
+                         "manifest.json": json.dumps(_manifest(self.identifier, old), ensure_ascii=False).encode(),
+                         "领取说明.txt": b"Legacy collection instructions."})
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, payload in payloads.items():
+                archive.writestr(name, payload)
+        old["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.bench.lock:
+            data = self.bench.production.read()
+            data["carousels"][0]["deliveries"][0] = copy.deepcopy(old)
+            self.bench.production.write(data)
+        old_bytes = path.read_bytes()
+        self.assertEqual(self.bench._checked_delivery(self.identifier, old, complete=True), path)
+        self.assertFalse(self.bench.carousel_delivery_live(self.current())["deliveries"][0]["current"])
+        new = self.create()["delivery"]
+        self.assertNotEqual(new["id"], old["id"])
+        self.assertTrue(new["images_only"])
+        self.assertEqual(path.read_bytes(), old_bytes)
+        with zipfile.ZipFile(self.bench.carousel_delivery_file(self.identifier, new["id"])) as archive:
+            self.assertEqual(archive.namelist(), ["01.png", "02.png", "03.png"])
 
     def test_redo_makes_new_package_without_mutating_old_and_old_can_be_current_again(self):
         self.ready()
@@ -204,8 +229,7 @@ class CarouselDeliveryTests(unittest.TestCase):
         self.assertNotRegex(record["filename"], r'[<>:"/\\|?*\x00-\x1f]')
         self.assertIn("产品", record["filename"])
         with zipfile.ZipFile(self.bench.carousel_delivery_file(self.identifier, record["id"])) as archive:
-            expected = {"caption_en.txt", "caption_zh.txt", "manifest.json", "领取说明.txt"} | {slide["file"] for slide in record["slides"]} | {
-                entry["file"] for entry in record.get("attachments", [])}
+            expected = {slide["file"] for slide in record["slides"]}
             self.assertEqual(set(archive.namelist()), expected)
             self.assertFalse(any(PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts or "\\" in name
                                  for name in archive.namelist()))

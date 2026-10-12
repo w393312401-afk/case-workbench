@@ -23,6 +23,7 @@ from case_store import StoreError, case_id as validate_case_id, load_json
 from ai_skills import REVIEW, SELECTIONS, SkillRuntime, SkillRuntimeError
 from sales_data import SalesDataResolver, prompt_sales_projection, unavailable_data
 from direction_store import product_key
+from task_activity import record_activity, safe_error
 
 
 TASK_RE = re.compile(r"AIT-[0-9a-f]{12}\Z")
@@ -161,21 +162,18 @@ FORMAT_ONLY_PROMPT = """你只做格式整理，不写作、不改稿。把 <unt
 |---|---|---|---|---|
 | 1 | <该行口播> | <只摘自原文的所需画面/画面说明，没有就留空> | <原文有才写> | <原文有才写> |
 
-3. 原文的其他内容（测试方向、变化说明、所需画面、补拍清单、发布文案代码块、图文版逐张表与 JSON、发布前核对、核对范围）原样保留在各自位置。
-4. 原文开了图文版却没有 JSON 代码块时，可按原文逐张表补一个 ```json 代码块：content_type 为 photo_carousel，slides 每张含 number、title_lines、body、title_zh、body_zh，caption_en、caption_zh 取原文图文发布文案；文字逐字取自原文。
-5. 原文若不是脚本候选（例如只回答问题或只做分析），只输出一行：NO_SCRIPT
+3. 原文的其他内容（测试方向、变化说明、所需画面、补拍清单、发布文案代码块、发布前核对、核对范围，以及早期候选里已有的图文版逐张表与 JSON）原样保留在各自位置，不新增图文版。
+4. 原文若不是脚本候选（例如只回答问题或只做分析），只输出一行：NO_SCRIPT
 
 直接输出整理后的全文，不加任何前言或说明。
 """
 
 
-def _plan_instruction(plan, carousel=False):
+def _plan_instruction(plan):
     numbers = "、".join(f"#{item['number']}" for item in plan["variants"])
     parts = [f"按所选 {len(plan['variants'])} 条已登记变体（{numbers}）各写一条"] if plan["variants"] else []
     if plan["new_variant_count"]:
         parts.append(f"另提出 {plan['new_variant_count']} 条建议新增变体")
-    if carousel:
-        parts.append("每条附图文版")
     return "，".join(parts) + "。"
 
 
@@ -246,8 +244,9 @@ def _writing_projection(snapshot):
 
 
 class AITaskManager:
-    def __init__(self, store, runtime_root, lock, bridge=None, review_digest=None, sales_resolver=None):
+    def __init__(self, store, runtime_root, lock, bridge=None, review_digest=None, sales_resolver=None, activity=None):
         self.store = store
+        self.activity = activity
         self.runtime = Path(runtime_root).resolve()
         self.lock = lock
         # product text -> digest dict of the user-review library, or None when the library does not cover the product
@@ -283,6 +282,28 @@ class AITaskManager:
                     self._write(task)
         self._worker = threading.Thread(target=self._work, name="case-assistant-worker", daemon=True)
         self._worker.start()
+
+    def _activity(self, task, *, status=None, phase, message, **fields):
+        """Separate, best-effort telemetry: never write task revisions or model text."""
+        try:
+            turn = task["rounds"][-1]
+            labels = {"variants": "AI 写稿", "review": "AI 审稿", "retrospective": "AI 复盘"}
+            observed = status or turn["status"]
+            if self._executing == task["task_id"] and observed not in {"queued", "running", "stopping"}:
+                observed = "stopping"
+            record_activity(self, f"ai:{task['task_id']}:{turn['round_id']}",
+                            kind="ai", owner_id=task["task_id"], source_id=turn["round_id"],
+                            product=task["snapshot"].get("product", ""), case_id=task.get("case_id"),
+                            title=f"{labels.get(task['action'], 'AI 协作')} · {task.get('case_title') or '创作任务'} · 第 {len(task['rounds'])} 轮",
+                            status=observed, phase=phase, message=message, **fields)
+        except Exception:
+            pass
+
+    def _activity_step(self, task_id, **fields):
+        try:
+            self._activity(self._read(task_id), **fields)
+        except Exception:
+            pass
 
     def _case(self, identifier):
         try:
@@ -602,12 +623,6 @@ class AITaskManager:
                     "方向备注 notes 中的“不能说”与“待核”证据要求按事实护栏处理，证据未补齐时不写对应的强声称。"
                     "当前用户要求与所选变体冲突时，以用户要求为准并在稿外说明。"
                 )
-            if (task["snapshot"].get("creation_context") or {}).get("carousel"):
-                direction_rule += (
-                    "本轮用户打开了图文版：每条稿之后按写作参考“图文版”附一套 5 张挂车图文，含逐张作用、叠字、正文、中文、素材来源与禁写，"
-                    "以及与工作台图文制作 copy.json 同结构的 JSON 代码块和图文专用发布文案。效果证据图只用实拍，生成模型只做背景；"
-                    "活动话题只用用户本轮给出或资料已登记的当前活动，没有就不加。"
-                )
             if draft is not None and (task["snapshot"].get("creation_context") or {}).get("writing_plan"):
                 direction_rule += "复核时逐条核对：所选变体是否各有一条候选、编号与推进结构是否对应、开头是否说出主打卖点。"
         if task["action"] == "retrospective":
@@ -895,7 +910,6 @@ class AITaskManager:
                                              ((task["snapshot"].get("current") or {}).get("test_direction") or {}).get("direction_id"),
                              "materials": copy.deepcopy(context.get("materials") or []),
                              "writing_plan": copy.deepcopy(context.get("writing_plan")),
-                             "carousel": bool(context.get("carousel")),
                              "captured_at": task["snapshot"].get("captured_at")}
         result["busy"] = task["status"] in ACTIVE or self._executing == task["task_id"]
         result["stopping"] = task["status"] == "cancelled" and self._executing == task["task_id"]
@@ -1037,6 +1051,11 @@ class AITaskManager:
                     self._live_saved.pop(task_id, None)
                     self._changed()
                     deleted.append(task_id)
+                    if self.activity is not None:
+                        try:
+                            self.activity.delete_owner(task_id)
+                        except Exception:
+                            pass  # Activity cleanup must not invalidate a completed deletion.
                     try:
                         folder.rmdir()
                         folder.parent.rmdir()  # Only succeeds if collaboration is empty.
@@ -1070,7 +1089,7 @@ class AITaskManager:
                 raise AITaskError("按变体写稿只用于生成变体。")
             raw = body.get("instruction")
             # Ticked variants already say what to write; the request text is then optional.
-            instruction = _plan_instruction(plan, bool(context.get("carousel"))) if plan and (raw is None or isinstance(raw, str) and not raw.strip()) else _text(raw, "本次要求")
+            instruction = _plan_instruction(plan) if plan and (raw is None or isinstance(raw, str) and not raw.strip()) else _text(raw, "本次要求")
             case = self._case(case_id) if case_id else None
             if case is not None and body.get("revision") != _hash(case):
                 raise AITaskError("案例已变化，请刷新后重新发起 AI 任务。", 409)
@@ -1122,6 +1141,7 @@ class AITaskManager:
                     "requests": [{"request_id": key, "hash": request_hash, "round_id": turn["round_id"]}]}
             self._prompt(task)
             self._write(task, initial=True)
+            self._activity(task, phase="queued", message="本轮已登记，等待 AI 接单。")
             self._cancel_events[task_id] = threading.Event()
             self._queue.put(task_id)
             return self._detail(task)
@@ -1186,6 +1206,7 @@ class AITaskManager:
             if format_source is None:
                 self._prompt(task)
             self._write(task)
+            self._activity(task, phase="queued", message="续轮已登记，等待 AI 接单。")
             self._cancel_events[task_id] = threading.Event()
             self._queue.put(task_id)
             return self._detail(task)
@@ -1249,6 +1270,8 @@ class AITaskManager:
                 task.update(status="cancelled", progress="正在停止助手，请稍候。" if running else "已取消排队。")
                 task["rounds"][-1].update(status="cancelled", error=None, completed_at=None if running else _now())
                 self._write(task)
+                self._activity(task, status="stopping" if running else "cancelled", phase="stopping" if running else "finished",
+                               message="已请求取消，正在等待 AI 停止。" if running else "已取消排队，本轮未执行。")
                 if event:
                     event.set()
             elif request:
@@ -1380,6 +1403,8 @@ class AITaskManager:
             stage = self._live[task_id]["stages"][name]
             stage.update(status="completed", output=output, completed_at=_now())
             self._checkpoint_live(task_id, True)
+            self._activity_step(task_id, phase=name,
+                           message="独立复核已保存。" if name == "review" else "初稿已保存，尚未完成独立复核。")
 
     def _run_variant_stages(self, task, resources, event, prompt):
         task_id, turn = task["task_id"], task["rounds"][-1]
@@ -1416,20 +1441,20 @@ class AITaskManager:
             task = self._read(task_id)
             task["progress"] = "初稿已保存，正在独立复核表达、原片对应和事实。"
             self._write(task)
+            self._activity(task, phase="review", message="正在独立复核表达、原片对应和事实。")
             review_prompt = self._prompt(task, resources, review_bundle=review_bundle, draft=draft)
         reviewed = self.bridge.run(review_prompt, **kwargs,
                                    on_progress=lambda message: self._progress(task_id, "独立复核中 · " + str(message)),
                                    skills=[{"name": skill["name"], "path": skill["path"]} for skill in stage["skills"]],
                                    on_event=lambda value: self._on_event(task_id, value, "review"))
         self._finish_stage(task_id, "review", reviewed)
-        carousel = bool((task["snapshot"].get("creation_context") or {}).get("carousel"))
-        formatted, check = self._format_pass(task_id, turn, reviewed, event, carousel=carousel, automatic=True)
+        formatted, check = self._format_pass(task_id, turn, reviewed, event, automatic=True)
         with self.lock:
             self._live[task_id]["format_check"] = check
             self._checkpoint_live(task_id, True)
         return formatted or reviewed
 
-    def _format_pass(self, task_id, turn, text, event, *, carousel, automatic):
+    def _format_pass(self, task_id, turn, text, event, *, automatic):
         """Re-lay out a candidate that missed the delivery format; keep it only if no spoken or slide word changed.
 
         Returns (formatted text or None, check record). Automatic runs never fail the round: a refused or failed
@@ -1437,7 +1462,7 @@ class AITaskManager:
         """
         from variant_parse import delivery_ready, looks_like_script, reformat_problems
 
-        if delivery_ready(text, carousel):
+        if delivery_ready(text):
             return None, {"status": "ok"}
         if automatic and not looks_like_script(text):
             return None, {"status": "skipped", "reason": "候选里没有可识别的英文口播，未整理格式。"}
@@ -1446,9 +1471,9 @@ class AITaskManager:
             live.setdefault("stages", {})["format"] = self._stage({}, turn, "running")
             live.update(active_stage="format")
             self._checkpoint_live(task_id, True)
+            self._activity_step(task_id, phase="format", message="正在整理交付格式，保留原稿措辞。")
         self._progress(task_id, "候选没有按可制作格式交付，正在整理格式（不改措辞）。")
-        prompt = (FORMAT_ONLY_PROMPT + ("\n本轮开了图文版。\n" if carousel else "")
-                  + "\n<untrusted_candidate>\n" + text + "\n</untrusted_candidate>\n")
+        prompt = FORMAT_ONLY_PROMPT + "\n<untrusted_candidate>\n" + text + "\n</untrusted_candidate>\n"
         try:
             output = self.bridge.run(prompt, cwd=self.store.root, cancel_event=event,
                                      model=turn.get("requested_model"), reasoning_effort=turn.get("requested_reasoning_effort"),
@@ -1465,12 +1490,14 @@ class AITaskManager:
             elif not output:
                 failure = "格式整理没有返回正文。"
             else:
-                problems = reformat_problems(text, output, carousel)
+                problems = reformat_problems(text, output)
                 failure = "整理稿没有通过逐字核对，未采用：" + " ".join(problems[:4]) if problems else None
         with self.lock:
             stage = self._live[task_id]["stages"]["format"]
             stage.update(status="failed" if failure else "completed", error=failure, output=output or "", completed_at=_now())
             self._checkpoint_live(task_id, True)
+            self._activity_step(task_id, phase="format",
+                           message="格式整理未采用，原文已保留。" if failure else "交付格式已整理并通过逐字核对。")
         if failure:
             return None, {"status": "failed", "reason": failure}
         return output, {"status": "repaired", "reason": "候选没有按可制作格式交付，已自动整理排版；口播和中文已逐字核对与原稿一致。"}
@@ -1481,8 +1508,7 @@ class AITaskManager:
         source = next((item for item in task["rounds"] if item["round_id"] == turn.get("format_source")), None)
         if not source or source.get("status") != "completed" or not str(source.get("output") or "").strip():
             raise AITaskError("要整理的候选轮次不存在或没有完成稿。", 409)
-        carousel = bool((task["snapshot"].get("creation_context") or {}).get("carousel"))
-        formatted, check = self._format_pass(task_id, turn, source["output"], event, carousel=carousel, automatic=False)
+        formatted, check = self._format_pass(task_id, turn, source["output"], event, automatic=False)
         with self.lock:
             self._live[task_id]["format_check"] = check
             self._checkpoint_live(task_id, True)
@@ -1498,6 +1524,8 @@ class AITaskManager:
             if task_id is None:
                 self._queue.task_done()
                 return
+            terminal = None
+            execution_error = None
             try:
                 with self.lock:
                     if self._closing.is_set():
@@ -1532,6 +1560,8 @@ class AITaskManager:
                             "review": self._stage({}, turn)})
                         self._apply_live(task)
                     self._write(task)
+                    self._activity(task, phase="draft" if task["action"] == "variants" and not format_round else "running",
+                                   message="正在生成初稿。" if task["action"] == "variants" and not format_round else "本轮已开始处理。")
                     try:
                         prompt = None if format_round else self._prompt(task, resources)
                     except AITaskError as exc:
@@ -1570,7 +1600,9 @@ class AITaskManager:
                         task.update(status="completed", progress="候选结果已保存，等待查看。")
                         task["rounds"][-1].update(status="completed", output=output, error=None, completed_at=_now())
                     self._write(task)
+                    terminal = task
             except Exception as exc:
+                execution_error = safe_error(exc)
                 with self.lock:
                     try:
                         task = self._read(task_id)
@@ -1583,6 +1615,7 @@ class AITaskManager:
                         if task["action"] == "variants" and state == "failed" and task["rounds"][-1].get("stages", {}).get("draft", {}).get("output"):
                             task["progress"] = "独立复核未完成；已保留初稿，本轮没有完成稿。"
                         self._write(task)
+                        terminal = task
                     except (OSError, StoreError, KeyError):
                         # Deleted/unreadable records are not resurrected or copied elsewhere.
                         pass
@@ -1594,6 +1627,20 @@ class AITaskManager:
                     self._live.pop(task_id, None)
                     self._live_saved.pop(task_id, None)
                     self._changed()
+                    if terminal is not None:
+                        state = terminal["rounds"][-1]["status"]
+                        messages = {"completed": "本轮结果已保存，可以查看。", "cancelled": "AI 已停止，本轮已取消。",
+                                    "interrupted": "本轮已中断，可查看已保存的历史后继续。", "failed": "本轮未完成，请查看任务详情。"}
+                        self._activity(terminal, phase="finished", message=messages[state] +
+                                       (f" {execution_error}" if execution_error and state == "failed" else ""))
+                    elif execution_error is not None:
+                        # Never announce success when the authoritative result could not be persisted.
+                        try:
+                            pending = self._read(task_id)
+                            self._activity(pending, status="needs_attention", phase="save",
+                                           message="本轮处理已停止，但结果状态未能保存，请检查本地任务记录。")
+                        except (OSError, StoreError, KeyError):
+                            pass
                 self._queue.task_done()
 
     def shutdown(self):
@@ -1611,6 +1658,8 @@ class AITaskManager:
                         task.update(status="interrupted", progress="服务关闭，本轮已中断；未自动重试。")
                         task["rounds"][-1].update(status="interrupted", error="服务关闭导致本轮中断。", completed_at=_now())
                         self._write(task)
+                        if self._executing != task_id:
+                            self._activity(task, phase="finished", message="服务已关闭，排队中的本轮已中断。")
                 except (OSError, StoreError):
                     pass
             self._queue.put(None)

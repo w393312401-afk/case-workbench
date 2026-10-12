@@ -78,6 +78,8 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, '../deployment/text-only/pu
     ['/api/cases/PVR-example', {method: 'DELETE'}],
     ['/media/PVR-example/video', {}],
     ['/api/ai/tasks/AIT-example/stream', {}],
+    ['/api/activity', {}],
+    ['/api/activity/ai%3Aone/logs', {}],
     ['https://outside.example/api/state', {}],
   ]) {
     const result = await window.fetch(url, options);

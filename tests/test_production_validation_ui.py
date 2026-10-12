@@ -81,6 +81,7 @@ class ProductionValidationBrowserTests(unittest.TestCase):
                                         for index, (state, _) in enumerate(states)]
         self.payload["job"]["edits"][2]["validation"]["issues"] = [{"code": "voice_changed", "message": "配音轨内容和建线时不一致。"}]
         page = self.open_page(width=390)
+        page.locator(".edit-older > summary").click()
         for index, (_, label) in enumerate(states):
             card = page.locator(f'[data-edit-id="EDT-{index:012d}"]')
             card.locator(".script-status").get_by_text(label, exact=True).wait_for()
@@ -230,6 +231,103 @@ class ProductionValidationBrowserTests(unittest.TestCase):
             "take_id": "TAK-0123456789ab", "creator": "Lab", "markers": 1, "frames": 60, "fps": "29.97", "built_at": "2026-10-11"}])
         self.payload["job"]["edits"] = [self.edit("awaiting_review")]
         self.payload["job"]["edits"][0]["validation"]["manual_scope"] = ["画面内容与口播是否匹配", "镜头时长例外与视觉连贯性", "字幕、声音听审和成片导出"]
+
+    def skill_delivery(self):
+        self.reviewable()
+        self.payload["job"]["status"] = "awaiting_review"
+        edit = self.payload["job"]["edits"][0]
+        edit.update(status="completed", completion_policy="skill_delivery", validation=None, summary=None,
+                    report={"shots": 24, "saved": True, "gaps": []})
+        return edit
+
+    def test_skill_delivery_is_reviewable_without_claiming_engineering_verification(self):
+        self.skill_delivery()
+        page = self.open_page(width=390)
+        card = page.locator('[data-edit-id="EDT-0123456789ab"]')
+        card.locator(".script-status").get_by_text("待人工审查", exact=True).wait_for()
+        card.get_by_text("工程核验未执行，素材去重已归档停用", exact=False).wait_for()
+        self.assertNotIn("工程核验通过", card.inner_text())
+        self.assertNotIn("画面全部覆盖", card.inner_text())
+        self.assertNotIn("undefined", card.inner_text())
+        self.assertTrue(card.get_by_role("button", name="确认完成", exact=True).is_enabled())
+        self.assertEqual(self.calls, [])
+        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
+
+    def test_skill_delivery_reported_gaps_show_as_waiting_for_material(self):
+        edit = self.skill_delivery()
+        edit["report"]["gaps"] = [{"start": 30, "end": 60, "need": "锁紧旋钮特写"}]
+        page = self.open_page()
+        card = page.locator('[data-edit-id="EDT-0123456789ab"]')
+        card.locator(".script-status").get_by_text("待补素材", exact=True).wait_for()
+        card.get_by_text("帧 [30, 60) · 锁紧旋钮特写", exact=True).wait_for()
+        self.assertNotIn("undefined", card.inner_text())
+        self.assertEqual(card.get_by_role("button", name="确认完成", exact=True).count(), 0)
+
+    def test_skill_delivery_pending_result_recovers_without_requesting_verification(self):
+        edit = self.skill_delivery()
+        edit.update(status="needs_repair", result_pending=True, error="剪辑结果待恢复。")
+
+        def recover(route):
+            self.assertTrue(route.request.url.endswith("/recheck"))
+            self.assertEqual(route.request.post_data_json, {"recover_result": True})
+            edit.update(status="completed", result_pending=False, error="")
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"job": self.payload["job"], "edit": edit}))
+
+        page = self.open_page(post=recover)
+        card = page.locator('[data-edit-id="EDT-0123456789ab"]')
+        self.assertEqual(card.get_by_role("button", name="重新核验", exact=True).count(), 0)
+        card.get_by_role("button", name="恢复结果", exact=True).click()
+        card.locator(".script-status").get_by_text("待人工审查", exact=True).wait_for()
+        card.get_by_text("工程核验未执行", exact=False).wait_for()
+        self.assertEqual(len(self.calls), 1)
+
+    def test_skill_delivery_manual_confirmation_has_no_automatic_recheck(self):
+        edit = self.skill_delivery()
+
+        def approve(route):
+            self.assertTrue(route.request.url.endswith("/approval"))
+            edit["approval"] = {"at": "2026-10-12T11:00:00", "note": "人工确认", "basis": "human_review"}
+            self.payload["job"]["status"] = "approved"
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"approved": True, "edit": edit}))
+
+        page = self.open_page(post=approve)
+        page.get_by_role("button", name="确认完成", exact=True).click()
+        dialog = page.locator("dialog.production-dialog")
+        dialog.get_by_text("仅登记你的人工审查，不自动读回工程核验或计算素材去重", exact=False).wait_for()
+        submit = dialog.get_by_role("button", name="确认人工审查完成", exact=True)
+        self.assertTrue(submit.is_disabled())
+        for box in dialog.locator('input[name="reviewed"]').all():
+            box.check()
+        submit.click()
+        card = page.locator('[data-edit-id="EDT-0123456789ab"]')
+        card.locator(".script-status").get_by_text("已完成", exact=True).wait_for()
+        card.get_by_text("工程核验未执行", exact=False).wait_for()
+        self.assertEqual(len(self.calls), 1)
+
+    def test_skill_delivery_saved_failure_does_not_offer_manual_completion(self):
+        edit = self.skill_delivery()
+        edit["report"]["saved"] = False
+        page = self.open_page()
+        card = page.locator('[data-edit-id="EDT-0123456789ab"]')
+        card.locator(".script-status").get_by_text("待修正", exact=True).wait_for()
+        self.assertEqual(card.get_by_role("button", name="确认完成", exact=True).count(), 0)
+        self.assertNotIn("已按技能完成保存交付", card.inner_text())
+
+    def test_skill_delivery_enters_review_queue_without_validation(self):
+        edit = self.skill_delivery()
+        page = self.open_page()
+        page.route("**/api/production?*", lambda route: route.fulfill(status=200, content_type="application/json",
+            body=json.dumps({"jobs": [self.payload["job"]], "carousels": [], "voices": [], "defaults": {}})))
+        row = {"kind": "video", "id": JOB_ID, "status": "awaiting_review", "edit_id": edit["id"]}
+        page.route("**/api/production/deliveries?*", lambda route: route.fulfill(status=200, content_type="application/json",
+            body=json.dumps({"items": [row]})))
+        page.goto(f"http://127.0.0.1:{self.server.server_port}/#production")
+        card = page.locator(f'[data-production-id="{JOB_ID}"]')
+        card.get_by_text("待人工审查", exact=True).wait_for()
+        card.get_by_text("按技能保存交付 · 工程核验未执行", exact=True).wait_for()
+        self.assertNotIn("工程核验通过", card.inner_text())
+        page.locator("#production-status").select_option("awaiting_review")
+        self.assertEqual(page.locator("#production-queue .production-card").count(), 1)
 
     def test_completion_needs_every_manual_check_and_then_shows_done(self):
         self.reviewable()

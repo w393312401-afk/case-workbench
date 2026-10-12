@@ -16,8 +16,9 @@ import zipfile
 
 from direction_store import fingerprint, now
 from elevenlabs_client import VoiceError
-from production_store import CAROUSEL_ID, carousel_input_signature, carousel_review_current
+from production_store import CAROUSEL_ID, carousel_input_signature, carousel_confirmation_current
 from workbench_carousel_stills import IMAGE_TYPES
+from task_activity import record_activity, safe_error
 
 DELIVERY_ID = re.compile(r"DLV-[0-9a-f]{12}")
 REQUEST_ID = re.compile(r"[\w-]{10,100}")
@@ -37,7 +38,7 @@ def _selected_outputs(item):
                 output.get("approved") is not True or output.get("stale") or output.get("input_changed") or
                 aspect not in {"3:4", "9:16"} or output.get("aspect") != aspect or
                 output.get("input_signature") != carousel_input_signature(item, slide, aspect) or
-                not carousel_review_current(item, slide, output)):
+                not carousel_confirmation_current(item, slide, output)):
             return None
         numbers.add(number)
         selected.append((slide, output))
@@ -110,21 +111,24 @@ class CarouselDeliveryMixin:
                 raise VoiceError(409, "这份图文领取包的文件已变化，请重新整理；旧记录仍保留。")
             if complete:
                 with zipfile.ZipFile(path) as archive:
-                    expected = TEXT_FILES | {slide["file"] for slide in record["slides"]} | {entry["file"] for entry in record.get("attachments", [])}
+                    expected = {slide["file"] for slide in record["slides"]}
+                    if not record.get("images_only"):
+                        expected |= TEXT_FILES | {entry["file"] for entry in record.get("attachments", [])}
                     if len(archive.namelist()) != len(expected) or set(archive.namelist()) != expected:
                         raise ValueError()
-                    if json.loads(archive.read("manifest.json")) != _manifest(identifier, record):
+                    if not record.get("images_only") and json.loads(archive.read("manifest.json")) != _manifest(identifier, record):
                         raise ValueError()
                     for slide in record["slides"]:
                         if hashlib.sha256(archive.read(slide["file"])).hexdigest() != slide["sha256"]:
                             raise ValueError()
-                    for entry in record.get("attachments", []):
+                    for entry in [] if record.get("images_only") else record.get("attachments", []):
                         if hashlib.sha256(archive.read(entry["file"])).hexdigest() != entry["sha256"]:
                             raise ValueError()
-                    for language in ("en", "zh"):
-                        if archive.read(f"caption_{language}.txt").decode("utf-8") != record[f"caption_{language}"]:
-                            raise ValueError()
-                    archive.read("领取说明.txt")
+                    if not record.get("images_only"):
+                        for language in ("en", "zh"):
+                            if archive.read(f"caption_{language}.txt").decode("utf-8") != record[f"caption_{language}"]:
+                                raise ValueError()
+                        archive.read("领取说明.txt")
         except VoiceError:
             raise
         except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, RuntimeError):
@@ -143,7 +147,7 @@ class CarouselDeliveryMixin:
         selected = _selected_outputs(item)
         signature = carousel_selection_signature(item) if selected else None
         for delivery in item.get("deliveries", []):
-            delivery["current"] = bool(signature and delivery.get("selection_signature") == signature)
+            delivery["current"] = bool(signature and delivery.get("images_only") and delivery.get("selection_signature") == signature)
             delivery["stale"] = not delivery["current"]
         return item
 
@@ -157,55 +161,13 @@ class CarouselDeliveryMixin:
             first_ready = bool(strict_first["ready"] if strict_first else first and _selected_outputs({**item, "slides": [first]}))
             complete = bool(_selected_outputs(item))
             return {"first_ready": first_ready, "complete": complete, "count": len(item["slides"]), "first_check": strict_first,
-                    "message": "整组已确认，可整理领取包。" if complete else "首张已确认，可沿用风格继续余图；整组尚未达到领取条件。" if first_ready else "请先核对并确认首张；已有成图可单独重新核对。"}
+                    "message": "整组已确认，可整理领取包。" if complete else "首张已确认，可沿用风格继续余图；整组尚未达到领取条件。" if first_ready else "请先选用并确认首张。"}
 
     def collect_carousel_delivery(self, identifier, delivery_id):
         with self.lock:
             self.carousel_delivery_file(identifier, delivery_id)
             return self.production.mutate("carousel_collection", {"carousel_id": identifier, "delivery_id": delivery_id,
                 "request_id": "download-" + uuid4().hex}, {"collected_at": now()})
-
-    def _delivery_records(self, item, selected):
-        """Package current words and reviews; original production archives remain explicit external references."""
-        payloads, archives = [], {}
-        requirements = copy.deepcopy(item.get("requirements", {}))
-        source_copy = next((output.get("source_copy") for _, output in selected if output.get("source_copy")), None)
-        locked_copy = copy.deepcopy(source_copy or item.get("copy") or {})
-        locked_copy.update(content_type="photo_carousel", direction_id=item.get("direction_id", ""),
-                           caption_en=item.get("caption_en", ""), caption_zh=item.get("caption_zh", ""))
-        locked_copy["slides"] = [{key: copy.deepcopy(slide.get(key)) for key in
-                                 ("number", "title_lines", "body", "title_zh", "body_zh")} for slide, _ in selected]
-        records = {"copy.json": locked_copy, "records/requirements.json": requirements}
-        for slide, output in selected:
-            review_runs = [{key: copy.deepcopy(run[key]) for key in
-                           ("id", "status", "file_sha256", "input_signature", "requirements_signature", "scope", "started_at", "finished_at", "error", "stale") if key in run}
-                           for run in output.get("review_runs", [])]
-            records[f"records/reviews/{slide['number']:02d}.json"] = {
-                "output_id": output["id"], "file_sha256": output["sha256"],
-                "input_signature": output["input_signature"], "review": output.get("review"),
-                "reviews": review_runs, "approval": {"approved": output.get("approved"), "at": output.get("approved_at"),
-                                                      "actor": output.get("approval_actor"), "note": output.get("note", "")},
-                "provenance": output.get("provenance"), "origin": output.get("origin")}
-            latest = next((run for run in output.get("review_runs", []) if run.get("id") == output.get("latest_review_id")), None)
-            if latest and latest.get("folder"):
-                root = self._carousel_dir(item["id"]).resolve()
-                review_folder = (root / latest["folder"]).resolve()
-                if not review_folder.is_relative_to(root / "reviews"):
-                    raise VoiceError(409, "核对记录路径无效，请重新核对后整理。")
-                for filename in ("input.json", "prompt.txt", "receipt.json"):
-                    source = (review_folder / filename).resolve()
-                    if not source.is_relative_to(review_folder) or not source.is_file() or source.stat().st_size > 4 * 1024 * 1024:
-                        raise VoiceError(409, "本次核对记录不完整，请重新核对后整理。")
-                    payloads.append((f"records/reviews/{slide['number']:02d}-{filename}", source.read_bytes()))
-            for entry in output.get("archive_refs", (output.get("source_archive") or {}).get("files", [])):
-                path = Path(entry.get("path", ""))
-                if not path.is_absolute() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != entry.get("sha256"):
-                    raise VoiceError(409, "来源档案已变化或缺失，请重新登记后核对；已有领取包仍保留。")
-                archives[str(path)] = {"kind": "external_archive", "path": str(path), "sha256": entry["sha256"],
-                                       "size": path.stat().st_size, "included_in_package": False}
-        for name, value in records.items():
-            payloads.append((name, (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")))
-        return payloads, list(archives.values())
 
     def create_carousel_delivery(self, identifier, body):
         if not isinstance(body, dict):
@@ -230,16 +192,31 @@ class CarouselDeliveryMixin:
             self.carousel_images_live(item)
             selected = _selected_outputs(item)
             if not selected:
-                raise VoiceError(409, "请先逐张核对并人工确认整组当前成图，失效或比例不一致的版本需重新出图。")
+                raise VoiceError(409, "请先逐张选用并确认整组当前成图，失效版本需重新出图。")
             signature = carousel_selection_signature(item)
+            activity_id = f"package:{identifier}:{body['request_id']}"
+            record_activity(self, activity_id, kind="package", owner_id=identifier, source_id=body["request_id"],
+                            product=item.get("product", ""), case_id=item.get("case_id"), title="成品打包 · " + (item.get("title") or identifier), step="package",
+                            status="running", phase="核对成品", message="正在核对已确认成图并整理领取包")
             for previous in reversed(item.get("deliveries", [])):
-                if previous.get("selection_signature") == signature:
+                if previous.get("selection_signature") == signature and previous.get("images_only"):
                     try:
                         self._checked_delivery(identifier, previous, complete=True)
                     except VoiceError:
                         continue
+                    except Exception as exc:
+                        record_activity(self, activity_id, status="failed", phase="核对领取包未完成", message=safe_error(exc))
+                        raise
                     record = {key: value for key, value in previous.items() if key not in {"current", "stale"}}
-                    return self.production.mutate("carousel_delivery", body, record)
+                    record_activity(self, activity_id, source_id=record["id"])
+                    try:
+                        saved = self.production.mutate("carousel_delivery", body, record)
+                    except Exception:
+                        record_activity(self, activity_id, status="needs_attention", phase="登记待恢复", message="领取包已存在，领取记录暂未保存")
+                        raise
+                    record_activity(self, activity_id, source_id=record["id"], status="completed", phase="领取包已就绪",
+                                    message="已核对现有领取包，可以领取", result_count=len(selected), event_key="saved")
+                    return saved
             delivery_id = "DLV-" + uuid4().hex[:12]
             folder = self._carousel_dir(identifier) / "deliveries" / delivery_id
             filename = _filename(item, delivery_id)
@@ -247,7 +224,9 @@ class CarouselDeliveryMixin:
                       "aspect": item.get("image_aspect", "3:4"), "caption_en": item.get("caption_en", ""),
                       "caption_zh": item.get("caption_zh", ""), "slides": [], "selection_signature": signature,
                       "zip_file": f"deliveries/{delivery_id}/{filename}", "filename": filename,
+                      "images_only": True, "schema_version": 3,
                       "packaging": {"status": "running", "started_at": now()}}
+            record_activity(self, activity_id, source_id=delivery_id)
             try:
                 folder.mkdir(parents=True, exist_ok=False)
                 payloads = []
@@ -264,34 +243,10 @@ class CarouselDeliveryMixin:
                         stream.write(payload)
                     record["slides"].append({"number": slide["number"], "output_id": output["id"], "sha256": output["sha256"], "file": name})
                     payloads.append((name, payload))
-                if any(output.get("origin") or output.get("provenance") for _, output in selected):
-                    records, archives = self._delivery_records(item, selected)
-                    record.update(schema_version=2, requirements=copy.deepcopy(item.get("requirements", {})),
-                                  attachments=[{"file": name, "sha256": hashlib.sha256(payload).hexdigest()} for name, payload in records],
-                                  external_archives=archives, source="当前选定成品与锁定文案；来源制作资料保留在外部本地档案。",
-                                  verification_scope="生成视觉、文字、商品对照与实拍证据分别记录；不声称原实拍商品逐像素保真。",
-                                  publication_status="unpublished_at_export")
-                    for name, payload in records:
-                        destination = folder / name
-                        destination.parent.mkdir(parents=True, exist_ok=True)
-                        destination.write_bytes(payload)
-                    payloads.extend(records)
-                manifest = json.dumps(_manifest(identifier, record), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-                instructions = ("按 01、02… 的张序上传图片，使用 caption_en.txt 的发布文案。\n"
-                                "caption_zh.txt 是中文对照；请在发布平台自行选择商品链接。\n"
-                                "本包只保存整理时已人工确认的图片与文案，重做不会改变此包。\n"
-                                "发布后可回工作台登记帖子信息。\n")
-                texts = {"caption_en.txt": record["caption_en"], "caption_zh.txt": record["caption_zh"],
-                         "manifest.json": manifest, "领取说明.txt": instructions}
-                for name, content in texts.items():
-                    with (folder / name).open("x", encoding="utf-8", newline="") as stream:
-                        stream.write(content)
                 temporary = folder / ".package.tmp"
                 with zipfile.ZipFile(temporary, "x", compression=zipfile.ZIP_DEFLATED) as archive:
                     for name, payload in payloads:
                         archive.writestr(name, payload)
-                    for name, content in texts.items():
-                        archive.writestr(name, content.encode("utf-8"))
                 # Windows FlushFileBuffers needs a handle opened for writing.
                 with temporary.open("r+b") as stream:
                     os.fsync(stream.fileno())
@@ -303,11 +258,21 @@ class CarouselDeliveryMixin:
                 record["sha256"] = digest.hexdigest()
                 self._checked_delivery(identifier, record, complete=True)
                 record["packaging"].update(status="completed", finished_at=now())
-            except VoiceError:
+            except VoiceError as exc:
+                record_activity(self, activity_id, status="failed", phase="打包未完成", message=safe_error(exc))
                 raise
-            except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile, RuntimeError):
+            except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile, RuntimeError) as exc:
+                record_activity(self, activity_id, status="failed", phase="打包未完成", message=safe_error(exc))
                 raise VoiceError(500, "领取包没有整理完成，原成图和已有领取包仍保留，请重试。") from None
-            return self.production.mutate("carousel_delivery", body, record)
+            try:
+                saved = self.production.mutate("carousel_delivery", body, record)
+            except Exception:
+                record_activity(self, activity_id, source_id=delivery_id, status="needs_attention", phase="登记待恢复",
+                                message="领取包已整理，领取记录暂未保存", event_key="result_pending")
+                raise
+            record_activity(self, activity_id, source_id=delivery_id, status="completed", phase="领取包已保存",
+                            message="成品领取包已整理完成", result_count=len(record["slides"]), event_key="saved")
+            return saved
 
     def production_deliveries(self, product=None):
         with self.lock:

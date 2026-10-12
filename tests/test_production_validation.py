@@ -140,6 +140,35 @@ class ValidationTests(unittest.TestCase):
         video["source_end"] = sound["source_end"] = 30
         self.assertIn("source_range_reused", self.codes(self.check(post)))
 
+    def test_archived_dedup_is_not_calculated_or_required_for_manual_verification(self):
+        post = inspection()
+        post.update(dedup_enabled=False, dedup_complete=False, other_shots=None)
+        video = post["tracks"]["video"][0]["items"][1]
+        sound = post["tracks"]["audio"][0]["items"][1]
+        video["source_start"] = sound["source_start"] = 0
+        video["source_end"] = sound["source_end"] = 30
+        result = self.check(post)
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertFalse(result["dedup_enabled"])
+        self.assertEqual(result["dedup_status"], "disabled")
+        self.assertNotIn("source_range_reused", self.codes(result))
+        self.assertNotIn("external_sources_unverified", self.codes(result))
+        self.assertNotIn("source_ranges_unique", result["checks"])
+        self.assertNotIn("external_source_ranges_unique", result["checks"])
+        self.assertTrue(result["checks"]["original_audio_paired"])
+        self.assertIn("未计算", result["source_scope"])
+
+    def test_explicit_or_legacy_enabled_dedup_retains_the_original_checks(self):
+        for enabled in (True, None):
+            with self.subTest(dedup_enabled=enabled):
+                post = inspection()
+                if enabled is not None:
+                    post["dedup_enabled"] = enabled
+                post["other_shots"] = [{"media_path": "C:/media/source.mov", "source_start": 10, "source_end": 20}]
+                result = self.check(post)
+                self.assertTrue(result["dedup_enabled"])
+                self.assertIn("source_range_used_elsewhere", self.codes(result))
+
     def test_manual_recheck_can_accept_sound_changes_and_old_record_stays_unverified(self):
         post = inspection()
         voice = post["tracks"]["audio"][1]

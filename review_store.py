@@ -631,7 +631,7 @@ class ReviewStore:
     def search(self, query, limit=50, offset=0, sort="likes"):
         if sort not in SORTS:
             raise ReviewError("排序方式无效")
-        limit = max(1, min(int(limit), 200))
+        limit = max(1, min(int(limit), 2000))
         offset = max(0, int(offset))
         with self.lock:
             connection = self.connect()

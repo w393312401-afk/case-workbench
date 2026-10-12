@@ -260,7 +260,7 @@ def _build_site(bundle, site, output):
     bundle["state"]["signature"] = bundle["state"]["digest"] = digest
     site.mkdir(parents=True, exist_ok=True)
     for source in (ROOT / "static").iterdir():
-        if source.suffix.lower() in {".html", ".js", ".css"}:
+        if source.suffix.lower() in {".html", ".js", ".css"} and source.name not in {"activity.js", "activity.css"}:
             shutil.copy2(source, site / source.name)
     for name in ("_worker.js", "public-mode.js", "public-mode.css"):
         if not (SUPPORT / name).is_file():
@@ -270,6 +270,7 @@ def _build_site(bundle, site, output):
     app = app.replace("function productFilterGroup(item) {", "function productFilterGroup(item) {\n  if (item.public_product_group) return item.public_product_group;", 1)
     (site / "app.js").write_text(app, encoding="utf-8")
     page = (site / "index.html").read_text(encoding="utf-8")
+    page = page.replace('<link rel="stylesheet" href="/activity.css">', "").replace('<script src="/activity.js" defer></script>', "")
     page = page.replace('<link rel="icon" type="image/svg+xml" href="/favicon.svg">', "")
     page = page.replace("<head>", '<head>\n  <meta name="public-exported-at" content="' + exported_at + '">\n  <script src="/public-mode.js"></script>', 1)
     page = page.replace("</head>", '  <link rel="stylesheet" href="/public-mode.css">\n</head>', 1)

@@ -326,6 +326,35 @@ class WorkerTests(unittest.TestCase):
                     worker.restore(FakeResolve(project), request)
                 self.assertIn("播放头", str(caught.exception))
 
+    def test_inspect_reads_only_target_without_archived_dedup_scan(self):
+        project = FakeProject(names=["Lab261010-202-1", "Lab261009-202-1"])
+        target, other = project.items
+        media = FakeClip("C:/media/a.mp4")
+        voice = FakeItem(0, 60, media)
+        target.items[1] = [voice]
+        resolve = FakeResolve(project)
+        request = {"project": "202H", "unique_id": target.uid}
+        with patch.object(other, "GetTrackCount", side_effect=AssertionError("other edits must not be scanned")):
+            result = worker.inspect(resolve, request)
+        self.assertEqual(result["tracks"]["audio"][0]["items"][0]["uid"], voice.uid)
+        self.assertEqual(result["other_shots"], [])
+        self.assertFalse(result["dedup_enabled"])
+        self.assertFalse(result["dedup_complete"])
+        self.assertEqual(resolve.saved, 0)
+
+    def test_inspect_archived_dedup_scan_requires_explicit_opt_in(self):
+        project = FakeProject(names=["Lab261010-202-1", "Lab261009-202-1"])
+        target, other = project.items
+        media = FakeClip("C:/media/a.mp4")
+        target_shot, other_shot = FakeItem(0, 60, media), FakeItem(0, 30, media)
+        target_read, other_read = target.GetItemListInTrack, other.GetItemListInTrack
+        with patch.object(target, "GetItemListInTrack", side_effect=lambda kind, index: [target_shot] if kind == "video" else target_read(kind, index)), \
+             patch.object(other, "GetItemListInTrack", side_effect=lambda kind, index: [other_shot] if kind == "video" else other_read(kind, index)):
+            result = worker.inspect(FakeResolve(project), {"project": "202H", "unique_id": target.uid, "deduplicate_source_ranges": True})
+        self.assertTrue(result["dedup_enabled"])
+        self.assertTrue(result["dedup_complete"])
+        self.assertEqual([item["uid"] for item in result["other_shots"]], [other_shot.uid])
+
 
 class FakeRunner:
     def __init__(self, reply=None):
@@ -377,7 +406,12 @@ class BuildTests(unittest.TestCase):
                                              for n, a, b in ((1, 0.4, 1.9), (2, 2.0, 3.9), (3, 4.0, 5.8))]}
         markers = meaning_markers(job, take, "29.97")
         self.assertEqual([(m["frame"], m["duration"]) for m in markers], [(0, 60), (60, 60), (120, 59)])
-        self.assertIn("画面要证明什么：待补", markers[0]["note"])
+        self.assertIn("画面表达：待补", markers[0]["note"])
+        self.assertNotIn("口播：", markers[0]["note"])
+        self.assertNotIn("配音：", markers[0]["note"])
+        zh_job = {**job, "lines": [{**line, "zh": "试一次。", "proof": "刃口变亮"} for line in job["lines"]]}
+        self.assertEqual(meaning_markers(zh_job, take, "29.97")[0]["note"], "试一次。 画面表达：刃口变亮")
+        self.assertIn("口播：", meaning_markers(job, take, "29.97", legacy=True)[0]["note"])
         self.assertEqual(markers[2]["custom"], "workbench-group:PRD-0123456789ab:3")
 
     def test_settings_validate_creators_and_product(self):

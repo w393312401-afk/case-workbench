@@ -332,3 +332,19 @@
   #content .ai-output-heading h3{white-space:nowrap}
   .ai-output-actions{flex-wrap:wrap}
 }
+
+/* Right-edge variant rail: one tick per variant, hover shows a preview card */
+.ai-variant-nav{position:fixed;right:10px;top:50%;transform:translateY(-50%);z-index:30;display:flex;flex-direction:column;align-items:flex-end;gap:2px;padding:6px 0}
+.ai-variant-nav[hidden]{display:none}
+.ai-variant-list{display:flex;flex-direction:column;align-items:flex-end;gap:2px;max-height:70vh;overflow:visible}
+.ai-variant-item,.ai-variant-top{position:relative;display:flex;align-items:center;justify-content:flex-end;width:44px;height:14px;padding:0;border:0;background:none;cursor:pointer}
+.ai-variant-item::before,.ai-variant-top::before{content:"";display:block;width:14px;height:2px;border-radius:2px;background:var(--muted-soft);opacity:.55;transition:width .15s,opacity .15s,background .15s}
+.ai-variant-top::before{width:8px;margin-bottom:6px}
+.ai-variant-item:hover::before,.ai-variant-item:focus-visible::before,.ai-variant-top:hover::before{width:24px;opacity:1}
+.ai-variant-item.is-current::before{width:30px;opacity:1;background:var(--ink)}
+.ai-variant-tip{position:absolute;right:calc(100% + 6px);top:50%;transform:translateY(-50%);display:none;flex-direction:column;gap:4px;width:max-content;min-width:120px;max-width:300px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface-alt,var(--surface));color:var(--ink);box-shadow:0 8px 28px #0005;text-align:left;font-size:13px;line-height:1.5;white-space:normal;pointer-events:none}
+.ai-variant-tip b{font-weight:600}
+.ai-variant-tip em{font-style:normal;color:var(--muted-soft);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ai-variant-item:hover .ai-variant-tip,.ai-variant-item:focus-visible .ai-variant-tip,.ai-variant-top:hover .ai-variant-tip{display:flex}
+#ai-rounds .markdown-body :is(h2,h3,h4,h5,p){scroll-margin-top:84px}
+@media(max-width:850px){.ai-variant-nav{right:4px;top:auto;bottom:150px;transform:none}}

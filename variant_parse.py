@@ -212,6 +212,47 @@ def variant_notes(text, index):
     return {"opening": opening, "onscreen": onscreen, "pickups": pickups}
 
 
+def variant_script(text, index):
+    """Markdown of one variant as written, without its carousel part and without the 意群表 (the job keeps its own)."""
+    blocks = _blocks(text)
+    if not isinstance(index, int) or not 0 <= index < len(blocks):
+        return ""
+    lines = blocks[index].splitlines()
+    out, position, seen_label = [], 0, False
+    while position < len(lines):
+        line, stripped = lines[position], lines[position].strip()
+        if stripped.startswith("```"):
+            end = position + 1
+            while end < len(lines) and not lines[end].strip().startswith("```"):
+                end += 1
+            fence = "\n".join(lines[position:end + 1])
+            if not ('"photo_carousel"' in fence or "'photo_carousel'" in fence):
+                out.extend(lines[position:end + 1])
+            position = end + 1
+            continue
+        if not seen_label and stripped:
+            seen_label = True
+            if VARIANT_LABEL.search(line) and not SPOKEN_HEADING.search(line) and len(stripped) < 80:
+                position += 1
+                continue
+        if stripped.startswith(("**", "#")) and "图文" in stripped:
+            break
+        if stripped.startswith("|") and "叠字" in stripped:
+            break
+        if stripped.startswith(("**", "#")) and TABLE_HEADING.search(stripped):
+            position += 1
+            while position < len(lines) and (not lines[position].strip() or lines[position].strip().startswith("|")):
+                position += 1
+            continue
+        out.append(line)
+        position += 1
+    while out and (not out[-1].strip() or re.fullmatch(r"\s*(?:---+|\*\*\*+)\s*", out[-1])):
+        out.pop()
+    while out and (not out[0].strip() or re.fullmatch(r"\s*(?:---+|\*\*\*+)\s*", out[0])):
+        out.pop(0)
+    return "\n".join(out)
+
+
 CAROUSEL_COLUMNS = (("number", ("张",)), ("role", ("作用",)), ("overlay", ("叠字",)), ("body", ("正文",)),
                     ("zh", ("中文",)), ("source", ("素材",)), ("forbidden", ("禁写",)))
 

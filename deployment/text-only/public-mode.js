@@ -6,6 +6,7 @@
   const MEDIA_SELECTOR = "img,image,video,audio,source,picture,iframe,object,embed,track";
   const MEDIA_ATTRIBUTES = new Set(["src", "srcset", "poster", "preload", "data-src", "data", "href", "xlink:href"]);
   const WRITE_SELECTOR = [
+    "#task-activity-open", ".task-activity-logs", ".activity-settings",
     "#add-top", "#import-video-top", "#library-video-import", "#detail-video-import",
     "#edit-case", "#archive-case", "#delete-case", "#release-edit", "[data-inline-edit]",
     "#bulk-archive", "#bulk-restore", "#bulk-delete", ".bulk-actions", "[data-move-case]",
@@ -129,7 +130,7 @@
     const method = String(options.method || input?.method || "GET").toUpperCase();
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url, location.href);
     if (!["GET", "HEAD"].includes(method) || url.origin !== location.origin ||
-        /^\/(?:media|attachments?)\//i.test(url.pathname) ||
+        /^\/(?:media|attachments?)\//i.test(url.pathname) || /^\/api\/activity(?:\/|$)/.test(url.pathname) ||
         /\/(?:thumbnail|stream)(?:\/|$)/i.test(url.pathname)) {
       return Promise.resolve(new Response(JSON.stringify({error: "文字浏览版仅供查看，修改请在本机工作台完成。"}), {
         status: 403, headers: {"Content-Type": "application/json; charset=utf-8"},

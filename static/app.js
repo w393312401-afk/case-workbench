@@ -786,6 +786,7 @@ async function refresh(quiet = false) {
     if (mutation !== mutationSequence) return;
     if (data.unchanged) {
       state.token = data.token;
+      window.TaskActivity?.initialize();
       online(true);
       markChecked();
       showError("");
@@ -800,6 +801,7 @@ async function refresh(quiet = false) {
       signature: data.signature,
       digest: data.digest || "",
     });
+    window.TaskActivity?.initialize();
     online(true);
     markChecked();
     showError("");
@@ -971,6 +973,7 @@ async function route(keepScroll = false, force = false) {
   } else if (page === "library" && previous === "case" && window.WorkbenchShell.url(previousLibraryHash) === location.hash) {
     requestAnimationFrame(() => { if (n === routeSequence) window.scrollTo(0, state.libraryScrollY); });
   } else if (!keepScroll) window.scrollTo(0, 0);
+  window.TaskActivity?.didNavigate?.(location.hash);
 }
 
 async function copyText(text, message) {
@@ -1154,8 +1157,26 @@ window.addEventListener("beforeunload", (event) => {
     event.returnValue = "";
   }
 });
+// The video-import overlay is only for video files; a file a page element already accepted (slide tile,
+// upload box) or a picture dropped elsewhere must neither show it nor be imported as a case video.
+const videoFileName = /\.(mp4|webm|mov|m4v)$/i;
+const isVideoLike = (file) => String(file.type || "").startsWith("video/") || videoFileName.test(file.name || "");
+function mayBeVideoDrag(event) {
+  const items = [...(event.dataTransfer?.items || [])].filter((item) => item.kind === "file");
+  return !items.length || items.some((item) => !item.type || item.type.startsWith("video/"));
+}
 document.addEventListener("dragover", (event) => {
   if (!isFileDrag(event)) return;
+  if (event.defaultPrevented) {
+    hideVideoDrop();
+    return;
+  }
+  if (!mayBeVideoDrag(event)) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "none";
+    hideVideoDrop();
+    return;
+  }
   event.preventDefault();
   const blocked =
     state.editor?.uploads ||
@@ -1189,11 +1210,16 @@ document.addEventListener("dragleave", (event) => {
 document.addEventListener("dragend", hideVideoDrop);
 document.addEventListener("drop", (event) => {
   hideVideoDrop();
+  if (event.defaultPrevented) return;
   if (!isFileDrag(event) && !event.dataTransfer?.files?.length) return;
   event.preventDefault();
   const files = [...(event.dataTransfer?.files || [])];
   if (!files.length) {
     toast("请拖入本地视频文件，不支持文件夹。", true);
+    return;
+  }
+  if (!files.some(isVideoLike)) {
+    toast("这里只接收视频文件（MP4 / WebM / MOV / M4V）。图片请拖到制作单里某一张的格子上。", true);
     return;
   }
   void importVideoFiles(files, dragItem());
@@ -1210,6 +1236,68 @@ else document.addEventListener("DOMContentLoaded", startWorkbench, { once: true 
 setInterval(() => {
   if (!document.hidden) refresh(true);
 }, 5000);
+// The pages are read from disk on every load but the backend only at start-up: after an update the new pages
+// can ask for features the running process does not have. Say so instead of showing a cryptic error.
+let staleNoticeDismissed = false;
+async function checkServiceFresh() {
+  if (document.hidden || staleNoticeDismissed) return;
+  try {
+    const response = await fetch("/api/service/status", { cache: "no-store" });
+    if (!response.ok) return;
+    const status = await response.json();
+    let banner = document.getElementById("code-stale-banner");
+    if (!status.code_stale) {
+      banner?.remove();
+      return;
+    }
+    if (banner) return;
+    banner = document.createElement("div");
+    banner.id = "code-stale-banner";
+    banner.setAttribute("role", "alert");
+    banner.innerHTML =
+      '<span data-stale-text>工作台程序已更新，当前运行的服务还是旧版本，部分新功能（如图片上传）暂时不可用。点「重启工作台」即可更新；有 AI 任务、剪辑、配音或出图在运行时不会重启，也不会打断它们。</span>' +
+      '<button type="button" data-stale-restart>重启工作台</button><button type="button" data-stale-later>稍后</button>';
+    const text = banner.querySelector("[data-stale-text]"), restart = banner.querySelector("[data-stale-restart]");
+    banner.querySelector("[data-stale-later]").onclick = () => {
+      staleNoticeDismissed = true;
+      banner.remove();
+    };
+    restart.onclick = async () => {
+      restart.disabled = true;
+      restart.textContent = "正在重启…";
+      try {
+        await api("/api/service/restart", { method: "POST", body: {} });
+      } catch (error) {
+        restart.disabled = false;
+        restart.textContent = "重启工作台";
+        text.textContent = `暂时不能重启：${error?.message || "请稍后重试"}`;
+        return;
+      }
+      text.textContent = "正在重启工作台，完成后页面会自动刷新…";
+      const started = Date.now();
+      const wait = setInterval(async () => {
+        try {
+          const response = await fetch("/api/service/status", { cache: "no-store" });
+          const next = response.ok ? await response.json() : null;
+          if (next && next.pid !== status.pid && !next.shutting_down && !next.code_stale) {
+            clearInterval(wait);
+            location.reload();
+            return;
+          }
+        } catch {}
+        if (Date.now() - started > 60000) {
+          clearInterval(wait);
+          restart.disabled = false;
+          restart.textContent = "重启工作台";
+          text.textContent = "没有等到新服务就绪，请用桌面快捷方式重启工作台。";
+        }
+      }, 1500);
+    };
+    document.body.append(banner);
+  } catch {}
+}
+setTimeout(checkServiceFresh, 3000);
+setInterval(checkServiceFresh, 30000);
 
 // Dragging changes manual filing without changing the performance assessment.
 (() => {

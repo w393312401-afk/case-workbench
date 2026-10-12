@@ -426,7 +426,7 @@ def inspect_item(item, *, minimal=False):
 
 
 def inspect(resolve, request):
-    """Everything the workbench needs to judge an edit: clips per track, markers and the timeline extent."""
+    """Read the target timeline; archived cross-edit source checks require explicit opt-in."""
     project = current_project(resolve, request["project"])
     timeline = find_timeline(project, request)
     tracks = {}
@@ -440,11 +440,12 @@ def inspect(resolve, request):
                                  "items": [inspect_item(item) for item in items]})
     markers = [{"frame": frame, "color": info.get("color"), "name": info.get("name"), "note": info.get("note"),
                 "duration": info.get("duration"), "custom": info.get("customData")} for frame, info in (timeline.GetMarkers() or {}).items()]
-    source_ids = {item["media_id"] for track in tracks["video"] for item in track["items"] if item["media_id"]}
-    source_paths = {os.path.normcase(item["media_path"]) for track in tracks["video"] for item in track["items"] if item["media_path"]}
-    related, complete = [], True
+    dedup_enabled = request.get("deduplicate_source_ranges") is True
+    related, complete = [], dedup_enabled
+    source_ids = {item["media_id"] for track in tracks["video"] for item in track["items"] if item["media_id"]} if dedup_enabled else set()
+    source_paths = {os.path.normcase(item["media_path"]) for track in tracks["video"] for item in track["items"] if item["media_path"]} if dedup_enabled else set()
     exclude_names = set(request.get("materials") or [])
-    for other in timelines(project):
+    for other in timelines(project) if dedup_enabled else []:
         if other.GetUniqueId() == timeline.GetUniqueId() or other.GetName() in exclude_names or re.search(
                 r"素材|备份|草稿|backup|draft|__WB_", other.GetName(), re.I):
             continue
@@ -464,7 +465,7 @@ def inspect(resolve, request):
               "fps": str(timeline.GetSetting("timelineFrameRate")),
               "width": timeline.GetSetting("timelineResolutionWidth"), "height": timeline.GetSetting("timelineResolutionHeight"),
               "tracks": tracks, "markers": sorted(markers, key=lambda item: item["frame"]),
-              "other_shots": related, "dedup_complete": complete}
+              "other_shots": related, "dedup_complete": complete, "dedup_enabled": dedup_enabled}
     if request.get("save"):
         result["saved"] = bool(resolve.GetProjectManager().SaveProject())
     return result
@@ -523,7 +524,7 @@ def clip_label(item, uid, frame, info):
 
 
 def candidates(resolve, request):
-    """Every clip of the material timelines with its labels and source range, and where other edits already used that media."""
+    """List material labels and full source ranges; archived usage scanning requires explicit opt-in."""
     project = current_project(resolve, request["project"])
     every = timelines(project)
     wanted = request.get("materials") or []
@@ -548,8 +549,9 @@ def candidates(resolve, request):
         materials.append({"name": timeline.GetName(), "unique_id": timeline.GetUniqueId(), "start_frame": timeline.GetStartFrame(),
                           "fps": str(timeline.GetSetting("timelineFrameRate")), "drop": drop_frame(timeline), "clips": clips})
     excluded = {item.GetUniqueId() for item in chosen} | {request.get("target_uid")}
-    used, complete = [], True
-    for other in every:
+    dedup_enabled = request.get("deduplicate_source_ranges") is True
+    used, complete = [], dedup_enabled
+    for other in every if dedup_enabled else []:
         name = other.GetName()
         if other.GetUniqueId() in excluded or "素材" in name or SKIPPED_TIMELINES.search(name):
             continue
@@ -564,7 +566,7 @@ def candidates(resolve, request):
         except Exception:
             complete = False
     return {"materials": materials, "missing": sorted(set(wanted) - {item.GetName() for item in chosen}),
-            "used": used, "used_complete": complete}
+            "used": used, "used_complete": complete, "dedup_enabled": dedup_enabled}
 
 
 def frames(resolve, request):
@@ -604,8 +606,30 @@ def frames(resolve, request):
     return {"shots": results}
 
 
+def reveal(resolve, request):
+    """Show one clip: open its timeline on the edit page and put the playhead on the given absolute timeline frame."""
+    project = current_project(resolve, request["project"])
+    timeline = find_timeline(project, request)
+    frame = request.get("frame")
+    if type(frame) is not int or frame < 0:
+        raise WorkerError("片段位置无效。")
+    if not project.SetCurrentTimeline(timeline):
+        raise WorkerError("达芬奇没能切换到这条时间线。")
+    fps, drop = timeline.GetSetting("timelineFrameRate"), drop_frame(timeline)
+    reached = ""
+    for text in dict.fromkeys((timecode(frame, fps, drop), timecode(frame, fps, False))):
+        if timeline.SetCurrentTimecode(text):
+            reached = text
+            break
+    if not reached:
+        raise WorkerError("达芬奇已切到素材时间线，但没能把播放头放到这个片段上。")
+    if optional(resolve, "GetCurrentPage") != "edit":
+        resolve.OpenPage("edit")
+    return {"name": timeline.GetName(), "timecode": reached}
+
+
 COMMANDS = {"status": status, "build": build, "open": open_timeline, "inspect": inspect, "restore": restore,
-            "candidates": candidates, "frames": frames}
+            "candidates": candidates, "frames": frames, "reveal": reveal}
 
 
 def main():

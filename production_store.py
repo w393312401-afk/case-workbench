@@ -27,7 +27,7 @@ TAKE_ID = re.compile(r"TAK-[0-9a-f]{12}")
 JOB_STATUSES = {"draft", "voiced", "timeline", "editing", "awaiting_review", "approved", "needs_material", "needs_repair",
                 "verification_failed", "unverified", "failed", "cancelled", "interrupted"}
 # Finished voiceovers and timelines are appended whatever else changed while they were being made.
-REVISION_FREE = {"take", "timeline", "edit_start", "edit_finish", "edit_recheck", "edit_approve", "edit_baseline", "carousel_search_start", "carousel_search_finish", "carousel_import",
+REVISION_FREE = {"take", "timeline", "edit_start", "edit_finish", "edit_recheck", "edit_approve", "edit_baseline", "edit_delete", "job_delete", "carousel_delete", "carousel_search_delete", "carousel_tidy", "carousel_search_start", "carousel_search_finish", "carousel_import",
                  "carousel_generation_start", "carousel_generation_finish", "carousel_generation_stage", "carousel_output", "carousel_publication",
                  "carousel_import_finished", "carousel_review_start", "carousel_review_finish", "carousel_collection"}
 EDIT_ID = re.compile(r"EDT-[0-9a-f]{12}")
@@ -85,6 +85,12 @@ def job_status(job):
     if state == "running":
         return "editing"
     if state == "completed":
+        if latest.get("completion_policy") == "skill_delivery":
+            if (latest.get("report") or {}).get("saved") is not True:
+                return "needs_repair"
+            if isinstance((latest.get("report") or {}).get("gaps"), list) and latest["report"]["gaps"]:
+                return "needs_material"
+            return "approved" if latest.get("approval") else "awaiting_review"
         return "unverified"
     if state == "awaiting_review" and latest.get("approval"):
         return "approved"
@@ -101,7 +107,8 @@ def current_edit(job, edit):
 def public_job(job, result_root=None):
     result = copy.deepcopy(job)
     for edit in result.get("edits", []):
-        if edit.get("status") == "completed" and not edit.get("validation"):
+        if (edit.get("status") == "completed" and not edit.get("validation") and
+                edit.get("completion_policy") != "skill_delivery"):
             edit["execution_status"] = "completed"
             edit["status"] = "unverified"
         if result_root is not None and edit.get("status") == "running" and EDIT_ID.fullmatch(str(edit.get("id"))):
@@ -110,13 +117,21 @@ def public_job(job, result_root=None):
                 try:
                     pending = json.loads(path.read_text(encoding="utf-8"))
                     if pending.get("edit_id") == edit["id"] and pending.get("job_id") == job.get("id") and not pending.get("persisted_at"):
-                        edit.update(status="verification_failed", result_pending=True,
-                            validation={"status": "verification_failed", "issues": [{"code": "result_pending", "message":
-                                "剪辑已结束，结果已保留但制作资料尚未登记；点击重新核验恢复记录。"}]})
+                        if edit.get("completion_policy") == "skill_delivery":
+                            edit.update(status="needs_repair", result_pending=True, validation=None,
+                                error="剪辑已结束，结果已保留但制作资料尚未登记；结果待恢复。")
+                        else:
+                            edit.update(status="verification_failed", result_pending=True,
+                                validation={"status": "verification_failed", "issues": [{"code": "result_pending", "message":
+                                    "剪辑已结束，结果已保留但制作资料尚未登记；点击重新核验恢复记录。"}]})
                 except (OSError, ValueError, TypeError):
-                    edit.update(status="verification_failed", result_pending=True,
-                        validation={"status": "verification_failed", "issues": [{"code": "result_unreadable", "message":
-                            "剪辑结果恢复记录无法读取，请保留原文件并核实。"}]})
+                    if edit.get("completion_policy") == "skill_delivery":
+                        edit.update(status="needs_repair", result_pending=True, validation=None,
+                            error="剪辑结果恢复记录无法读取，请保留原文件并核实；结果待恢复。")
+                    else:
+                        edit.update(status="verification_failed", result_pending=True,
+                            validation={"status": "verification_failed", "issues": [{"code": "result_unreadable", "message":
+                                "剪辑结果恢复记录无法读取，请保留原文件并核实。"}]})
     result["status"] = job_status(result)
     return result
 
@@ -226,6 +241,30 @@ def carousel_review_current(item, slide, output):
                 review.get("review_id") == output.get("latest_review_id", review.get("review_id")))
     # Existing records were independently reviewed inside their generation attempt.
     return bool(output.get("generation_id"))
+
+
+def carousel_output_current(item, slide, output):
+    """A person can choose current image bytes without an AI review report."""
+    if not output or output.get("input_changed") or output.get("stale"):
+        return False
+    aspect = output.get("aspect")
+    return bool(aspect in {"3:4", "9:16"} and aspect == item.get("image_aspect", aspect) and
+                (slide.get("base") or output.get("origin") == "external_generated_layout") and
+                output.get("input_signature") == carousel_input_signature(item, slide, aspect) and
+                (not output.get("requirements_snapshot") or
+                 output.get("requirements_signature") == fingerprint(output["requirements_snapshot"])))
+
+
+def carousel_confirmation_current(item, slide, output):
+    """Keep manual confirmation bound to the selected file and current inputs."""
+    if not carousel_output_current(item, slide, output) or output.get("approved") is not True:
+        return False
+    # Before manual receipts existed, an old review stored the same file identity.
+    # Its findings are optional; only the bytes identity remains relevant here.
+    approved_hash = output.get("approved_sha256") or (output.get("review") or {}).get("file_sha256")
+    approved_input = output.get("approved_input_signature") or output.get("input_signature")
+    return bool((not approved_hash or approved_hash == output.get("sha256")) and
+                approved_input == output.get("input_signature"))
 
 
 class ProductionStore:
@@ -377,8 +416,10 @@ class ProductionStore:
                         "settings": self._settings, "timeline": self._timeline,
                         "edit_start": self._edit_start, "edit_finish": self._edit_finish, "edit_recheck": self._edit_recheck,
                         "edit_approve": self._edit_approve, "edit_baseline": self._edit_baseline,
+                        "edit_delete": self._edit_delete,
                         "carousel": self._carousel, "carousel_slides": self._carousel_slides, "carousel_archive": self._carousel_archive,
-                        "carousel_search_start": self._carousel_search_start, "carousel_search_finish": self._carousel_search_finish,
+                        "carousel_search_start": self._carousel_search_start, "carousel_search_delete": self._carousel_search_delete, "carousel_tidy": self._carousel_tidy,
+                        "job_delete": self._job_delete, "carousel_delete": self._carousel_delete, "carousel_search_finish": self._carousel_search_finish,
                         "carousel_import": self._carousel_import, "carousel_base": self._carousel_base,
                         "carousel_import_finished": self._carousel_import_finished, "carousel_requirements": self._carousel_requirements,
                         "carousel_review_start": self._carousel_review_start, "carousel_review_finish": self._carousel_review_finish,
@@ -603,6 +644,8 @@ class ProductionStore:
         labels = {"completed": "AI 剪辑执行结束", "failed": "AI 剪辑失败", "cancelled": "AI 剪辑已停止",
                   "awaiting_review": "工程核验通过，待人工审查", "needs_material": "待补素材",
                   "needs_repair": "待修正", "verification_failed": "核验未完成", "unverified": "历史结果待核验"}
+        if edit.get("completion_policy") == "skill_delivery" and edit["status"] == "completed":
+            labels["completed"] = "按技能剪辑结束，交人工审查；工程核验未执行"
         job["history"].append({"at": edit["finished_at"], "event": "edit_" + edit["status"], "note": f"{labels.get(edit['status'], edit['status'])} {edit['id']}"})
         return {"job": copy.deepcopy(job), "edit": copy.deepcopy(edit)}
 
@@ -644,6 +687,25 @@ class ProductionStore:
         job["history"].append({"at": job["updated_at"], "event": "edit_recheck", "note": f"重新核验 {edit['id']}：{edit['status']}"})
         return {"job": copy.deepcopy(job), "edit": copy.deepcopy(edit)}
 
+    def _edit_delete(self, data, body, extra):
+        """Drop one finished edit record and every saved request that only describes it; files are removed by the caller."""
+        job = self._find_job(data, body.get("job_id"))
+        edit = next((item for item in job.get("edits", []) if item["id"] == body.get("edit_id")), None)
+        if not edit:
+            raise VoiceError(404, "这次剪辑记录不存在。")
+        if job.get("archived"):
+            raise VoiceError(409, "制作单已归档，请恢复后再删除剪辑。")
+        if edit.get("status") == "running":
+            raise VoiceError(409, "这次剪辑还在运行，请先取消或等它结束。")
+        job["edits"] = [item for item in job["edits"] if item["id"] != edit["id"]]
+        job["updated_at"] = now()
+        job["status"] = job_status(job)
+        job["history"].append({"at": job["updated_at"], "event": "edit_deleted", "note": f"删除 AI 剪辑 {edit['id']}（{edit.get('timeline_name', '')}）及本地文件"})
+        for key in [key for key, saved in data["requests"].items()
+                    if isinstance(saved.get("result"), dict) and (saved["result"].get("edit") or {}).get("id") == edit["id"]]:
+            del data["requests"][key]
+        return {"job": copy.deepcopy(job), "deleted_edit": edit["id"]}
+
     def _edit_approve(self, data, body, result):
         job, edit = self._finished_edit(data, body)
         if body.get("approved") is False:
@@ -657,14 +719,24 @@ class ProductionStore:
                 raise VoiceError(409, "制作单已归档，请恢复后再确认完成。")
             if not current_edit(job, edit):
                 raise VoiceError(409, "这次剪辑已被更新的剪辑或配音取代，只能确认当前版本。")
-            self._apply_readback(job, edit, result)
-            if edit["status"] == "awaiting_review":
-                edit["approval"] = {"at": job["updated_at"], "note": str(body.get("note") or ""), "reviewed": list(MANUAL_SCOPE),
-                                    "checked_at": edit["validation"].get("checked_at", ""),
-                                    "shots": shot_signature(edit["validation"].get("source_ranges") or [])}
-                note = f"人工确认完成 {edit['id']}（{edit['timeline_name']}）"
+            if edit.get("completion_policy") == "skill_delivery":
+                if (edit.get("status") not in {"completed", "awaiting_review"} or
+                        edit.get("execution_status") != "completed" or (edit.get("report") or {}).get("saved") is not True or
+                        (isinstance((edit.get("report") or {}).get("gaps"), list) and edit["report"]["gaps"])):
+                    raise VoiceError(409, "这次剪辑尚未完成保存交付，请先处理已列明的问题。")
+                job["updated_at"] = now()
+                edit["approval"] = {"at": job["updated_at"], "note": str(body.get("note") or ""),
+                                    "reviewed": list(MANUAL_SCOPE), "basis": "human_review"}
+                note = f"人工确认完成 {edit['id']}（{edit['timeline_name']}）；仅登记人工审查"
             else:
-                note = f"确认完成前重新核验 {edit['id']}：{edit['status']}，未确认完成"
+                self._apply_readback(job, edit, result)
+                if edit["status"] == "awaiting_review":
+                    edit["approval"] = {"at": job["updated_at"], "note": str(body.get("note") or ""), "reviewed": list(MANUAL_SCOPE),
+                                        "checked_at": edit["validation"].get("checked_at", ""),
+                                        "shots": shot_signature(edit["validation"].get("source_ranges") or [])}
+                    note = f"人工确认完成 {edit['id']}（{edit['timeline_name']}）"
+                else:
+                    note = f"确认完成前重新核验 {edit['id']}：{edit['status']}，未确认完成"
             job["history"].append({"at": job["updated_at"], "event": "edit_approve", "note": note})
         job["status"] = job_status(job)
         return {"job": copy.deepcopy(job), "edit": copy.deepcopy(edit), "approved": bool(edit.get("approval"))}
@@ -794,7 +866,7 @@ class ProductionStore:
             raise VoiceError(400, "图文制作单缺少已核对的逐张内容。")
         stamp = now()
         item = {"id": "CAR-" + uuid4().hex[:12], **copy.deepcopy(resolved), "status": "draft", "archived": False, "searches": [], "generations": [],
-                "history": [{"at": stamp, "event": "created", "note": "按已采纳的图文版创建制作单"}],
+                "history": [{"at": stamp, "event": "created", "note": "按图文技能生成的逐张表创建制作单" if (resolved.get("source") or {}).get("table_id") else "按已采纳的图文版创建制作单"}],
                 "created_at": stamp, "updated_at": stamp}
         for slide in item["slides"]:
             slide.update(base=None, status="pending", candidates=[], outputs=[], output_id=None)
@@ -842,12 +914,10 @@ class ProductionStore:
         selected = []
         for slide in slides:
             output = next((entry for entry in slide.get("outputs", []) if entry["id"] == slide.get("output_id")), None)
-            valid = bool(output and (slide.get("base") or output.get("origin") == "external_generated_layout") and not output.get("input_changed") and not output.get("stale") and
-                         output["aspect"] == item.get("image_aspect", output["aspect"]) and
-                         output.get("input_signature") == carousel_input_signature(item, slide, output["aspect"]))
+            valid = carousel_output_current(item, slide, output)
             selected.append(output if valid else None)
-            slide["status"] = "approved" if valid and output.get("approved") and carousel_review_current(item, slide, output) else "generated" if valid else "awaiting_review" if slide.get("outputs") else "picked" if slide.get("base") else "pending"
-        if slides and all(output and output.get("approved") and carousel_review_current(item, slide, output) for slide, output in zip(slides, selected)):
+            slide["status"] = "approved" if valid and carousel_confirmation_current(item, slide, output) else "generated" if valid else "awaiting_review" if slide.get("outputs") else "picked" if slide.get("base") else "pending"
+        if slides and all(output and carousel_confirmation_current(item, slide, output) for slide, output in zip(slides, selected)):
             return "approved"
         if any(selected):
             return "reviewing"
@@ -865,6 +935,44 @@ class ProductionStore:
         item["updated_at"] = record["started_at"]
         item["history"].append({"at": record["started_at"], "event": "search", "note": f"开始从达芬奇找底图 {record['id']}"})
         return {"carousel": copy.deepcopy(item), "search": copy.deepcopy(record)}
+
+    def _carousel_search_delete(self, data, body, extra):
+        """Drop one finished search record and the candidates only it produced; the one chosen as a base stays.
+
+        The caller removes the search folder and the returned candidate files after the record is gone."""
+        item = self._find_carousel(data, body.get("carousel_id"))
+        if item["archived"]:
+            raise VoiceError(409, "图文制作单已归档，请恢复后再删除找底图记录。")
+        search = next((entry for entry in item.get("searches", []) if entry["id"] == body.get("search_id")), None)
+        if not search:
+            raise VoiceError(404, "这次找底图记录不存在。")
+        if search.get("status") == "running":
+            raise VoiceError(409, "这次找底图还在运行，请先停止或等它结束。")
+        item["searches"] = [entry for entry in item["searches"] if entry["id"] != search["id"]]
+        removed, kept_as_base = [], 0
+        for slide in item["slides"]:
+            if "candidates" not in slide:
+                continue
+            base_id = (slide.get("base") or {}).get("id")
+            kept = []
+            for candidate in slide["candidates"]:
+                if candidate.get("search_id") != search["id"]:
+                    kept.append(candidate)
+                elif candidate["id"] == base_id:
+                    kept.append(candidate)
+                    kept_as_base += 1
+                else:
+                    removed.append({"id": candidate["id"], "file": candidate.get("file"), "thumb": candidate.get("thumb")})
+            slide["candidates"] = kept
+        item["updated_at"] = now()
+        item["status"] = self._carousel_status(item)
+        item["history"].append({"at": item["updated_at"], "event": "search_deleted",
+                                "note": f"删除找底图记录 {search['id']}，移除 {len(removed)} 张未选用的候选"
+                                        + (f"，保留 {kept_as_base} 张已选底图" if kept_as_base else "")})
+        for key in [key for key, saved in data["requests"].items()
+                    if isinstance(saved.get("result"), dict) and (saved["result"].get("search") or {}).get("id") == search["id"]]:
+            del data["requests"][key]
+        return {"carousel": copy.deepcopy(item), "deleted_search": search["id"], "removed_candidates": removed, "kept_as_base": kept_as_base}
 
     def _carousel_search_finish(self, data, body, result):
         item = self._find_carousel(data, body.get("carousel_id"))
@@ -1018,10 +1126,8 @@ class ProductionStore:
     def _carousel_select_output(self, data, body, extra):
         item = self._find_carousel(data, body.get("carousel_id"))
         slide, output = self._carousel_bound_output(item, body)
-        if output.get("input_changed") or output.get("stale") or output.get("input_signature") != carousel_input_signature(item, slide, output["aspect"]):
-            raise VoiceError(409, "这个版本对应的制作要求已变化，请核对当前候选。")
-        if output.get("review", {}).get("status") in {"pending", "review_failed", "needs_fix", "failed", "running"}:
-            raise VoiceError(409, "这张候选尚未通过核对，已保留当前选版；请先重新核对。")
+        if not carousel_output_current(item, slide, output):
+            raise VoiceError(409, "这个版本对应的底图或制作要求已变化，请按当前资料重新出图。")
         slide["output_id"] = output["id"]
         item["updated_at"] = now()
         item["status"] = self._carousel_status(item)
@@ -1040,7 +1146,50 @@ class ProductionStore:
         stages[body["stage"]] = {**stages.get(body["stage"], {}), **copy.deepcopy(stage)}
         return {"carousel": copy.deepcopy(item), "generation": copy.deepcopy(run)}
 
+    def _job_delete(self, data, body, extra):
+        """Remove a job and every saved request that only describes it; files are removed by the caller."""
+        job = self._find_job(data, body.get("job_id"))
+        if any(edit.get("status") == "running" for edit in job.get("edits", [])):
+            raise VoiceError(409, "这张制作单还有 AI 剪辑在运行。")
+        data["jobs"] = [entry for entry in data["jobs"] if entry["id"] != job["id"]]
+        for key in [key for key, saved in data["requests"].items() if isinstance(saved.get("result"), dict) and
+                    ((saved["result"].get("job") or {}).get("id") == job["id"] or
+                     (saved["result"].get("edit") or {}).get("job_id") == job["id"])]:
+            del data["requests"][key]
+        return {"deleted_job": job["id"], "title": job.get("title", ""), "edit_ids": [edit["id"] for edit in job.get("edits", [])]}
+
+    def _carousel_delete(self, data, body, extra):
+        """Remove a carousel order; its folder is removed by the caller."""
+        item = self._find_carousel(data, body.get("carousel_id"))
+        if any(entry.get("status") == "running" for key in ("searches", "generations") for entry in item.get(key, [])):
+            raise VoiceError(409, "这张图文制作单还有任务在运行。")
+        data["carousels"] = [entry for entry in data["carousels"] if entry["id"] != item["id"]]
+        for key in [key for key, saved in data["requests"].items() if isinstance(saved.get("result"), dict) and
+                    ((saved["result"].get("carousel") or {}).get("id") == item["id"])]:
+            del data["requests"][key]
+        return {"deleted_carousel": item["id"], "title": item.get("title", "")}
+
+    def _carousel_tidy(self, data, body, extra):
+        """Every slide that has a base keeps only that image; the other candidate records are dropped (files: the caller)."""
+        item = self._find_carousel(data, body.get("carousel_id"))
+        if item["archived"]:
+            raise VoiceError(409, "图文制作单已归档，请恢复后再整理候选图。")
+        removed = []
+        for slide in item["slides"]:
+            base_id = (slide.get("base") or {}).get("id")
+            if not base_id or "candidates" not in slide:
+                continue
+            for entry in slide["candidates"]:
+                if entry["id"] != base_id:
+                    removed.append({"id": entry["id"], "file": entry.get("file"), "thumb": entry.get("thumb")})
+            slide["candidates"] = [entry for entry in slide["candidates"] if entry["id"] == base_id]
+        if removed:
+            item["updated_at"] = now()
+            item["history"].append({"at": item["updated_at"], "event": "tidy", "note": f"整理候选图：每张只保留底图，移除 {len(removed)} 张多余候选"})
+        return {"carousel": copy.deepcopy(item), "removed_candidates": removed}
+
     def _carousel_base(self, data, body, extra):
+        removed = []
         item = self._find_carousel(data, body.get("carousel_id"))
         slide = next((entry for entry in item["slides"] if entry["number"] == body.get("slide")), None)
         if not slide:
@@ -1055,11 +1204,15 @@ class ProductionStore:
             if not candidate:
                 raise VoiceError(404, "这张候选图不属于这一张。")
             slide.update(base=copy.deepcopy(candidate), status="picked")
+            # One base image per slide: the other candidates go once a base is chosen; the caller removes their files.
+            removed = [{"id": entry["id"], "file": entry.get("file"), "thumb": entry.get("thumb")}
+                       for entry in slide.get("candidates", []) if entry["id"] != chosen]
+            slide["candidates"] = [entry for entry in slide.get("candidates", []) if entry["id"] == chosen]
         item["status"] = self._carousel_status(item)
         item["updated_at"] = now()
         item["history"].append({"at": item["updated_at"], "event": "base",
-                                "note": f"第 {slide['number']} 张" + (f"选用底图 {chosen}" if chosen else "取消底图")})
-        return {"carousel": copy.deepcopy(item)}
+                                "note": f"第 {slide['number']} 张" + (f"选用底图 {chosen}，移除其余 {len(removed)} 张候选" if chosen else "取消底图")})
+        return {"carousel": copy.deepcopy(item), "removed_candidates": removed}
 
     @staticmethod
     def _clear_carousel_approval(slide):
@@ -1132,20 +1285,17 @@ class ProductionStore:
         approved = body.get("approved")
         if type(approved) is not bool:
             raise VoiceError(400, "确认参数无效。")
-        if approved and (output.get("input_changed") or output["aspect"] != item.get("image_aspect", output["aspect"]) or
-                         output["input_signature"] != carousel_input_signature(item, slide, output["aspect"])):
+        if approved and not carousel_output_current(item, slide, output):
             raise VoiceError(409, "底图或制作要求已变化，请按当前资料重新出图。")
-        if approved and not carousel_review_current(item, slide, output):
-            raise VoiceError(409, "这张图尚无对应文件和文案版本的完整核对，请先重新核对；已有选版保留。")
-        if approved and output["review"]["status"] != "pass" and body.get("acknowledge") is not True:
-            raise VoiceError(409, "这张图还有核对提示，请先查看并明确确认这些提示。")
-        note = text(body.get("note", ""), "核对备注", False, 2000)
+        note = text(body.get("note", ""), "确认备注", False, 2000)
         if approved:
             slide["output_id"] = output["id"]
         actor = body.get("actor", "human")
         if actor not in {"human", "assistant_on_user_authorization"}:
             raise VoiceError(400, "确认来源无效。")
         output.update(approved=approved, approved_at=now() if approved else "", note=note, approval_actor=actor)
+        output.update(approved_sha256=output["sha256"] if approved else "",
+                      approved_input_signature=output["input_signature"] if approved else "")
         output.setdefault("stages", {})["confirmation"] = {"status": "completed" if approved else "pending",
             "started_at": output["approved_at"], "finished_at": output["approved_at"], "actor": actor}
         if approved and output.get("generation_id"):

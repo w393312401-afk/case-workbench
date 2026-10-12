@@ -25,7 +25,7 @@ class CarouselWorkbenchMixin:
             raise VoiceError(409, "只有完整完成的候选才可以制作图文。")
         carousels = parse_carousels(turn["output"])
         if not carousels:
-            raise VoiceError(409, "这一轮候选没有图文版。写稿时勾选「同时出图文版」，每条变体才会附带 5 张图文和 copy.json。")
+            raise VoiceError(409, "这一轮候选没有图文版。写稿不再附图文版：定稿后用口播稿的意群表配合图文技能另做逐张表。")
         for item in carousels:
             item["text"], item["translation_zh"] = carousel_text(item), carousel_text(item, chinese=True)
         return {"task_id": task_id, "round_id": round_id, "task_revision": task.get("revision"), "carousels": carousels}
@@ -40,6 +40,17 @@ class CarouselWorkbenchMixin:
         with self.lock:
             script = self.creation.get_script(str(value.get("script_id") or ""))
             source = script.get("source") or {}
+            if value.get("table_id"):
+                chosen, table = self.carousel_from_table(script, str(value["table_id"]))
+                resolved = {"product": product_key(script["product"]), "direction_id": script.get("direction_id", ""),
+                            "script_id": script["id"], "script_version": script["version"], "script_family": script["family_id"],
+                            "title": script["title"], "variant_label": table.get("variant_label") or chosen["label"],
+                            "slides": copy.deepcopy(chosen["slides"]), "caption_en": chosen["caption_en"],
+                            "caption_zh": chosen["caption_zh"], "copy": copy.deepcopy(chosen["copy"]),
+                            "problems": chosen["problems"],
+                            "source": {"task_id": source.get("task_id", ""), "round_id": source.get("round_id", ""),
+                                       "variant_index": None, "table_id": table["id"]}}
+                return self.production.mutate("carousel", body, resolved)
             carousels = parse_carousels(source.get("candidate_text") or "")
             index = value.get("variant_index")
             hinted = next((item for item in carousels if item["index"] == index), None) if type(index) is int else None
@@ -77,7 +88,8 @@ class CarouselWorkbenchMixin:
             settings = self.production.product_settings(catalog, item["product"])
             return {"carousel": item, "revision": catalog["revision"], "script": script,
                     "sales_data": self.carousel_publication_live(item) if hasattr(self, "carousel_publication_live") else None,
-                    "material_timelines": settings.get("material_timelines", []), "project": settings["project"]}
+                    "material_timelines": settings.get("material_timelines", []), "project": settings["project"],
+                    "clip_picks": self.carousel_clip_picks(identifier) if hasattr(self, "carousel_clip_picks") else None}
 
     def save_carousel_slides(self, identifier, body):
         if not isinstance(body, dict):

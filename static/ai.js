@@ -2,6 +2,11 @@
 
 window.CaseAI = (() => {
   const pageHash = () => window.WorkbenchShell?.legacyHash() || location.hash;
+  const pagePath = () => pageHash().split('?')[0];
+  const taskRouteId = () => {
+    try {return pagePath().startsWith('#ai/') ? decodeURIComponent(pagePath().slice(4)) : '';}
+    catch {return '';}
+  };
   const pageURL = hash => window.WorkbenchShell?.url(hash) || hash;
   const taskProduct = task => task.product || task.context?.product || (state.cases || []).find(item => item.case_id === task.case_id)?.product || '';
   const contextTitle = task => task.case_title || task.context?.title || task.context?.direction_id || task.case_id || `${taskProduct(task) || '产品'} · 空白写稿`;
@@ -9,7 +14,8 @@ window.CaseAI = (() => {
   function alignTaskProduct(task) {
     const shell = window.WorkbenchShell, product = taskProduct(task);
     if (!shell?.product() || !product || shell.matchesProduct(product)) return false;
-    location.hash = shell.url(`#ai/${encodeURIComponent(task.task_id)}`, product);
+    const query = pageHash().includes('?') ? `?${pageHash().split('?').slice(1).join('?')}` : '';
+    location.hash = shell.url(`#ai/${encodeURIComponent(task.task_id)}${query}`, product);
     return true;
   }
   const actions = {variants:'生成变体',review:'一起审稿',retrospective:'一起复盘'};
@@ -65,7 +71,7 @@ window.CaseAI = (() => {
     if (!force && ai.taskList && Date.now()-ai.taskListAt < maxAge) return Promise.resolve(ai.taskList);
     ai.taskListRequest = api('/api/ai/tasks').then(data => {
       const tasks = Array.isArray(data?.tasks) ? [...data.tasks] : [];
-      const current = ai.task && pageHash() === `#ai/${encodeURIComponent(ai.task.task_id)}` ? ai.task : null;
+      const current = ai.task && taskRouteId() === ai.task.task_id ? ai.task : null;
       if (current?.task_id) {
         const index = tasks.findIndex(task => task.task_id === current.task_id);
         if (index < 0 && active(current)) {
@@ -236,7 +242,7 @@ window.CaseAI = (() => {
     const product = item.product || window.WorkbenchShell?.product() || '';
     const key = `create:${item.case_id || `${product}:${item.direction_id || 'blank'}`}:${action}`, pending = ai.pending.get(key);
     const materialIds = pending?.payload.material_ids || item.material_ids || null;
-    const modal = {key,caseId:item.case_id,product,directionId:pending?.payload.direction_id || item.direction_id || '',caseTitle:item.current?.title || item.title || item.direction_id || item.case_id || `${product} · 空白写稿`,revision:pending?.payload.revision || item.revision,planId:pending?.payload.plan_id || item.plan_id || '',action,instruction:pending?.payload.instruction || item.plan_note || '',includeBasket:pending ? !!(pending.payload.include_basket || pending.payload.material_ids?.length) : !!(materialIds?.length || item.direction_id),materialIds,materials:[],directions:item.direction_id ? [item] : [],variantSel:pending?.payload.variants ? pending.payload.variants.map(item => item.index) : pending ? [] : null,newVariants:pending?.payload.new_variant_count || 0,carousel:!!pending?.payload.carousel,settings:{skill_selection:pending?.payload.skill_selection || 'auto'},busy:false,blocked:false,error:pending ? '上次提交结果尚未确认。请重试同一请求核对，不会重复创建任务。' : ''};
+    const modal = {key,caseId:item.case_id,product,directionId:pending?.payload.direction_id || item.direction_id || '',caseTitle:item.current?.title || item.title || item.direction_id || item.case_id || `${product} · 空白写稿`,revision:pending?.payload.revision || item.revision,planId:pending?.payload.plan_id || item.plan_id || '',action,instruction:pending?.payload.instruction || item.plan_note || '',includeBasket:pending ? !!(pending.payload.include_basket || pending.payload.material_ids?.length) : !!(materialIds?.length || item.direction_id),materialIds,materials:[],directions:item.direction_id ? [item] : [],variantSel:pending?.payload.variants ? pending.payload.variants.map(item => item.index) : pending ? [] : null,newVariants:pending?.payload.new_variant_count || 0,settings:{skill_selection:pending?.payload.skill_selection || 'auto'},busy:false,blocked:false,error:pending ? '上次提交结果尚未确认。请重试同一请求核对，不会重复创建任务。' : ''};
     ai.modal = modal;
     setText('#ai-create-title',actions[action]);setText('#ai-create-case',modal.caseTitle);
     setText('#ai-create-version',item.case_id ? '基于当前案例版本' : item.direction_id ? '基于当前方向定义' : '空白写稿');
@@ -252,10 +258,9 @@ window.CaseAI = (() => {
   }
   function renderBasketChoice(modal) {
     const host = $('#ai-basket-choice');if (!host) return;
-    host.innerHTML = `${!modal.caseId ? `<div class="ai-source-row"><label class="field"><span>本次方向</span><select id="ai-create-direction"><option value="">空白写稿，不指定方向</option>${modal.directions.filter(item => item.status !== 'archived').map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === modal.directionId ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>${!modal.materialIds ? '<button type="button" class="subtle" id="ai-create-from-case">改为从案例写稿</button>' : ''}</div>` : ''}<label class="ai-check"><input id="ai-include-basket" type="checkbox" ${modal.includeBasket ? 'checked' : ''} ${ai.pending.has(modal.key) ? 'disabled' : ''}> 携带${modal.materialIds ? '已选择的素材' : '当前产品的摘录篮'}（${modal.materialIds?.length ?? modal.materials.length} 条）</label><p class="context-note">${esc(modal.basketError ? `摘录篮暂不可用：${modal.basketError}。可取消携带素材，或关闭后重试。` : '提交时固定选中的素材；以后修改摘录篮不会改动此任务。')}</p><div id="ai-variant-plan"></div>${modal.action === 'variants' ? `<label class="ai-carousel-toggle"><input id="ai-carousel" type="checkbox" ${modal.carousel ? 'checked' : ''}> 同时出图文版（每条稿附 5 张挂车图文与 copy.json）</label>` : ''}`;
+    host.innerHTML = `${!modal.caseId ? `<div class="ai-source-row"><label class="field"><span>本次方向</span><select id="ai-create-direction"><option value="">空白写稿，不指定方向</option>${modal.directions.filter(item => item.status !== 'archived').map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === modal.directionId ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>${!modal.materialIds ? '<button type="button" class="subtle" id="ai-create-from-case">改为从案例写稿</button>' : ''}</div>` : ''}<label class="ai-check"><input id="ai-include-basket" type="checkbox" ${modal.includeBasket ? 'checked' : ''} ${ai.pending.has(modal.key) ? 'disabled' : ''}> 携带${modal.materialIds ? '已选择的素材' : '当前产品的摘录篮'}（${modal.materialIds?.length ?? modal.materials.length} 条）</label><p class="context-note">${esc(modal.basketError ? `摘录篮暂不可用：${modal.basketError}。可取消携带素材，或关闭后重试。` : '提交时固定选中的素材；以后修改摘录篮不会改动此任务。')}</p><div id="ai-variant-plan"></div>`;
     $('#ai-include-basket').onchange = event => {modal.includeBasket = event.target.checked;updateCreateControls();};
     if ($('#ai-create-direction')) $('#ai-create-direction').onchange = event => {modal.directionId = event.target.value;modal.variantSel = null;renderVariantPlan(modal);updateCreateControls();};
-    if ($('#ai-carousel')) $('#ai-carousel').onchange = event => {modal.carousel = event.target.checked;updateCreateControls();};
     if ($('#ai-create-from-case')) $('#ai-create-from-case').onclick = () => {if (modal.busy) return;closeCreate();void window.WorkbenchShell?.chooseWritingCase();};
     renderVariantPlan(modal);
   }
@@ -319,7 +324,6 @@ window.CaseAI = (() => {
     $('#ai-create-instruction').required = !plan;
     $('#ai-create-instruction').placeholder = plan ? '例如：控制在 40 秒内；出镜人没有用过旧装备。' : requestHints[modal.action];
     if ($('.ai-variant-plan')) $('.ai-variant-plan').disabled = busy || !!pending;
-    if ($('#ai-carousel')) $('#ai-carousel').disabled = busy || !!pending;
     $('#close-ai-create').disabled = busy;$('#cancel-ai-create').disabled = busy;
     $('#submit-ai-create').disabled = busy || modal.blocked || (modal.includeBasket && !!modal.basketError) || !ai.status?.available || !state.token || (!modal.instruction.trim() && !plan) || (!pending && !!settingsIssue(modal.settings));
     if ($('#ai-create-fieldset')) $('#ai-create-fieldset').disabled = busy || !!pending;
@@ -328,7 +332,7 @@ window.CaseAI = (() => {
     $('#ai-create-check').disabled = busy;
     setText('#submit-ai-create',busy ? '正在提交…' : pending ? '重试同一请求' : '开始协作');
     setText('#ai-create-error',modal.error);$('#ai-create-error').hidden = !modal.error;
-    setText('#ai-create-hint',pending ? '为防止重复创建，重试使用上次的相同要求和请求。' : plan ? `将按 ${selected} 条变体各写一稿${modal.newVariants ? `，另提 ${modal.newVariants} 条新变体` : ''}${modal.carousel ? '，每条附图文版' : ''}；提交后可在「内容创作」查看进度与结果。` : '提交后可在「内容创作」查看进度与结果。');
+    setText('#ai-create-hint',pending ? '为防止重复创建，重试使用上次的相同要求和请求。' : plan ? `将按 ${selected} 条变体各写一稿${modal.newVariants ? `，另提 ${modal.newVariants} 条新变体` : ''}；提交后可在「内容创作」查看进度与结果。` : '提交后可在「内容创作」查看进度与结果。');
   }
   function closeCreate() {
     if (ai.modal?.busy) {toast('正在提交，请等待返回结果。',true);return;}
@@ -338,7 +342,7 @@ window.CaseAI = (() => {
     event.preventDefault();const modal = ai.modal;
     if (!modal || modal.busy || modal.blocked || (modal.includeBasket && !!modal.basketError) || !ai.status?.available || (!modal.instruction.trim() && !planActive(modal)) || (!ai.pending.has(modal.key) && settingsIssue(modal.settings))) return;
     let pending = ai.pending.get(modal.key);
-    if (!pending) {pending = {path:'/api/ai/tasks',payload:{request_id:crypto.randomUUID(),...(modal.planId ? {plan_id:modal.planId} : {}),...(modal.caseId ? {case_id:modal.caseId,revision:modal.revision} : {product:modal.product,...(modal.directionId ? {direction_id:modal.directionId} : {})}),...(modal.includeBasket && modal.materialIds ? {material_ids:modal.materialIds} : {include_basket:modal.includeBasket}),action:modal.action,instruction:modal.instruction.trim(),...planPayload(modal),...(modal.action === 'variants' && modal.carousel ? {carousel:true} : {}),skill_selection:modal.settings.skill_selection}};ai.pending.set(modal.key,pending);}
+    if (!pending) {pending = {path:'/api/ai/tasks',payload:{request_id:crypto.randomUUID(),...(modal.planId ? {plan_id:modal.planId} : {}),...(modal.caseId ? {case_id:modal.caseId,revision:modal.revision} : {product:modal.product,...(modal.directionId ? {direction_id:modal.directionId} : {})}),...(modal.includeBasket && modal.materialIds ? {material_ids:modal.materialIds} : {include_basket:modal.includeBasket}),action:modal.action,instruction:modal.instruction.trim(),...planPayload(modal),skill_selection:modal.settings.skill_selection}};ai.pending.set(modal.key,pending);}
     modal.busy = true;pending.busy = true;modal.error = '';ai.mutation++;updateCreateControls();
     try {
       const response = await api(pending.path,{method:'POST',body:pending.payload});
@@ -624,7 +628,7 @@ window.CaseAI = (() => {
     $('[data-adopt-script]',adoption).onclick = () => window.CaseScripts?.adoptCandidate(ai.task,round,false);
     $('[data-write-case]',adoption).onclick = () => window.CaseScripts?.adoptCandidate(ai.task,round,true);
     const produce = $('[data-produce-video]',adoption);if (produce) {produce.hidden = ai.task.action !== 'variants';produce.onclick = () => window.CaseProduction?.fromCandidate(ai.task,round);}
-    const carousel = $('[data-produce-carousel]',adoption);if (carousel) {carousel.hidden = ai.task.action !== 'variants' || !/photo_carousel|叠字/.test(String(round.output || ''));carousel.onclick = () => window.CaseProduction?.fromCandidateCarousel(ai.task,round);}
+    const carousel = $('[data-produce-carousel]',adoption);if (carousel) {carousel.hidden = ai.task.action !== 'variants';carousel.onclick = () => /photo_carousel|叠字/.test(String(round.output || '')) ? window.CaseProduction?.fromCandidateCarousel(ai.task,round) : toast('图文版不再随稿附带：先点「采纳为脚本版本」，再在脚本版本里点「制作图文」，由图文技能按意群表生成逐张表。');}
     const relayout = $('[data-format-round]',adoption);if (relayout) {relayout.hidden = ai.task.action !== 'variants' || round.format_check?.status === 'ok';relayout.onclick = async () => {relayout.disabled = true;try {await formatRound(ai.task,round);} catch (error) {toast(message(error),true);} finally {relayout.disabled = false;}};}
   }
   function taskContextMarkup(task) {
@@ -634,7 +638,7 @@ window.CaseAI = (() => {
   }
   function roundMarkup(round,index) {
     return `<article class="ai-round" data-round-id="${esc(round.round_id || String(index))}"><div class="ai-round-heading"><button type="button" class="ai-round-toggle" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><h2>第 ${index+1} 轮</h2><span class="ai-round-summary">${esc(round.instruction || '')}</span></button><span class="ai-round-status ai-status ${esc(round.status)}">${esc(statusText(round))}</span><small class="ai-round-time">${esc(readableDate(round.completed_at || round.created_at))}</small></div>
-      <div class="ai-round-body"><section class="ai-user-request"><h3 class="sr-only">你的要求</h3><p>${esc(round.instruction || '')}</p></section><div class="ai-round-execution"></div>
+      <div class="ai-round-body"><section class="ai-user-request"><h3 class="sr-only">你的要求</h3><p>${esc(round.instruction || '')}</p></section><div class="ai-round-execution"></div><div class="task-activity-logs"></div>
       <div class="ai-output-heading"><h3 class="ai-output-title">实时回复</h3><div class="ai-output-actions"><button type="button" class="subtle ai-copy-round" hidden>${icon('copy')}复制当前文本</button></div></div><div class="ai-round-messages"></div><div class="ai-round-output markdown-body"></div><p class="ai-round-error ai-error" ${round.error ? '' : 'hidden'}>${esc(typeof round.error === 'string' ? round.error : round.error ? JSON.stringify(round.error) : '')}</p></div></article>`;
   }
   function renderTaskShell(task,keepScroll) {
@@ -645,7 +649,9 @@ window.CaseAI = (() => {
       <div class="ai-task-progress"><p id="ai-task-progress" role="status"></p><small id="ai-stream-status" class="ai-stream-status"></small></div><p class="ai-error" id="ai-task-error" role="alert" hidden></p><div id="ai-rounds"></div>
       <section class="ai-continue-card ai-composer" aria-label="继续一起修改"><form id="ai-continue-form"><label class="sr-only" for="ai-continue-instruction">下一步要求</label><textarea id="ai-continue-instruction" maxlength="12000" rows="2" required placeholder="继续一起修改：例如保留第二版的推进结构，把正文压缩到 30 秒。"></textarea>
         ${defaultsMarkup('ai-continue')}<details class="ai-advanced" id="ai-continue-advanced"><summary><span>技能与服务</span><span class="ai-advanced-summary" id="ai-continue-settings-summary"></span></summary>${serviceMarkup()}<div id="ai-continue-settings"></div></details>
-        <div class="ai-continue-footer"><p class="ai-muted" id="ai-continue-note"></p><small class="ai-shortcut-hint">Ctrl + Enter 提交</small><button type="submit" class="primary compact" id="ai-continue-submit">继续修改</button></div></form></section>`;
+        <div class="ai-continue-footer"><p class="ai-muted" id="ai-continue-note"></p><small class="ai-shortcut-hint">Ctrl + Enter 提交</small><button type="submit" class="primary compact" id="ai-continue-submit">继续修改</button></div></form></section>
+      <nav id="ai-variant-nav" class="ai-variant-nav" aria-label="变体导航" hidden><button type="button" class="ai-variant-top" data-variant-top aria-label="回到顶部"><span class="ai-variant-tip"><b>回到顶部</b></span></button><div class="ai-variant-list"></div></nav>`;
+    bindVariantNav();
     $('#ai-continue-instruction').value = ai.drafts.get(task.task_id) || ai.pending.get(`continue:${task.task_id}`)?.payload.instruction || '';
     renderSettings('ai-continue',settingsForTask(task));
     $('#ai-continue-instruction').addEventListener('input',event => {ai.drafts.set(task.task_id,event.target.value);updateTaskControls();});
@@ -653,7 +659,7 @@ window.CaseAI = (() => {
     // Older rounds fold to one line; a click opens any of them.
     $('#ai-rounds').addEventListener('click',event => {
       const toggle = event.target.closest('.ai-round-toggle');
-      if (toggle) {const node = toggle.closest('.ai-round'), key = `${task.task_id}:${node.dataset.roundId}`;(ai.openRounds ||= new Map()).set(key,node.classList.contains('is-collapsed'));paintRoundFolding();return;}
+      if (toggle) {const node = toggle.closest('.ai-round'), key = `${task.task_id}:${node.dataset.roundId}`;(ai.openRounds ||= new Map()).set(key,node.classList.contains('is-collapsed'));paintRoundFolding();updateVariantNav();return;}
       const menu = event.target.closest('.ai-menu');if (menu && event.target.closest('[role=menuitem]')) menu.open = false;
     });
     if (!keepScroll) window.scrollTo(0,0);
@@ -664,6 +670,64 @@ window.CaseAI = (() => {
       const chosen = ai.openRounds?.get(`${ai.task?.task_id}:${node.dataset.roundId}`), open = chosen ?? index === nodes.length - 1;
       node.classList.toggle('is-collapsed',!open);$('.ai-round-toggle',node).setAttribute('aria-expanded',String(open));
     });
+  }
+  // Right-edge outline of every "变体 X" heading in the open rounds: fixed on screen, click to jump, one tap back to top.
+  function variantHeadings() {
+    const open = $$('#ai-rounds > .ai-round:not(.is-collapsed)'), found = [];
+    open.forEach((round,roundIndex) => {
+      $$('.markdown-body h2,.markdown-body h3,.markdown-body h4,.markdown-body h5,.markdown-body p',round).forEach(heading => {
+        if (heading.closest('[hidden]')) return;
+        // Variants are usually a bold-only line ("**202H-S2 · 变体 #1 · …**"), not a markdown heading.
+        if (heading.tagName === 'P' && !(heading.children.length === 1 && heading.firstElementChild.tagName === 'STRONG' && (heading.textContent || '').trim() === (heading.firstElementChild.textContent || '').trim())) return;
+        const match = /^.{0,40}?变体\s*#?\s*([A-Za-z0-9]+|[一二三四五六七八九十]+)/.exec(heading.textContent || '');
+        if (!match) return;
+        const id = match[1].toUpperCase(), label = `变体${id}`;
+        let preview = '', node = heading.nextElementSibling;
+        while (node && !preview && !/^H[2-5]$/.test(node.tagName)) {preview = (node.textContent || '').trim().replace(/\s+/g,' ');node = node.nextElementSibling;}
+        found.push({heading,label:open.length > 1 ? `第 ${$$('#ai-rounds > .ai-round').indexOf(round)+1} 轮 · ${label}` : label,title:(heading.textContent || '').trim(),preview:preview.slice(0,90)});
+      });
+    });
+    return found;
+  }
+  function updateVariantNav() {
+    const nav = $('#ai-variant-nav');if (!nav) return;
+    const items = variantHeadings(), list = $('.ai-variant-list',nav);
+    ai.variantItems = items;
+    nav.hidden = !items.length;
+    const signature = items.map(item => `${item.label}${item.title}${item.preview}`).join('|');
+    if (list.dataset.source !== signature) {
+      list.dataset.source = signature;
+      list.innerHTML = items.map((item,index) => `<button type="button" class="ai-variant-item" data-variant-index="${index}" aria-label="${esc(item.label)}"><span class="ai-variant-tip"><b>${esc(item.label)}</b>${item.title && item.title !== item.label ? `<span>${esc(item.title)}</span>` : ''}${item.preview ? `<em>${esc(item.preview)}</em>` : ''}</span></button>`).join('');
+    }
+    markVariantNav();
+  }
+  function markVariantNav() {
+    const items = ai.variantItems || [], buttons = $$('.ai-variant-item',$('#ai-variant-nav'));
+    let current = -1;
+    items.forEach((item,index) => {if (item.heading.isConnected && item.heading.getBoundingClientRect().top <= 120) current = index;});
+    buttons.forEach((button,index) => button.classList.toggle('is-current',index === current));
+  }
+  function bindVariantNav() {
+    const nav = $('#ai-variant-nav');if (!nav) return;
+    nav.addEventListener('click',event => {
+      if (event.target.closest('[data-variant-top]')) {window.scrollTo({top:0,behavior:'smooth'});return;}
+      const button = event.target.closest('[data-variant-index]'), item = button && ai.variantItems?.[Number(button.dataset.variantIndex)];
+      if (item?.heading.isConnected) item.heading.scrollIntoView({block:'start',behavior:'smooth'});
+    });
+    if (!ai.variantScrollBound) {
+      ai.variantScrollBound = true;
+      let frame = 0;
+      window.addEventListener('scroll',() => {if (frame) return;frame = requestAnimationFrame(() => {frame = 0;markVariantNav();});},{passive:true});
+    }
+  }
+  function focusRequestedRound() {
+    const hash = pageHash(), round = new URLSearchParams(hash.split('?').slice(1).join('?')).get('round');
+    if (!round || ai.focusedRound === hash) return;
+    const node = $$('#ai-rounds > .ai-round').find(item => item.dataset.roundId === round);
+    if (!node) return;
+    ai.focusedRound = hash;
+    (ai.openRounds ||= new Map()).set(`${ai.task.task_id}:${round}`,true);
+    paintRoundFolding();node.tabIndex = -1;node.focus({preventScroll:true});node.scrollIntoView({block:'start'});
   }
   function updateTask(task,keepScroll = true) {
     ai.task = task;
@@ -676,7 +740,7 @@ window.CaseAI = (() => {
     const container = $('#ai-rounds'), rounds = task.rounds || [];
     rounds.forEach((round,index) => {
       const key = String(round.round_id || index);let node = [...container.children].find(child => child.dataset.roundId === key);
-      if (!node) {const holder = document.createElement('div');holder.innerHTML = roundMarkup(round,index);node = holder.firstElementChild;container.append(node);}
+      if (!node) {const holder = document.createElement('div');holder.innerHTML = roundMarkup(round,index);node = holder.firstElementChild;container.append(node);window.TaskActivity?.mountLogs($('.task-activity-logs',node),{owner_id:task.task_id,source_id:round.round_id});}
       const status = $('.ai-round-status',node);status.className = `ai-round-status ai-status ${round.status}`;if (status.textContent !== statusText(round)) status.textContent = statusText(round);
       const execution = $('.ai-round-execution',node), metadata = roundMetadata(round);
       if (execution.dataset.source !== metadata && !selectionInside(execution)) {execution.innerHTML = metadata;execution.dataset.source = metadata;}
@@ -686,6 +750,8 @@ window.CaseAI = (() => {
       const time = $('.ai-round-time',node), value = readableDate(round.completed_at || round.created_at);if (time.textContent !== value) time.textContent = value;
     });
     paintRoundFolding();
+    focusRequestedRound();
+    updateVariantNav();
     if (!active(task)) {ai.cancelWaiting.delete(task.task_id);ai.pending.delete(`cancel:${task.task_id}`);}
     updateTaskControls();syncStream(task);
   }
@@ -718,13 +784,13 @@ window.CaseAI = (() => {
       const response = await api(pending.path,{method:'POST',body:pending.payload});
       if (response.task?.task_id !== task.task_id) throw new Error('没有收到完整任务信息，请重试同一请求核对。');
       ai.pending.delete(key);ai.drafts.delete(task.task_id);
-      if (pageHash() === `#ai/${encodeURIComponent(task.task_id)}`) {$('#ai-continue-instruction').value = '';updateTask(response.task);}
+      if (pagePath() === `#ai/${encodeURIComponent(task.task_id)}`) {$('#ai-continue-instruction').value = '';updateTask(response.task);}
       else rememberTaskState(response.task);
       toast('新一轮要求已提交。');
     } catch (error) {
       if (definitive(error)) ai.pending.delete(key);
       ai.errors.set(task.task_id,error.status === 409 ? '任务已更新，本次未追加要求。正在读取最新记录，请核对后再提交。' : definitive(error) ? message(error) : `提交结果尚未确认：${message(error)}。请重试同一请求核对。`);
-      if (error.status === 404) {if (pageHash() === `#ai/${encodeURIComponent(task.task_id)}`) renderMissing();return;}
+      if (error.status === 404) {if (pagePath() === `#ai/${encodeURIComponent(task.task_id)}`) renderMissing();return;}
       if (error.status === 409) void pollTask(true);
     } finally {pending.busy = false;updateTaskControls();syncStream(ai.task);void loadTaskList(0,true).catch(() => {});}
   }
@@ -737,7 +803,7 @@ window.CaseAI = (() => {
     try {
       const response = await api(pending.path,{method:'POST',body:pending.payload});
       ai.pending.delete(key);
-      if (pageHash() === `#ai/${encodeURIComponent(task.task_id)}`) updateTask(response.task);else rememberTaskState(response.task);
+      if (pagePath() === `#ai/${encodeURIComponent(task.task_id)}`) updateTask(response.task);else rememberTaskState(response.task);
       toast('已开始整理格式（只改排版，逐字核对）。完成后在新一轮里点「制作视频」或「制作图文」。');
       return true;
     } catch (error) {
@@ -760,17 +826,17 @@ window.CaseAI = (() => {
       if (response.task?.task_id !== task.task_id) throw new Error('没有收到完整取消结果，请重试同一请求核对。');
       ai.pending.delete(key);
       if (active(response.task)) ai.cancelWaiting.add(task.task_id);
-      if (pageHash() === `#ai/${encodeURIComponent(task.task_id)}`) updateTask(response.task);
+      if (pagePath() === `#ai/${encodeURIComponent(task.task_id)}`) updateTask(response.task);
       else rememberTaskState(response.task);
     } catch (error) {
       if (definitive(error)) ai.pending.delete(key);
       ai.errors.set(task.task_id,definitive(error) ? message(error) : `取消结果尚未确认：${message(error)}。可重试同一取消请求。`);
-      if (error.status === 404) {if (pageHash() === `#ai/${encodeURIComponent(task.task_id)}`) renderMissing();return;}
+      if (error.status === 404) {if (pagePath() === `#ai/${encodeURIComponent(task.task_id)}`) renderMissing();return;}
     } finally {pending.busy = false;updateTaskControls();syncStream(ai.task);void loadTaskList(0,true).catch(() => {});}
   }
   function renderMissing() {
     closeStream();
-    const id = ai.task?.task_id || (pageHash().startsWith('#ai/') ? decodeURIComponent(pageHash().slice(4)) : '');ai.task = null;ai.page = 'missing';if (id) {ai.errors.delete(id);ai.cancelWaiting.delete(id);ai.drafts.delete(id);ai.pending.delete(`continue:${id}`);ai.pending.delete(`cancel:${id}`);}
+    const id = ai.task?.task_id || taskRouteId();ai.task = null;ai.page = 'missing';if (id) {ai.errors.delete(id);ai.cancelWaiting.delete(id);ai.drafts.delete(id);ai.pending.delete(`continue:${id}`);ai.pending.delete(`cancel:${id}`);}
     $('#content').innerHTML = '<div class="empty"><h3>任务或关联案例已不存在</h3><p>旧任务内容已从当前页面清空，请返回任务列表查看现有记录。</p><a class="secondary" href="#ai">返回内容创作</a></div>';
   }
   function closeStream() {
@@ -779,7 +845,7 @@ window.CaseAI = (() => {
     if (ai.streamFrame !== null) clearTimeout(ai.streamFrame);
     ai.streamFrame = null;ai.queuedTask = null;
   }
-  function streamCurrent(session) {return ai.stream === session && pageHash() === `#ai/${encodeURIComponent(session.taskId)}` && session.mutation === ai.mutation;}
+  function streamCurrent(session) {return ai.stream === session && pagePath() === `#ai/${encodeURIComponent(session.taskId)}` && session.mutation === ai.mutation;}
   function olderSnapshot(task,previous = ai.task) {
     if (!previous || task.task_id !== previous.task_id) return false;
     const oldTime = Date.parse(previous.updated_at || ''), newTime = Date.parse(task.updated_at || '');
@@ -802,7 +868,7 @@ window.CaseAI = (() => {
     },100);
   }
   function syncStream(task) {
-    if (!task || !active(task) || document.hidden || pageHash() !== `#ai/${encodeURIComponent(task.task_id)}` || [...ai.pending.values()].some(entry => entry.busy)) {
+    if (!task || !active(task) || document.hidden || pagePath() !== `#ai/${encodeURIComponent(task.task_id)}` || [...ai.pending.values()].some(entry => entry.busy)) {
       closeStream();if (task && !active(task)) setText('#ai-stream-status','本轮已结束。');return;
     }
     if (ai.stream?.taskId === task.task_id) {
@@ -820,26 +886,27 @@ window.CaseAI = (() => {
     } catch {ai.streamRetryAt = Date.now()+10000;setText('#ai-stream-status','实时连接暂不可用，正在定时更新回复。');}
   }
   async function pollTask(force = false) {
-    const id = pageHash().startsWith('#ai/') ? decodeURIComponent(pageHash().slice(4)) : '';
+    const id = taskRouteId();
     if (!id || ai.page === 'missing' || ai.polling || (!force && [...ai.pending.values()].some(entry => entry.busy))) return;
     if (!force && ai.stream?.taskId === id && Date.now()-ai.stream.lastEvent < 15000) return;
     ai.polling = true;const mutation = ai.mutation, sequence = ai.sequence;
     try {
       const data = await api(`/api/ai/tasks/${encodeURIComponent(id)}`), task = data.task || data;
-      if (sequence !== ai.sequence || mutation !== ai.mutation || pageHash() !== `#ai/${encodeURIComponent(id)}`) return;
+      if (sequence !== ai.sequence || mutation !== ai.mutation || pagePath() !== `#ai/${encodeURIComponent(id)}`) return;
       if (task.task_id !== id) throw new Error('任务详情不完整。');
       if (olderSnapshot(task)) return;
       if (ai.errors.get(id)?.startsWith('暂时无法更新任务')) ai.errors.delete(id);
       updateTask(task,true);
     } catch (error) {
-      if (sequence !== ai.sequence || mutation !== ai.mutation || pageHash() !== `#ai/${encodeURIComponent(id)}`) return;
+      if (sequence !== ai.sequence || mutation !== ai.mutation || pagePath() !== `#ai/${encodeURIComponent(id)}`) return;
       if (error.status === 404) renderMissing();
       else {ai.errors.set(id,`暂时无法更新任务：${message(error)}。已有内容和下一步要求仍保留。`);updateTaskControls();}
     } finally {ai.polling = false;}
   }
   async function routeAI(keepScroll = false) {
     const hash = pageHash(), sequence = ++ai.sequence;
-    if (hash === '#ai') {
+    ai.focusedRound = '';
+    if (pagePath() === '#ai') {
       const product = window.WorkbenchShell?.product() || '';
       if (ai.page === 'list' && $('#ai-task-list')) {
         const saved = window.WorkbenchShell?.listState?.('ai',product);
@@ -848,10 +915,11 @@ window.CaseAI = (() => {
       closeStream();await renderList(keepScroll,sequence);return;
     }
     if (!hash.startsWith('#ai/')) return;
-    const id = decodeURIComponent(hash.slice(4));
+    const id = taskRouteId();
+    if (!id) {renderMissing();return;}
     if (ai.task?.task_id === id && alignTaskProduct(ai.task)) return;
     if (ai.stream && ai.stream.taskId !== id) closeStream();
-    if (ai.page === id && $('#ai-rounds')) {await pollTask();return;}
+    if (ai.page === id && $('#ai-rounds')) {focusRequestedRound();await pollTask();return;}
     ai.page = '';ai.task = null;$('#content').innerHTML = skeletonMarkup(2);
     try {
       void Promise.all([checkStatus(),loadOptions(true)]).then(() => {
@@ -883,7 +951,7 @@ window.CaseAI = (() => {
   $('#ai-delete-form').addEventListener('submit',submitDelete);
   $('#close-ai-delete').onclick = $('#cancel-ai-delete').onclick = closeDeleteDialog;
   $('#ai-delete-dialog').addEventListener('cancel',event => {event.preventDefault();closeDeleteDialog();});
-  window.addEventListener('hashchange',() => {if (ai.stream && pageHash() !== `#ai/${encodeURIComponent(ai.stream.taskId)}`) closeStream();});
+  window.addEventListener('hashchange',() => {if (ai.stream && pagePath() !== `#ai/${encodeURIComponent(ai.stream.taskId)}`) closeStream();});
   document.addEventListener('visibilitychange',() => {if (document.hidden) closeStream();else {void loadTaskList().catch(() => {});if (ai.modal || pageHash().startsWith('#ai/')) void loadOptions(true).then(refreshSettingsViews);if (pageHash().startsWith('#ai/')) {syncStream(ai.task);void pollTask(true);}}});
   setInterval(() => {
     if (document.hidden) return;

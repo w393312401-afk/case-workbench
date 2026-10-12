@@ -22,7 +22,8 @@ from direction_store import fingerprint, now, product_key
 from elevenlabs_client import DEFAULT_MODEL, MODELS, VOICE_ID, VoiceError, clean_settings, model
 from production_operations import ProductionOperations, durable_json
 from production_store import FRAME_RATES, JOB_ID, TAKE_ID, apply_readings, take_quality, job_status
-from variant_parse import parse_variants, same_lines, spoken_lines
+from task_activity import record_activity, safe_error
+from variant_parse import parse_variants, same_lines, spoken_lines, variant_script
 
 MAX_LINES = 80
 MAX_LINE_CHARS = 1000
@@ -73,10 +74,12 @@ def _short(value, limit):
     return value if len(value) <= limit else value[:limit - 1].rstrip() + "…"
 
 
-def meaning_markers(job, take, fps):
+def meaning_markers(job, take, fps, legacy=False):
     """One range marker per meaning group, tiling the voiceover: [this group's start, next group's start).
 
     The first marker starts at frame 0 so the opening shot is covered; pauses after a line belong to that line.
+    The note carries only the bare Chinese line and what the shot must prove; legacy=True rebuilds the fuller note
+    that timelines built before 2026-10-12 carry.
     """
     if not take_quality(take, len(job.get("lines") or [])):
         raise VoiceError(409, "这版配音的意群对齐未通过核验，请先核对配音后再建时间线。")
@@ -91,12 +94,13 @@ def meaning_markers(job, take, fps):
     ends = starts[1:] + [max(int(math.floor(seconds * rate)), starts[-1] + 1)]
     markers = []
     for line, group, start, end in zip(job["lines"], groups, starts, ends):
-        note = [f"口播：{line['spoken']}", f"中文：{line['zh']}" if line.get("zh") else "",
-                f"画面要证明什么：{line['proof']}" if line.get("proof") else "画面要证明什么：待补",
-                f"素材标签：{line['tags']}" if line.get("tags") else "", f"证据：{line['evidence']}" if line.get("evidence") else "",
-                f"配音：{group['start']:.2f}–{group['end']:.2f} 秒；标记 [{start}, {end}) 帧，含句后停顿"]
+        proof = line.get("proof") or "待补"
+        note = ([f"口播：{line['spoken']}", f"中文：{line['zh']}" if line.get("zh") else "", f"画面要证明什么：{proof}",
+                 f"素材标签：{line['tags']}" if line.get("tags") else "", f"证据：{line['evidence']}" if line.get("evidence") else "",
+                 f"配音：{group['start']:.2f}–{group['end']:.2f} 秒；标记 [{start}, {end}) 帧，含句后停顿"] if legacy
+                else [line.get("zh") or "", f"画面表达：{proof}"])
         markers.append({"number": line["number"], "frame": start, "duration": end - start,
-                        "name": f"#{line['number']} {_short(line['spoken'], 36)}", "note": "\n".join(item for item in note if item),
+                        "name": f"#{line['number']} {_short(line['spoken'], 36)}", "note": ("\n" if legacy else " ").join(item for item in note if item),
                         "custom": f"workbench-group:{job['id']}:{line['number']}"})
     return markers
 
@@ -146,7 +150,41 @@ class ProductionWorkbenchMixin:
         return self._voicing_jobs
 
     def _production_operations(self):
-        return ProductionOperations(self.production.root)
+        return ProductionOperations(self.production.root, on_saved=self._production_operation_activity)
+
+    def _production_operation_activity(self, record, *, pending=False):
+        """Mirror only durable phase boundaries, never provider responses or prompts."""
+        try:
+            kind = "voice" if record["kind"] == "take" else "timeline"
+            job = self.production.job(record["job_id"])
+            run_id = f"{kind}:{job['id']}:{record['request_id']}"
+            state = record["state"]
+            phases = {"prepared": "已准备", "inflight": "正在生成配音" if kind == "voice" else "正在建立时间线",
+                      "response_saved": "配音已返回，正在对齐", "result_ready": "结果已保存，正在登记",
+                      "committed": "已登记", "safe_failed": "执行失败", "uncertain": "待核实外部结果"}
+            status = "running"
+            message = phases.get(state, "正在处理")
+            if state == "committed":
+                result = record.get("result") or {}
+                attention = (result.get("quality", {}).get("status") != "passed" if kind == "voice" else
+                             bool(result.get("warnings")) or result.get("saved") is not True)
+                status = "needs_attention" if attention else "completed"
+                message = ("配音已生成，意群对齐待核对" if attention else "配音已生成") if kind == "voice" else (
+                          "时间线已建立，待核对工程" if attention else "时间线已建立")
+            elif state == "safe_failed":
+                status, message = "failed", "配音请求未完成。" + safe_error(record.get("error", ""))
+            elif state == "uncertain":
+                status, message = "needs_attention", "外部结果待核实，请恢复原请求"
+            if pending:
+                status, message = "needs_attention", "结果已取得，资料尚未登记；请恢复原请求"
+            record_activity(self, run_id, kind=kind, owner_id=job["id"], product=job.get("product", ""),
+                            case_id=job.get("case_id"), title=("生成配音" if kind == "voice" else "建立时间线") + " · " + (job.get("title") or job["id"]),
+                            source_id=record.get("take_id") or (record.get("result") or {}).get("unique_id") or record["request_id"],
+                            step=kind, status=status, phase=phases.get(state, "处理中"), message=message,
+                            result_count=1 if state == "committed" else 0,
+                            event_key=f"{state}:{'pending' if pending else status}" if status != "running" else None)
+        except Exception:
+            pass
 
     def recover_production_operation(self, identifier, body):
         operations = self._production_operations()
@@ -176,6 +214,7 @@ class ProductionWorkbenchMixin:
             result = self.production.mutate(record["kind"], record["body"], record["result"])
             operations.update(record, "committed", error="")
         except OSError as exc:
+            self._production_operation_activity(record, pending=True)
             raise VoiceError(503, "外部制作结果已经保存，资料登记未完成；请用原请求恢复，无需重新生成配音或另建时间线。") from exc
         return result
 
@@ -232,10 +271,13 @@ class ProductionWorkbenchMixin:
                 raise VoiceError(404, "这张制作单不存在。")
             readings = [item for item in catalog["readings"] if item["product"] == job["product"]]
             try:
-                script = self.creation.get_script(job["script_id"])
-                script = {key: script.get(key) for key in ("id", "title", "status", "version", "product", "direction_id")}
+                full = self.creation.get_script(job["script_id"])
+                script = {key: full.get(key) for key in ("id", "title", "status", "version", "product", "direction_id")}
+                index = (job.get("source") or {}).get("variant_index")
+                markdown = variant_script((full.get("source") or {}).get("candidate_text") or "", index)
+                variant = {"label": job.get("variant_label", ""), "markdown": markdown} if markdown else None
             except CreationError:
-                script = None
+                script, variant = None, None
             job["voicing"] = identifier in self._voicing()
             recovery = self._production_operations().public(identifier)
             job["recovery_operations"] = recovery
@@ -244,7 +286,7 @@ class ProductionWorkbenchMixin:
             return {"job": job, "revision": catalog["revision"], "readings": readings, "tts": self._tts(job, readings),
                     "historical_baseline_restore": True,
                     "recovery_operations": recovery,
-                    "script": script, "voices": catalog["voices"], "defaults": catalog["defaults"],
+                    "script": script, "variant": variant, "voices": catalog["voices"], "defaults": catalog["defaults"],
                     "models": copy.deepcopy(MODELS), "default_model": DEFAULT_MODEL, "creators": catalog["settings"]["creators"],
                     "product_settings": self.production.product_settings(catalog, job["product"]),
                     "today": datetime.now().strftime("%y%m%d")}
@@ -427,6 +469,8 @@ class ProductionWorkbenchMixin:
             with self.lock:
                 self._voicing().add(identifier)
             try:
+                if response:
+                    self._production_operation_activity(record)
                 if not response:
                     current = self.production.job(identifier)
                     if current["archived"]:
@@ -480,6 +524,13 @@ class ProductionWorkbenchMixin:
                                               "意群对齐未通过核验，请试听核对；暂不能选用或建线。"}
                 record = operations.update(record, "result_ready", result=take, error="")
                 return self._commit_production_operation(operations, record)
+            except Exception:
+                try:
+                    latest = operations.read("take", body) or record
+                    self._production_operation_activity(latest, pending=latest.get("state") in {"response_saved", "result_ready"})
+                except Exception:
+                    pass
+                raise
             finally:
                 with self.lock:
                     self._voicing().discard(identifier)

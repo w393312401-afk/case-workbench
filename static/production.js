@@ -11,7 +11,8 @@ window.CaseProduction = (() => {
   const editClient = provider => provider === 'codex' ? 'Codex 客户端' : 'Claude Code 客户端';
   const editModelLabel = model => editModelNames.get(model || 'codex-default') || model;
   const editLabels = {running:'运行中',completed:'已完成',awaiting_review:'待人工审查',approved:'已完成',needs_material:'待补素材',needs_repair:'待修正',verification_failed:'核验未完成',unverified:'旧记录待核验',failed:'失败',cancelled:'已停止',interrupted:'已中断'};
-  const editState = edit => edit.status === 'completed' ? 'unverified' : edit.status === 'awaiting_review' && edit.approval ? 'approved' : edit.status;
+  const skillDelivery = edit => edit?.completion_policy === 'skill_delivery';
+  const editState = edit => edit.status === 'completed' ? (skillDelivery(edit) ? (edit.report?.saved !== true ? 'needs_repair' : edit.report?.gaps?.length ? 'needs_material' : edit.approval ? 'approved' : 'awaiting_review') : 'unverified') : edit.status === 'awaiting_review' && edit.approval ? 'approved' : edit.status;
   const manualScope = ['画面内容与口播是否匹配','镜头时长例外与视觉连贯性','字幕、声音听审和成片导出'];
   // Only the latest attempt on a timeline of the selected voiceover decides the job, so only it can be completed.
   const currentEdit = (job,edit) => {
@@ -30,12 +31,57 @@ window.CaseProduction = (() => {
   const sourceLabels = {tts:'配音自带时间',tts_normalized:'配音时间（规范化文本）',forced:'强制对齐','':'未取得'};
   const settingLabels = {stability:'稳定度',similarity_boost:'相似度',style:'风格',speed:'语速'};
   const ranges = {stability:[0,1,.05,.5],similarity_boost:[0,1,.05,.75],style:[0,1,.05,0],speed:[.7,1.2,.01,1]};
-  const view = {sequence:0,modal:null,pending:new Map(),choice:{},showArchived:false,type:'all',status:'all'};
-  const queueTypes = {all:'全部类型',video:'视频',carousel:'图文'};
+  const view = {sequence:0,modal:null,pending:new Map(),choice:{},showArchived:false,type:'all',status:'all',batch:false,selected:new Set()};
+  const queueTypes = {all:'全部',video:'视频',carousel:'图文'};
+  const typeStorageKey = product => `case-workbench:production-type:${window.WorkbenchShell?.normalizeProduct?.(product) || 'all'}`;
+  const storedType = product => {try {const value = localStorage.getItem(typeStorageKey(product));return Object.hasOwn(queueTypes,value) ? value : 'all';} catch {return 'all';}};
+  const rememberType = (product,value) => {try {localStorage.setItem(typeStorageKey(product),value);} catch {}};
   const queueStatuses = {all:'全部状态',in_progress:'制作中',needs_attention:'需处理',awaiting_review:'待核对 / 审查',ready_to_package:'待整理成品包',ready:'可领取',approved:'已人工审查',published:'已登记发布'};
   const url = (hash,product) => window.WorkbenchShell?.url(hash,product) || hash;
   const currentProduct = () => window.WorkbenchShell?.product() || '';
   const pageHash = () => window.WorkbenchShell?.legacyHash() || location.hash;
+  const activitySteps = {validation:'edit',stills:'pick',image_review:'images',package:'delivery'};
+  function mountActivityHost(host,options) {
+    window.TaskActivity.mountLogs(host,options);
+    const details = $('details',host);if (!details) return;
+    const key = `${options.owner_id}:${options.source_id || 'all'}`;
+    const opened = view.activityLogsOpen ||= new Map();
+    details.addEventListener('toggle',() => {if (details.isConnected) opened.set(key,details.open);});
+    if (opened.get(key)) details.open = true;
+  }
+  function mountActivityLogs(ownerId) {
+    if (!window.TaskActivity) return;
+    $$('[data-activity-source]',$('#content')).forEach(card => {
+      if ($('.task-activity-logs',card)) return;
+      const host = document.createElement('div');host.className = 'task-activity-logs';card.append(host);
+      mountActivityHost(host,{owner_id:ownerId,source_id:card.dataset.activitySource});
+    });
+    if (!$('#production-activity-logs')) {
+      const host = document.createElement('div');host.id = 'production-activity-logs';host.className = 'task-activity-logs';
+      $('.page-heading',$('#content'))?.after(host);
+      const requested = new URLSearchParams(pageHash().split('?').slice(1).join('?')).get('run');
+      const hasCard = requested && $$('[data-activity-source]',$('#content')).some(node => node.dataset.activitySource === requested);
+      mountActivityHost(host,{owner_id:ownerId,...(requested && !hasCard ? {source_id:requested} : {})});
+    }
+  }
+  function applyActivityTarget(id, hash) {
+    if (view.activityTarget === hash) return;
+    const params = new URLSearchParams(hash.split('?').slice(1).join('?')), run = params.get('run');
+    const step = activitySteps[params.get('step')] || params.get('step');
+    if (step) (view.choice[id] ||= {}).step = step;
+    view.pendingActivityTarget = {hash,run,step};
+  }
+  function focusActivityTarget() {
+    const target = view.pendingActivityTarget;if (!target) return;
+    view.pendingActivityTarget = null;view.activityTarget = target.hash;
+    if (!target.run && !target.step) return;
+    const card = $$('[data-activity-source]',$('#content')).find(node => node.dataset.activitySource === target.run) || $$('[data-generation-result]',$('#content')).find(node => node.dataset.generationResult === target.run);
+    const panel = card?.closest('[data-step-panel]');
+    if (panel?.hidden) $$('[data-step]',$('.production-steps')).find(button => button.dataset.step === panel.dataset.stepPanel)?.click();
+    if (card?.closest('.image-version-others')?.hidden) setImageVersionsExpanded(card.closest('.image-version-stack'),true);
+    const node = card || (target.run ? $('#production-activity-logs') : null) || $$('[data-step-panel]',$('#content')).find(node => !node.hidden);
+    if (node) {if (!card && target.run) {const details = $('details',node);if (details) details.open = true;}node.tabIndex = -1;node.focus({preventScroll:true});node.scrollIntoView({block:'start'});}
+  }
   const fail = error => error?.message || '操作暂未完成';
   const definitive = error => Number.isInteger(error?.status) && error.status >= 400 && error.status < 500;
   const jobLink = job => url(`#production/${encodeURIComponent(job.id)}`,job.product);
@@ -190,7 +236,7 @@ window.CaseProduction = (() => {
 
   function captureListState() {
     if (!$('#production-settings-open') || !$('.production-main')) return null;
-    return {product:view.listProduct,showArchived:!!$('#production-archived')?.checked,type:$('#production-type')?.value || 'all',status:$('#production-status')?.value || 'all'};
+    return {product:view.listProduct,showArchived:!!$('#production-archived')?.checked,type:$('#production-type [aria-pressed="true"]')?.dataset.type || 'all',status:$('#production-status')?.value || 'all'};
   }
 
   async function route(keepScroll = false, refreshStatus = false) {
@@ -199,7 +245,7 @@ window.CaseProduction = (() => {
       const mounted = keepScroll && view.listProduct === currentProduct() ? captureListState() : null;
       const saved = window.WorkbenchShell?.listState?.('production',currentProduct());
       view.showArchived = (saved || mounted)?.showArchived === true;
-      view.type = Object.hasOwn(queueTypes,(saved || mounted)?.type) ? (saved || mounted).type : 'all';
+      view.type = Object.hasOwn(queueTypes,(saved || mounted)?.type) ? (saved || mounted).type : storedType(currentProduct());
       view.status = Object.hasOwn(queueStatuses,(saved || mounted)?.status) ? (saved || mounted).status : 'all';
     }
     if (refreshStatus) statusReads.forEach(entry => {entry.expires = 0;});
@@ -207,14 +253,17 @@ window.CaseProduction = (() => {
     $('#breadcrumb').innerHTML = `工作空间 <span>/</span> 内容创作 <span>/</span> ${tail ? '制作单' : '内容制作'}`;
     if (!keepScroll) $('#content').innerHTML = skeletonMarkup(2);
     try {
+      if (tail) applyActivityTarget(decodeURIComponent(tail),hash);
       if (tail.startsWith('CAR-')) {
         const data = await api(`/api/production/carousels/${encodeURIComponent(decodeURIComponent(tail))}`);
         if (seq !== view.sequence || hash !== pageHash()) return;
         renderCarousel(data);
+        mountActivityLogs(data.carousel.id);focusActivityTarget();
       } else if (tail) {
         const data = await api(`/api/production/jobs/${encodeURIComponent(decodeURIComponent(tail))}`);
         if (seq !== view.sequence || hash !== pageHash()) return;
         renderJob(data,seq);
+        mountActivityLogs(data.job.id);focusActivityTarget();
       } else {
         const data = await api(`/api/production?product=${encodeURIComponent(currentProduct())}`);
         if (seq !== view.sequence || hash !== pageHash()) return;
@@ -254,12 +303,13 @@ window.CaseProduction = (() => {
       if (item.voicing) return {key:'in_progress',label:'配音中',action:'查看进度',step:'voice'};
       if (item.recovery_operations?.length) return {key:'needs_attention',label:'结果待恢复',action:'查看并恢复'};
       if (['awaiting_review','approved'].includes(item.status)) {
-        // A passed result from another timeline cannot override the job's latest state.
+        // A result from another timeline cannot override the job's latest state.
         const edit = (item.edits || []).find(edit => edit.id === delivery?.edit_id);
-        const verified = delivery?.status === 'awaiting_review' && edit && currentEdit(item,edit) &&
-          edit.status === 'awaiting_review' && edit.validation?.status === 'awaiting_review';
-        if (verified && item.status === 'approved' && delivery.approved_at) return {key:'approved',label:'已人工审查',action:'查看制作单',step:'edit',note:'人工审查已确认；成片导出在达芬奇完成',delivery:true};
-        if (verified && item.status === 'awaiting_review' && !delivery.approved_at) return {key:'awaiting_review',label:'待人工审查',action:'去审查',step:'edit',note:'工程核验通过 · 待人工审查',delivery:true};
+        const reviewable = delivery?.status === 'awaiting_review' && edit && currentEdit(item,edit) &&
+          ((skillDelivery(edit) && edit.status === 'completed' && edit.report?.saved === true && !edit.report?.gaps?.length) ||
+          (edit.status === 'awaiting_review' && edit.validation?.status === 'awaiting_review'));
+        if (reviewable && item.status === 'approved' && delivery.approved_at) return {key:'approved',label:'已人工审查',action:'查看制作单',step:'edit',note:'人工审查已确认；成片导出在达芬奇完成',delivery:true};
+        if (reviewable && item.status === 'awaiting_review' && !delivery.approved_at) return {key:'awaiting_review',label:'待人工审查',action:'去审查',step:'edit',note:skillDelivery(edit) && !edit.validation ? '按技能保存交付 · 工程核验未执行' : '工程核验通过 · 待人工审查',delivery:true};
         return {key:'needs_attention',label:deliveryState.loading ? '审查状态核对中' : '审查状态待确认',action:'查看制作单',step:'edit',note:deliveryState.error || '进入制作单核对当前工程与审查记录'};
       }
       const problem = ['needs_material','needs_repair','verification_failed','unverified','completed','failed','cancelled','interrupted'].includes(item.status);
@@ -273,7 +323,7 @@ window.CaseProduction = (() => {
       return {key:'ready_to_package',label:'待整理成品包',action:'整理成品包',step:'delivery',note:delivery.delivery_error || '当前图文已确认，整理后可领取',delivery:true};
     }
     if (item.status === 'approved' || item.status === 'published') return {key:'needs_attention',label:deliveryState.loading ? '领取状态核对中' : '领取状态待确认',action:'查看制作单',step:'delivery',note:deliveryState.error || '请核对当前图片与成品包'};
-    if (item.status === 'reviewing') return {key:'awaiting_review',label:'成图待核对',action:'继续核对',step:'images',note:delivery?.delivery_id ? '有历史成品包；当前版本仍需核对' : ''};
+    if (item.status === 'reviewing') return {key:'awaiting_review',label:'成图待确认',action:'选择图片',step:'images',note:delivery?.delivery_id ? '有历史成品包；当前图片待选用' : ''};
     return {key:'in_progress',label:carouselLabel(item),action:'继续制作',step:['ready','picked'].includes(item.status) ? 'images' : 'pick',note:delivery?.delivery_id ? '历史成品包可在制作单中查看' : ''};
   }
 
@@ -293,8 +343,33 @@ window.CaseProduction = (() => {
       statusNode.hidden = !deliveryState.loading && !deliveryState.error;
       statusNode.innerHTML = deliveryState.error ? `<span>暂时无法核对审查与领取状态：${esc(deliveryState.error)}</span><button type="button" class="subtle" data-delivery-reload>重新读取</button>` : deliveryState.loading ? '<span>正在核对审查与领取状态…</span>' : '';
       $('[data-delivery-reload]',statusNode)?.addEventListener('click',load);
-      node.innerHTML = visible.length ? visible.map(({item,kind,state}) => `<a class="script-card production-card production-queue-row" href="${esc(jobLink(item))}" data-production-id="${esc(item.id)}" data-production-kind="${kind}" data-production-state="${state.key}" ${state.step ? `data-production-step="${state.step}"` : ''} ${state.delivery ? `data-delivery-kind="${kind}" data-delivery-item="${esc(item.id)}"` : ''}><span class="script-row-main"><span class="production-row-title"><span class="production-kind">${kind === 'video' ? '视频' : '图文'}</span><strong>${esc(item.title || '未命名制作单')}</strong></span><small>${esc(item.product)} · ${esc(item.direction_id || '未指定方向')}${kind === 'video' ? ` · ${(item.lines || []).length} 个意群` : ` · ${(item.slides || []).length} 张图片`} · ${esc(readableDate(item.updated_at))}</small>${state.note ? `<small class="production-row-note">${esc(state.note)}</small>` : ''}</span><span class="production-row-next"><span class="script-status ${['ready','published','approved'].includes(state.key) ? 'published' : ''}">${esc(state.label)}</span><span class="production-next-action">${esc(state.action)}${icon('arrow')}</span></span></a>`).join('') : `<div class="empty"><h3>${rows.length ? '没有符合筛选的制作单' : '还没有制作单'}</h3><p>${rows.length ? '调整类型或状态筛选，查看其他制作单。' : '在脚本详情中选择视频或图文，开始制作。'}</p>${rows.length ? '<button type="button" class="secondary" data-queue-reset>查看全部</button>' : `<a class="secondary" href="${esc(url('#scripts',product))}">查看脚本版本</a>`}</div>`;
-      $('[data-queue-reset]',node)?.addEventListener('click',() => {view.type = view.status = 'all';$('#production-type').value = $('#production-status').value = 'all';paint();});
+      node.innerHTML = visible.length ? visible.map(({item,kind,state}) => `<a class="script-card production-card production-queue-row${view.batch ? ' selecting' : ''}${view.batch && view.selected.has(item.id) ? ' selected' : ''}" href="${esc(jobLink(item))}" ${view.batch ? `role="checkbox" aria-checked="${view.selected.has(item.id)}"` : ''} data-production-id="${esc(item.id)}" data-production-kind="${kind}" data-production-state="${state.key}" ${state.step ? `data-production-step="${state.step}"` : ''} ${state.delivery ? `data-delivery-kind="${kind}" data-delivery-item="${esc(item.id)}"` : ''}>${view.batch ? '<span class="production-pick" aria-hidden="true"></span>' : ''}<span class="script-row-main"><span class="production-row-title"><span class="production-kind">${kind === 'video' ? '视频' : '图文'}</span><strong>${esc(item.title || '未命名制作单')}</strong></span><small>${esc(item.product)} · ${esc(item.direction_id || '未指定方向')}${kind === 'video' ? ` · ${(item.lines || []).length} 个意群` : ` · ${(item.slides || []).length} 张图片`} · ${esc(readableDate(item.updated_at))}</small>${state.note ? `<small class="production-row-note">${esc(state.note)}</small>` : ''}</span><span class="production-row-next"><span class="script-status ${['ready','published','approved'].includes(state.key) ? 'published' : ''}">${esc(state.label)}</span><span class="production-next-action">${esc(state.action)}${icon('arrow')}</span></span></a>`).join('') : `<div class="empty"><h3>${rows.length ? '没有符合筛选的制作单' : '还没有制作单'}</h3><p>${rows.length ? '调整类型或状态筛选，查看其他制作单。' : '在脚本详情中选择视频或图文，开始制作。'}</p>${rows.length ? '<button type="button" class="secondary" data-queue-reset>查看全部</button>' : `<a class="secondary" href="${esc(url('#scripts',product))}">查看脚本版本</a>`}</div>`;
+      $('[data-queue-reset]',node)?.addEventListener('click',() => {view.type = view.status = 'all';rememberType(product,'all');syncType();$('#production-status').value = 'all';paint();});
+      paintBatch(visible,rows);
+    };
+    const syncType = () => $$('.production-type-choice',$('#production-type')).forEach(button => button.setAttribute('aria-pressed',String(button.dataset.type === view.type)));
+    const orderRef = ({item,kind}) => ({kind:kind === 'video' ? 'job' : 'carousel',id:item.id});
+    const paintBatch = (visible,rows) => {
+      const bar = $('#production-batchbar'), toggle = $('#production-batch-toggle');
+      if (!bar) return;
+      toggle.setAttribute('aria-pressed',String(view.batch));toggle.textContent = view.batch ? '退出批量管理' : '批量管理';
+      bar.hidden = !view.batch;
+      if (!view.batch) return;
+      const known = new Set(rows.map(row => row.item.id));
+      for (const id of [...view.selected]) if (!known.has(id)) view.selected.delete(id);
+      const chosen = visible.filter(row => view.selected.has(row.item.id));
+      const live = chosen.filter(row => !row.item.archived).length, archived = chosen.length - live;
+      bar.innerHTML = `<span class="production-batch-count" role="status">已选 ${chosen.length} 张${chosen.length && archived ? `（其中已归档 ${archived}）` : ''}</span><button type="button" class="subtle" data-batch="all">${chosen.length === visible.length && visible.length ? '取消全选' : `全选当前 ${visible.length} 张`}</button><button type="button" class="secondary compact" data-batch="archive" ${live ? '' : 'disabled'}>归档 ${live || ''}</button><button type="button" class="secondary compact" data-batch="restore" ${archived ? '' : 'disabled'}>恢复 ${archived || ''}</button><button type="button" class="secondary compact danger" data-batch="delete" ${chosen.length ? '' : 'disabled'}>永久删除 ${chosen.length || ''}</button><small>永久删除不需要先归档；有任务在运行的制作单会被跳过并说明原因。</small>`;
+      $$('[data-batch]',bar).forEach(button => button.onclick = () => {
+        const action = button.dataset.batch;
+        if (action === 'all') {
+          if (chosen.length === visible.length) view.selected.clear();
+          else visible.forEach(row => view.selected.add(row.item.id));
+          paint();return;
+        }
+        const targets = chosen.filter(row => action === 'delete' || (action === 'archive' ? !row.item.archived : row.item.archived)).map(orderRef);
+        void runBatch(action,targets);
+      });
     };
     const load = async () => {
       const request = ++readSequence;deliveryState.loading = true;deliveryState.error = '';paint();
@@ -308,11 +383,22 @@ window.CaseProduction = (() => {
       }
       deliveryState.loading = false;paint();
     };
-    for (const [id,key] of [['production-type','type'],['production-status','status']]) {
-      const select = $('#' + id);select.value = view[key];select.onchange = () => {view[key] = select.value;paint();};
-    }
+    syncType();
+    $$('.production-type-choice',$('#production-type')).forEach(button => button.onclick = () => {view.type = button.dataset.type;rememberType(product,view.type);syncType();paint();});
+    const statusSelect = $('#production-status');statusSelect.value = view.status;statusSelect.onchange = () => {view.status = statusSelect.value;paint();};
+    $('#production-batch-toggle').onclick = () => {view.batch = !view.batch;if (!view.batch) view.selected.clear();paint();};
     $('#production-archived')?.addEventListener('change',event => {view.showArchived = event.target.checked;paint();});
     node.addEventListener('click',event => {
+      if (view.batch) {
+        const pick = event.target.closest('[data-production-id]');
+        if (pick) {
+          event.preventDefault();
+          const id = pick.dataset.productionId;
+          if (view.selected.has(id)) view.selected.delete(id);else view.selected.add(id);
+          paint();
+        }
+        return;
+      }
       const row = event.target.closest('[data-production-step]');
       if (row && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) (view.choice[row.dataset.productionId] ||= {}).step = row.dataset.productionStep;
     });
@@ -324,7 +410,7 @@ window.CaseProduction = (() => {
     view.listProduct = product;
     const archivedCount = [...(data.jobs || []), ...(data.carousels || [])].filter(item => item.archived).length;
     const voices = data.voices || [];
-    $('#content').innerHTML = `<div class="page-heading"><div><h1>内容制作</h1><p>管理视频与图文制作单，继续配音、剪辑或出图，核对并领取成品。</p></div><button type="button" class="secondary" id="production-settings-open" aria-haspopup="dialog" aria-controls="production-settings">${icon('folder')}制作设置</button></div>${tabs()}<div class="production-service-warning" id="production-service-warning" role="status" hidden></div><div class="production-main"><section aria-labelledby="production-queue-title"><div class="section-title-row production-list-head"><h2 id="production-queue-title">制作清单 <small id="production-queue-count"></small></h2>${archivedCount ? `<label class="production-toggle"><input type="checkbox" id="production-archived" ${view.showArchived ? 'checked' : ''}>显示已归档（${archivedCount}）</label>` : ''}</div><div class="production-queue-filters"><label>类型<select id="production-type">${Object.entries(queueTypes).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select></label><label>状态<select id="production-status">${Object.entries(queueStatuses).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select></label></div><div class="production-queue-status" id="production-queue-status" role="status"></div><div id="production-queue" class="script-rows"></div></section></div><dialog id="production-settings" class="rev-drawer production-drawer" aria-labelledby="production-settings-title"><div class="rev-drawer-head"><h2 id="production-settings-title">制作设置</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭制作设置">${icon('close')}</button></div><div class="rev-drawer-body"><section class="production-setting"><h2>配音服务</h2><div class="production-eleven" id="production-eleven"></div></section><section class="production-setting"><h2>音色库</h2><p class="context-note">生成过的音色会自动留在这里；备注写清是谁的声音、适合什么稿。</p><ul class="voice-list">${voices.length ? voices.map(voice => `<li class="voice-row ${voice.disabled ? 'disabled' : ''}"><div><strong>${esc(voiceLabel(voice))}</strong>${product && data.defaults?.[window.WorkbenchShell.normalizeProduct(product)] === voice.voice_id ? '<span class="script-status published">默认</span>' : ''}${voice.disabled ? '<span class="script-status">已停用</span>' : ''}<code>${esc(voice.voice_id)}</code><small>使用 ${voice.use_count || 0} 次${voice.last_used_at ? ` · 最近 ${esc(readableDate(voice.last_used_at))}` : ''}</small></div><div class="voice-actions"><button type="button" class="subtle" data-voice-note="${esc(voice.voice_id)}">备注</button>${product && !voice.disabled ? `<button type="button" class="subtle" data-voice-default="${esc(voice.voice_id)}">设为默认</button>` : ''}<button type="button" class="subtle" data-voice-toggle="${esc(voice.voice_id)}">${voice.disabled ? '启用' : '停用'}</button></div></li>`).join('') : '<li class="context-note">还没有音色。</li>'}</ul><form id="voice-add" class="inline-form"><label class="field"><span>音色 ID</span><input name="voice_id" required pattern="[A-Za-z0-9]{10,64}" autocomplete="off"></label><label class="field"><span>备注</span><input name="note" maxlength="500" placeholder="例如：Zack 男声，适合测评稿"></label><button type="submit" class="secondary">核对并加入</button><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="production-setting"><h2>读法表${product ? ` · ${esc(product)}` : ''}</h2>${product ? `<p class="context-note">只改送去配音的文字，稿件原文不变。按整词、区分大小写替换。</p><ul class="reading-list">${(data.readings || []).map(item => `<li><span><code>${esc(item.written)}</code> 读作 <strong>${esc(item.spoken)}</strong></span><button type="button" class="subtle" data-reading-remove="${esc(item.id)}">删除</button></li>`).join('') || '<li class="context-note">还没有登记读法。</li>'}</ul><form id="reading-add" class="inline-form"><label class="field"><span>稿中写法</span><input name="written" required maxlength="100" placeholder="例如 202H"></label><label class="field"><span>配音读法</span><input name="spoken" required maxlength="200" placeholder="例如 two oh two H"></label><button type="submit" class="secondary">添加读法</button><p class="ai-error" data-error role="alert" hidden></p></form>` : '<p class="context-note">选择具体产品后维护读法。</p>'}</section>${resolveSettings(data,product)}</div></dialog>`;
+    $('#content').innerHTML = `<div class="page-heading"><div><h1>内容制作</h1><p>管理视频与图文制作单，继续配音、剪辑或出图，核对并领取成品。</p></div><button type="button" class="secondary" id="production-settings-open" aria-haspopup="dialog" aria-controls="production-settings">${icon('folder')}制作设置</button></div>${tabs()}<div class="production-service-warning" id="production-service-warning" role="status" hidden></div><div class="production-main"><section aria-labelledby="production-queue-title"><div class="section-title-row production-list-head"><h2 id="production-queue-title">制作清单 <small id="production-queue-count"></small></h2>${archivedCount ? `<label class="production-toggle"><input type="checkbox" id="production-archived" ${view.showArchived ? 'checked' : ''}>显示已归档（${archivedCount}）</label>` : ''}</div><div class="production-queue-filters"><div class="production-type-field"><span id="production-type-label">类型</span><div class="production-type-group" id="production-type" role="group" aria-labelledby="production-type-label">${Object.entries(queueTypes).map(([key,label]) => `<button type="button" class="production-type-choice" data-type="${key}" aria-pressed="false">${label}</button>`).join('')}</div></div><label>状态<select id="production-status">${Object.entries(queueStatuses).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select></label><button type="button" class="secondary compact" id="production-batch-toggle" aria-pressed="false">批量管理</button></div><div class="production-batchbar" id="production-batchbar" hidden></div><div class="production-queue-status" id="production-queue-status" role="status"></div><div id="production-queue" class="script-rows"></div></section></div><dialog id="production-settings" class="rev-drawer production-drawer" aria-labelledby="production-settings-title"><div class="rev-drawer-head"><h2 id="production-settings-title">制作设置</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭制作设置">${icon('close')}</button></div><div class="rev-drawer-body"><section class="production-setting"><h2>配音服务</h2><div class="production-eleven" id="production-eleven"></div></section><section class="production-setting"><h2>音色库</h2><p class="context-note">生成过的音色会自动留在这里；备注写清是谁的声音、适合什么稿。</p><ul class="voice-list">${voices.length ? voices.map(voice => `<li class="voice-row ${voice.disabled ? 'disabled' : ''}"><div><strong>${esc(voiceLabel(voice))}</strong>${product && data.defaults?.[window.WorkbenchShell.normalizeProduct(product)] === voice.voice_id ? '<span class="script-status published">默认</span>' : ''}${voice.disabled ? '<span class="script-status">已停用</span>' : ''}<code>${esc(voice.voice_id)}</code><small>使用 ${voice.use_count || 0} 次${voice.last_used_at ? ` · 最近 ${esc(readableDate(voice.last_used_at))}` : ''}</small></div><div class="voice-actions"><button type="button" class="subtle" data-voice-note="${esc(voice.voice_id)}">备注</button>${product && !voice.disabled ? `<button type="button" class="subtle" data-voice-default="${esc(voice.voice_id)}">设为默认</button>` : ''}<button type="button" class="subtle" data-voice-toggle="${esc(voice.voice_id)}">${voice.disabled ? '启用' : '停用'}</button></div></li>`).join('') : '<li class="context-note">还没有音色。</li>'}</ul><form id="voice-add" class="inline-form"><label class="field"><span>音色 ID</span><input name="voice_id" required pattern="[A-Za-z0-9]{10,64}" autocomplete="off"></label><label class="field"><span>备注</span><input name="note" maxlength="500" placeholder="例如：Zack 男声，适合测评稿"></label><button type="submit" class="secondary">核对并加入</button><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="production-setting"><h2>读法表${product ? ` · ${esc(product)}` : ''}</h2>${product ? `<p class="context-note">只改送去配音的文字，稿件原文不变。按整词、区分大小写替换。</p><ul class="reading-list">${(data.readings || []).map(item => `<li><span><code>${esc(item.written)}</code> 读作 <strong>${esc(item.spoken)}</strong></span><button type="button" class="subtle" data-reading-remove="${esc(item.id)}">删除</button></li>`).join('') || '<li class="context-note">还没有登记读法。</li>'}</ul><form id="reading-add" class="inline-form"><label class="field"><span>稿中写法</span><input name="written" required maxlength="100" placeholder="例如 202H"></label><label class="field"><span>配音读法</span><input name="spoken" required maxlength="200" placeholder="例如 two oh two H"></label><button type="submit" class="secondary">添加读法</button><p class="ai-error" data-error role="alert" hidden></p></form>` : '<p class="context-note">选择具体产品后维护读法。</p>'}</section>${resolveSettings(data,product)}</div></dialog>`;
     elevenStatus($('#production-eleven'));
     mountQueue(data,product,view.sequence);
     bindResolveSettings(data,product);
@@ -401,51 +487,83 @@ window.CaseProduction = (() => {
   }
   function editRun(job,edit,historicalRestore = false) {
     const summary = edit.summary, report = edit.report || {}, live = edit.live || {}, state = editState(edit);
+    const unverifiedDelivery = skillDelivery(edit) && !edit.validation;
     const requestedModel = edit.requested_model || edit.model || 'codex-default', provider = edit.provider || editProvider(requestedModel), client = edit.client_label || editClient(provider);
     const effectiveModel = live.effective_model || edit.effective_model, effectiveEffort = live.effective_effort || edit.effective_effort;
     const receipt = `${esc(client)} · ${effectiveModel ? `实际模型：${esc(editModelLabel(effectiveModel))}` : `申请模型：${esc(editModelLabel(requestedModel))} · 实际型号尚未回报`}${effectiveModel && effectiveModel !== requestedModel ? `（申请 ${esc(editModelLabel(requestedModel))}）` : ''}${effectiveEffort ? ` · 实际思考强度：${esc(effectiveEffort)}` : edit.effort ? ` · 申请思考强度：${esc(edit.effort)}` : ''} · ${provider === 'codex' ? '使用 Codex 客户端当前账户额度' : '使用 Claude 订阅额度'}`;
-    const gaps = summary?.gaps || [], uncovered = summary?.uncovered || [];
+    const gaps = summary?.gaps || (Array.isArray(report.gaps) ? report.gaps.map(gap => ({...gap,name:gap.need || '缺素材'})) : []), uncovered = summary?.uncovered || [];
+    const gapLocation = gap => Number.isFinite(gap.seconds) ? `第 ${gap.seconds} 秒` : `帧 [${gap.start}, ${gap.end})`;
     const facts = summary ? [`镜头 ${summary.shots} 个`,`配音 ${summary.voice_seconds} 秒`,`缺素材 ${gaps.length} 处`,
       uncovered.length ? `未覆盖 ${uncovered.length} 段` : '画面全部覆盖',
-      summary.long_shots ? `超过通用参考 ${summary.frame_limit} 帧的镜头 ${summary.long_shots} 个（最长 ${summary.max_shot} 帧，需按产品规则人工判断）` : ''].filter(Boolean) : [];
+      summary.long_shots ? `超过通用参考 ${summary.frame_limit} 帧的镜头 ${summary.long_shots} 个（最长 ${summary.max_shot} 帧，需按产品规则人工判断）` : ''].filter(Boolean) : unverifiedDelivery ?
+      [Number.isInteger(report.shots) ? `剪辑说明：镜头 ${report.shots} 个` : '',`已报缺素材 ${gaps.length} 处`].filter(Boolean) : [];
     const issues = (edit.validation?.issues || []).map(issue => typeof issue === 'string' ? issue : issue.message).filter(Boolean);
     const warnings = issues.length ? issues : summary ? [summary.voice_changed ? '配音轨和建时间线时不一致，请核对是否被改动。' : '',
       summary.group_markers !== summary.groups_expected ? `意群标记读回 ${summary.group_markers} 个，应有 ${summary.groups_expected} 个。` : ''].filter(Boolean) : [];
     if (edit.readback_error && !issues.length) warnings.push(`没能读回时间线：${edit.readback_error}`);
     const checked = edit.validation?.checked_at ? ` · 核验 ${esc(readableDate(edit.validation.checked_at))}` : '';
     const approval = state === 'approved' ? edit.approval : null;
-    const explanation = approval ? `你已在 ${readableDate(approval.at)} 人工确认完成${approval.note ? `：${approval.note}` : '。'}之后重新核验时镜头有变化，会自动撤销确认。`
-      : state === 'awaiting_review' ? '工程核验通过，待你在达芬奇人工审查；字幕、声音和导出由你处理。核对完点「确认完成」。'
+    const explanation = approval ? `你已在 ${readableDate(approval.at)} 人工确认完成${approval.note ? `：${approval.note}` : '。'}${unverifiedDelivery ? '此记录仅表示人工审查已确认，工程核验未执行。' : '之后重新核验时镜头有变化，会自动撤销确认。'}`
+      : state === 'awaiting_review' ? unverifiedDelivery ? '已按技能完成保存交付，待你在达芬奇人工审查；工程核验未执行，素材去重已归档停用。字幕、声音和导出由你处理。核对完点「确认完成」。' : `工程核验通过${edit.validation?.dedup_enabled === false ? '（素材去重未执行）' : ''}，待你在达芬奇人工审查；字幕、声音和导出由你处理。核对完点「确认完成」。`
       : state === 'unverified' ? '旧记录未保存完整核验依据，不能作为可审查成品；可读回现有工程重新核验。' : '';
     const busy = (job.edits || []).some(entry => entry.status === 'running');
     const missingBaseline = !edit.baseline && (edit.validation?.issues || []).some(issue => issue?.code === 'baseline_missing');
+    const resultRecovery = skillDelivery(edit) && edit.result_pending;
     const actions = edit.status === 'running' ? `<button type="button" class="secondary" data-cancel-edit="${esc(edit.id)}">停止</button>`
-      : `<div class="edit-actions">${missingBaseline ? `<button type="button" class="secondary" data-adopt-baseline="${esc(edit.id)}" ${busy || !historicalRestore ? 'disabled' : ''}>补齐核验依据</button>` : ''}<button type="button" class="secondary" data-recheck-edit="${esc(edit.id)}" ${busy ? 'disabled' : ''}>重新核验</button>${approval ? `<button type="button" class="secondary" data-revoke-edit="${esc(edit.id)}" ${busy ? 'disabled' : ''}>撤销完成</button>`
-        : state === 'awaiting_review' && currentEdit(job,edit) && !job.archived ? `<button type="button" class="primary" data-approve-edit="${esc(edit.id)}" ${busy ? 'disabled' : ''}>确认完成</button>` : ''}</div>`;
+      : `<div class="edit-actions">${missingBaseline ? `<button type="button" class="secondary" data-adopt-baseline="${esc(edit.id)}" ${busy || !historicalRestore ? 'disabled' : ''}>补齐核验依据</button>` : ''}${resultRecovery ? `<button type="button" class="secondary" data-recover-edit="${esc(edit.id)}" ${busy ? 'disabled' : ''}>恢复结果</button>` : `<button type="button" class="secondary" data-recheck-edit="${esc(edit.id)}" ${busy ? 'disabled' : ''}>重新核验</button>`}${approval ? `<button type="button" class="secondary" data-revoke-edit="${esc(edit.id)}" ${busy ? 'disabled' : ''}>撤销完成</button>`
+        : state === 'awaiting_review' && currentEdit(job,edit) && !job.archived ? `<button type="button" class="primary" data-approve-edit="${esc(edit.id)}" ${busy ? 'disabled' : ''}>确认完成</button>` : ''}${job.archived ? '' : `<button type="button" class="subtle edit-delete" data-delete-edit="${esc(edit.id)}" ${busy && edit.status === 'running' ? 'disabled' : ''}>${icon('trash')}删除</button>`}</div>`;
     const evidence = edit.baseline_evidence || {};
     const adopted = edit.baseline_origin === 'adopted' ? `<p class="context-note">当前保护基准采纳于 ${esc(readableDate(edit.baseline_at))}：配音轨和意群标记以采纳时工程为准。这份基准不能证明更早的剪辑过程没有改动；镜头仍逐个核验。</p>`
       : edit.baseline_origin === 'historical_resume' ? `<div class="context-note historical-baseline"><p>历史核验依据来自 ${esc(readableDate(evidence.captured_at || edit.baseline_at))} 保存的「${esc(evidence.scope || 'Codex 接续剪辑前')}」快照，于 ${esc(readableDate(evidence.restored_at))} 恢复；来源资料与文件校验记录已保留。工程核验通过后仍待你人工审查，恢复依据不会自动确认完成。</p>${(evidence.unrecorded_fields || []).includes('voice.clip_enabled') ? '<p>历史快照未记录配音片段启用状态，按当前工程另行核对；画幅的宽和高来自当时项目设置。</p>' : ''}${evidence.sources?.length ? `<details><summary>查看历史依据来源</summary><ul class="edit-gaps">${evidence.sources.map(source => `<li><p>${esc(source.role)}：${esc(source.path)}</p><p><small>SHA-256：${esc(source.sha256)}</small></p></li>`).join('')}</ul></details>` : ''}</div>` : '';
-    return `<article class="edit-card ${esc(state)}" data-edit-id="${esc(edit.id)}"><div class="take-head"><div><strong><span class="script-status ${['awaiting_review','approved'].includes(state) ? 'published' : ''}">${esc(editLabels[state] || state)}</span> ${esc(edit.timeline_name)}</strong><small>${receipt} · ${esc(editModes[edit.mode] || edit.mode)} · 开始 ${esc(readableDate(edit.started_at))}${edit.finished_at ? ` · 结束 ${esc(readableDate(edit.finished_at))}` : ''}${checked}</small>${edit.execution_status ? `<small>剪辑执行：${esc(editLabels[edit.execution_status] || edit.execution_status)}</small>` : ''}</div>${actions}</div>${explanation ? `<p class="edit-validation-note">${esc(explanation)}</p>` : ''}${missingBaseline && !historicalRestore ? '<p class="context-note">需要更新工作台后恢复历史核验依据。</p>' : ''}${adopted}${edit.status === 'running' ? `<p class="production-busy">${esc(live.progress || '正在剪辑…')}</p>${live.latest ? `<pre class="edit-live">${esc(live.latest)}</pre>` : ''}` : ''}${facts.length ? `<p class="edit-facts">${facts.map(esc).join(' · ')}</p>` : ''}${warnings.length ? `<ul class="take-warnings edit-validation-issues">${warnings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}${gaps.length ? `<h3>缺素材</h3><ul class="edit-gaps">${gaps.map(gap => `<li><strong>第 ${gap.seconds} 秒 · ${esc(gap.name)}</strong>${gap.note ? `<p>${esc(gap.note)}</p>` : ''}</li>`).join('')}</ul>` : ''}${uncovered.length ? `<h3>没有画面、也没报缺素材的地方</h3><ul class="edit-gaps">${uncovered.map(item => `<li>第 ${item.seconds} 秒起，共 ${item.end - item.start} 帧</li>`).join('')}</ul>` : ''}${(report.questions || []).length ? `<h3>待你确认</h3><ul class="edit-gaps">${report.questions.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}${edit.error ? `<p class="ai-error">${esc(edit.error)}</p>` : ''}${edit.output ? `<details><summary>${esc(client)}的剪辑说明</summary><pre class="edit-output">${esc(edit.output)}</pre></details>` : ''}${edit.instruction ? `<p class="context-note">本次额外要求：${esc(edit.instruction)}</p>` : ''}</article>`;
+    return `<article class="edit-card ${esc(state)}" data-edit-id="${esc(edit.id)}" data-activity-source="${esc(edit.id)}"><div class="take-head"><div><strong><span class="script-status ${['awaiting_review','approved'].includes(state) ? 'published' : ''}">${esc(editLabels[state] || state)}</span> ${esc(edit.timeline_name)}</strong><small>${receipt} · ${esc(editModes[edit.mode] || edit.mode)} · 开始 ${esc(readableDate(edit.started_at))}${edit.finished_at ? ` · 结束 ${esc(readableDate(edit.finished_at))}` : ''}${checked}</small>${edit.execution_status ? `<small>剪辑执行：${esc(editLabels[edit.execution_status] || edit.execution_status)}</small>` : ''}</div>${actions}</div>${explanation ? `<p class="edit-validation-note">${esc(explanation)}</p>` : ''}${missingBaseline && !historicalRestore ? '<p class="context-note">需要更新工作台后恢复历史核验依据。</p>' : ''}${adopted}${edit.status === 'running' ? `<p class="production-busy">${esc(live.progress || '正在剪辑…')}</p>${live.latest ? `<pre class="edit-live">${esc(live.latest)}</pre>` : ''}` : ''}${facts.length ? `<p class="edit-facts">${facts.map(esc).join(' · ')}</p>` : ''}${warnings.length ? `<ul class="take-warnings edit-validation-issues">${warnings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}${gaps.length ? `<h3>缺素材</h3><ul class="edit-gaps">${gaps.map(gap => `<li><strong>${esc(gapLocation(gap))} · ${esc(gap.name)}</strong>${gap.note ? `<p>${esc(gap.note)}</p>` : ''}</li>`).join('')}</ul>` : ''}${uncovered.length ? `<h3>没有画面、也没报缺素材的地方</h3><ul class="edit-gaps">${uncovered.map(item => `<li>第 ${item.seconds} 秒起，共 ${item.end - item.start} 帧</li>`).join('')}</ul>` : ''}${(report.questions || []).length ? `<h3>待你确认</h3><ul class="edit-gaps">${report.questions.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}${edit.error ? `<p class="ai-error">${esc(edit.error)}</p>` : ''}${edit.output ? `<details><summary>${esc(client)}的剪辑说明</summary><pre class="edit-output">${esc(edit.output)}</pre></details>` : ''}${edit.instruction ? `<p class="context-note">本次额外要求：${esc(edit.instruction)}</p>` : ''}</article>`;
   }
   function editSection(data,choice) {
     const job = data.job, timelines = [...(job.timelines || [])].reverse(), edits = [...(job.edits || [])].reverse();
     const running = edits.some(edit => edit.status === 'running');
+    const olderIds = edits.slice(1).filter(edit => edit.status !== 'running').map(edit => edit.id);
     const form = !timelines.length ? '<p class="context-note">先建时间线，再让 AI 按意群标记去素材里选画面、拼成视频。</p>'
       : `<form id="edit-form"><div class="form-row"><label class="field"><span>目标时间线</span><select name="timeline">${timelines.map(item => `<option value="${esc(item.unique_id)}" ${item.unique_id === choice.edit_timeline ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}</select></label><label class="field"><span>选画面模式</span><select name="mode">${Object.entries(editModes).map(([key,label]) => `<option value="${key}" ${key === (choice.edit_mode || 'explain') ? 'selected' : ''}>${label}</option>`).join('')}</select></label></div><fieldset class="material-picker"><legend>素材时间线</legend><div data-materials>正在读取达芬奇里的时间线…</div></fieldset><label class="field"><span>本次额外要求（可选）</span><textarea name="instruction" rows="3" maxlength="4000" placeholder="例如：开头用切纸结果；只剪前 4 个意群">${esc(choice.edit_instruction || '')}</textarea></label><p class="context-note"><span data-edit-default role="status">正在读取全局默认模型…</span> <a href="${esc(url('#settings'))}" data-edit-settings>修改全局设置</a> · <button type="button" class="subtle" data-edit-default-refresh>重新读取</button></p><div data-edit-override hidden><p class="context-note">当前全局默认暂不能用于 AI 剪辑，请为本次选择兼容模型，或修改全局设置。</p><div class="form-row"><label class="field"><span>本次剪辑模型</span><select name="model"><option value="">请选择兼容模型</option></select></label><label class="field"><span>本次思考强度</span><select name="effort"><option value="">客户端默认</option></select></label></div></div><p class="production-resolve" data-edit-provider-status role="status">正在检查剪辑客户端…</p><p class="context-note" data-edit-usage>AI 剪辑默认沿用全局模型与思考强度，支持 Codex 和 Claude。</p><div class="take-actions"><button type="submit" class="primary" disabled>开始 AI 剪辑</button><button type="button" class="secondary" data-copy-handoff>复制剪辑指令</button>${running ? '<span>已有剪辑在运行。</span>' : ''}</div><p class="ai-error" data-error role="alert" hidden></p></form>`;
-    return `<section class="section-card" id="edit-panel"><h2>AI 剪辑 <small>${edits.length} 次</small></h2>${form}${edits.length ? '<p class="context-note">「重新核验」读回并保存现有工程；不会重新剪辑、生成配音或渲染。请先结束正在进行的剪辑。</p>' : ''}<div id="edit-runs">${edits.map(edit => editRun(job,edit,data.historical_baseline_restore === true)).join('')}</div></section>`;
+    return `<section class="section-card" id="edit-panel"><h2>AI 剪辑 <small>${edits.length} 次</small></h2>${form}<p class="context-note">剪辑按技能完成保存后交人工审查，默认不做剪后工程核验；素材去重已归档停用。</p>${edits.length ? '<p class="context-note">按需点击「重新核验」可读回并保存现有工程，素材去重仍停用。请先结束正在进行的剪辑。</p>' : ''}<div id="edit-runs">${edits.slice(0,1).map(edit => editRun(job,edit,data.historical_baseline_restore === true)).join('')}${edits.length > 1 ? `<details class="edit-older"><summary>较早的 ${edits.length - 1} 次剪辑</summary>${job.archived || !olderIds.length ? '' : `<div class="edit-older-bar"><button type="button" class="secondary compact" data-clean-edits="${esc(olderIds.join(','))}">清理旧剪辑（${olderIds.length} 次）</button><small>只保留最新一次，连同本地文件一起删除，不动达芬奇里的时间线。</small></div>`}${edits.slice(1).map(edit => editRun(job,edit,data.historical_baseline_restore === true)).join('')}</details>` : ''}</div></section>`;
   }
   function bindEdit(data,choice,seq,request) {
     const job = data.job, form = $('#edit-form',$('#edit-panel'));
+    // Removes finished edits with their local files; DaVinci timelines are left alone.
+    const deleteEdits = async ids => {
+      const base = `/api/production/jobs/${encodeURIComponent(job.id)}/edits`;
+      let previews;
+      try {previews = await Promise.all(ids.map(id => api(`${base}/${encodeURIComponent(id)}/delete`,{method:'POST',body:{preview:true}})));}
+      catch (error) {toast(fail(error),true);return;}
+      const bytes = previews.reduce((sum,item) => sum + (item.bytes || 0),0), approved = previews.filter(item => item.approved);
+      const size = bytes >= 1073741824 ? `${(bytes / 1073741824).toFixed(1)} GB` : `${Math.max(1,Math.round(bytes / 1048576))} MB`;
+      openModal(ids.length > 1 ? `清理 ${ids.length} 次旧剪辑` : '删除这次 AI 剪辑',`<p class="context-note">将删除${ids.length > 1 ? `这 ${ids.length} 次剪辑` : `「${esc(previews[0].timeline_name || ids[0])}」这次剪辑`}的工作台记录，以及它在本地保存的交接文件、结果和候选画面，共约 ${esc(size)}。此操作不能撤销。</p><ul class="context-list"><li>不会改动达芬奇里的时间线和工程。</li><li>配音、时间线记录和制作单本身保留。</li></ul>${approved.length ? `<p class="ai-error">其中 ${approved.length} 次已人工确认完成；删除后制作单状态会按剩余剪辑重新计算。</p>` : ''}`,'确认删除',async modal => {
+        const warnings = [];
+        for (const id of ids) {
+          const result = await send(`edit-delete-${id}`,`${base}/${encodeURIComponent(id)}/delete`,{});
+          warnings.push(...(result.warnings || []));
+        }
+        closeModal(true);
+        toast(warnings.length ? warnings[0] : `已删除 ${ids.length} 次剪辑及本地文件。`,warnings.length > 0);
+        await route(true);
+      });
+    };
     const bindRuns = () => {
+      $$('[data-recover-edit]').forEach(button => button.onclick = async () => {
+        button.disabled = true;button.textContent = '正在恢复…';
+        try {await api(`/api/production/jobs/${encodeURIComponent(job.id)}/edits/${encodeURIComponent(button.dataset.recoverEdit)}/recheck`,{method:'POST',body:{recover_result:true}});toast('剪辑结果已恢复；工程核验未执行。');await route(true);}
+        catch (error) {toast(fail(error),true);button.disabled = false;button.textContent = '恢复结果';}
+      });
       $$('[data-recheck-edit]').forEach(button => button.onclick = async () => {
         button.disabled = true;button.textContent = '正在核验…';
         try {await api(`/api/production/jobs/${encodeURIComponent(job.id)}/edits/${encodeURIComponent(button.dataset.recheckEdit)}/recheck`,{method:'POST',body:{}});toast('现有工程已重新核验，请查看状态和问题。');await route(true);}
         catch (error) {toast(fail(error),true);button.disabled = false;button.textContent = '重新核验';}
       });
+      $$('[data-delete-edit]').forEach(button => button.onclick = () => deleteEdits([button.dataset.deleteEdit]));
+      $$('[data-clean-edits]').forEach(button => button.onclick = () => deleteEdits(button.dataset.cleanEdits.split(',').filter(Boolean)));
       $$('[data-approve-edit]').forEach(button => button.onclick = () => {
         const edit = (job.edits || []).find(item => item.id === button.dataset.approveEdit);if (!edit) return;
         const scope = Array.isArray(edit.validation?.manual_scope) && edit.validation.manual_scope.length ? edit.validation.manual_scope : manualScope;
-        const modal = openModal(`确认完成：${edit.timeline_name}`,`<p class="context-note">工作台会先读回并保存达芬奇里的这条时间线，工程核验仍通过才记为完成。下面几项工程核验判断不了，请在达芬奇里逐项看过再勾选。</p><fieldset class="material-picker"><legend>我已人工核对</legend><div class="material-options">${scope.map(item => `<label><input type="checkbox" name="reviewed" value="${esc(item)}" required>${esc(item)}</label>`).join('')}</div></fieldset><label class="field"><span>备注（可选）</span><textarea name="note" rows="2" maxlength="2000" placeholder="例如：已导出 1080×1920，字幕和混音已完成"></textarea></label>`,'读回核验并确认完成',async modal => {
+        const note = skillDelivery(edit) ? '剪辑已按技能交付。这里仅登记你的人工审查，不自动读回工程核验或计算素材去重；请在达芬奇里逐项看过再勾选。' : '工作台会先读回并保存达芬奇里的这条时间线，工程核验仍通过才记为完成。下面几项工程核验判断不了，请在达芬奇里逐项看过再勾选。';
+        const modal = openModal(`确认完成：${edit.timeline_name}`,`<p class="context-note">${esc(note)}</p><fieldset class="material-picker"><legend>我已人工核对</legend><div class="material-options">${scope.map(item => `<label><input type="checkbox" name="reviewed" value="${esc(item)}" required>${esc(item)}</label>`).join('')}</div></fieldset><label class="field"><span>备注（可选）</span><textarea name="note" rows="2" maxlength="2000" placeholder="例如：已导出 1080×1920，字幕和混音已完成"></textarea></label>`,skillDelivery(edit) ? '确认人工审查完成' : '读回核验并确认完成',async modal => {
           const reviewed = $$('input[name="reviewed"]:checked',modal.form).map(input => input.value);
           const result = await send(`approve-${edit.id}`,`/api/production/jobs/${encodeURIComponent(job.id)}/edits/${encodeURIComponent(edit.id)}/approval`,{approved:true,reviewed,note:modal.form.note.value.trim()});
           closeModal(true);
@@ -485,7 +603,7 @@ window.CaseProduction = (() => {
           const fresh = await api(`/api/production/jobs/${encodeURIComponent(job.id)}`);
           if (!isCurrent()) return;
           if (!(fresh.job.edits || []).some(edit => edit.status === 'running')) {await route(true);return;}
-          $('#edit-runs').innerHTML = [...fresh.job.edits].reverse().map(edit => editRun(fresh.job,edit,fresh.historical_baseline_restore === true)).join('');bindRuns();
+          $('#edit-runs').innerHTML = [...fresh.job.edits].reverse().map(edit => editRun(fresh.job,edit,fresh.historical_baseline_restore === true)).join('');bindRuns();mountActivityLogs(job.id);
         } catch {}
         setTimeout(poll,5000);
       };
@@ -620,7 +738,7 @@ window.CaseProduction = (() => {
     const form = !selected ? '<p class="context-note">先选用一版配音，再建时间线。</p>'
       : !creators.length ? `<p class="context-note">还没有达人名，请到 <a href="${esc(url('#production',job.product))}">内容制作</a> 页的「达芬奇设置」里添加。</p>`
       : `<form id="timeline-form"><div class="form-row"><label class="field"><span>达人</span><select name="creator">${creators.map(name => `<option ${name === creator ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></label><div></div></div><p class="context-note">将在项目「${esc(config.project)}」里新建 <code data-timeline-name>${esc(creator)}${esc(data.today)}-${esc(config.code)}-序号</code>（序号按项目里已有的时间线顺延）。配音放在单独的「配音」轨（音频 2），每个意群一个蓝色范围标记，备注里写着口播、中文和画面要求；视频轨留空，下一步交给剪辑。</p><div class="take-actions"><button type="submit" class="primary" ${job.archived ? 'disabled' : ''}>在达芬奇建时间线</button>${timelines.length && timelines[0].take_id !== job.selected_take ? '<span>当前选用的配音和最近一条时间线用的不同，会另建一条新时间线，旧的保留。</span>' : ''}</div><p class="ai-error" data-error role="alert" hidden></p></form>`;
-    return `<section class="section-card" id="timeline-panel"><h2>达芬奇时间线 <small>${timelines.length} 条</small></h2><p class="production-resolve" data-resolve-status>正在检查达芬奇…</p>${form}${timelines.map(item => `<article class="timeline-card"><div><strong>${esc(item.name)}</strong><small>${esc(item.creator)} · ${item.markers} 个意群标记 · ${(item.frames / Number(item.fps)).toFixed(1)} 秒 · 配音 ${esc(item.take_id)}${item.take_id === job.selected_take ? '（当前选用）' : ''} · ${esc(readableDate(item.built_at))}</small>${(item.warnings || []).length ? `<ul class="take-warnings">${item.warnings.map(text => `<li>${esc(text)}</li>`).join('')}</ul>` : ''}</div><button type="button" class="secondary" data-open-timeline="${esc(item.unique_id)}">在达芬奇打开</button></article>`).join('')}</section>`;
+    return `<section class="section-card" id="timeline-panel"><h2>达芬奇时间线 <small>${timelines.length} 条</small></h2><p class="production-resolve" data-resolve-status>正在检查达芬奇…</p>${form}${timelines.map(item => `<article class="timeline-card" data-activity-source="${esc(item.unique_id)}"><div><strong>${esc(item.name)}</strong><small>${esc(item.creator)} · ${item.markers} 个意群标记 · ${(item.frames / Number(item.fps)).toFixed(1)} 秒 · 配音 ${esc(item.take_id)}${item.take_id === job.selected_take ? '（当前选用）' : ''} · ${esc(readableDate(item.built_at))}</small>${(item.warnings || []).length ? `<ul class="take-warnings">${item.warnings.map(text => `<li>${esc(text)}</li>`).join('')}</ul>` : ''}</div><button type="button" class="secondary" data-open-timeline="${esc(item.unique_id)}">在达芬奇打开</button></article>`).join('')}</section>`;
   }
   function bindTimeline(data,choice,seq,request) {
     const job = data.job, panel = $('#timeline-panel'), form = $('#timeline-form');
@@ -650,6 +768,48 @@ window.CaseProduction = (() => {
     }).join('');
   }
 
+  // The chosen variant as written (carousel part left out); each spoken, on-screen and 🔴 publish paragraph gets its own copy button.
+  function fallbackScript(lines) {
+    const block = values => '```text\n' + values.join('\n') + '\n```';
+    return `**口播（配音用）**\n${block(lines.map(line => line.spoken))}` + (lines.some(line => line.zh) ? `\n\n**对应中文**\n${block(lines.map(line => line.zh || ''))}` : '');
+  }
+  function copyButton(label,text,message) {
+    const button = document.createElement('button');
+    button.type = 'button';button.className = 'script-copy';button.title = label;button.setAttribute('aria-label',label);
+    button.innerHTML = icon('copy');
+    button.onclick = event => {event.preventDefault();event.stopPropagation();void copyText(text,message);};
+    return button;
+  }
+  // The copy icon lives inside the module it copies (top-right corner of a block, or right after an inline line).
+  function boxed(node,button) {
+    const wrap = document.createElement('div');
+    wrap.className = 'script-block';node.replaceWith(wrap);wrap.append(node,button);
+  }
+  function renderScript(root,markdown) {
+    if (!root) return;
+    root.innerHTML = renderMarkdown(markdown);
+    let label = '';
+    [...root.children].forEach(node => {
+      const text = (node.innerText || node.textContent || '').trim();
+      if (/^H[2-6]$/.test(node.tagName) || (node.tagName === 'P' && node.children.length === 1 && node.firstElementChild.tagName === 'STRONG' && node.firstElementChild.textContent.trim() === node.textContent.trim())) {label = text;return;}
+      if (node.tagName === 'PRE') {
+        const code = node.textContent.replace(/\s+$/,''), marked = code.split('\n').filter(line => line.includes('🔴'));
+        if (marked.length) boxed(node,copyButton(marked.length > 1 ? '复制这一套发布文案' : '复制发布文案',marked.join('\n'),'发布文案已复制'));
+        else if (/中文/.test(label)) boxed(node,copyButton('复制中文',code,'中文已复制'));
+        else if (/口播|英文|English/i.test(label)) boxed(node,copyButton('复制英文口播',code,'英文口播已复制'));
+        else boxed(node,copyButton('复制',code,'已复制'));
+        return;
+      }
+      if (node.tagName === 'P' && /^开头屏显[:：]/.test(text)) {
+        const shown = node.querySelector('code')?.textContent.trim() || text.replace(/^开头屏显[:：]\s*/,'').trim();
+        node.classList.add('script-inline');node.append(copyButton('复制屏显文字',shown,'屏显文字已复制'));
+        return;
+      }
+      const marked = text.split('\n').map(line => line.trim()).filter(line => line.includes('🔴'));
+      if (marked.length && ['P','UL','OL'].includes(node.tagName)) boxed(node,copyButton(marked.length > 1 ? '复制这一套发布文案' : '复制发布文案',marked.join('\n'),'发布文案已复制'));
+    });
+  }
+
   function renderJob(data,seq) {
     const job = data.job, takes = [...job.takes].reverse(), selected = job.takes.find(take => take.id === job.selected_take);
     const voices = (data.voices || []).filter(voice => !voice.disabled), models = data.models || [];
@@ -661,14 +821,15 @@ window.CaseProduction = (() => {
     const modelName = id => models.find(item => item.id === id)?.name || id;
     // A take that has no timeline yet is selected and built in one go; rebuilding stays in the timeline step.
     const buildOnSelect = take => (data.creators || []).length > 0 && !job.archived && !(job.timelines || []).some(item => item.take_id === take.id);
-    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#production',job.product))}">${icon('back')}返回制作单</a><div class="page-heading"><div><span class="eyebrow">PRODUCTION JOB</span><h1>${esc(job.title)}</h1><p>${esc(job.product)} · ${esc(job.direction_id || '未指定方向')}${job.variant_label ? ` · ${esc(job.variant_label)}` : ''} · <span class="script-status ${['voiced','timeline','approved'].includes(job.status) ? 'published' : ''}">${esc(job.archived ? '已归档' : statusLabels[job.status] || job.status)}</span>${data.script ? ` · <a href="${esc(url(`#scripts/${encodeURIComponent(data.script.id)}`,job.product))}">脚本版本 ${esc(data.script.version)}</a>` : ' · 脚本版本已不可读'}</p></div><div class="scripts-start-actions"><button class="secondary" id="job-archive">${job.archived ? '恢复制作单' : '归档'}</button></div></div>${recoverySection(job)}${problemsMarkup(job.problems)}<section class="section-card"><div class="section-title-row"><h2>意群表 <small>${job.lines.length} 个意群</small></h2><button type="button" class="subtle" id="job-lines-edit">${icon('edit')}编辑画面要求</button></div>${linesTable(job.lines,selected ? selected.groups : null)}${selected ? `<p class="context-note">配音时间来自已选用的配音（${esc(sourceLabels[selected.alignment_source] || selected.alignment_source)}），单位秒；下一步建时间线时按这些时间打意群标记。</p>` : '<p class="context-note">选用一版配音后，这里显示每个意群在配音里的起止时间。</p>'}</section><section class="section-card" id="voice-panel"><h2>配音</h2>${job.voicing ? '<p class="production-busy">正在生成配音，完成后自动刷新…</p>' : ''}<form id="take-form" class="take-form"><div class="form-row"><label class="field"><span>音色</span><select name="voice">${voices.map(voice => `<option value="${esc(voice.voice_id)}" ${voice.voice_id === voiceId ? 'selected' : ''}>${esc(voiceLabel(voice))}${data.defaults?.[job.product] === voice.voice_id ? '（默认）' : ''}</option>`).join('')}<option value="__new" ${voiceId === '__new' ? 'selected' : ''}>新音色 ID…</option></select></label><label class="field"><span>模型</span><select name="model_id">${models.map(model => `<option value="${esc(model.id)}" ${model.id === modelId ? 'selected' : ''}>${esc(model.name)}</option>`).join('')}</select></label></div><div class="form-row" data-new-voice ${voiceId === '__new' ? '' : 'hidden'}><label class="field"><span>新音色 ID</span><input name="new_voice_id" pattern="[A-Za-z0-9]{10,64}" autocomplete="off" value="${esc(choice.new_voice_id || '')}"></label><label class="field"><span>备注（存入音色库）</span><input name="new_note" maxlength="500" value="${esc(choice.new_note || '')}"></label></div><div class="take-settings" data-settings></div><details class="take-text"><summary>送去配音的文字（${data.tts.characters} 字符${data.tts.substitutions ? `，已套用读法 ${data.tts.substitutions} 处` : ''}）</summary><pre>${esc(data.tts.text)}</pre></details><div class="take-actions"><button class="primary" type="submit" ${job.voicing || job.archived ? 'disabled' : ''}>生成配音</button><span>每次生成按字数消耗 ElevenLabs 额度（本条约 ${data.tts.characters} 字符），旧版本都会保留。</span></div><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="section-card" id="take-panel"><h2>配音版本 <small>${takes.length} 版</small></h2>${takes.length ? takes.map(take => `<article class="take-card ${take.id === job.selected_take ? 'selected' : ''}"><div class="take-head"><div><strong>${esc(voiceName(take.voice_id))}</strong><small>${esc(modelName(take.model_id))} · ${Object.keys(settingLabels).filter(key => key in (take.settings || {})).map(key => `${settingLabels[key]} ${take.settings[key]}`).join(' · ')} · ${esc(seconds(take.duration))} · ${esc(readableDate(take.created_at))}</small></div>${take.id === job.selected_take ? '<span class="script-status published">已选用</span>' : `<button type="button" class="secondary" data-select-take="${esc(take.id)}" ${buildOnSelect(take) ? `data-build="${esc(defaultCreator(data,choice))}"` : ''} ${takeSelectable(take,job.lines.length) ? '' : 'disabled title="意群时间无效或对齐覆盖不足 60%，请先核对配音"'}>${buildOnSelect(take) ? `选用并建时间线（${esc(defaultCreator(data,choice))}）` : '选用这一版'}</button>`}</div><audio controls preload="none" src="${esc(audioURL(job.id,take.id,'mp3'))}"></audio>${(take.warnings || []).length ? `<ul class="take-warnings">${take.warnings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}<details><summary>意群时间（${esc(sourceLabels[take.alignment_source] || take.alignment_source)}）</summary><table class="production-table compact"><thead><tr><th>#</th><th>开始</th><th>结束</th><th>对上的字</th></tr></thead><tbody>${(take.groups || []).map(group => `<tr><td>${group.number}</td><td>${esc(seconds(group.start))}</td><td>${esc(seconds(group.end))}</td><td>${Math.round((group.coverage || 0) * 100)}%</td></tr>`).join('')}</tbody></table></details><div class="take-links">${take.wav ? `<a href="${esc(audioURL(job.id,take.id,'wav',true))}">下载 WAV</a>` : ''}<a href="${esc(audioURL(job.id,take.id,'mp3',true))}">下载 MP3</a><small>${esc(take.id)}</small></div></article>`).join('') : '<p class="context-note">还没有配音。</p>'}</section>${timelineSection(data,choice,selected)}${editSection(data,choice)}<details class="section-card production-history"><summary>制作记录（${job.history.length} 条）</summary><ol>${[...job.history].reverse().map(entry => `<li>${esc(readableDate(entry.at))} · ${esc(entry.note || entry.event)}</li>`).join('')}</ol></details>`;
+    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#production',job.product))}">${icon('back')}返回制作单</a><div class="page-heading"><div><span class="eyebrow">PRODUCTION JOB</span><h1>${esc(job.title)}</h1><p>${esc(job.product)} · ${esc(job.direction_id || '未指定方向')}${job.variant_label ? ` · ${esc(job.variant_label)}` : ''} · <span class="script-status ${['voiced','timeline','approved'].includes(job.status) ? 'published' : ''}">${esc(job.archived ? '已归档' : statusLabels[job.status] || job.status)}</span>${data.script ? ` · <a href="${esc(url(`#scripts/${encodeURIComponent(data.script.id)}`,job.product))}">脚本版本 ${esc(data.script.version)}</a>` : ' · 脚本版本已不可读'}</p></div><div class="scripts-start-actions"><button class="secondary" id="job-archive">${job.archived ? '恢复制作单' : '归档'}</button><button class="secondary danger" id="job-delete">永久删除</button></div></div>${recoverySection(job)}${problemsMarkup(job.problems)}<section class="section-card" id="job-script-panel"><div class="section-title-row"><h2>脚本 <small>${esc(job.variant_label || data.variant?.label || '')}${job.variant_label || data.variant?.label ? ' · ' : ''}${job.lines.length} 个意群</small></h2><button type="button" class="subtle" id="job-lines-edit">${icon('edit')}编辑画面要求</button></div><div class="script-variant markdown-body" id="job-script-body"></div><div class="script-lines"><h3>意群表 <small>含画面要求${selected ? '与配音时间' : ''}</small></h3>${linesTable(job.lines,selected ? selected.groups : null)}${selected ? `<p class="context-note">配音时间来自已选用的配音（${esc(sourceLabels[selected.alignment_source] || selected.alignment_source)}），单位秒；下一步建时间线时按这些时间打意群标记。</p>` : '<p class="context-note">选用一版配音后，这里显示每个意群在配音里的起止时间。</p>'}</div></section><section class="section-card" id="voice-panel"><h2>配音</h2>${job.voicing ? '<p class="production-busy">正在生成配音，完成后自动刷新…</p>' : ''}<form id="take-form" class="take-form"><div class="form-row"><label class="field"><span>音色</span><select name="voice">${voices.map(voice => `<option value="${esc(voice.voice_id)}" ${voice.voice_id === voiceId ? 'selected' : ''}>${esc(voiceLabel(voice))}${data.defaults?.[job.product] === voice.voice_id ? '（默认）' : ''}</option>`).join('')}<option value="__new" ${voiceId === '__new' ? 'selected' : ''}>新音色 ID…</option></select></label><label class="field"><span>模型</span><select name="model_id">${models.map(model => `<option value="${esc(model.id)}" ${model.id === modelId ? 'selected' : ''}>${esc(model.name)}</option>`).join('')}</select></label></div><div class="form-row" data-new-voice ${voiceId === '__new' ? '' : 'hidden'}><label class="field"><span>新音色 ID</span><input name="new_voice_id" pattern="[A-Za-z0-9]{10,64}" autocomplete="off" value="${esc(choice.new_voice_id || '')}"></label><label class="field"><span>备注（存入音色库）</span><input name="new_note" maxlength="500" value="${esc(choice.new_note || '')}"></label></div><div class="take-settings" data-settings></div><details class="take-text"><summary>送去配音的文字（${data.tts.characters} 字符${data.tts.substitutions ? `，已套用读法 ${data.tts.substitutions} 处` : ''}）</summary><pre>${esc(data.tts.text)}</pre></details><div class="take-actions"><button class="primary" type="submit" ${job.voicing || job.archived ? 'disabled' : ''}>生成配音</button><span>每次生成按字数消耗 ElevenLabs 额度（本条约 ${data.tts.characters} 字符），旧版本都会保留。</span></div><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="section-card" id="take-panel"><h2>配音版本 <small>${takes.length} 版</small></h2>${takes.length ? takes.map(take => `<article class="take-card ${take.id === job.selected_take ? 'selected' : ''}" data-activity-source="${esc(take.id)}"><div class="take-head"><div><strong>${esc(voiceName(take.voice_id))}</strong><small>${esc(modelName(take.model_id))} · ${Object.keys(settingLabels).filter(key => key in (take.settings || {})).map(key => `${settingLabels[key]} ${take.settings[key]}`).join(' · ')} · ${esc(seconds(take.duration))} · ${esc(readableDate(take.created_at))}</small></div>${take.id === job.selected_take ? '<span class="script-status published">已选用</span>' : `<button type="button" class="secondary" data-select-take="${esc(take.id)}" ${buildOnSelect(take) ? `data-build="${esc(defaultCreator(data,choice))}"` : ''} ${takeSelectable(take,job.lines.length) ? '' : 'disabled title="意群时间无效或对齐覆盖不足 60%，请先核对配音"'}>${buildOnSelect(take) ? `选用并建时间线（${esc(defaultCreator(data,choice))}）` : '选用这一版'}</button>`}</div><audio controls preload="none" src="${esc(audioURL(job.id,take.id,'mp3'))}"></audio>${(take.warnings || []).length ? `<ul class="take-warnings">${take.warnings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}<details><summary>意群时间（${esc(sourceLabels[take.alignment_source] || take.alignment_source)}）</summary><table class="production-table compact"><thead><tr><th>#</th><th>开始</th><th>结束</th><th>对上的字</th></tr></thead><tbody>${(take.groups || []).map(group => `<tr><td>${group.number}</td><td>${esc(seconds(group.start))}</td><td>${esc(seconds(group.end))}</td><td>${Math.round((group.coverage || 0) * 100)}%</td></tr>`).join('')}</tbody></table></details><div class="take-links">${take.wav ? `<a href="${esc(audioURL(job.id,take.id,'wav',true))}">下载 WAV</a>` : ''}<a href="${esc(audioURL(job.id,take.id,'mp3',true))}">下载 MP3</a><small>${esc(take.id)}</small></div></article>`).join('') : '<p class="context-note">还没有配音。</p>'}</section>${timelineSection(data,choice,selected)}${editSection(data,choice)}<details class="section-card production-history"><summary>制作记录（${job.history.length} 条）</summary><ol>${[...job.history].reverse().map(entry => `<li>${esc(readableDate(entry.at))} · ${esc(entry.note || entry.event)}</li>`).join('')}</ol></details>`;
     bindRecovery(job);
+    renderScript($('#job-script-body'),data.variant?.markdown || fallbackScript(job.lines));
     const edits = job.edits || [], built = (job.timelines || []).some(item => selected && item.take_id === selected.id);
     mountSteps(job.id,[
-      {key:'lines',label:'意群表',note:`${job.lines.length} 个意群`,panels:[$('#job-lines-edit')?.closest('section')].filter(Boolean)},
+      {key:'lines',label:'脚本',note:job.variant_label || `${job.lines.length} 个意群`,done:job.lines.length > 0,panels:[$('#job-lines-edit')?.closest('section')].filter(Boolean)},
       {key:'voice',label:'配音',note:job.voicing ? '生成中' : selected ? '已选用' : `${job.takes.length} 版`,done:!!selected,panels:[$('#voice-panel'),$('#take-panel')].filter(Boolean)},
       {key:'timeline',label:'达芬奇时间线',note:`${(job.timelines || []).length} 条`,done:built,panels:[$('#timeline-panel')].filter(Boolean)},
-      {key:'edit',label:'AI 剪辑与审查',note:edits.some(edit => edit.status === 'running') ? '剪辑中' : job.status === 'approved' ? '已完成' : `${edits.length} 次`,done:job.status === 'approved',panels:[$('#edit-panel')].filter(Boolean)}
+      {key:'edit',label:'AI 剪辑与人工审查',note:edits.some(edit => edit.status === 'running') ? '剪辑中' : job.status === 'approved' ? '已完成' : `${edits.length} 次`,done:job.status === 'approved',panels:[$('#edit-panel')].filter(Boolean)}
     ],job.voicing || (!selected && !edits.length) ? 'voice' : selected && !built ? 'timeline' : 'edit');
     const form = $('#take-form');
     const syncSettings = () => {
@@ -716,6 +877,7 @@ window.CaseProduction = (() => {
       catch (error) {choice.step = 'timeline';toast(`已选用这一版配音，但时间线${definitive(error) || error.status === 409 ? `没建成：${fail(error)}` : `结果尚未确认：${fail(error)}。请先到达芬奇里看是否已经建好`}。可在「达芬奇时间线」步骤重试。`,true);}
       if (seq === view.sequence) await route(true);
     });
+    $('#job-delete')?.addEventListener('click',() => void deleteOrder('job',job));
     $('#job-archive').onclick = async () => {
       try {await send(`archive-${job.id}`,`/api/production/jobs/${encodeURIComponent(job.id)}/archive`,{revision:data.revision,archived:!job.archived});toast(job.archived ? '制作单已恢复。' : '制作单已归档，配音文件保留。');await route(true);}
       catch (error) {toast(fail(error),true);}
@@ -739,6 +901,13 @@ window.CaseProduction = (() => {
   }
 
   const splitLines = value => String(value || '').split('\n').map(line => line.trim()).filter(Boolean);
+  function variantPickerBody(options,content) {
+    return `<div class="variant-picker-layout"><aside class="variant-picker-options"><p class="variant-picker-label">选择变体</p><div class="variant-options" role="radiogroup" aria-label="要制作的变体">${options}</div></aside><section class="variant-picker-content" data-variant-content aria-label="脚本内容" tabindex="0"><p class="variant-picker-label" data-variant-label aria-live="polite"></p>${content}</section></div>`;
+  }
+  function revealVariantContent(modal,label) {
+    $('[data-variant-label]',modal.dialog).textContent = `${label} · 脚本内容`;
+    $('[data-variant-content]',modal.dialog).scrollTop = 0;
+  }
   // Re-layout runs as a new AI round; the server keeps it only when every spoken word matches the original.
   function bindFormatRound(modal,task,round) {
     const button = $('[data-format-round]',modal.dialog);if (!button) return;
@@ -784,13 +953,16 @@ window.CaseProduction = (() => {
     }
     const variants = data.variants, defaultTitle = variant => `${direction ? direction + ' ' : ''}${variant.label}`;
     const loose = variants.some(variant => variant.loose);
-    const modal = openModal('选择要制作的变体',`<p class="context-note">口播按行配音，每行是一个意群。采纳后正文固定为脚本版本；改稿请另存新版本再制作。</p>${loose ? '<div class="production-format-choice"><p>这一轮没有按「口播（配音用）」代码块交付，下面是宽松识别的结果：意群按句拆分，请逐行核对。也可以让 AI 只整理排版（新开一轮，逐字核对后才采用）。</p><button type="button" class="secondary" data-format-round>一键整理格式</button></div>' : ''}<div class="variant-options">${variants.map((variant,position) => `<label class="variant-option"><input type="radio" name="variant" value="${variant.index}" ${position === 0 ? 'checked' : ''}><span><strong>${esc(variant.label)}</strong><small>${variant.lines.length} 个意群${variant.problems.length ? ` · ${variant.problems.length} 处需核对` : ''}</small></span></label>`).join('')}</div><label class="field"><span>脚本标题</span><input name="title" required maxlength="500" value="${esc(defaultTitle(variants[0]))}"></label><div data-variant-preview></div><details class="production-line-editor" data-line-editor><summary>调整意群（拆分、合并或修正断行）</summary><p class="context-note">一行一个意群。不改动时会带入意群表；改动后画面要求需在制作单里补填。</p><label class="field"><span>口播</span><textarea name="spoken" rows="8" spellcheck="false"></textarea></label><label class="field"><span>对应中文（可选，与口播逐行对应）</span><textarea name="chinese" rows="6"></textarea></label></details>`,'采纳并创建制作单',async modal => {
+    const options = variants.map((variant,position) => `<label class="variant-option"><input type="radio" name="variant" value="${variant.index}" ${position === 0 ? 'checked' : ''}><span><strong>${esc(variant.label)}</strong><small>${variant.lines.length} 个意群${variant.problems.length ? ` · ${variant.problems.length} 处需核对` : ''}</small></span></label>`).join('');
+    const content = `<label class="field"><span>脚本标题</span><input name="title" required maxlength="500" value="${esc(defaultTitle(variants[0]))}"></label><div data-variant-preview></div><details class="production-line-editor" data-line-editor><summary>调整意群（拆分、合并或修正断行）</summary><p class="context-note">一行一个意群。不改动时会带入意群表；改动后画面要求需在制作单里补填。</p><label class="field"><span>口播</span><textarea name="spoken" rows="8" spellcheck="false"></textarea></label><label class="field"><span>对应中文（可选，与口播逐行对应）</span><textarea name="chinese" rows="6"></textarea></label></details>`;
+    const modal = openModal('选择要制作的变体',`<p class="context-note">选择变体即可查看对应脚本。口播每行是一个意群；采纳后正文固定为脚本版本。</p>${loose ? '<div class="production-format-choice"><p>这一轮没有按「口播（配音用）」代码块交付，下面是宽松识别的结果：意群按句拆分，请逐行核对。也可以让 AI 只整理排版（新开一轮，逐字核对后才采用）。</p><button type="button" class="secondary" data-format-round>一键整理格式</button></div>' : ''}${variantPickerBody(options,content)}`,'采纳并创建制作单',async modal => {
       const values = new FormData(modal.form), chosen = variants.find(item => String(item.index) === values.get('variant'));
       const spoken = edited ? splitLines(values.get('spoken')) : chosen.lines.map(line => line.spoken);
       const chinese = edited ? splitLines(values.get('chinese')) : chosen.lines.every(line => line.zh) ? chosen.lines.map(line => line.zh) : [];
       const issue = edited ? linesIssue(spoken,chinese) : '';if (issue) {setError(modal.dialog,issue);return;}
       await adoptAndProduce(modal,{task,round,taskRevision:data.task_revision,product,direction,title:values.get('title').trim(),spoken,chinese,variantIndex:chosen.index});
     });
+    modal.dialog.classList.add('variant-picker-dialog');
     let edited = false;
     const fill = chosen => {
       modal.form.spoken.value = chosen.lines.map(line => line.spoken).join('\n');
@@ -802,6 +974,7 @@ window.CaseProduction = (() => {
       const chosen = variants.find(item => String(item.index) === new FormData(modal.form).get('variant'));
       $('[data-variant-preview]',modal.dialog).innerHTML = problemsMarkup(chosen.problems) + linesTable(chosen.lines);
       fill(chosen);
+      revealVariantContent(modal,chosen.label);
     };
     let titleEdited = false;
     modal.form.title.oninput = () => {titleEdited = true;};
@@ -815,7 +988,7 @@ window.CaseProduction = (() => {
   }
 
   const carouselLink = item => url(`#production/${encodeURIComponent(item.id)}`,item.product);
-  const carouselLabels = {draft:'待选底图',picking:'选图中',picked:'底图已选齐',ready:'底图已选齐',reviewing:'成图待核对',approved:'成图已确认',published:'已登记发布'};
+  const carouselLabels = {draft:'待选底图',picking:'选图中',picked:'底图已选齐',ready:'底图已选齐',reviewing:'成图待确认',approved:'成图已确认',published:'已登记发布'};
   const carouselLabel = item => item.archived ? '已归档' : carouselLabels[item.status] || '待选底图';
   const pad = number => String(number).padStart(2,'0');
   const imageURL = (item,candidate,size) => `/api/production/carousels/${encodeURIComponent(item.id)}/images/${encodeURIComponent(candidate.id)}?size=${size}`;
@@ -843,41 +1016,127 @@ window.CaseProduction = (() => {
     const live = search.live || {}, report = search.report || {}, warnings = [...(search.problems || []),search.readback_error].filter(Boolean), provider = search.provider || stillProvider(search.model), client = stillClient(provider);
     const effectiveModel = live.effective_model || search.effective_model, effectiveEffort = live.effective_effort || search.effective_effort;
     const gapsLabel = search.status === 'completed' ? '没找到合格画面' : search.status === 'running' ? '待核验画面' : '尚未完成核验';
-    return `<article class="edit-card ${esc(search.status)}"><div class="take-head"><div><strong><span class="script-status ${search.status === 'completed' ? 'published' : ''}">${esc(editLabels[search.status] || search.status)}</span> 第 ${esc(search.slides.join('、'))} 张 · 每张 ${search.per_slide} 张候选</strong><small>${esc(client)} · ${effectiveModel ? `实际模型：${esc(stillModelLabel(effectiveModel))}` : `申请模型：${esc(stillModelLabel(search.requested_model || search.model))} · 实际型号尚未回报`}${effectiveModel && effectiveModel !== (search.requested_model || search.model) ? `（申请 ${esc(stillModelLabel(search.requested_model || search.model))}）` : ''}${effectiveEffort ? ` · 实际思考强度：${esc(effectiveEffort)}` : search.effort ? ` · 申请思考强度：${esc(search.effort)}` : ''} · ${provider === 'codex' ? '使用 Codex 客户端当前账户额度' : '使用 Claude 订阅额度'} · ${esc(search.materials.join('、'))} · 开始 ${esc(readableDate(search.started_at))}${search.finished_at ? ` · 结束 ${esc(readableDate(search.finished_at))}` : ''}</small></div>${search.status === 'running' ? `<button type="button" class="secondary" data-cancel-search="${esc(search.id)}">停止</button>` : ''}</div>${search.status === 'running' ? `<p class="production-busy">${esc(live.progress || '正在找底图…')}</p>${live.latest ? `<pre class="edit-live">${esc(live.latest)}</pre>` : ''}` : `<p class="edit-facts">新增候选 ${search.added || 0} 张</p>`}${(report.gaps || []).length ? `<h3>${esc(gapsLabel)}</h3><ul class="edit-gaps">${report.gaps.map(gap => `<li>第 ${esc(gap.slide)} 张：${esc(gap.need)}</li>`).join('')}</ul>` : ''}${(report.questions || []).length ? `<h3>待你确认</h3><ul class="edit-gaps">${report.questions.map(text => `<li>${esc(text)}</li>`).join('')}</ul>` : ''}${warnings.length ? `<ul class="take-warnings">${warnings.map(text => `<li>${esc(text)}</li>`).join('')}</ul>` : ''}${search.error ? `<p class="ai-error">${esc(search.error)}</p>` : ''}${search.output ? `<details><summary>${esc(client)}的选图说明</summary><pre class="edit-output">${esc(search.output)}</pre></details>` : ''}${search.instruction ? `<p class="context-note">本次额外要求：${esc(search.instruction)}</p>` : ''}</article>`;
+    return `<article class="edit-card ${esc(search.status)}" data-activity-source="${esc(search.id)}"><div class="take-head"><div><strong><span class="script-status ${search.status === 'completed' ? 'published' : ''}">${esc(editLabels[search.status] || search.status)}</span> 第 ${esc(search.slides.join('、'))} 张 · 每张 ${search.per_slide} 张候选</strong><small>${esc(client)} · ${effectiveModel ? `实际模型：${esc(stillModelLabel(effectiveModel))}` : `申请模型：${esc(stillModelLabel(search.requested_model || search.model))} · 实际型号尚未回报`}${effectiveModel && effectiveModel !== (search.requested_model || search.model) ? `（申请 ${esc(stillModelLabel(search.requested_model || search.model))}）` : ''}${effectiveEffort ? ` · 实际思考强度：${esc(effectiveEffort)}` : search.effort ? ` · 申请思考强度：${esc(search.effort)}` : ''} · ${provider === 'codex' ? '使用 Codex 客户端当前账户额度' : '使用 Claude 订阅额度'} · ${esc(search.materials.join('、'))} · 开始 ${esc(readableDate(search.started_at))}${search.finished_at ? ` · 结束 ${esc(readableDate(search.finished_at))}` : ''}</small></div>${search.status === 'running' ? `<button type="button" class="secondary" data-cancel-search="${esc(search.id)}">停止</button>` : item.archived ? '' : `<button type="button" class="subtle edit-delete" data-delete-search="${esc(search.id)}">${icon('trash')}删除</button>`}</div>${search.status === 'running' ? `<p class="production-busy">${esc(live.progress || '正在找底图…')}</p>${live.latest ? `<pre class="edit-live">${esc(live.latest)}</pre>` : ''}` : `<p class="edit-facts">新增候选 ${search.added || 0} 张</p>`}${(report.gaps || []).length ? `<h3>${esc(gapsLabel)}</h3><ul class="edit-gaps">${report.gaps.map(gap => `<li>第 ${esc(gap.slide)} 张：${esc(gap.need)}</li>`).join('')}</ul>` : ''}${(report.questions || []).length ? `<h3>待你确认</h3><ul class="edit-gaps">${report.questions.map(text => `<li>${esc(text)}</li>`).join('')}</ul>` : ''}${warnings.length ? `<ul class="take-warnings">${warnings.map(text => `<li>${esc(text)}</li>`).join('')}</ul>` : ''}${search.error ? `<p class="ai-error">${esc(search.error)}</p>` : ''}${search.output ? `<details><summary>${esc(client)}的选图说明</summary><pre class="edit-output">${esc(search.output)}</pre></details>` : ''}${search.instruction ? `<p class="context-note">本次额外要求：${esc(search.instruction)}</p>` : ''}</article>`;
+  }
+  // Uploads local pictures for one slide. One picture can become the base at once (replacing the slide's other candidates).
+  const isImageFile = file => /^image\/(png|jpe?g|webp)$/.test(file.type) || /\.(png|jpe?g|webp)$/i.test(file.name || '');
+  async function uploadSlideImages(item,slide,files,{pick = false,onStatus = () => {}} = {}) {
+    const images = [...files].filter(isImageFile);
+    if (!images.length) throw new Error('没有可用的图片：只支持 PNG、JPG、WebP。');
+    const root = `/api/production/carousels/${encodeURIComponent(item.id)}`, made = [];
+    try {
+      for (const [index,file] of images.entries()) {
+        onStatus(`正在上传 ${index + 1}/${images.length}：${file.name || '粘贴的图片'}`);
+        const response = await fetch(`${root}/upload?slide=${slide}&name=${encodeURIComponent(file.name || 'paste.png')}&request_id=${encodeURIComponent(crypto.randomUUID())}`,
+          {method:'POST',headers:{'X-Workbench-Token':state.token,'Content-Type':'application/octet-stream'},body:file});
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || `上传失败（${response.status}）`);
+        made.push(result.candidate);
+      }
+      const picked = pick && made.length === 1;
+      if (picked) {
+        const fresh = await api(root);
+        await send(`base-${item.id}-${slide}`,`${root}/base`,{revision:fresh.revision,slide,candidate:made[0].id});
+      }
+      return {made,picked};
+    } catch (error) {
+      if (made.length) error.message += `（已成功导入 ${made.length} 张，可在候选里看到）`;
+      throw error;
+    }
+  }
+  // Batch archive / restore / permanent delete: the service judges every order on its own and reports each one.
+  async function runBatch(action,targets) {
+    if (!targets.length) return;
+    const labels = {archive:'归档',restore:'恢复',delete:'永久删除'};
+    const execute = async () => {
+      let result;
+      try {result = await send(`order-batch-${action}-${targets.map(target => target.id).join(',')}`,'/api/production/orders/batch',{action,items:targets});}
+      catch (error) {toast(`批量${labels[action]}没有完成：${fail(error)}`,true);return null;}
+      const failed = result.results.filter(entry => !entry.ok);
+      const warned = result.results.flatMap(entry => entry.warnings || []);
+      const parts = [`已${labels[action]} ${result.changed} 张`];
+      if (result.skipped) parts.push(`${result.skipped} 张无需处理`);
+      if (failed.length) parts.push(`${failed.length} 张未完成：${failed[0].error}${failed.length > 1 ? ' 等' : ''}`);
+      else if (warned.length) parts.push(warned[0]);
+      toast(parts.join('，'),failed.length > 0 || warned.length > 0);
+      view.selected = new Set(failed.map(entry => entry.id));
+      await route(true);
+      return result;
+    };
+    if (action !== 'delete') {await execute();return;}
+    openModal('批量永久删除制作单',`<p class="context-note">将永久删除所选 ${targets.length} 张制作单（不需要先归档），以及它们在本地保存的配音、候选图、成图、成品包等全部文件。此操作不能撤销。</p><ul class="context-list"><li>不会改动达芬奇里的时间线和工程。</li><li>脚本版本和案例库保留，可以重新创建制作单。</li><li>仍有任务在运行的制作单会被跳过并说明原因。</li></ul><label class="field"><span><input type="checkbox" name="sure" required> 我已确认永久删除，不需要找回</span></label>`,'永久删除',async modal => {
+      const result = await execute();
+      if (result) closeModal(true);
+    });
+  }
+  // Permanent removal of an archived order with its local files; DaVinci timelines and script versions stay.
+  async function deleteOrder(kind,item) {
+    const base = `/api/production/${kind === 'job' ? 'jobs' : 'carousels'}/${encodeURIComponent(item.id)}`;
+    let preview;
+    try {preview = await api(`${base}/delete`,{method:'POST',body:{preview:true}});}
+    catch (error) {toast(fail(error),true);return;}
+    const bytes = preview.bytes || 0;
+    const size = bytes >= 1073741824 ? `${(bytes / 1073741824).toFixed(1)} GB` : `${Math.max(1,Math.round(bytes / 1048576))} MB`;
+    const parts = kind === 'job'
+      ? [`${preview.takes} 条配音`,`${preview.edits} 次 AI 剪辑记录`]
+      : [`${preview.slides} 张图的候选、成图和核对记录`,`${preview.searches} 次找底图`,`${preview.generations} 次出图`,`${preview.deliveries} 个成品包`];
+    openModal('永久删除制作单',`<p class="context-note">将永久删除「${esc(preview.title || item.title || item.id)}」：${esc(parts.join('、'))}，以及它们在本地保存的全部文件（${preview.files} 个，共约 ${esc(size)}）。此操作不能撤销。</p><ul class="context-list"><li>不会改动达芬奇里的时间线和工程${kind === 'job' && preview.timelines ? `（已建的 ${preview.timelines} 条时间线需要的话请自行在达芬奇里处理）` : ''}。</li><li>脚本版本和案例库保留，可以重新创建制作单。</li>${preview.published ? '<li class="ai-error">这张图文单已登记发布；发布登记和成品包会一并删除，脚本里的发布状态不会自动改回。</li>' : ''}</ul><label class="field"><span><input type="checkbox" name="sure" required> 我已确认永久删除，不需要找回</span></label>`,'永久删除',async modal => {
+      const result = await send(`order-delete-${item.id}`,`${base}/delete`,{});
+      closeModal(true);
+      const warnings = result.warnings || [];
+      toast(warnings.length ? warnings[0] : '制作单及本地文件已永久删除。',warnings.length > 0);
+      const back = $('.back-link');
+      if (back) back.click();else location.hash = url('#production',item.product);
+    });
+  }
+  // The newest search stays open; older ones fold away with a one-click cleanup, like AI edits on a video order.
+  function searchRuns(item) {
+    const runs = [...(item.searches || [])].reverse();
+    const older = runs.slice(1), olderIds = older.filter(search => search.status !== 'running').map(search => search.id);
+    return `${runs.slice(0,1).map(search => searchRun(item,search)).join('')}${older.length ? `<details class="edit-older"><summary>较早的 ${older.length} 次找底图</summary>${item.archived || !olderIds.length ? '' : `<div class="edit-older-bar"><button type="button" class="secondary compact" data-clean-searches="${esc(olderIds.join(','))}">清理旧记录（${olderIds.length} 次）</button><small>只保留最新一次，连同本地文件和未选用的候选一起删除；已选为底图的保留，不动达芬奇。</small></div>`}${older.map(search => searchRun(item,search)).join('')}</details>` : ''}`;
   }
   function stillSection(data) {
-    const item = data.carousel, choice = view.choice[item.id] ||= {}, searches = [...(item.searches || [])].reverse();
-    const running = searches.some(search => search.status === 'running');
-    const pending = item.slides.filter(slide => !slide.base).map(slide => slide.number);
-    const chosen = choice.still_slides || (pending.length ? pending : item.slides.map(slide => slide.number));
-    const form = `<form id="still-form"><fieldset class="material-picker"><legend>素材时间线</legend><div data-materials>正在读取达芬奇里的时间线…</div></fieldset><fieldset class="material-picker"><legend>要找哪几张</legend><div class="material-options">${item.slides.map(slide => `<label><input type="checkbox" name="slide" value="${slide.number}" ${chosen.includes(slide.number) ? 'checked' : ''}>${pad(slide.number)} ${esc(slide.title_lines.join(' / '))}</label>`).join('')}</div></fieldset><div class="form-row"><label class="field"><span>每张候选数</span><select name="per_slide">${[1,2,3,4,5,6].map(value => `<option ${value === (choice.per_slide || 3) ? 'selected' : ''}>${value}</option>`).join('')}</select></label></div><label class="field"><span>本次额外要求（可选）</span><textarea name="instruction" rows="2" maxlength="2000" placeholder="例如：第 1 张要能看到打开的箱子和七块磨板">${esc(choice.still_instruction || '')}</textarea></label><p class="context-note" data-still-default>正在读取全局默认模型…</p><div data-still-override hidden><p class="context-note">全局默认配置不适用于找底图，请为本次选择兼容模型，或前往<a href="${esc(url('#settings'))}">设置</a>调整全局默认。</p><label class="field"><span>本次找底图模型</span><select name="model"><option value="">请选择兼容模型</option></select></label></div><p class="production-resolve" data-still-provider-status role="status">正在检查全局默认客户端…</p><p class="context-note" data-still-usage>所选客户端会读素材时间线的标记、逐段看画面，把合适的帧导出成候选图，通常 10–30 分钟。期间请不要在达芬奇里操作；结束后工作台会把达芬奇切回你原来的时间线和播放头。</p><div class="take-actions"><button type="submit" class="primary" ${running || item.archived ? 'disabled' : ''}>让 AI 从达芬奇找候选</button>${running ? '<span>正在找底图。</span>' : ''}</div><p class="ai-error" data-error role="alert" hidden></p></form>`;
-    return `<section class="section-card" id="still-panel"><h2>找底图 <small>${searches.length} 次</small></h2><p class="production-resolve" data-resolve-status>正在检查达芬奇…</p>${form}<div id="search-runs">${searches.map(search => searchRun(item,search)).join('')}</div></section>`;
+    const item = data.carousel, choice = view.choice[item.id] ||= {}, searches = item.searches || [];
+    const picks = data.clip_picks, counted = picks ? Object.values(picks.counts || {}).reduce((sum,value) => sum + value,0) : 0;
+    const summary = picks ? `<p class="context-note" id="clip-ai-summary">上次 AI 挑片段：${esc(readableDate(picks.at))} · ${counted} 个候选片段 · 已记在各张的「从片段取帧」里${(picks.gaps || []).length ? `<br>缺口：${(picks.gaps || []).map(gap => `第 ${esc(gap.slide)} 张：${esc(gap.need)}`).join('；')}` : ''}</p>` : '';
+    const history = searches.length ? `<details class="edit-older still-history"><summary>以前的 AI 找画面记录（${searches.length} 次，已停用，可删除）</summary><div id="search-runs">${searchRuns(item)}</div></details>` : '<div id="search-runs" hidden></div>';
+    return `<section class="section-card" id="still-panel"><h2>AI 按标签挑候选片段</h2><p class="context-note">AI 只读素材片段的标签和每一张的文字，为每一张挑几个候选片段：不看画面、不导出静帧、不占用达芬奇，通常 10–60 秒。挑好后在上面每一张点「从片段取帧」，推荐的片段排在最前，自己拖动取帧。</p><p class="production-resolve" data-resolve-status>正在检查达芬奇…</p><fieldset class="material-picker"><legend>素材时间线</legend><div data-materials>正在读取达芬奇里的时间线…</div></fieldset><div class="form-row"><label class="field"><span>每张挑几个片段</span><select name="per_slide">${[1,2,3,4,5].map(value => `<option ${value === (choice.per_slide || 3) ? 'selected' : ''}>${value}</option>`).join('')}</select></label></div><label class="field"><span>本次额外要求（可选）</span><textarea name="instruction" rows="2" maxlength="1000" placeholder="例如：第 1 张要能看到打开的箱子和七块磨板">${esc(choice.still_instruction || '')}</textarea></label><p class="context-note" data-clip-ai-model>正在读取全局默认模型…</p><div class="take-actions"><button type="button" class="primary" id="clip-ai-pick" ${item.archived ? 'disabled' : ''}>让 AI 按标签挑候选片段</button><span data-clip-ai-status role="status"></span></div><p class="ai-error" data-error role="alert" hidden></p>${summary}${history}</section>`;
   }
+  // Large images open in place (no new tab); ctrl/shift/middle click still open the file itself.
+  function openLightbox(source,label) {
+    document.querySelector('dialog.image-lightbox')?.remove();
+    const dialog = document.createElement('dialog');dialog.className = 'image-lightbox';
+    dialog.innerHTML = `<button type="button" class="icon-button" data-close aria-label="关闭">${icon('close')}</button><img alt="${esc(label || '大图')}">`;
+    $('img',dialog).src = source;
+    document.body.append(dialog);
+    const close = () => {try {dialog.close();} catch {}dialog.remove();};
+    dialog.addEventListener('click',close);
+    dialog.addEventListener('cancel',event => {event.preventDefault();close();});
+    dialog.showModal();
+  }
+  document.addEventListener('click',event => {
+    const link = event.target.closest?.('a[target="_blank"]');
+    const href = link?.getAttribute('href') || '';
+    if (!link || event.button || event.ctrlKey || event.metaKey || event.shiftKey || !location.hash.includes('production')) return;
+    if (!/^\/api\/production\/carousels\/CAR-[0-9a-f]{12}\/(images|outputs)\/[A-Z]{3}-[0-9a-f]{12}/.test(href)) return;
+    event.preventDefault();openLightbox(href,link.querySelector('img')?.alt);
+  });
+  // Every slide is one tile of a grid, so five slides fit on one screen; only the first few candidates show, the rest fold.
+  const PICK_VISIBLE = 4;
   function pickSection(item) {
-    return `<section class="section-card" id="pick-panel"><h2>逐张选底图</h2>${item.slides.map(slide => {
-      const candidates = slide.candidates || [];
-      return `<div class="pick-slide"><div class="pick-head"><div><strong>${pad(slide.number)} ${esc(slide.title_lines.join(' / '))}</strong><small>${esc([slide.role,slide.source ? `素材来源：${slide.source}` : ''].filter(Boolean).join(' · '))}</small></div><button type="button" class="subtle" data-import-slide="${slide.number}">导入底图</button></div>${candidates.length ? `<div class="pick-grid">${candidates.map(candidate => `<figure class="pick-card ${slide.base?.id === candidate.id ? 'chosen' : ''}"><a href="${esc(imageURL(item,candidate,'full'))}" target="_blank" rel="noopener" title="看原图"><img src="${esc(imageURL(item,candidate,'thumb'))}" alt="${esc(`第 ${slide.number} 张候选 ${candidate.name}`)}"></a><figcaption><span>${candidate.origin === 'folder' ? `已有图片 · ${esc(candidate.name)}` : esc([candidate.timeline,candidate.marker].filter(Boolean).join(' · ') || candidate.name)}${candidate.evidence ? ' <em class="pick-evidence">效果证据</em>' : ''}</span>${candidate.reason ? `<small>${esc(candidate.reason)}</small>` : ''}</figcaption>${slide.base?.id === candidate.id ? `<button type="button" class="secondary compact" data-unpick="${slide.number}">取消选用</button>` : `<button type="button" class="primary compact" data-pick="${slide.number}" data-candidate="${esc(candidate.id)}">选为底图</button>`}</figure>`).join('')}</div>` : '<p class="context-note">还没有候选图。</p>'}</div>`;
-    }).join('')}</section>`;
+    const card = (slide,candidate) => `<figure class="pick-card ${slide.base?.id === candidate.id ? 'chosen' : ''}"><a href="${esc(imageURL(item,candidate,'full'))}" target="_blank" rel="noopener" title="看原图"><img src="${esc(imageURL(item,candidate,'thumb'))}" alt="${esc(`第 ${slide.number} 张候选 ${candidate.name}`)}" loading="lazy"></a><figcaption><span>${candidate.origin === 'folder' ? `已有图片 · ${esc(candidate.name)}` : candidate.origin === 'clip' ? `片段取帧 · ${esc(candidate.marker || candidate.timeline || candidate.name)}` : candidate.origin === 'upload' ? `本地上传 · ${esc(candidate.original_name || candidate.name)}` : esc([candidate.timeline,candidate.marker].filter(Boolean).join(' · ') || candidate.name)}${candidate.evidence ? ' <em class="pick-evidence">效果证据</em>' : ''}</span>${candidate.reason ? `<small>${esc(candidate.reason)}</small>` : ''}</figcaption>${slide.base?.id === candidate.id ? `<button type="button" class="secondary compact" data-unpick="${slide.number}">取消选用</button>` : `<button type="button" class="primary compact" data-pick="${slide.number}" data-candidate="${esc(candidate.id)}">选为底图</button>`}</figure>`;
+    const tile = slide => {
+      const all = slide.candidates || [], chosenFirst = [...all.filter(candidate => slide.base?.id === candidate.id),...all.filter(candidate => slide.base?.id !== candidate.id)];
+      const shown = chosenFirst.slice(0,PICK_VISIBLE), more = chosenFirst.slice(PICK_VISIBLE);
+      return `<div class="pick-slide ${slide.base ? 'has-base' : ''}" data-pick-slide="${slide.number}" data-drop-hint="松开，导入到第 ${slide.number} 张"><div class="pick-head"><div><strong>${pad(slide.number)} ${esc(slide.title_lines.join(' / '))}</strong><small>${esc([slide.role,slide.source ? `素材来源：${slide.source}` : ''].filter(Boolean).join(' · '))}</small></div><span class="pick-state ${slide.base ? 'done' : ''}">${slide.base ? '已选底图' : all.length ? `${all.length} 张候选` : '待选'}</span></div><div class="pick-tools"><button type="button" class="subtle" data-clip-slide="${slide.number}">从片段取帧${view.clipCounts?.[String(slide.number)] ? `<em class="pick-ai">AI ${view.clipCounts[String(slide.number)]}</em>` : ''}</button><button type="button" class="subtle" data-import-slide="${slide.number}">导入底图</button></div>${shown.length ? `<div class="pick-grid">${shown.map(candidate => card(slide,candidate)).join('')}</div>` : '<p class="context-note">还没有候选图。</p>'}${more.length ? `<details class="pick-more"><summary>其余 ${more.length} 张候选</summary><div class="pick-grid">${more.map(candidate => card(slide,candidate)).join('')}</div></details>` : ''}</div>`;
+    };
+    return `<section class="section-card" id="pick-panel"><h2>逐张选底图</h2><div class="pick-slides">${item.slides.map(tile).join('')}</div></section>`;
   }
   const outputURL = (item,output,size = 'thumb') => `/api/production/carousels/${encodeURIComponent(item.id)}/outputs/${encodeURIComponent(output.id)}?size=${size}`;
-  const imageReviewLabels = {pass:'通过',fail:'需修正',needs_fix:'需修正',uncertain:'待人工核对',pending:'尚未核对',running:'正在核对',review_failed:'核对失败，可重试',failed:'核对失败，可重试',not_applicable:'不适用',not_verified:'未验证'};
   const currentOutput = slide => (slide.outputs || []).find(output => output.id === slide.output_id);
   const generating = item => (item.generations || []).some(generation => generation.status === 'running');
-  const reviewRunning = output => (output.review_runs || []).some(run => run.status === 'running');
-  const reviewing = item => item.slides.some(slide => (slide.outputs || []).some(reviewRunning));
   const imageModes = {generated_visual:'生成视觉版',photo_preserving:'实拍保真版',layout_only:'仅文字排版'};
-  const approvalSource = output => output.approval_actor === 'assistant_on_user_authorization' ? '助手按用户授权核对' : output.approval_actor === 'human' ? '用户确认' : '旧记录未标注';
-  const reviewScopes = {visual:'视觉与排版',text:'文字',product:'商品对照',evidence:'实拍证据'};
-  const outputMode = output => output.requirements_snapshot?.mode || output.requirements?.mode || output.production_requirements?.mode || (output.provenance?.kind === 'external_generated_layout' ? 'generated_visual' : '');
-  const reviewCanConfirm = output => {
-    const review = output.review || {}, scope = review.scope;
-    return !output.stale && ['pass','uncertain'].includes(review.status) && review.completed !== false &&
-      (!scope || Array.isArray(scope) && Object.keys(reviewScopes).every(key => scope.includes(key))) &&
-      (!review.file_sha256 || review.file_sha256 === output.sha256) &&
-      (!review.execution_status || review.execution_status === 'completed') &&
-      (!output.latest_review_id || review.review_id === output.latest_review_id);
-  };
-  const confirmedOutput = slide => {const output = currentOutput(slide);return Boolean(output?.approved && reviewCanConfirm(output) && !reviewRunning(output));};
+  const confirmedOutput = slide => {const output = currentOutput(slide);return Boolean(output?.approved && !output.stale);};
   const requirementsFor = (item,choice) => ({mode:'photo_preserving',editable_regions:['background','text'],protected_product:true,protected_evidence:true,hands_authorized:false,style:'',source:'当前逐张底图',instruction:'',postprocess:'layout_only',...(item.requirements || {}),...(choice.requirements || {}),aspect:choice.image_aspect || item.image_aspect || item.requirements?.aspect || '3:4'});
   const regionLabels = {background:'背景',text:'文字',hands:'手部',product:'产品外观'};
   const requirementsSummary = requirements => [imageModes[requirements.mode] || requirements.mode,
@@ -915,38 +1174,33 @@ window.CaseProduction = (() => {
       throw Object.assign(new Error(`资料已更新，输入已保留，检查后重试。${fail(error)}`),{status:409});
     }
   }
-  const reviewText = issue => typeof issue === 'string' ? issue : issue?.note || issue?.message || '需要进一步核对。';
-  function imageReview(output, expanded = false) {
-    const review = output.review || {}, checks = review.checks || [], issues = review.issues || [], scope = review.scope || review.scopes || [];
-    const hash = output.sha256 || output.file_sha256 || '', reviewedHash = review.file_sha256 || review.output_sha256 || review.sha256 || '';
-    const changed = hash && reviewedHash && hash !== reviewedHash;
-    const runs = output.review_runs || [], latest = runs.at(-1);
-    return `<div class="image-review ${esc(review.status || 'pending')}"><strong>自动核对：${esc(reviewRunning(output) ? '正在核对' : imageReviewLabels[review.status] || '尚未核对')}</strong>${changed ? '<p class="ai-error">文件已改变，原核对记录不能用于当前图片，请重新核对。</p>' : ''}${review.summary ? `<p>${esc(review.summary)}</p>` : ''}${scope.length ? `<p class="image-review-scope">核对范围：${esc(scope.map(key => reviewScopes[key] || key).join('、'))}</p>` : '<p class="image-review-scope">核对范围：视觉、文字、商品对照、实拍证据分别记录</p>'}${outputMode(output) === 'generated_visual' ? '<p class="image-approval-note">生成视觉版：商品对照不代表原实拍逐像素保真。</p>' : ''}${latest?.error ? `<p class="ai-error">${esc(latest.error)}</p>` : ''}${checks.length || issues.length || hash || latest ? `<details ${expanded ? 'open' : ''}><summary>查看核对项目与记录</summary>${checks.length ? `<ul class="image-checks">${checks.map(check => `<li><span>${esc(check.label || reviewScopes[check.id] || check.id)}</span><strong class="${esc(check.status || 'uncertain')}">${esc(imageReviewLabels[check.status] || '待人工核对')}</strong>${check.note ? `<small>${esc(check.note)}</small>` : ''}</li>`).join('')}</ul>` : ''}${issues.length ? `<ul class="take-warnings">${issues.map(issue => `<li>${esc(reviewText(issue))}</li>`).join('')}</ul>` : ''}${hash ? `<p class="image-record-meta">文件指纹：${esc(hash)}${review.input_signature ? `<br>核对输入版本：${esc(review.input_signature)}` : ''}${review.requirements_signature ? `<br>制作要求版本：${esc(review.requirements_signature)}` : ''}</p>` : ''}${latest ? `<p class="image-record-meta">最近核对：${esc(imageReviewLabels[latest.status] || editLabels[latest.status] || latest.status)}${latest.started_at ? ` · 开始 ${esc(readableDate(latest.started_at))}` : ''}${latest.finished_at ? ` · 结束 ${esc(readableDate(latest.finished_at))}` : ''}</p>` : ''}</details>` : ''}</div>`;
-  }
-  function outputStages(output) {
-    const labels = {prepare:'准备',generation:'生成',layout:'排版',review:'核对',confirmation:'确认',package:'打包'}, states = {pending:'待处理',running:'进行中',completed:'已完成',skipped:'无需处理',failed:'失败，可重试',cancelled:'已停止',interrupted:'已中断'};
-    return output.stages ? `<details class="image-output-stages"><summary>查看这版的处理阶段</summary><ul class="image-checks">${Object.entries(output.stages).map(([key,step]) => `<li><span>${esc(labels[key] || key)}</span><strong>${esc(states[step.status] || step.status || '待处理')}</strong>${step.started_at || step.finished_at ? `<small>${step.started_at ? `开始 ${esc(readableDate(step.started_at))}` : ''}${step.finished_at ? ` · 结束 ${esc(readableDate(step.finished_at))}` : ''}</small>` : ''}${step.note ? `<small>${esc(step.note)}</small>` : ''}</li>`).join('')}</ul></details>` : '';
-  }
-  function reviewRuns(item) {
-    return item.slides.flatMap(slide => (slide.outputs || []).flatMap(output => (output.review_runs || []).map(run => ({...run,slide:slide.number,output:output.id})))).reverse().map(run => `<article class="image-review-run ${esc(run.status)}"><div><strong>第 ${run.slide} 张 · 独立核对 · ${esc(editLabels[run.status] || run.status)}</strong><small>${run.started_at ? `开始 ${esc(readableDate(run.started_at))}` : ''}${run.finished_at ? ` · 结束 ${esc(readableDate(run.finished_at))}` : ''}</small>${run.live?.progress ? `<p role="status">${esc(run.live.progress)}</p>` : ''}${run.error ? `<p class="ai-error">${esc(run.error)}</p>` : ''}</div>${run.status === 'running' ? `<button type="button" class="secondary compact" data-cancel-review="${esc(run.id)}">停止核对</button>` : ''}</article>`).join('');
-  }
   function imageRun(generation) {
-    const live = generation.live || {}, warnings = generation.problems || [];
-    const labels = {awaiting_first_approval:'首张待确认',...editLabels}, stages = generation.stages || {}, stageLabels = {prepare:'准备',preparation:'准备',generate:'生成',generation:'生成',layout:'排版',review:'核对',verification:'核对',confirm:'确认',confirmation:'确认',package:'打包',packaging:'打包'}, stageStates = {pending:'待处理',running:'进行中',completed:'已完成',saved:'已保存',skipped:'无需处理',failed:'失败，可重试',cancelled:'已停止',interrupted:'已中断',awaiting_approval:'待确认'};
-    const stageMarkup = Object.entries(stages).map(([number,steps]) => `<div class="image-stage-row"><strong>第 ${esc(number)} 张</strong><ol>${Object.entries(steps).map(([key,step]) => `<li class="${esc(step.status || 'pending')}"><span>${esc(stageLabels[key] || key)}</span><b>${esc(stageStates[step.status] || editLabels[step.status] || step.status || '待处理')}</b>${step.started_at || step.finished_at ? `<small>${step.started_at ? `开始 ${esc(readableDate(step.started_at))}` : ''}${step.finished_at ? ` · 结束 ${esc(readableDate(step.finished_at))}` : ''}</small>` : ''}${step.note ? `<small>${esc(step.note)}</small>` : ''}</li>`).join('')}</ol></div>`).join('');
-    return `<article class="edit-card image-run ${esc(generation.status)}" data-generation-id="${esc(generation.id)}"><div class="take-head"><div><strong><span class="script-status ${generation.status === 'completed' ? 'published' : ''}">${esc(labels[generation.status] || generation.status)}</span> 第 ${esc((generation.slides || []).join('、'))} 张 · ${esc(generation.aspect || '3:4')}</strong><small>${generation.started_at ? `开始 ${esc(readableDate(generation.started_at))}` : '尚未开始'}${generation.finished_at ? ` · 结束 ${esc(readableDate(generation.finished_at))}` : ''}${(generation.concurrency || generation.concurrency_limit) ? ` · 最多同时处理 ${esc(generation.concurrency || generation.concurrency_limit)} 张` : ''}</small></div>${generation.status === 'running' ? `<button type="button" class="secondary" data-cancel-generation="${esc(generation.id)}">停止出图</button>` : ''}</div>${generation.status === 'running' ? `<p class="production-busy" role="status">${esc(live.progress || '正在后台处理…')}</p>${live.latest ? `<details><summary>查看处理进度</summary><pre class="edit-live">${esc(live.latest)}</pre></details>` : ''}` : `<p class="edit-facts">新增成图 ${generation.added || 0} 张</p>`}${stageMarkup ? `<div class="image-stages" aria-label="逐张处理阶段">${stageMarkup}</div>` : ''}${generation.status === 'awaiting_first_approval' ? '<p class="context-note">先核对、选定并确认首张，通过领取资格预检后，再继续余图。尚未完成全组时不会整理完整领取包。</p>' : ''}${['cancelled','interrupted','failed'].includes(generation.status) ? '<p class="context-note">已保存的成图与阶段结果会保留。核对失败请使用「重新核对这张」；继续制作只处理尚未完成的图。</p>' : ''}${warnings.length ? `<ul class="take-warnings">${warnings.map(warning => `<li>${esc(reviewText(warning))}</li>`).join('')}</ul>` : ''}${generation.error ? `<p class="ai-error">${esc(generation.error)}</p>` : ''}${generation.instruction ? `<p class="context-note">本次要求：${esc(generation.instruction)}</p>` : ''}</article>`;
+    if (generation.status === 'completed') return '';
+    const labels = {awaiting_first_approval:'首张待确认',...editLabels};
+    return `<article class="image-run ${esc(generation.status)}" data-generation-id="${esc(generation.id)}"><div class="take-head"><strong><span class="script-status">${esc(labels[generation.status] || generation.status)}</span></strong>${generation.status === 'running' ? `<button type="button" class="secondary compact" data-cancel-generation="${esc(generation.id)}">停止出图</button>` : ''}</div>${generation.status === 'running' ? `<p class="production-busy" role="status">${esc(generation.live?.progress || '正在生成图片…')}</p>` : ''}${generation.error ? `<p class="ai-error">${esc(generation.error)}</p>` : ''}</article>`;
+  }
+  function setImageVersionsExpanded(stack, expanded) {
+    const others = $('.image-version-others',stack), toggle = $('[data-image-versions-toggle]',stack);
+    if (!others || !toggle) return;
+    others.hidden = !expanded;stack.classList.toggle('expanded',expanded);
+    toggle.setAttribute('aria-expanded',String(expanded));
+    toggle.textContent = expanded ? '收起' : `查看其他图片（${toggle.dataset.imageCount}）`;
+    const choice = view.choice[stack.dataset.carouselId] ||= {};
+    (choice.image_versions_open ||= {})[stack.dataset.imageStack] = expanded;
   }
   function imageSlides(item) {
-    const busy = generating(item);
+    const busy = generating(item), choice = view.choice[item.id] ||= {};
     return item.slides.map(slide => {
-      const outputs = slide.outputs || [], selected = currentOutput(slide);
-      const disabled = item.archived || busy;
-      return `<article class="image-slide" data-image-slide="${slide.number}"><div class="pick-head"><div><h3>${pad(slide.number)} ${esc(slide.title_lines.join(' / '))}</h3><small>${confirmedOutput(slide) ? '工作台已确认这一版' : outputs.length ? '已有成图候选，请分别核对并选版' : slide.base ? '已选好底图，可以出图' : '可导入现有成品，或先选底图出图'}</small></div><button type="button" class="secondary compact" data-redo-slide="${slide.number}" ${disabled || !slide.base ? 'disabled' : ''}>${outputs.length ? '重做这一张' : '生成这一张'}</button></div><div class="image-version-grid">${slide.base ? `<figure class="image-base"><a href="${esc(imageURL(item,slide.base,'full'))}" target="_blank" rel="noopener" title="查看底图"><img src="${esc(imageURL(item,slide.base,'thumb'))}" alt="第 ${slide.number} 张已选底图"></a><figcaption><strong>本张独立产品参考</strong><small>${esc(slide.base.name || [slide.base.timeline,slide.base.marker].filter(Boolean).join(' · '))}</small></figcaption></figure>` : ''}${[...outputs].reverse().map((output,index) => {
-        const current = output.id === slide.output_id, version = outputs.length - index;
-        const stateLabel = output.stale ? (output.stale_reason || '').includes('丢失') ? '图片文件不可用，需重新登记' : (output.stale_reason || '').includes('文件已变化') ? '图片已改变，需重新登记并核对' : '输入已改变，需重新登记并核对' : current && output.approved ? confirmedOutput(slide) ? '当前选用 · 工作台已确认' : '确认记录保留 · 当前核对未完成' : current ? '当前候选 · 待确认' : output.approved ? '已确认的保留版本' : '待选候选 · 保留';
-        const mode = outputMode(output), imported = output.provenance?.kind === 'external_generated_layout', canConfirm = reviewCanConfirm(output), reviewBusy = reviewRunning(output), runningReview = (output.review_runs || []).find(run => run.status === 'running');
-        return `<figure class="carousel-output ${current ? 'current' : ''} ${output.stale ? 'stale' : ''}" data-output-id="${esc(output.id)}"><a href="${esc(outputURL(item,output,'full'))}" target="_blank" rel="noopener" title="查看成图原图"><img src="${esc(outputURL(item,output))}" data-aspect="${output.aspect === '9:16' ? '9:16' : '3:4'}" alt="第 ${slide.number} 张成图第 ${version} 版"></a><figcaption><strong>第 ${version} 版 <span class="image-version-state">${esc(stateLabel)}</span></strong><small>${esc(readableDate(output.created_at))} · ${esc(output.aspect || '3:4')}${mode ? ` · ${esc(imageModes[mode] || mode)}` : ''}</small>${imported ? `<small>本地已导出 · 外部完成的生成／排版结果<br>模型：${esc(output.provenance.model || '未知')}${output.provenance.model_source === 'operator_reported' ? '（用户补充）' : output.provenance.model ? '（来源记录）' : ''}</small>` : ''}</figcaption>${imageReview(output,current && !output.approved)}${outputStages(output)}${output.note ? `<p class="image-approval-note">确认备注：${esc(output.note)}</p>` : ''}<div class="image-version-actions"><button type="button" class="secondary compact" data-recheck-output="${esc(output.id)}" data-output-slide="${slide.number}" ${item.archived || busy || reviewBusy ? 'disabled' : ''}>${reviewBusy ? '正在核对这张…' : '重新核对这张'}</button>${runningReview ? `<button type="button" class="secondary compact" data-cancel-review="${esc(runningReview.id)}">停止核对</button>` : ''}<button type="button" class="${current && output.approved ? 'secondary' : 'primary'} compact" ${current && output.approved ? `data-revoke-output="${esc(output.id)}"` : output.approved ? `data-select-output="${esc(output.id)}" data-approve-output="${esc(output.id)}"` : `data-approve-output="${esc(output.id)}"`} data-output-slide="${slide.number}" ${disabled || reviewBusy || (!canConfirm && !(current && output.approved)) || output.stale ? 'disabled' : ''}>${output.stale ? '此版需重新核对' : current && output.approved ? '撤销确认' : output.approved ? '选用已确认版本' : canConfirm ? '核对并选用这版' : '先完成核对再确认'}</button></div></figure>`;
-      }).join('')}</div>${!outputs.length ? '<p class="context-note">还没有成图。生成后会保留每一版，核对主体、文字和排版，再确认选用。</p>' : ''}</article>`;
+      const outputs = slide.outputs || [], disabled = item.archived || busy;
+      const latest = [...outputs].reverse(), selectedOutput = currentOutput(slide);
+      const front = selectedOutput?.approved && !selectedOutput.stale ? selectedOutput : latest.find(output => !output.stale) || latest[0];
+      const others = latest.filter(output => output !== front), expanded = Boolean(choice.image_versions_open?.[slide.number]);
+      const otherId = `image-versions-${item.id}-${slide.number}`;
+      const card = output => {
+        const selected = output.id === slide.output_id && output.approved, version = outputs.indexOf(output) + 1;
+        return `<figure class="carousel-output ${selected ? 'current' : ''} ${output.stale ? 'stale' : ''}" data-output-id="${esc(output.id)}"${output.generation_id ? ` data-generation-result="${esc(output.generation_id)}"` : ''}><a href="${esc(outputURL(item,output,'full'))}" target="_blank" rel="noopener" title="查看成图原图" aria-label="查看第 ${slide.number} 张成图第 ${version} 版原图"><img src="${esc(outputURL(item,output))}" data-aspect="${output.aspect === '9:16' ? '9:16' : '3:4'}" alt="第 ${slide.number} 张成图第 ${version} 版"></a><div class="image-version-actions"><button type="button" class="${selected ? 'secondary' : 'primary'} compact" ${selected ? `data-revoke-output="${esc(output.id)}"` : output.approved ? `data-select-output="${esc(output.id)}" data-approve-output="${esc(output.id)}"` : `data-approve-output="${esc(output.id)}"`} data-output-slide="${slide.number}" ${disabled || output.stale ? 'disabled' : ''}>${output.stale ? '此图已失效' : selected ? '撤销确认' : '确认选用'}</button></div></figure>`;
+      };
+      return `<article class="image-slide" data-image-slide="${slide.number}"><div class="pick-head"><h3>${pad(slide.number)} ${esc(slide.title_lines.join(' / '))}</h3><button type="button" class="secondary compact" data-redo-slide="${slide.number}" ${disabled || !slide.base ? 'disabled' : ''}>${outputs.length ? '重做这一张' : '生成这一张'}</button></div>${front ? `<div class="image-version-stack ${expanded ? 'expanded' : ''}" data-image-stack="${slide.number}" data-carousel-id="${esc(item.id)}"><div class="image-stack-cover ${others.length ? 'stacked' : ''} ${others.length > 1 ? 'has-more' : ''}">${card(front)}</div>${others.length ? `<button type="button" class="subtle compact image-versions-toggle" data-image-versions-toggle="${slide.number}" data-image-count="${others.length}" aria-expanded="${expanded}" aria-controls="${esc(otherId)}">${expanded ? '收起' : `查看其他图片（${others.length}）`}</button><div class="image-version-others image-version-grid" id="${esc(otherId)}" ${expanded ? '' : 'hidden'}>${others.map(card).join('')}</div>` : ''}</div>` : '<p class="context-note">还没有成图。</p>'}</article>`;
     }).join('');
   }
   function imagesSection(data) {
@@ -955,16 +1209,20 @@ window.CaseProduction = (() => {
     const aspect = choice.image_aspect || item.image_aspect || runs.at(-1)?.aspect || '3:4';
     const firstReady = confirmedOutput(item.slides[0] || {});
     const continuation = runs.some(run => ['awaiting_first_approval','interrupted','cancelled','failed'].includes(run.status));
-    return `<section class="section-card" id="carousel-images-panel"><div class="section-title-row"><h2>出图与核对</h2><div class="carousel-image-heading-actions"><small>${item.slides.filter(confirmedOutput).length} / ${item.slides.length} 张已确认</small><button type="button" class="secondary compact" id="carousel-import-finished" ${item.archived || generating(item) ? 'disabled' : ''}>导入现有成品</button></div></div><p class="context-note">已有完成的图片可直接导入：只登记、核对和选版，不重新生图。底图请在「找图与选底图」步骤用「导入底图」。导入的新候选不会替换已确认版本。</p><p class="production-resolve" id="carousel-images-service" role="status">正在检查出图服务…</p><form id="carousel-image-form"><details class="carousel-requirements-toggle" id="carousel-requirements-toggle" ${choice.requirements_open ? 'open' : ''}><summary><strong>出图设置</strong><small>${esc(requirementsSummary(requirementsFor(item,choice)))}</small><span>修改</span></summary>${requirementsFields(requirementsFor(item,choice),item.archived || generating(item))}<div class="take-actions carousel-requirements-save"><button type="button" class="secondary compact" id="carousel-save-requirements" ${item.archived || generating(item) ? 'disabled' : ''}>保存制作要求</button><span>出图、核对和版本记录使用同一份要求；保存后这个产品新建的图文单也默认沿用。</span></div></details><fieldset class="material-picker"><legend>要制作哪几张</legend><div class="material-options">${item.slides.map(slide => `<label><input type="checkbox" name="image_slide" value="${slide.number}" ${chosen.includes(slide.number) && slide.base ? 'checked' : ''} ${!slide.base || item.archived || generating(item) ? 'disabled' : ''}>${pad(slide.number)} ${esc(slide.title_lines.join(' / '))}${!slide.base ? '（未选底图）' : ''}</label>`).join('')}</div></fieldset><div class="form-row image-aspect-row"><label class="field"><span>成图比例</span><select name="aspect" ${item.archived || generating(item) ? 'disabled' : ''}><option value="3:4" ${aspect === '3:4' ? 'selected' : ''}>3:4</option><option value="9:16" ${aspect === '9:16' ? 'selected' : ''}>9:16</option></select></label><div></div></div><label class="field"><span>本次额外要求（可选）</span><textarea name="instruction" rows="2" maxlength="2000" placeholder="例如：背景更简洁，产品主体放大，保留完整夹具与磨板">${esc(choice.image_instruction ?? item.requirements?.instruction ?? '')}</textarea></label><p class="context-note">先完成首张的制作、核对、选版和领取资格预检，再按同一风格继续余图。后台处理时可以离开本页，回来后继续查看进度；每张成图都需要核对后确认。合格画面只做必要排版，额外合成需要另行明确要求。</p><div class="take-actions"><button type="submit" class="primary" disabled>让 Codex 生成选中的图</button><button type="button" class="secondary" id="carousel-generate-first" disabled>先制作首张</button>${continuation ? `<button type="button" class="secondary" id="carousel-continue-images" disabled>${firstReady ? '继续未完成的余图' : '首张确认后继续余图'}</button>` : ''}</div><p class="ai-error" data-error role="alert" hidden></p></form><div id="carousel-first-preflight" class="carousel-first-preflight"><strong>首张验证</strong><p>${firstReady ? '首张已选定并确认；继续余图时会检查文件与核对记录是否仍有效。' : '首张先核对并确认选版，余图再沿用它的风格。'}</p></div><div id="carousel-image-runs">${[...runs].reverse().map(imageRun).join('')}</div><div id="carousel-image-slides">${imageSlides(item)}</div></section>`;
+    return `<section class="section-card" id="carousel-images-panel"><div class="section-title-row"><h2>出图</h2><div class="carousel-image-heading-actions"><small>${item.slides.filter(confirmedOutput).length} / ${item.slides.length} 张已确认</small><button type="button" class="secondary compact" id="carousel-import-finished" ${item.archived || generating(item) ? 'disabled' : ''}>导入现有成品</button></div></div>
+      <p class="production-resolve" id="carousel-images-service" role="status">正在检查出图服务…</p>
+      <form id="carousel-image-form"><details class="carousel-requirements-toggle" id="carousel-requirements-toggle" ${choice.requirements_open ? 'open' : ''}><summary><strong>出图设置</strong><small>${esc(requirementsSummary(requirementsFor(item,choice)))}</small><span>修改</span></summary>${requirementsFields(requirementsFor(item,choice),item.archived || generating(item))}<div class="take-actions carousel-requirements-save"><button type="button" class="secondary compact" id="carousel-save-requirements" ${item.archived || generating(item) ? 'disabled' : ''}>保存制作要求</button><span>保存后，这个产品新建的图文单也默认沿用。</span></div></details>
+      <fieldset class="material-picker"><legend>要制作哪几张</legend><div class="material-options">${item.slides.map(slide => `<label><input type="checkbox" name="image_slide" value="${slide.number}" ${chosen.includes(slide.number) && slide.base ? 'checked' : ''} ${!slide.base || item.archived || generating(item) ? 'disabled' : ''}>${pad(slide.number)} ${esc(slide.title_lines.join(' / '))}${!slide.base ? '（未选底图）' : ''}</label>`).join('')}</div></fieldset>
+      <div class="form-row image-aspect-row"><label class="field"><span>成图比例</span><select name="aspect" ${item.archived || generating(item) ? 'disabled' : ''}><option value="3:4" ${aspect === '3:4' ? 'selected' : ''}>3:4</option><option value="9:16" ${aspect === '9:16' ? 'selected' : ''}>9:16</option></select></label><div></div></div>
+      <label class="field"><span>本次额外要求（可选）</span><textarea name="instruction" rows="2" maxlength="2000" placeholder="例如：背景更简洁，产品主体放大，保留完整夹具与磨板">${esc(choice.image_instruction ?? item.requirements?.instruction ?? '')}</textarea></label>
+      <p class="context-note">选好首张后，余图沿用它的风格。图片生成后可直接确认选用；后台处理时可以离开本页。</p>
+      <div class="take-actions"><button type="submit" class="primary" disabled>生成选中的图</button><button type="button" class="secondary" id="carousel-generate-first" disabled>先制作首张</button>${continuation ? `<button type="button" class="secondary" id="carousel-continue-images" disabled>${firstReady ? '继续未完成的余图' : '首张确认后继续余图'}</button>` : ''}</div><p class="ai-error" data-error role="alert" hidden></p></form>
+      <div id="carousel-image-runs">${[...runs].reverse().map(imageRun).join('')}</div><div id="carousel-image-slides">${imageSlides(item)}</div></section>`;
   }
   function bindImages(data) {
     const item = data.carousel, seq = view.sequence, choice = view.choice[item.id] ||= {}, form = $('#carousel-image-form');
     let service = null, preflight = null;
-    $$('[data-output-id]').forEach(card => {
-      const output = item.slides.flatMap(slide => slide.outputs || []).find(output => output.id === card.dataset.outputId);
-      if (output?.approved) $('figcaption',card).insertAdjacentHTML('beforeend',`<small>确认来源：${esc(approvalSource(output))}</small>`);
-    });
-    $('#carousel-image-runs').insertAdjacentHTML('beforebegin',`<div class="image-import-records">${[...(item.finished_imports || [])].reverse().map(record => `<p>现有成品已登记 · ${record.logical_count} 张 · 开始 ${esc(readableDate(record.started_at || record.imported_at))} · 结束 ${esc(readableDate(record.finished_at || record.imported_at))}<small>只复制登记，未调用生图 · 模型${record.model ? `：${esc(record.model)}` : '未知'}</small></p>`).join('')}</div><div id="carousel-review-runs">${reviewRuns(item)}</div>`);
+    $$('[data-image-versions-toggle]').forEach(button => button.onclick = () => setImageVersionsExpanded(button.closest('.image-version-stack'),button.getAttribute('aria-expanded') !== 'true'));
     const remember = () => {
       choice.image_slides = $$('input[name="image_slide"]:checked',form).map(input => Number(input.value));
       choice.image_aspect = form.aspect.value;choice.image_instruction = form.instruction.value;
@@ -977,54 +1235,50 @@ window.CaseProduction = (() => {
     form.querySelector('.image-aspect-row').insertAdjacentElement('afterend',aspectNote);
     const updateAspectNote = () => {
       const current = item.image_aspect || '3:4', changed = form.aspect.value !== current && item.slides.some(slide => (slide.outputs || []).length);
-      aspectNote.hidden = !changed;aspectNote.textContent = changed ? `这组当前采用 ${current}。启动 ${form.aspect.value} 出图后，旧比例版本将失效，整组都需按新比例重新出图并核对。` : '';
+      aspectNote.hidden = !changed;aspectNote.textContent = changed ? `这组当前采用 ${current}。启动 ${form.aspect.value} 出图后，旧比例版本将失效，整组都需按新比例重新出图。` : '';
     };
     form.aspect.addEventListener('change',updateAspectNote);updateAspectNote();
     const updateSubmit = () => {
       const unavailable = !service?.available || service.busy || generating(item) || item.archived;
-      const layoutOnly = form.elements.namedItem('image_mode').value === 'layout_only';
+      const layoutOnly = form.elements.namedItem('image_mode').value === 'layout_only' && service && service.source !== 'cockpit_image_edit';
       const blocked = item.archived || generating(item) || (!layoutOnly && unavailable);
-      const submit = $('button[type="submit"]',form);if (submit) {submit.disabled = blocked || !$$('input[name="image_slide"]:checked',form).length;submit.textContent = layoutOnly ? '排版选中的图' : '让 Codex 生成选中的图';}
+      const submit = $('button[type="submit"]',form);if (submit) {submit.disabled = blocked || !$$('input[name="image_slide"]:checked',form).length;submit.textContent = layoutOnly ? '排版选中的图' : '生成选中的图';}
       $('#carousel-generate-first').disabled = blocked || !item.slides[0]?.base;
       const continueButton = $('#carousel-continue-images');if (continueButton) continueButton.disabled = blocked || !preflight?.first_ready;
-      $$('[data-redo-slide]').forEach(button => {button.disabled = unavailable || !item.slides.find(slide => slide.number === Number(button.dataset.redoSlide))?.base;});
+      $$('[data-redo-slide]').forEach(button => {button.disabled = blocked || !item.slides.find(slide => slide.number === Number(button.dataset.redoSlide))?.base;});
     };
     updateSubmit();
     form.addEventListener('change',updateSubmit);
     readStatus('/api/production/codex-images',10000,true).then(status => {
       if (seq !== view.sequence || !form.isConnected) return;
       service = status;const node = $('#carousel-images-service');node.classList.toggle('problem',!status.available || status.busy);
-      node.innerHTML = `<span>${esc(status.available ? status.busy ? '出图服务正在处理任务，结束后可以再生成。' : 'Codex 出图服务已就绪。' : status.error || 'Codex 出图服务暂不可用。')}</span>`;
-      if (status.available && !status.busy) node.insertAdjacentHTML('beforeend',' <span class="image-service-model">内置生图工具 · 具体型号未确认</span>');updateSubmit();
+      node.textContent = status.available ? status.busy ? '出图服务正在处理任务，结束后可以再生成。' : `${status.label || '图生图服务'}已就绪。` : status.error || '图生图服务暂不可用。';
+      updateSubmit();
     }).catch(error => {if (seq === view.sequence && form.isConnected) {$('#carousel-images-service').textContent = `暂时无法检查出图服务：${fail(error)}`;}});
-    const firstPanel = $('#carousel-first-preflight');
-    firstPanel.insertAdjacentHTML('beforeend',`<button type="button" class="secondary compact" id="carousel-check-first" ${item.archived ? 'disabled' : ''}>检查首张领取资格</button><p data-preflight-result role="status"></p>`);
-    const checkFirst = async () => {
-      const button = $('#carousel-check-first'), result = $('[data-preflight-result]',firstPanel);button.disabled = true;
-      try {preflight = await api(`/api/production/carousels/${encodeURIComponent(item.id)}/preflight`);if (seq !== view.sequence || !firstPanel.isConnected) return;result.textContent = preflight.message || (preflight.first_ready ? '首张领取资格预检通过，可继续余图。' : '首张尚未通过领取资格预检，请核对并确认选版。');result.classList.toggle('ai-error',!preflight.first_ready);updateSubmit();}
-      catch (error) {result.textContent = `暂时无法检查首张领取资格：${fail(error)}`;result.classList.add('ai-error');}
-      finally {if (firstPanel.isConnected) button.disabled = item.archived;}
-    };
-    $('#carousel-check-first').onclick = checkFirst;
-    if (currentOutput(item.slides[0] || {})?.approved) checkFirst();
+    if (confirmedOutput(item.slides[0] || {})) {
+      api(`/api/production/carousels/${encodeURIComponent(item.id)}/preflight`).then(result => {
+        if (seq !== view.sequence || !form.isConnected) return;
+        preflight = result;updateSubmit();
+      }).catch(() => {});
+    }
     form.onsubmit = async event => {
       event.preventDefault();remember();setError(form,'');
       if (!choice.image_slides.length) {setError(form,'请勾选至少一张已有底图的图。');return;}
       const submit = $('button[type="submit"]',form);submit.disabled = true;submit.textContent = '正在启动后台出图…';
-      try {await send(`generate-${item.id}`,`/api/production/carousels/${encodeURIComponent(item.id)}/generate`,{revision:data.revision,slides:choice.image_slides,aspect:choice.image_aspect,instruction:choice.image_instruction.trim(),requirements:choice.requirements});delete choice.image_slides;toast('已开始分阶段制作，成图后逐张核对并确认。');await route(true);}
-      catch (error) {setError(form,fail(error));submit.textContent = '让 Codex 生成选中的图';updateSubmit();}
+      try {await send(`generate-${item.id}`,`/api/production/carousels/${encodeURIComponent(item.id)}/generate`,{revision:data.revision,slides:choice.image_slides,aspect:choice.image_aspect,instruction:choice.image_instruction.trim(),requirements:choice.requirements});delete choice.image_slides;toast('已开始生成图片，完成后可直接确认选用。');await route(true);}
+      catch (error) {setError(form,fail(error));submit.textContent = '生成选中的图';updateSubmit();}
     };
     $('#carousel-save-requirements').onclick = async event => {
       remember();const button = event.currentTarget;button.disabled = true;setError(form,'');
-      try {await send(`requirements-${item.id}`,`/api/production/carousels/${encodeURIComponent(item.id)}/requirements`,{revision:data.revision,requirements:choice.requirements});toast('制作要求已保存，后续制作与核对使用这份要求。');await route(true);}
+      try {await send(`requirements-${item.id}`,`/api/production/carousels/${encodeURIComponent(item.id)}/requirements`,{revision:data.revision,requirements:choice.requirements});toast('制作要求已保存。');await route(true);}
       catch (error) {setError(form,fail(error));button.disabled = false;}
     };
     $('#carousel-import-finished').onclick = () => {
       const draft = choice.import_finished || {directory:'',model:'',requirements:{...requirementsFor(item,choice),mode:'generated_visual',editable_regions:[],source:'外部完成的生成／排版结果',hands_authorized:false}};
-      const modal = openModal('导入现有成品',`<p class="context-note">选择「图文成品」里的整组目录。工作台会复制并检查图片、顺序、比例、锁定文案与来源记录；PNG 和 JPG 发布副本只算同一张。导入后成为待核对候选。</p><label class="field"><span>成品目录</span><input name="directory" required maxlength="2000" value="${esc(draft.directory || '')}" placeholder="例如：C:/Users/video/Desktop/case-workbench/图文成品/产品方向-日期-版本"></label>${requirementsFields(draft.requirements,false,'import')}<div class="form-row"><label class="field"><span>图片比例</span><select name="aspect"><option value="3:4" ${draft.requirements.aspect !== '9:16' ? 'selected' : ''}>3:4</option><option value="9:16" ${draft.requirements.aspect === '9:16' ? 'selected' : ''}>9:16</option></select></label><label class="field"><span>实际使用的模型（未知可留空）</span><input name="model" maxlength="200" value="${esc(draft.model || '')}" placeholder="未知"></label></div><p class="context-note">来源登记为外部完成的生成／排版结果；没有实际模型信息时保持未知。登记不会生成图片，也不会自动声明人工已确认。</p>`,'登记为待核对候选',async modal => {
+      const modal = openModal('导入现有成品',`<p class="context-note">选择「图文成品」里的整组目录。工作台会复制并检查图片、顺序、比例、锁定文案与来源记录；PNG 和 JPG 发布副本只算同一张。导入后可直接选用。</p><label class="field"><span>成品目录</span><input name="directory" required maxlength="2000" value="${esc(draft.directory || '')}" placeholder="例如：C:/Users/video/Desktop/case-workbench/图文成品/产品方向-日期-版本"></label>${requirementsFields(draft.requirements,false,'import')}<div class="form-row"><label class="field"><span>图片比例</span><select name="aspect"><option value="3:4" ${draft.requirements.aspect !== '9:16' ? 'selected' : ''}>3:4</option><option value="9:16" ${draft.requirements.aspect === '9:16' ? 'selected' : ''}>9:16</option></select></label><label class="field"><span>实际使用的模型（未知可留空）</span><input name="model" maxlength="200" value="${esc(draft.model || '')}" placeholder="未知"></label></div><p class="context-note">来源登记为外部完成的生成／排版结果；没有实际模型信息时保持未知。登记不会生成图片，也不会自动声明人工已确认。</p>`,'导入图片',async modal => {
         const requirements = requirementsFromForm(modal.form,item,choice,'import'), directory = modal.form.directory.value.trim(), model = modal.form.model.value.trim() || null;
         await once(modal,'import-finished',`/api/production/carousels/${encodeURIComponent(item.id)}/import-finished`,async () => ({revision:data.revision,directory,requirements,source:'external_generated_layout',model}));
-        delete choice.import_finished;delete choice.requirements;delete choice.image_slides;delete choice.image_aspect;closeModal(true);toast('现有成品已登记为待核对候选，已确认版本继续保留。');await route(true);
+        delete choice.import_finished;delete choice.requirements;delete choice.image_slides;delete choice.image_aspect;closeModal(true);toast('图片已导入，已确认版本继续保留。');await route(true);
       });
       const rememberImport = () => {choice.import_finished = {directory:modal.form.directory.value,model:modal.form.model.value,requirements:requirementsFromForm(modal.form,item,choice,'import')};};
       bindRequirementsMode(modal.form,'import');
@@ -1032,27 +1286,15 @@ window.CaseProduction = (() => {
     };
     const startSubset = async (button,slides) => {
       remember();button.disabled = true;setError(form,'');
-      try {await send(`generate-${item.id}`,`/api/production/carousels/${encodeURIComponent(item.id)}/generate`,{revision:data.revision,slides,aspect:choice.image_aspect,instruction:choice.image_instruction.trim(),requirements:choice.requirements});delete choice.image_slides;toast('已接续制作；已保存的阶段结果继续保留。');await route(true);}
+      try {await send(`generate-${item.id}`,`/api/production/carousels/${encodeURIComponent(item.id)}/generate`,{revision:data.revision,slides,aspect:choice.image_aspect,instruction:choice.image_instruction.trim(),requirements:choice.requirements});delete choice.image_slides;toast('已继续生成图片。');await route(true);}
       catch (error) {setError(form,fail(error));updateSubmit();}
     };
     $('#carousel-generate-first').onclick = event => startSubset(event.currentTarget,[item.slides[0].number]);
     $('#carousel-continue-images')?.addEventListener('click',event => startSubset(event.currentTarget,item.slides.filter(slide => slide.base && (!currentOutput(slide)?.approved || currentOutput(slide)?.stale)).map(slide => slide.number)));
-    $$('[data-recheck-output]').forEach(button => button.onclick = () => {
-      const slide = Number(button.dataset.outputSlide), outputId = button.dataset.recheckOutput;
-      openModal(`第 ${slide} 张：重新核对已有图片`,`<p class="context-note">只读取这一版已经保存的图片，重新核对并记录文件与输入版本。不会再次生图，当前已确认版本继续保留。</p><fieldset class="material-picker"><legend>本次核对范围</legend><div class="material-options">${Object.entries(reviewScopes).map(([key,label]) => `<label><input type="checkbox" name="scope" value="${key}" checked>${label}</label>`).join('')}</div></fieldset>`,'开始重新核对',async modal => {
-        const scope = $$('input[name="scope"]:checked',modal.form).map(input => input.value);if (!scope.length) throw Object.assign(new Error('请至少选择一项核对范围。'),{status:400});
-        await carouselMutation(data,() => once(modal,'recheck',`/api/production/carousels/${encodeURIComponent(item.id)}/recheck`,async () => ({revision:data.revision,slide,output_id:outputId,scope})));closeModal(true);toast(`第 ${slide} 张已开始独立核对，原成图保留。`);await route(true);
-      });
-    });
-    const bindReviewCancels = () => $$('[data-cancel-review]').forEach(button => button.onclick = async () => {
-      button.disabled = true;button.textContent = '正在停止核对…';
-      try {await api(`/api/production/carousels/${encodeURIComponent(item.id)}/reviews/${encodeURIComponent(button.dataset.cancelReview)}/cancel`,{method:'POST',body:{}});toast('已请求停止核对，已有成图与核对记录保留。');}
-      catch (error) {toast(fail(error),true);button.disabled = false;button.textContent = '停止核对';}
-    });
-    bindReviewCancels();
     const approve = async (slide,output,approved,note = '',acknowledge = false,actor = 'human') => {
       await carouselMutation(data,() => send(`approval-${item.id}-${slide}`,`/api/production/carousels/${encodeURIComponent(item.id)}/approval`,{revision:data.revision,slide,output_id:output.id,approved,note,acknowledge,actor}));
       delete choice.image_slides;
+      if (approved) delete choice.image_versions_open?.[slide];
       // Once the whole group is confirmed the package is made right away; if that fails the button in 领取与发布 still works.
       let packed = false;
       if (approved) {
@@ -1065,22 +1307,14 @@ window.CaseProduction = (() => {
       }
       toast(!approved ? `第 ${slide} 张已撤销确认。` : packed ? `第 ${slide} 张已确认选用。整组都已确认，成品包已自动整理好，可在「领取与发布」下载。` : `第 ${slide} 张已确认选用。`);await route(true);
     };
-    $$('[data-approve-output]').forEach(button => button.onclick = () => {
+    $$('[data-approve-output]').forEach(button => button.onclick = async () => {
       const slide = item.slides.find(slide => slide.number === Number(button.dataset.outputSlide)), output = (slide.outputs || []).find(output => output.id === button.dataset.approveOutput);
-      if (!output || output.stale || (!output.approved && !reviewCanConfirm(output))) return;
-      const risk = output.review?.status !== 'pass';
-      const preview = `<div class="image-approval-comparison ${!slide.base ? 'single' : ''}">${slide.base ? `<figure><a href="${esc(imageURL(item,slide.base,'full'))}" target="_blank" rel="noopener"><img src="${esc(imageURL(item,slide.base,'thumb'))}" alt="第 ${slide.number} 张原底图"></a><figcaption>本张产品参考</figcaption></figure>` : ''}<figure><a href="${esc(outputURL(item,output,'full'))}" target="_blank" rel="noopener"><img src="${esc(outputURL(item,output))}" alt="第 ${slide.number} 张待确认成图"></a><figcaption>待确认成图${outputMode(output) === 'generated_visual' ? ' · 生成视觉版' : ''}</figcaption></figure></div>`;
-      const actorField = output.approved ? `<p class="context-note">保留此版原确认来源：${esc(approvalSource(output))}。</p>` : '<label class="field"><span>确认来源</span><select name="actor" required><option value="human" selected>由我确认</option><option value="assistant_on_user_authorization">助手按我的授权核对</option></select></label>';
-      const modal = openModal(`第 ${slide.number} 张：核对并确认选用`,`${imageReview(output,true)}<p class="context-note">请检查这一版的完整画面、产品外观、英文叠字与正文、画面证据和排版。确认后这一版将作为本张的选用成图。${outputMode(output) === 'generated_visual' ? '确认生成视觉版仍保留实拍证据限制，不代表原实拍逐像素保真。' : ''}</p>${risk ? '<label class="image-risk-ack"><input type="checkbox" name="acknowledge" required>我已逐项核对上述风险，确认仍可选用这一版</label>' : ''}${actorField}<label class="field"><span>核对备注（可选）</span><textarea name="note" rows="2" maxlength="2000" placeholder="记录你已核对的内容，或说明保留这版的理由"></textarea></label>`,'确认并选用',async modal => {
-        if (button.dataset.selectOutput) {await carouselMutation(data,() => send(`select-output-${item.id}-${slide.number}`,`/api/production/carousels/${encodeURIComponent(item.id)}/select-output`,{revision:data.revision,slide:slide.number,output_id:output.id}));toast(`第 ${slide.number} 张已选用这版，其他版本继续保留。`);await route(true);}
-        else await approve(slide.number,output,true,modal.form.note.value.trim(),risk ? modal.form.acknowledge.checked : false,modal.form.actor.value);closeModal(true);
-      });
-      $('.script-editor-body',modal.dialog).insertAdjacentHTML('afterbegin',preview);
-      if (risk) {
-        const submit = $('[data-submit]',modal.dialog), hint = $('[data-hint]',modal.dialog);submit.disabled = true;
-        hint.textContent = '勾选已核对风险后，才能确认选用。';
-        modal.form.acknowledge.onchange = () => {submit.disabled = !modal.form.acknowledge.checked;hint.textContent = modal.form.acknowledge.checked ? '已核对，可以确认选用。' : '勾选已核对风险后，才能确认选用。';};
-      }
+      if (!output || output.stale) return;
+      button.disabled = true;
+      try {
+        if (button.dataset.selectOutput) {await carouselMutation(data,() => send(`select-output-${item.id}-${slide.number}`,`/api/production/carousels/${encodeURIComponent(item.id)}/select-output`,{revision:data.revision,slide:slide.number,output_id:output.id}));delete choice.image_versions_open?.[slide.number];toast(`第 ${slide.number} 张已选用。`);await route(true);}
+        else await approve(slide.number,output,true);
+      } catch (error) {toast(fail(error),true);if (button.isConnected) button.disabled = false;}
     });
     $$('[data-revoke-output]').forEach(button => button.onclick = async () => {
       const slide = item.slides.find(slide => slide.number === Number(button.dataset.outputSlide)), output = (slide.outputs || []).find(output => output.id === button.dataset.revokeOutput);
@@ -1089,7 +1323,7 @@ window.CaseProduction = (() => {
     });
     $$('[data-redo-slide]').forEach(button => button.onclick = () => {
       const slide = Number(button.dataset.redoSlide), draftKey = `image_redo_${slide}`, redo = !!item.slides.find(item => item.number === slide)?.outputs?.length;
-      const modal = openModal(`第 ${slide} 张：${redo ? '重新出图' : '生成成图'}`,`<p class="context-note">${redo ? '仍从这一张当前选用的原底图重做，旧成图和核对记录都会保留。' : '使用这一张当前选用的底图生成成图。'}新成图需要重新核对与确认。</p><label class="field"><span>${redo ? '重做要求' : '本次要求（可选）'}</span><textarea name="instruction" rows="3" maxlength="2000" placeholder="例如：纠正英文文字，把主体放大，减少背景干扰">${esc(choice[draftKey] || '')}</textarea></label>`,redo ? '开始重做' : '开始生成',async modal => {
+      const modal = openModal(`第 ${slide} 张：${redo ? '重新出图' : '生成成图'}`,`<p class="context-note">${redo ? '仍从这一张当前选用的原底图重做，旧成图会保留。' : '使用这一张当前选用的底图生成成图。'}新成图可直接确认选用。</p><label class="field"><span>${redo ? '重做要求' : '本次要求（可选）'}</span><textarea name="instruction" rows="3" maxlength="2000" placeholder="例如：纠正英文文字，把主体放大，减少背景干扰">${esc(choice[draftKey] || '')}</textarea></label>`,redo ? '开始重做' : '开始生成',async modal => {
         remember();const requirements = {...choice.requirements};
         await once(modal,'generate',`/api/production/carousels/${encodeURIComponent(item.id)}/generate`,async () => ({revision:data.revision,slides:[slide],aspect:requirements.aspect,instruction:modal.form.instruction.value.trim(),requirements,redo}));
         delete choice[draftKey];delete choice.image_slides;closeModal(true);toast(`第 ${slide} 张已开始重做，旧版本保留。`);await route(true);
@@ -1098,7 +1332,7 @@ window.CaseProduction = (() => {
       modal.form.instruction.maxLength = 2000;
       const targetAspect = choice.image_aspect || item.image_aspect || '3:4';
       if (targetAspect !== (item.image_aspect || '3:4') && item.slides.some(slide => (slide.outputs || []).length))
-        $('.script-editor-body',modal.dialog).insertAdjacentHTML('afterbegin',`<p class="context-note image-aspect-note">本次采用 ${esc(targetAspect)}，整组旧比例版本都会失效，需要按新比例重新出图并核对。</p>`);
+        $('.script-editor-body',modal.dialog).insertAdjacentHTML('afterbegin',`<p class="context-note image-aspect-note">本次采用 ${esc(targetAspect)}，整组旧比例版本都会失效，需要按新比例重新出图。</p>`);
     });
     const bindCancels = () => $$('[data-cancel-generation]').forEach(button => button.onclick = async () => {
       button.disabled = true;button.textContent = '正在停止…';
@@ -1106,106 +1340,253 @@ window.CaseProduction = (() => {
       catch (error) {toast(fail(error),true);button.disabled = false;button.textContent = '停止出图';}
     });
     bindCancels();
-    if (generating(item) || reviewing(item)) {
+    if (generating(item)) {
       const poll = async () => {
         if (seq !== view.sequence || pageHash().split('?')[0] !== `#production/${item.id}`) return;
         try {
           const fresh = await api(`/api/production/carousels/${encodeURIComponent(item.id)}`);
           if (seq !== view.sequence) return;
-          if (!generating(fresh.carousel) && !reviewing(fresh.carousel) && !view.modal) {await route(true);return;}
+          if (!generating(fresh.carousel) && !view.modal) {await route(true);return;}
           $('#carousel-image-runs').innerHTML = [...(fresh.carousel.generations || [])].reverse().map(imageRun).join('');bindCancels();
-          $('#carousel-review-runs').innerHTML = reviewRuns(fresh.carousel);bindReviewCancels();
+
         } catch {}
         setTimeout(poll,3000);
       };
       setTimeout(poll,3000);
     }
   }
-  function bindStills(data) {
-    const item = data.carousel, choice = view.choice[item.id] ||= {}, seq = view.sequence, form = $('#still-form');
-    const request = readStatus('/api/production/resolve',10000).catch(error => ({ok:false,error:fail(error)}));
-    resolveStatus($('[data-resolve-status]',$('#still-panel')),{project:data.project},request);
-    let clients = null, resolve = null, catalogError = '', catalogReady = false, starting = false, defaults = null, defaultsError = '';
-    const activeSearch = (item.searches || []).some(search => search.status === 'running');
-    const usesDefault = () => stillDefaultCompatible(defaults);
-    const selectedModel = () => usesDefault() ? defaults.model || 'codex-default' : form.model.value;
-    const updateSearchControls = () => {
-      if (seq !== view.sequence || !form.isConnected) return;
-      const model = selectedModel(), provider = stillProvider(model), state = clients?.providers?.[provider], client = stillClient(provider), node = $('[data-still-provider-status]',form);
-      const known = stillModels.get(model), modelReady = Boolean(known && known.available !== false && (provider === 'claude' || model === 'codex-default' || catalogReady)), unavailable = !state?.available || !modelReady;
-      $('[data-still-override]',form).hidden = !defaults || !catalogReady || usesDefault();
-      $('[data-still-default]',form).textContent = defaultsError ? `全局默认配置暂时不可用：${defaultsError}` : !defaults ? '正在读取全局默认模型…' : `使用全局默认：${stillModelLabel(defaults.model || 'codex-default')}${defaults.reasoning_effort ? ` · ${defaults.reasoning_effort}` : ''}${usesDefault() ? '（可在设置中修改）' : '（此流程暂不支持）'}`;
-      node.classList.toggle('problem',Boolean(clients && unavailable));
-      node.textContent = !defaults || !clients ? '正在检查全局默认客户端…' : !model ? '请选择本次找底图使用的兼容模型。' : !state?.available ? `${client}暂不可用：${state?.error || state?.label || '请检查客户端连接后重试。'} 请在设置中检查全局默认。` : !modelReady ? `${client}已连接；${!catalogReady ? '正在确认默认模型…' : '模型尚未确认，请到设置检查全局默认。'}` : clients.busy ? `${client}可用；当前已有达芬奇 AI 任务，请等它结束。` : `${client}可用于找底图。${provider === 'codex' && catalogError ? ` ${catalogError} 可沿用 Codex 客户端默认。` : ''}`;
-      $('[data-still-usage]',form).textContent = `${client}会读素材时间线的标记、逐段看画面，把合适的帧导出成候选图，通常 10–30 分钟。${provider === 'codex' ? '使用 Codex 客户端当前登录账户的额度。' : '使用已连接 Claude 账户的订阅额度。'}期间请不要在达芬奇里操作；结束后工作台会把达芬奇切回原来的时间线和播放头。`;
-      const submit = $('button[type="submit"]',form);
-      submit.disabled = starting || item.archived || activeSearch || !defaults || Boolean(defaultsError) || !clients || unavailable || clients.busy || !resolve?.ok || resolve.project !== data.project;
-    };
-    form.model.addEventListener('change',updateSearchControls);
-    updateSearchControls();
-    request.then(status => {resolve = status;updateSearchControls();});
-    readStatus('/api/production/still-search',10000).then(status => {clients = status;updateSearchControls();}).catch(error => {clients = {providers:{}};catalogError = fail(error);updateSearchControls();});
-    api('/api/ai/preferences').then(result => {defaults = result.preferences;updateSearchControls();}).catch(error => {defaultsError = fail(error);updateSearchControls();});
-    readStatus('/api/ai/options',60000).then(options => {
-      if (seq !== view.sequence || !form.isConnected) return;
-      catalogError = options.models_error || '';
-      catalogReady = true;
-      const selected = form.model.value;
-      Object.entries(editModels).forEach(([id,name]) => stillModels.set(id,{id,name,provider:'claude'}));
-      [...stillModels.entries()].forEach(([id,model]) => {if (model.provider === 'codex' && id !== 'codex-default') stillModels.delete(id);});
-      for (const model of options.models || []) {
-        if (!model || typeof model.id !== 'string' || !model.id) continue;
-        const provider = model.provider || (model.id.startsWith('claude-') ? 'claude' : 'codex');
-        if (provider === 'codex' || Object.hasOwn(editModels,model.id)) stillModels.set(model.id,{...model,provider});
-      }
-      form.model.innerHTML = '<option value="">请选择兼容模型</option>' + stillModelOptions(selected);
-      $('#search-runs').innerHTML = [...(item.searches || [])].reverse().map(search => searchRun(item,search)).join('');bindRuns();
-      updateSearchControls();
-    }).catch(error => {
-      catalogError = fail(error);catalogReady = true;
-      const selected = form.model.value;
-      [...stillModels.entries()].forEach(([id,model]) => {if (model.provider === 'codex' && id !== 'codex-default') stillModels.delete(id);});
-      if (seq === view.sequence && form.isConnected) form.model.innerHTML = '<option value="">请选择兼容模型</option>' + stillModelOptions(selected);
-      updateSearchControls();
-    });
-    const bindRuns = () => $$('[data-cancel-search]').forEach(button => button.onclick = async () => {
-      button.disabled = true;
-      try {await api(`/api/production/carousels/${encodeURIComponent(item.id)}/searches/${encodeURIComponent(button.dataset.cancelSearch)}/cancel`,{method:'POST',body:{}});toast('正在停止找底图。');}
-      catch (error) {toast(fail(error),true);button.disabled = false;}
-    });
-    bindRuns();
-    if ((item.searches || []).some(search => search.status === 'running')) {
-      const poll = async () => {
-        if (seq !== view.sequence || !pageHash().startsWith(`#production/${item.id}`)) return;
-        try {
-          const fresh = await api(`/api/production/carousels/${encodeURIComponent(item.id)}`);
-          if (seq !== view.sequence) return;
-          if (!(fresh.carousel.searches || []).some(search => search.status === 'running')) {await route(true);return;}
-          $('#search-runs').innerHTML = [...fresh.carousel.searches].reverse().map(search => searchRun(fresh.carousel,search)).join('');bindRuns();
-        } catch {}
-        setTimeout(poll,5000);
-      };
-      setTimeout(poll,5000);
+  // Pick a base frame straight from a labeled material clip: scrub in the page, crop/rotate/brighten, save as a candidate.
+  async function openClipPicker(data,item,slide) {
+    const choice = view.choice[item.id] ||= {}, root = `/api/production/carousels/${encodeURIComponent(item.id)}`;
+    const target = item.slides.find(entry => entry.number === slide);
+    let names = finishedOnly(choice.still_materials || data.material_timelines || []);
+    if (!names.length) {
+      const status = await readStatus('/api/production/resolve',10000).catch(() => ({ok:false}));
+      names = status.ok ? finishedOnly(status.timelines || []) : [];
     }
-    const materials = () => pickedMaterials(form);
+    if (!names.length) {toast(`没有找到名称带「${finishedMark}」的素材时间线，请先在「找底图」里选好素材时间线。`,true);return;}
+    let clips = [], suggested = [], current = null, frame = 0, rotate = 0, brightness = 1, aspect = '3:4', scale = 1, centre = {x:.5,y:.5};
+    let evidence = false, image = null, token = 0, timer = 0, query = '', showAll = false, reasons = new Map(), fromAI = false;
+    const ready = () => {
+      const on = Boolean(current && image), save = $in('[data-clip-save]'), submit = $in('[data-submit]');
+      if (submit) submit.disabled = !on;
+      if (save) save.disabled = !on;
+    };
+    const frameURL = (key,number,size) => `${root}/clips/${encodeURIComponent(key)}/frame?frame=${number}&size=${size}`;
+    const modal = openModal(`第 ${slide} 张：从片段取帧`,`<div class="clip-picker">
+      <p class="context-note">${esc(target ? [target.role,target.title_lines.join(' / ')].filter(Boolean).join(' · ') : '')}。左边按标签找片段，右边拖动取帧；取到的帧会存成这一张的候选，原素材和达芬奇不动。</p>
+      <p class="context-note" data-clip-note role="status">正在读取素材片段清单…</p>
+      <div class="clip-layout"><aside class="clip-side"><div class="clip-search"><input type="search" data-clip-search placeholder="按标签或名称筛选" aria-label="筛选片段"><button type="button" class="subtle compact" data-clip-refresh>刷新</button></div><div class="clip-list" data-clip-list></div></aside>
+      <section class="clip-stage" data-clip-stage hidden><div class="clip-view" data-clip-view><canvas data-clip-canvas></canvas><div class="clip-crop" data-clip-crop hidden></div></div>
+      <p class="clip-time" data-clip-time role="status"></p>
+      <div class="clip-scrub"><button type="button" class="subtle compact" data-step="-10" aria-label="后退 10 帧">−10</button><button type="button" class="subtle compact" data-step="-1" aria-label="后退 1 帧">−1</button><input type="range" data-clip-slider aria-label="片段内位置"><button type="button" class="subtle compact" data-step="1" aria-label="前进 1 帧">+1</button><button type="button" class="subtle compact" data-step="10" aria-label="前进 10 帧">+10</button></div>
+      <div class="clip-strip" data-clip-strip></div>
+      <div class="clip-tools"><label>裁切<select data-clip-aspect><option value="3:4">3:4 竖图</option><option value="9:16">9:16</option><option value="none">不裁切</option></select></label><label>裁切大小<input type="range" min="50" max="100" value="100" data-clip-scale></label><label>亮度<input type="range" min="60" max="160" value="100" data-clip-brightness></label><button type="button" class="subtle compact" data-clip-rotate>顺时针转 90°</button><label class="clip-evidence"><input type="checkbox" data-clip-evidence>这帧是效果证据</label></div>
+      <p class="clip-facts" data-clip-facts></p><div class="take-actions">${target?.base ? '' : '<button type="button" class="secondary" data-clip-save>只存为候选</button>'}<button type="button" class="subtle" data-clip-reveal>在达芬奇打开该片段</button></div></section></div></div>`,target?.base ? '替换这一张的底图' : '存为候选并选为底图',async current_modal => {
+      const saved = await save(current_modal);
+      const fresh = await api(root);
+      await send(`base-${item.id}-${slide}`,`${root}/base`,{revision:fresh.revision,slide,candidate:saved.candidate.id});
+      closeModal(true);toast(`第 ${slide} 张已取到帧并选为底图。`);await route(true);
+    });
+    modal.dialog.classList.add('clip-dialog');
+    const $in = selector => $(selector,modal.dialog), note = $in('[data-clip-note]'), canvas = $in('[data-clip-canvas]'), context = canvas.getContext('2d');
+    ready();
+    const rectangle = () => {
+      if (aspect === 'none' || !canvas.width) return null;
+      const [across,down] = aspect.split(':').map(Number), ratio = across / down, width = canvas.width, height = canvas.height;
+      let w, h;
+      if (width / height > ratio) {h = 1;w = ratio * height / width;} else {w = 1;h = width / (ratio * height);}
+      w *= scale;h *= scale;
+      return {x:Math.min(1 - w,Math.max(0,centre.x - w / 2)),y:Math.min(1 - h,Math.max(0,centre.y - h / 2)),w,h};
+    };
+    const drawBox = () => {
+      const box = $in('[data-clip-crop]'), r = rectangle();
+      box.hidden = !r;
+      if (r) Object.assign(box.style,{left:`${r.x * 100}%`,top:`${r.y * 100}%`,width:`${r.w * 100}%`,height:`${r.h * 100}%`});
+    };
+    const draw = () => {
+      if (!image) return;
+      const turned = rotate % 180 !== 0, width = turned ? image.naturalHeight : image.naturalWidth, height = turned ? image.naturalWidth : image.naturalHeight;
+      canvas.width = width;canvas.height = height;
+      context.filter = `brightness(${brightness})`;
+      context.save();context.translate(width / 2,height / 2);context.rotate(rotate * Math.PI / 180);
+      context.drawImage(image,-image.naturalWidth / 2,-image.naturalHeight / 2);context.restore();
+      drawBox();
+    };
+    const clock = () => {
+      if (!current) return;
+      const offset = frame - current.source[0];
+      $in('[data-clip-time]').textContent = `第 ${offset} 帧 · ${(offset / current.fps).toFixed(2)} 秒 / 共 ${current.seconds} 秒`;
+      $in('[data-clip-slider]').value = String(frame);
+    };
+    const load = () => {
+      if (!current) return;
+      const mine = ++token, next = new Image();
+      note.textContent = '正在取帧…';image = null;ready();
+      next.onload = () => {if (mine !== token) return;image = next;note.textContent = '';draw();ready();};
+      next.onerror = () => {if (mine === token) note.textContent = '这一帧没有取出来；反复出现请点「刷新」重新读取片段清单。';};
+      next.src = frameURL(current.key,frame,'view');
+    };
+    const go = number => {
+      if (!current) return;
+      frame = Math.max(current.source[0],Math.min(current.source[1] - 1,Math.round(number)));
+      image = null;ready();clock();clearTimeout(timer);timer = setTimeout(load,120);
+    };
+    const renderList = () => {
+      const byKey = new Map(clips.map(clip => [clip.key,clip])), wanted = query.trim().toLowerCase();
+      const match = clip => !wanted || `${clip.label} ${clip.timeline}`.toLowerCase().includes(wanted);
+      const row = clip => `<button type="button" class="clip-row ${current?.key === clip.key ? 'chosen' : ''}" data-clip="${esc(clip.key)}"><strong>${esc(clip.label)}</strong><small>${esc(clip.timeline)} · ${esc(clip.label_status_text)}${clip.used_by.length ? ` · 已被 ${esc(clip.used_by.join('、'))} 用过` : ''}</small>${reasons.get(clip.key) ? `<small class="clip-reason">AI：${esc(reasons.get(clip.key))}</small>` : ''}</button>`;
+      const top = suggested.map(key => byKey.get(key)).filter(clip => clip && match(clip));
+      const rest = clips.filter(clip => !suggested.includes(clip.key) && match(clip));
+      const expanded = showAll || Boolean(wanted) || !top.length;
+      $in('[data-clip-list]').innerHTML = `${top.length ? `<h3>${fromAI ? `AI 按标签推荐 ${top.length} 个` : `按文字匹配推荐 ${top.length} 个（还没让 AI 挑）`}</h3>${top.map(row).join('')}` : ''}${expanded ? `<h3>${wanted ? '筛选结果' : '全部片段'}（${rest.length}${rest.length > 100 ? '，只显示前 100' : ''}）</h3>${rest.slice(0,100).map(row).join('') || '<p class="context-note">没有匹配的片段。</p>'}` : `<button type="button" class="subtle compact" data-clip-all>查看其余 ${rest.length} 个片段</button>`}`;
+      $$('[data-clip]',modal.dialog).forEach(button => button.onclick = () => choose(button.dataset.clip));
+      const more = $in('[data-clip-all]');
+      if (more) more.onclick = () => {showAll = true;renderList();};
+    };
+    const choose = async key => {
+      note.textContent = '正在读取片段…';image = null;ready();
+      try {current = await api(`${root}/clips/${encodeURIComponent(key)}`);}
+      catch (error) {note.textContent = fail(error);return;}
+      note.textContent = '';
+      const [left,right] = current.source;
+      $in('[data-clip-stage]').hidden = false;
+      const slider = $in('[data-clip-slider]');slider.min = String(left);slider.max = String(right - 1);
+      const offsets = current.strip || [], sheet = `${root}/clips/${encodeURIComponent(current.key)}/strip`, strip = $in('[data-clip-strip]');
+      strip.style.setProperty('--tile-ratio',`${current.width} / ${current.height}`);
+      strip.innerHTML = offsets.map((offset,index) => `<button type="button" data-frame="${left + offset}" aria-label="跳到第 ${offset} 帧" style="background-image:url('${esc(sheet)}');background-size:${offsets.length * 100}% 100%;background-position:${offsets.length > 1 ? index / (offsets.length - 1) * 100 : 0}% 0"></button>`).join('');
+      $$('[data-frame]',modal.dialog).forEach(button => button.onclick = () => go(Number(button.dataset.frame)));
+      $in('[data-clip-facts]').textContent = `${current.label} · ${current.timeline} · ${current.width}×${current.height} · ${current.label_status_text}${current.used_by.length ? ` · 这段素材已被 ${current.used_by.join('、')} 用过` : ''}`;
+      renderList();go((left + right - 1) / 2);
+    };
+    const body = () => {
+      const r = rectangle();
+      return {slide,key:current.key,frame,rotate,brightness:Number(brightness.toFixed(2)),crop:r ? {x:r.x,y:r.y,w:r.w,h:r.h} : null,evidence};
+    };
+    const save = async active => {
+      if (!current || !image) throw new Error('请先选一个片段并等这一帧显示出来。');
+      const payload = body();
+      return once(active,`clip-${slide}-${current.key}-${frame}-${JSON.stringify(payload)}`,`${root}/clip-frame`,async () => payload);
+    };
+    $$('[data-step]',modal.dialog).forEach(button => button.onclick = () => go(frame + Number(button.dataset.step)));
+    $in('[data-clip-slider]').oninput = event => go(Number(event.currentTarget.value));
+    $in('[data-clip-aspect]').onchange = event => {aspect = event.currentTarget.value;drawBox();};
+    $in('[data-clip-scale]').oninput = event => {scale = Number(event.currentTarget.value) / 100;drawBox();};
+    $in('[data-clip-brightness]').oninput = event => {brightness = Number(event.currentTarget.value) / 100;draw();};
+    $in('[data-clip-rotate]').onclick = () => {rotate = (rotate + 90) % 360;centre = {x:.5,y:.5};draw();};
+    $in('[data-clip-evidence]').onchange = event => {evidence = event.currentTarget.checked;};
+    $in('[data-clip-search]').oninput = event => {query = event.currentTarget.value;renderList();};
+    $in('[data-clip-search]').onkeydown = event => {if (event.key === 'Enter') event.preventDefault();};
+    const view_ = $in('[data-clip-view]');
+    const move = event => {
+      const box = canvas.getBoundingClientRect();
+      if (!box.width) return;
+      centre = {x:Math.min(1,Math.max(0,(event.clientX - box.left) / box.width)),y:Math.min(1,Math.max(0,(event.clientY - box.top) / box.height))};
+      drawBox();
+    };
+    view_.onpointerdown = event => {view_.setPointerCapture(event.pointerId);move(event);view_.onpointermove = move;};
+    view_.onpointerup = event => {view_.onpointermove = null;try {view_.releasePointerCapture(event.pointerId);} catch {}};
+    const saveOnly = $in('[data-clip-save]');
+    if (saveOnly) saveOnly.onclick = async event => {
+      const button = event.currentTarget;
+      if (modal.busy) return;
+      modal.busy = true;button.disabled = true;setError(modal.dialog,'');
+      try {await save(modal);closeModal(true);toast(`已存为第 ${slide} 张的候选，可以在候选里选用。`);await route(true);}
+      catch (error) {setError(modal.dialog,fail(error));}
+      finally {modal.busy = false;button.disabled = false;}
+    };
+    $in('[data-clip-reveal]').onclick = async event => {
+      const button = event.currentTarget;
+      if (!current || button.disabled) return;
+      button.disabled = true;
+      try {const result = await api(`${root}/reveal`,{method:'POST',body:{key:current.key,frame}});toast(`已在达芬奇打开「${result.name}」${result.timecode ? ` ${result.timecode}` : ''}。`);}
+      catch (error) {setError(modal.dialog,fail(error));}
+      finally {button.disabled = false;}
+    };
+    const reload = async refresh => {
+      note.textContent = refresh ? '正在向达芬奇重新读取片段清单…' : '正在读取素材片段清单（第一次需要几秒到几十秒）…';
+      const params = new URLSearchParams();names.forEach(name => params.append('materials',name));if (refresh) params.set('refresh','1');
+      try {
+        const listing = await api(`${root}/clips?${params}`);
+        clips = listing.clips;
+        const aiPicks = listing.ai_picks?.[String(slide)] || [];
+        fromAI = aiPicks.length > 0;
+        reasons = new Map(aiPicks.map(pick => [pick.key,pick.reason]));
+        suggested = fromAI ? aiPicks.map(pick => pick.key) : (listing.suggested[String(slide)] || []);
+        note.textContent = clips.length ? `${clips.length} 个片段${listing.missing?.length ? `；找不到时间线：${listing.missing.join('、')}` : ''}` : '这些素材时间线里没有可用的片段。';
+        renderList();
+        if (!current && suggested.length) await choose(suggested[0]);
+      } catch (error) {note.textContent = fail(error);}
+    };
+    $in('[data-clip-refresh]').onclick = () => void reload(true);
+    await reload(false);
+  }
+  function bindStills(data) {
+    const item = data.carousel, choice = view.choice[item.id] ||= {}, seq = view.sequence, panel = $('#still-panel');
+    const root = `/api/production/carousels/${encodeURIComponent(item.id)}`;
+    // One image per slide once it has a base: leftover candidates from earlier picks are cleared.
+    const extras = item.slides.reduce((sum,slide) => sum + (slide.base ? (slide.candidates || []).filter(candidate => candidate.id !== slide.base.id).length : 0),0);
+    if (extras && !item.archived && !view.tidying) {
+      view.tidying = true;
+      send(`tidy-${item.id}`,`${root}/tidy`,{})
+        .then(async result => {toast(`每张只保留一张底图，已清理 ${result.removed} 张多余候选。`);await route(true);})
+        .catch(error => toast(fail(error),true)).finally(() => {view.tidying = false;});
+    }
+    const request = readStatus('/api/production/resolve',10000).catch(error => ({ok:false,error:fail(error)}));
+    resolveStatus($('[data-resolve-status]',panel),{project:data.project},request);
     request.then(status => {
-      const box = $('[data-materials]',form);if (!box) return;
+      const box = $('[data-materials]',panel);if (!box) return;
       materialPicker(box,status,new Set(),choice.still_materials,data.material_timelines);
     });
-    form.onsubmit = async event => {
-      event.preventDefault();setError(form,'');
-      const values = Object.fromEntries(new FormData(form)), slides = $$('input[name="slide"]:checked',form).map(input => Number(input.value));
-      Object.assign(choice,{still_materials:materials(),still_slides:slides,per_slide:Number(values.per_slide),still_instruction:values.instruction});
-      const problem = materialProblem(choice.still_materials);
-      if (problem) {setError(form,problem);return;}
-      if (!slides.length) {setError(form,'请至少勾选一张。');return;}
-      const model = selectedModel(), selected = stillModels.get(model);
-      if (!defaults || defaultsError || !clients?.providers?.[stillProvider(model)]?.available || !selected || selected.available === false || (stillProvider(model) === 'codex' && model !== 'codex-default' && !catalogReady)) {setError(form,'默认客户端或模型尚未就绪，请在设置中检查连接后再找底图。');return;}
-      const submit = $('button[type="submit"]',form);submit.disabled = true;submit.textContent = '正在核对达芬奇并启动…';
-      starting = true;
-      try {await send(`search-${item.id}`,`/api/production/carousels/${encodeURIComponent(item.id)}/search`,{materials:choice.still_materials,slides,per_slide:choice.per_slide,...(usesDefault() ? {} : {model,effort:null}),instruction:values.instruction.trim()});toast('已开始找底图，完成后这里会出现候选图。');}
-      catch (error) {setError(form,fail(error));starting = false;submit.textContent = '让 AI 从达芬奇找候选';updateSearchControls();return;}
-      if (seq === view.sequence) await route(true);
+    api('/api/ai/preferences').then(result => {
+      const node = $('[data-clip-ai-model]',panel), model = result.preferences?.model || 'codex-default';
+      if (node) node.textContent = `使用全局默认：${stillModelLabel(model)}${result.preferences?.reasoning_effort ? ` · ${result.preferences.reasoning_effort}` : ''}（可在设置中修改）`;
+    }).catch(() => {const node = $('[data-clip-ai-model]',panel);if (node) node.textContent = '沿用全局默认模型。';});
+    // Removes finished AI frame searches with their local files and unchosen candidates; chosen bases and DaVinci stay.
+    const deleteSearches = async ids => {
+      const base = `${root}/searches`;
+      let previews;
+      try {previews = await Promise.all(ids.map(id => api(`${base}/${encodeURIComponent(id)}/delete`,{method:'POST',body:{preview:true}})));}
+      catch (error) {toast(fail(error),true);return;}
+      const bytes = previews.reduce((sum,entry) => sum + (entry.bytes || 0),0), candidates = previews.reduce((sum,entry) => sum + (entry.candidates || 0),0), kept = previews.reduce((sum,entry) => sum + (entry.kept_as_base || 0),0);
+      const size = bytes >= 1073741824 ? `${(bytes / 1073741824).toFixed(1)} GB` : `${Math.max(1,Math.round(bytes / 1048576))} MB`;
+      openModal(ids.length > 1 ? `清理 ${ids.length} 次旧的找画面记录` : '删除这次找画面记录',`<p class="context-note">将删除${ids.length > 1 ? `这 ${ids.length} 次` : '这次'}找画面的工作台记录、本地保存的交接文件和导出静帧，以及它产生的 ${candidates} 张未选用候选图，共约 ${esc(size)}。此操作不能撤销。</p><ul class="context-list"><li>不会改动达芬奇里的时间线和工程。</li><li>已选为底图的候选保留${kept ? `（${kept} 张）` : ''}；从片段取帧、从已有图片添加的候选不受影响。</li></ul>`,'确认删除',async modal => {
+        const warnings = [];
+        for (const id of ids) {
+          const result = await send(`search-delete-${id}`,`${base}/${encodeURIComponent(id)}/delete`,{});
+          warnings.push(...(result.warnings || []));
+        }
+        closeModal(true);
+        toast(warnings.length ? warnings[0] : `已删除 ${ids.length} 次找画面记录及本地文件。`,warnings.length > 0);
+        await route(true);
+      });
+    };
+    const bindRuns = () => {
+      $$('[data-delete-search]').forEach(button => button.onclick = () => deleteSearches([button.dataset.deleteSearch]));
+      $$('[data-clean-searches]').forEach(button => button.onclick = () => deleteSearches(button.dataset.cleanSearches.split(',').filter(Boolean)));
+      $$('[data-cancel-search]').forEach(button => button.onclick = async () => {
+        button.disabled = true;
+        try {await api(`${root}/searches/${encodeURIComponent(button.dataset.cancelSearch)}/cancel`,{method:'POST',body:{}});toast('正在停止。');}
+        catch (error) {toast(fail(error),true);button.disabled = false;}
+      });
+    };
+    bindRuns();
+    const aiButton = $('#clip-ai-pick'), aiStatus = $('[data-clip-ai-status]',panel);
+    if (aiButton) aiButton.onclick = async () => {
+      setError(panel,'');
+      const materials = pickedMaterials(panel), problem = materialProblem(materials);
+      if (problem) {setError(panel,problem);return;}
+      const perSlide = Number($('select[name="per_slide"]',panel).value), instruction = $('textarea[name="instruction"]',panel).value.trim();
+      Object.assign(choice,{still_materials:materials,per_slide:perSlide,still_instruction:instruction});
+      aiButton.disabled = true;aiStatus.textContent = 'AI 正在按标签挑片段…（第一次要先读片段清单，通常 10–60 秒）';
+      try {
+        const result = await api(`${root}/clip-picks`,{method:'POST',body:{materials,per_slide:perSlide,instruction,request_id:crypto.randomUUID()}});
+        toast(`AI 已挑好 ${result.count} 个候选片段，点每一张的「从片段取帧」查看。`);
+        await route(true);
+      } catch (error) {
+        setError(panel,fail(error));
+        aiButton.disabled = false;aiStatus.textContent = '';
+      }
     };
     const pick = async (slide,candidate) => {
       try {await send(`base-${item.id}-${slide}`,`/api/production/carousels/${encodeURIComponent(item.id)}/base`,{revision:data.revision,slide,candidate});toast(candidate ? `第 ${slide} 张已选好底图。` : `第 ${slide} 张已取消底图。`);}
@@ -1214,13 +1595,66 @@ window.CaseProduction = (() => {
     };
     $$('[data-pick]').forEach(button => button.onclick = () => {button.disabled = true;void pick(Number(button.dataset.pick),button.dataset.candidate);});
     $$('[data-unpick]').forEach(button => button.onclick = () => {button.disabled = true;void pick(Number(button.dataset.unpick),null);});
+    // Drag pictures from the desktop or a folder straight onto a slide's tile: one picture replaces its base, several become candidates.
+    const carriesFiles = event => [...(event.dataTransfer?.types || [])].includes('Files');
+    if (!item.archived) $$('[data-pick-slide]').forEach(tile => {
+      const slide = Number(tile.dataset.pickSlide);
+      let depth = 0;
+      tile.addEventListener('dragenter',event => {if (!carriesFiles(event)) return;event.preventDefault();depth += 1;tile.classList.add('drop-over');});
+      tile.addEventListener('dragover',event => {if (!carriesFiles(event)) return;event.preventDefault();event.dataTransfer.dropEffect = 'copy';});
+      tile.addEventListener('dragleave',() => {depth = Math.max(0,depth - 1);if (!depth) tile.classList.remove('drop-over');});
+      tile.addEventListener('drop',async event => {
+        if (!carriesFiles(event)) return;
+        event.preventDefault();event.stopPropagation();depth = 0;tile.classList.remove('drop-over');
+        try {hideVideoDrop();} catch {}
+        if (tile.dataset.uploading) return;
+        const files = [...event.dataTransfer.files];
+        tile.dataset.uploading = '1';tile.classList.add('uploading');
+        try {
+          const {made,picked} = await uploadSlideImages(item,slide,files,{pick:true,onStatus:text => {tile.dataset.dropHint = text;}});
+          toast(picked ? `第 ${slide} 张已导入图片并选为底图。` : `已为第 ${slide} 张导入 ${made.length} 张图片，可在候选里选用。`);
+          await route(true);
+        } catch (error) {
+          toast(fail(error),true);
+          delete tile.dataset.uploading;tile.classList.remove('uploading');
+        }
+      });
+    });
+    $$('[data-clip-slide]').forEach(button => button.onclick = () => {
+      button.disabled = true;
+      void openClipPicker(data,item,Number(button.dataset.clipSlide)).catch(error => toast(fail(error),true)).finally(() => {button.disabled = false;});
+    });
     $$('[data-import-slide]').forEach(button => button.onclick = async () => {
       const slide = Number(button.dataset.importSlide);
       let listing;
       try {listing = await api(`/api/production/carousels/${encodeURIComponent(item.id)}/folder-images`);}
       catch (error) {toast(fail(error),true);return;}
       const groups = new Map();for (const image of listing.images) {if (!groups.has(image.folder)) groups.set(image.folder,[]);groups.get(image.folder).push(image);}
-      const modal = openModal(`第 ${slide} 张：从已有图片添加`,`<p class="context-note">图片目录：${esc(listing.root)}${listing.start ? `（从 ${esc(listing.start)} 开始）` : ''}。点一张图，把它复制进这张制作单的候选；原文件不动。</p>${groups.size ? [...groups].map(([folder,images]) => `<h3 class="folder-title">${esc(folder || '（根目录）')}</h3><div class="pick-grid folder-grid">${images.map(image => `<button type="button" class="folder-pick" data-path="${esc(image.path)}" title="${esc(image.path)}"><img src="/api/production/folder-thumb?path=${encodeURIComponent(image.path)}" alt="${esc(image.name)}" loading="lazy"><span>${esc(image.name)}</span></button>`).join('')}</div>`).join('') : '<p class="context-note">这个目录里没有图片。</p>'}`,'关闭',async () => closeModal(true));
+      const modal = openModal(`第 ${slide} 张：导入底图`,`<section class="upload-box"><div class="upload-drop" data-upload-drop tabindex="0" role="button" aria-label="上传本地图片"><strong>上传本地图片</strong><span>点击选择、拖入图片，或按 Ctrl+V 粘贴截图 · PNG / JPG / WebP · 单张最大 25 MB，可一次选多张</span><input type="file" accept="image/png,image/jpeg,image/webp" multiple hidden data-upload-file></div><label class="upload-pick"><input type="checkbox" data-upload-pick ${item.slides.find(entry => entry.number === slide)?.base ? '' : 'checked'}> 只上传一张时直接选为这一张的底图（会清掉这一张的其他候选）</label><p class="context-note" data-upload-status role="status"></p></section><h3 class="folder-title">或者从图文素材文件夹添加</h3><p class="context-note">图片目录：${esc(listing.root)}${listing.start ? `（从 ${esc(listing.start)} 开始）` : ''}。点一张图，把它复制进这张制作单的候选；原文件不动。</p>${groups.size ? [...groups].map(([folder,images]) => `<h3 class="folder-title">${esc(folder || '（根目录）')}</h3><div class="pick-grid folder-grid">${images.map(image => `<button type="button" class="folder-pick" data-path="${esc(image.path)}" title="${esc(image.path)}"><img src="/api/production/folder-thumb?path=${encodeURIComponent(image.path)}" alt="${esc(image.name)}" loading="lazy"><span>${esc(image.name)}</span></button>`).join('')}</div>`).join('') : '<p class="context-note">这个目录里没有图片。</p>'}`,'关闭',async () => closeModal(true));
+      const dropzone = $('[data-upload-drop]',modal.dialog), chooser = $('[data-upload-file]',modal.dialog), uploadStatus = $('[data-upload-status]',modal.dialog);
+      const sendImages = async files => {
+        if (modal.busy) return;
+        modal.busy = true;dropzone.setAttribute('aria-disabled','true');
+        try {
+          const {made,picked} = await uploadSlideImages(item,slide,files,{pick:$('[data-upload-pick]',modal.dialog).checked,onStatus:text => {uploadStatus.textContent = text;}});
+          modal.busy = false;closeModal(true);
+          toast(picked ? `第 ${slide} 张已导入图片并选为底图。` : `已为第 ${slide} 张导入 ${made.length} 张图片，可在候选里选用。`);
+          await route(true);
+        } catch (error) {
+          modal.busy = false;dropzone.removeAttribute('aria-disabled');
+          uploadStatus.textContent = fail(error);
+        }
+      };
+      dropzone.onclick = () => {if (!modal.busy) chooser.click();};
+      dropzone.onkeydown = event => {if (event.key === 'Enter' || event.key === ' ') {event.preventDefault();dropzone.click();}};
+      chooser.onchange = () => {const files = [...chooser.files];chooser.value = '';void sendImages(files);};
+      ['dragenter','dragover'].forEach(name => dropzone.addEventListener(name,event => {event.preventDefault();dropzone.classList.add('over');}));
+      ['dragleave','drop'].forEach(name => dropzone.addEventListener(name,event => {event.preventDefault();dropzone.classList.remove('over');}));
+      dropzone.addEventListener('drop',event => void sendImages(event.dataTransfer?.files || []));
+      modal.dialog.addEventListener('paste',event => {
+        const files = [...(event.clipboardData?.files || [])];
+        if (files.length) {event.preventDefault();void sendImages(files);}
+      });
       $$('.folder-pick',modal.dialog).forEach(tile => tile.onclick = async () => {
         if (modal.busy) return;
         modal.busy = true;$$('.folder-pick',modal.dialog).forEach(node => {node.disabled = true;});
@@ -1252,7 +1686,7 @@ window.CaseProduction = (() => {
     const confirmed = item.slides.filter(confirmedOutput).length;
     const ready = item.slides.length > 0 && confirmed === item.slides.length;
     const canPack = ready && !item.archived && !generating(item);
-    return `<section class="section-card" id="carousel-delivery-panel"><div class="section-title-row"><h2>成品领取与发布</h2><button type="button" class="primary" id="carousel-prepare-delivery" ${canPack ? '' : 'disabled'}>整理成品包</button></div><p class="context-note">${ready ? '成品包包含按张号排列的已确认图片和英文发布文案。新包整理后，旧包继续保留；发布时请选择实际使用的那一包。' : `还有 ${item.slides.length - confirmed} 张未工作台确认，请先在「出图与核对」步骤逐张核对并确认选用。已整理的旧包仍可领取。`}</p><p class="ai-error" data-error role="alert" hidden></p><div id="carousel-deliveries">${deliveries.length ? [...deliveries].reverse().map((delivery,index) => `<article class="delivery-package ${delivery.current ? 'current' : ''}" data-delivery-id="${esc(delivery.id)}"><div class="delivery-package-head"><div><strong>成品包 ${deliveries.length - index} <span class="script-status ${delivery.current ? 'published' : ''}">${delivery.current ? '当前确认版本' : '历史版本 · 保留'}</span>${publication?.delivery_id === delivery.id ? ' <span class="script-status published">用于当前发布登记</span>' : ''}</strong><small>${esc(readableDate(delivery.created_at))} · ${delivery.slides?.length || 0} 张 · ${esc(delivery.aspect)}<br>${esc(delivery.filename || '')}</small></div><a class="primary compact" href="${esc(deliveryURL(item,delivery))}" download data-download-delivery="${esc(delivery.id)}">下载成品包</a></div><div class="take-actions"><button type="button" class="secondary compact" data-copy-delivery="${esc(delivery.id)}">${icon('copy')}复制英文发布文案</button><button type="button" class="secondary compact" data-publish-delivery="${esc(delivery.id)}" ${item.archived ? 'disabled' : ''}>${publication ? '修改发布登记' : '登记这包已发布'}</button></div></article>`).join('') : '<p class="delivery-empty">还没有整理成品包。</p>'}</div><div id="carousel-publication">${publication ? `<div class="publication-record"><div class="section-title-row"><h3>已登记发布</h3><button type="button" class="secondary compact" id="carousel-publication-edit" ${item.archived ? 'disabled' : ''}>修改发布登记</button></div><dl class="publication-facts"><dt>帖子 ID</dt><dd>${esc(publication.post_id)}</dd><dt>发布日期</dt><dd>${esc(publication.published_on)}</dd><dt>实际使用</dt><dd>${esc(deliveries.findIndex(delivery => delivery.id === publication.delivery_id) >= 0 ? `成品包 ${deliveries.findIndex(delivery => delivery.id === publication.delivery_id) + 1}` : '已登记的成品包')}</dd>${publication.account ? `<dt>账号</dt><dd>${esc(publication.account)}</dd>` : ''}${publication.post_url ? `<dt>帖子链接</dt><dd><a href="${esc(publication.post_url)}" target="_blank" rel="noopener">查看已发布帖子</a></dd>` : ''}${publication.note ? `<dt>备注</dt><dd>${esc(publication.note)}</dd>` : ''}</dl><small class="publication-history-note">修改登记会保留原登记历史，表现数据按帖子 ID 匹配。</small></div><div id="carousel-publication-performance">${publicationPerformance(data,publication)}</div>${publicationHistory(item,deliveries)}` : '<p class="context-note">整理完整成品包后，可登记实际发布的帖子 ID 和发布日期。</p>'}</div></section>`;
+    return `<section class="section-card" id="carousel-delivery-panel"><div class="section-title-row"><h2>成品领取与发布</h2><button type="button" class="primary" id="carousel-prepare-delivery" ${canPack ? '' : 'disabled'}>整理成品包</button></div><p class="context-note">${ready ? '成品包只包含按张号排列的已确认图片。新包整理后，旧包继续保留；发布时请选择实际使用的那一包。' : `还有 ${item.slides.length - confirmed} 张未工作台确认，请先在「出图」步骤逐张确认选用。已整理的旧包仍可领取。`}</p><p class="ai-error" data-error role="alert" hidden></p><div id="carousel-deliveries">${deliveries.length ? [...deliveries].reverse().map((delivery,index) => `<article class="delivery-package ${delivery.current ? 'current' : ''}" data-delivery-id="${esc(delivery.id)}" data-activity-source="${esc(delivery.id)}"><div class="delivery-package-head"><div><strong>成品包 ${deliveries.length - index} <span class="script-status ${delivery.current ? 'published' : ''}">${delivery.current ? '当前确认版本' : '历史版本 · 保留'}</span>${publication?.delivery_id === delivery.id ? ' <span class="script-status published">用于当前发布登记</span>' : ''}</strong><small>${esc(readableDate(delivery.created_at))} · ${delivery.slides?.length || 0} 张 · ${esc(delivery.aspect)}<br>${esc(delivery.filename || '')}</small></div><a class="primary compact" href="${esc(deliveryURL(item,delivery))}" download data-download-delivery="${esc(delivery.id)}">下载成品包</a></div><div class="take-actions"><button type="button" class="secondary compact" data-copy-delivery="${esc(delivery.id)}">${icon('copy')}复制英文发布文案</button><button type="button" class="secondary compact" data-publish-delivery="${esc(delivery.id)}" ${item.archived ? 'disabled' : ''}>${publication ? '修改发布登记' : '登记这包已发布'}</button></div></article>`).join('') : '<p class="delivery-empty">还没有整理成品包。</p>'}</div><div id="carousel-publication">${publication ? `<div class="publication-record"><div class="section-title-row"><h3>已登记发布</h3><button type="button" class="secondary compact" id="carousel-publication-edit" ${item.archived ? 'disabled' : ''}>修改发布登记</button></div><dl class="publication-facts"><dt>帖子 ID</dt><dd>${esc(publication.post_id)}</dd><dt>发布日期</dt><dd>${esc(publication.published_on)}</dd><dt>实际使用</dt><dd>${esc(deliveries.findIndex(delivery => delivery.id === publication.delivery_id) >= 0 ? `成品包 ${deliveries.findIndex(delivery => delivery.id === publication.delivery_id) + 1}` : '已登记的成品包')}</dd>${publication.account ? `<dt>账号</dt><dd>${esc(publication.account)}</dd>` : ''}${publication.post_url ? `<dt>帖子链接</dt><dd><a href="${esc(publication.post_url)}" target="_blank" rel="noopener">查看已发布帖子</a></dd>` : ''}${publication.note ? `<dt>备注</dt><dd>${esc(publication.note)}</dd>` : ''}</dl><small class="publication-history-note">修改登记会保留原登记历史，表现数据按帖子 ID 匹配。</small></div><div id="carousel-publication-performance">${publicationPerformance(data,publication)}</div>${publicationHistory(item,deliveries)}` : '<p class="context-note">整理完整成品包后，可登记实际发布的帖子 ID 和发布日期。</p>'}</div></section>`;
   }
   function bindDelivery(data) {
     const item = data.carousel, choice = view.choice[item.id] ||= {}, panel = $('#carousel-delivery-panel');
@@ -1315,28 +1749,32 @@ window.CaseProduction = (() => {
   function renderCarousel(data) {
     const item = data.carousel;
     $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 内容创作 <span>/</span> 图文制作单';
-    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#production',item.product))}">${icon('back')}返回制作单</a><div class="page-heading"><div><span class="eyebrow">PHOTO CAROUSEL</span><h1>${esc(item.title)}</h1><p>${esc(item.product)} · ${esc(item.direction_id || '未指定方向')}${item.variant_label ? ` · ${esc(item.variant_label)}` : ''} · <span class="script-status">${esc(carouselLabel(item))}</span>${data.script ? ` · <a href="${esc(url(`#scripts/${encodeURIComponent(data.script.id)}`,item.product))}">脚本版本 ${esc(data.script.version)}</a>` : ' · 脚本版本已不可读'}</p></div><div class="scripts-start-actions"><button class="secondary" id="carousel-archive">${item.archived ? '恢复制作单' : '归档'}</button></div></div>${problemsMarkup(item.problems)}<section class="section-card"><div class="section-title-row"><h2>逐张表 <small>${item.slides.length} 张</small></h2><button type="button" class="subtle" id="carousel-slides-edit">${icon('edit')}编辑作用、素材来源与禁写</button></div>${slidesTable(item.slides)}<p class="context-note">叠字、正文和中文属于已采纳的脚本版本，不在这里改；改稿请另存脚本新版本再建制作单。已有成品可在「出图与核对」步骤用「导入现有成品」登记，再逐张核对并确认选版；从素材开始制作时，先找底图、选底图，再验证首张并继续余图。</p></section>${stillSection(data)}${pickSection(item)}<section class="section-card"><div class="section-title-row"><h2>图文发布文案</h2><button type="button" class="subtle" id="carousel-caption-copy">${icon('copy')}复制英文</button></div><p class="carousel-caption">${esc(item.caption_en || '—')}</p><p class="context-note">${esc(item.caption_zh || '')}</p></section><details class="section-card production-history"><summary>制作记录（${item.history.length} 条）</summary><ol>${[...item.history].reverse().map(entry => `<li>${esc(readableDate(entry.at))} · ${esc(entry.note || entry.event)}</li>`).join('')}</ol></details>`;
+    view.clipCounts = data.clip_picks?.counts || null;
+    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#production',item.product))}">${icon('back')}返回制作单</a><div class="page-heading"><div><span class="eyebrow">PHOTO CAROUSEL</span><h1>${esc(item.title)}</h1><p>${esc(item.product)} · ${esc(item.direction_id || '未指定方向')}${item.variant_label ? ` · ${esc(item.variant_label)}` : ''} · <span class="script-status">${esc(carouselLabel(item))}</span>${data.script ? ` · <a href="${esc(url(`#scripts/${encodeURIComponent(data.script.id)}`,item.product))}">脚本版本 ${esc(data.script.version)}</a>` : ' · 脚本版本已不可读'}</p></div><div class="scripts-start-actions"><button class="secondary" id="carousel-archive">${item.archived ? '恢复制作单' : '归档'}</button><button class="secondary danger" id="carousel-delete">永久删除</button></div></div>${problemsMarkup(item.problems)}<section class="section-card"><div class="section-title-row"><h2>逐张表 <small>${item.slides.length} 张</small></h2><button type="button" class="subtle" id="carousel-slides-edit">${icon('edit')}编辑作用、素材来源与禁写</button></div>${slidesTable(item.slides)}<p class="context-note">叠字、正文和中文属于已采纳的脚本版本，不在这里改；改稿请另存脚本新版本再建制作单。已有成品可在「出图」步骤用「导入现有成品」登记，再逐张确认选用；从素材开始制作时，先选底图，再生成首张并继续余图。</p></section>${stillSection(data)}${pickSection(item)}<section class="section-card"><div class="section-title-row"><h2>图文发布文案</h2><button type="button" class="subtle" id="carousel-caption-copy">${icon('copy')}复制英文</button></div><p class="carousel-caption">${esc(item.caption_en || '—')}</p><p class="context-note">${esc(item.caption_zh || '')}</p></section><details class="section-card production-history"><summary>制作记录（${item.history.length} 条）</summary><ol>${[...item.history].reverse().map(entry => `<li>${esc(readableDate(entry.at))} · ${esc(entry.note || entry.event)}</li>`).join('')}</ol></details>`;
     $('#carousel-caption-copy').onclick = () => copyText(item.caption_en || '','图文发布文案已复制');
     $('#pick-panel').insertAdjacentHTML('afterend',imagesSection(data)+deliverySection(data));
     const count = item.slides.length, based = item.slides.filter(slide => slide.base).length, found = item.slides.filter(slide => slide.base || (slide.candidates || []).length).length;
     const confirmed = item.slides.filter(slide => currentOutput(slide)?.approved && !currentOutput(slide)?.stale).length, publication = carouselPublication(data), packs = carouselDeliveries(data).length;
     // Finding and picking bases share one step: candidates first once there are any, the search form folds away when every slide has some.
     const searching = (item.searches || []).some(search => search.status === 'running'), stillForm = $('#still-form');
-    if (found) $('#still-panel')?.before($('#pick-panel'));
-    if (stillForm && count && found === count && !searching) {
-      const again = document.createElement('details');again.className = 'still-search-again';again.innerHTML = '<summary>再让 AI 找一次候选</summary>';
+    // Picking from the clips is the main path; the slow AI search is a folded extra below it.
+    $('#still-panel')?.before($('#pick-panel'));
+    if (stillForm && !searching) {
+      const again = document.createElement('details');again.className = 'still-search-again';
+      again.innerHTML = `<summary>${found ? '再让 AI 自动找一次候选' : '让 AI 自动找候选'}（较慢，通常 10–30 分钟；也可以在上面每一张点「从片段取帧」自己挑）</summary>`;
       stillForm.before(again);again.append(stillForm);
     }
     $('#carousel-requirements-toggle')?.addEventListener('toggle',event => {(view.choice[item.id] ||= {}).requirements_open = event.currentTarget.open;});
     mountSteps(item.id,[
       {key:'slides',label:'逐张表',note:`${count} 张`,panels:[$('#carousel-slides-edit')?.closest('section')].filter(Boolean)},
       {key:'pick',label:'找图与选底图',note:searching ? '正在找候选' : `${based}/${count} 已选`,done:count > 0 && based === count,panels:[$('#pick-panel'),$('#still-panel')].filter(Boolean)},
-      {key:'images',label:'出图与核对',note:generating(item) ? '出图中' : `${confirmed}/${count} 已确认`,done:count > 0 && confirmed === count,panels:[$('#carousel-images-panel')].filter(Boolean)},
+      {key:'images',label:'出图',note:generating(item) ? '出图中' : `${confirmed}/${count} 已确认`,done:count > 0 && confirmed === count,panels:[$('#carousel-images-panel')].filter(Boolean)},
       {key:'delivery',label:'领取与发布',note:publication ? '已登记发布' : packs ? `${packs} 个成品包` : '',done:!!publication,panels:[$('#carousel-delivery-panel'),$('#carousel-caption-copy')?.closest('section')].filter(Boolean)}
     ],confirmed === count && count ? 'delivery' : based < count && !item.slides.some(slide => (slide.outputs || []).length) ? 'pick' : 'images');
     bindStills(data);
     bindImages(data);
     bindDelivery(data);
+    $('#carousel-delete')?.addEventListener('click',() => void deleteOrder('carousel',item));
     $('#carousel-archive').onclick = async () => {
       try {await send(`carousel-archive-${item.id}`,`/api/production/carousels/${encodeURIComponent(item.id)}/archive`,{revision:data.revision,archived:!item.archived});toast(item.archived ? '图文制作单已恢复。' : '图文制作单已归档。');await route(true);}
       catch (error) {toast(fail(error),true);}
@@ -1354,7 +1792,9 @@ window.CaseProduction = (() => {
     try {data = await api(`/api/production/carousel-variants?task_id=${encodeURIComponent(task.task_id)}&round_id=${encodeURIComponent(round.round_id)}`);}
     catch (error) {toast(fail(error),true);return;}
     const items = data.carousels, defaultTitle = item => `${direction ? direction + ' ' : ''}${item.label} · 图文`;
-    const modal = openModal('选择要制作的图文版',`<p class="context-note">图文版的叠字、正文和发布文案会采纳为一个脚本版本（之后不能改，改稿请另存新版本），再建一张图文制作单。</p><div class="variant-options">${items.map((item,position) => `<label class="variant-option"><input type="radio" name="variant" value="${item.index}" ${position === 0 ? 'checked' : ''}><span><strong>${esc(item.label)}</strong><small>${item.slides.length} 张${item.problems.length ? ` · ${item.problems.length} 处需核对` : ''}</small></span></label>`).join('')}</div><label class="field"><span>脚本标题</span><input name="title" required maxlength="500" value="${esc(defaultTitle(items[0]))}"></label><div data-variant-preview></div>`,'采纳并创建图文制作单',async modal => {
+    const options = items.map((item,position) => `<label class="variant-option"><input type="radio" name="variant" value="${item.index}" ${position === 0 ? 'checked' : ''}><span><strong>${esc(item.label)}</strong><small>${item.slides.length} 张${item.problems.length ? ` · ${item.problems.length} 处需核对` : ''}</small></span></label>`).join('');
+    const content = `<label class="field"><span>脚本标题</span><input name="title" required maxlength="500" value="${esc(defaultTitle(items[0]))}"></label><div data-variant-preview></div>`;
+    const modal = openModal('选择要制作的图文版',`<p class="context-note">选择图文版即可查看叠字、正文和发布文案。采纳后保存为脚本版本，再创建图文制作单。</p>${variantPickerBody(options,content)}`,'采纳并创建图文制作单',async modal => {
       const chosen = items.find(item => String(item.index) === new FormData(modal.form).get('variant'));
       const title = new FormData(modal.form).get('title').trim();
       if (modal.variant !== chosen.index) {modal.done = {};modal.requests = {};modal.variant = chosen.index;}
@@ -1364,9 +1804,11 @@ window.CaseProduction = (() => {
       catch (error) {if (definitive(error)) {closeModal(true);toast(`脚本已采纳，但图文制作单没有创建：${fail(error)}。可在脚本版本里再点「制作图文」。`,true);location.hash = url(`#scripts/${encodeURIComponent(adopted.script.id)}`,product);return;}throw error;}
       closeModal(true);toast('已采纳图文版，并创建图文制作单。');location.hash = carouselLink(created.carousel);
     });
+    modal.dialog.classList.add('variant-picker-dialog');
     const preview = () => {
       const chosen = items.find(item => String(item.index) === new FormData(modal.form).get('variant'));
       $('[data-variant-preview]',modal.dialog).innerHTML = problemsMarkup(chosen.problems) + slidesTable(chosen.slides) + `<p class="context-note">发布文案：${esc(chosen.caption_en)}</p>`;
+      revealVariantContent(modal,chosen.label);
     };
     let titleEdited = false;
     modal.form.title.oninput = () => {titleEdited = true;};
@@ -1378,9 +1820,33 @@ window.CaseProduction = (() => {
   }
   async function fromScriptCarousel(script) {
     const scriptId = script.script_id || script.id;
-    openModal('为这条脚本创建图文制作单',`<p class="context-note">只适用于从图文版采纳的脚本版本：工作台会到来源候选里找回逐张表和 copy.json。</p><pre class="carousel-preview">${esc(String(script.text || '').slice(0,1200))}</pre>`,'创建图文制作单',async modal => {
-      const created = await once(modal,'carousel','/api/production/carousels',async () => ({revision:(await api('/api/production')).revision,carousel:{script_id:scriptId}}));
-      closeModal(true);toast('图文制作单已创建。');location.hash = carouselLink(created.carousel);
+    // Scripts adopted from an early 图文版 candidate still create their job directly from it.
+    const earlyCarousel = /^01\s/.test(String(script.text || '').trim());
+    const wait = ms => new Promise(resolve => setTimeout(resolve,ms));
+    const preview = (item,table) => `${problemsMarkup([...(table.note ? [table.note] : []),...item.problems])}${slidesTable(item.slides)}<p class="context-note">发布文案：${esc(item.caption_en || '（未给出）')}</p>`;
+    openModal('用图文技能生成逐张表',`<p class="context-note">图文版不再随写稿附带。工作台把这条口播稿和它的意群表交给图文技能（tiktok-photo-commerce），由它合并成逐张的叠字、正文和图文发布文案；你核对表格后再创建图文制作单。生成可能要几分钟。</p><pre class="carousel-preview">${esc(String(script.text || '').slice(0,1200))}</pre><label class="field"><span>补充要求（选填）</span><textarea name="instruction" rows="2" maxlength="2000" placeholder="例如：只做 4 张；首图突出整套价值。"></textarea></label><div data-table-progress></div>${earlyCarousel ? '<p class="context-note">这条脚本是早期从图文版采纳的，也可以<button type="button" class="subtle" data-early>直接按已采纳的图文版创建</button>。</p>' : ''}`,'生成逐张表',async modal => {
+      const progress = $('[data-table-progress]',modal.dialog);
+      const started = await once(modal,'table','/api/production/carousel-tables',async () => ({script_id:scriptId,instruction:String(new FormData(modal.form).get('instruction') || '').trim()}));
+      let table = started.table;
+      while (table.status === 'running') {
+        progress.innerHTML = `<p class="context-note">图文技能处理中：${esc(table.progress || '请稍候')}</p>`;
+        await wait(2500);
+        if (view.modal !== modal) return;
+        table = (await api(`/api/production/carousel-tables/${encodeURIComponent(table.id)}`)).table;
+      }
+      if (table.status !== 'completed' || !table.carousels?.length) throw Object.assign(new Error(table.error || '逐张表没有生成，请重试。'),{status:422});
+      const item = table.carousels[0];
+      closeModal(true);
+      openModal('核对图文逐张表',`<p class="context-note">这是图文技能按意群表合并出的逐张表。作用、素材来源和禁写创建后还能在制作单里改；叠字和正文需要改就重新生成。</p>${preview(item,table)}`,'创建图文制作单',async review => {
+        const created = await once(review,'carousel','/api/production/carousels',async () => ({revision:(await api('/api/production')).revision,carousel:{script_id:scriptId,table_id:table.id}}));
+        closeModal(true);toast('图文制作单已创建。');location.hash = carouselLink(created.carousel);
+      });
+    });
+    $('[data-early]',view.modal?.dialog)?.addEventListener('click',async () => {
+      try {
+        const created = await api('/api/production/carousels',{method:'POST',body:{revision:(await api('/api/production')).revision,carousel:{script_id:scriptId},request_id:crypto.randomUUID()}});
+        closeModal(true);toast('图文制作单已创建。');location.hash = carouselLink(created.carousel);
+      } catch (error) {toast(fail(error),true);}
     });
   }
 
@@ -1397,5 +1863,6 @@ window.CaseProduction = (() => {
 
   window.addEventListener('focus',() => {if (!document.hidden) void view.refreshEditDefaults?.();});
   document.addEventListener('visibilitychange',() => {if (!document.hidden) void view.refreshEditDefaults?.();});
+  window.addEventListener('hashchange',() => {if (!pageHash().startsWith('#production/')) view.activityTarget = null;});
   return {route,fromCandidate,fromScript,fromCandidateCarousel,fromScriptCarousel,modalOpen,captureListState};
 })();

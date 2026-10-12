@@ -15,6 +15,9 @@ import test_production_carousel_ui as carousel_fixture
 
 
 class FakeImages:
+    direct_image_edit = True
+    source = "cockpit_image_edit"
+
     def __init__(self):
         self.calls = []
         self.hold = False
@@ -23,7 +26,7 @@ class FakeImages:
         self.risky_slides = {2}
 
     def status(self):
-        return {"available": True, "label": "Isolated image fixture"}
+        return {"available": True, "label": "Isolated image fixture", "source": self.source, "review_available": False}
 
     def run(self, prompt, *, cwd, images, cancel_event, on_progress, read_only=False, **options):
         snapshot = json.loads((Path(cwd) / "input.json").read_text(encoding="utf-8"))
@@ -89,7 +92,7 @@ class CarouselImageBrowserTests(unittest.TestCase):
         page = self.open_page(f"#production/{self.carousel['id']}")
         page.set_viewport_size({"width": width, "height": 900 if width > 600 else 844})
         page.locator('[data-step="images"]').click()
-        page.locator("#carousel-images-service").get_by_text("Codex 出图服务已就绪。", exact=True).wait_for()
+        page.locator("#carousel-images-service").get_by_text("Isolated image fixture已就绪。", exact=True).wait_for()
         return page
 
     def generate(self, page, slides=None):
@@ -126,24 +129,22 @@ class CarouselImageBrowserTests(unittest.TestCase):
             selected.click()
             selected.wait_for(state="detached")
         page.locator(f'[data-image-slide="{number}"] [data-approve-output]').first.click()
-        modal = page.locator(".production-dialog[open]")
-        modal.locator('[name="note"]').fill(note)
-        if acknowledge:
-            self.assertTrue(modal.locator('[data-submit]').is_disabled())
-            modal.locator('[name="acknowledge"]').check()
-        modal.get_by_role("button", name="确认并选用", exact=True).click()
         page.locator(f'[data-image-slide="{number}"] [data-revoke-output]').wait_for(state="attached")
 
     def detail(self):
         return self.request("GET", f"/api/production/carousels/{self.carousel['id']}")[2]["carousel"]
 
-    def test_generate_review_approve_redo_keep_versions_and_invalidate_after_base_changes(self):
+    def test_generate_direct_approve_redo_keep_versions_and_invalidate_after_base_changes(self):
         original = self.source.read_bytes()
         script = self.app.creation.get_script(self.carousel["script_id"])
         page = self.open_images()
         page.locator('#carousel-image-form [name="instruction"]').fill("背景简洁，保留原主体")
         self.generate(page)
         self.assertEqual(page.locator(".carousel-output").count(), 3)
+        self.assertEqual(page.locator('.carousel-output figcaption,.carousel-output details,.carousel-output p,.image-review,.image-stages,[data-recheck-output]').count(), 0)
+        self.assertEqual(page.locator('.carousel-output').nth(1).inner_text(), '确认选用')
+        self.assertEqual(page.locator('#carousel-images-panel h2').inner_text(), '出图')
+        self.assertTrue(all(not call['review'] for call in self.images.calls))
         self.assertEqual(page.locator(".carousel-output img").first.evaluate("img => getComputedStyle(img).objectFit"), "contain")
         self.approve(page, 1, note="已核对主体和文字")
         self.approve(page, 2, acknowledge=True, note="人工逐字核对后保留")
@@ -164,19 +165,19 @@ class CarouselImageBrowserTests(unittest.TestCase):
         self.approve(page, 3)
         self.assertNotEqual(self.detail()["slides"][2]["output_id"], previous)
         page.locator('[data-step="images"]').click()
+        page.locator('[data-image-slide="3"] [data-image-versions-toggle]').click()
         page.locator(f'[data-output-id="{previous}"] [data-approve-output]').click()
-        page.locator('.production-dialog[open]').get_by_role("button", name="确认并选用", exact=True).click()
         page.locator(f'[data-output-id="{previous}"] [data-revoke-output]').wait_for(state="attached")
         self.assertEqual(self.detail()["slides"][2]["output_id"], previous)
         page.locator('[data-step="images"]').click()
         page.locator(f'[data-output-id="{previous}"] [data-revoke-output]').click()
-        page.locator(f'[data-output-id="{previous}"] [data-approve-output]').wait_for()
+        page.locator(f'[data-output-id="{previous}"] [data-approve-output]').wait_for(state="attached")
         self.assertFalse(next(output for output in self.detail()["slides"][2]["outputs"] if output["id"] == previous)["approved"])
         replacement = self.source.parent / "replacement.jpg"
         Image.new("RGB", (120, 160), "navy").save(replacement)
         self.add_base(3, "202H-S2/原图/replacement.jpg")
         page.reload()
-        page.locator(f'[data-output-id="{previous}"].stale').wait_for()
+        page.locator(f'[data-output-id="{previous}"].stale').wait_for(state="attached")
         self.assertTrue(page.locator(f'[data-output-id="{previous}"] [data-approve-output]').is_disabled())
         self.assertEqual(self.source.read_bytes(), original)
         self.assertEqual(self.app.creation.get_script(script["id"]), script)
@@ -202,13 +203,24 @@ class CarouselImageBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator(".carousel-output").count(), 0)
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 
+    def test_task_result_link_focuses_the_image_without_opening_logs(self):
+        page = self.open_images()
+        self.generate(page, slides=[1])
+        item = self.detail()
+        output = item["slides"][0]["outputs"][0]
+        page.goto(f"http://127.0.0.1:{self.server.server_port}/#production/{self.carousel['id']}?step=images&run={output['generation_id']}")
+        page.locator(f'[data-output-id="{output["id"]}"]').wait_for()
+        page.wait_for_function("id => document.activeElement?.dataset.outputId === id", arg=output["id"])
+        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-step'), 'images')
+        self.assertEqual(page.locator('.task-activity-logs details[open]').count(), 0)
+
     def test_aspect_change_warns_and_invalidates_old_group_versions(self):
         self.images.risky_slides.clear()
         page = self.open_images(width=390)
         self.generate(page)
         before = [slide["outputs"][0]["id"] for slide in self.detail()["slides"]]
         page.locator('#carousel-image-form [name="aspect"]').select_option("9:16")
-        page.locator('#carousel-image-aspect-note').get_by_text("整组都需按新比例重新出图并核对", exact=False).wait_for()
+        page.locator('#carousel-image-aspect-note').get_by_text("整组都需按新比例重新出图", exact=False).wait_for()
         self.generate(page, slides=[1])
         page.wait_for_function("() => document.querySelectorAll('[data-image-slide=\"1\"] .carousel-output').length === 2", timeout=15000)
         data = self.detail()

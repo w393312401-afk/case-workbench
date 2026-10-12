@@ -90,8 +90,9 @@ def file_lock(path, message):
 
 
 class ProductionOperations:
-    def __init__(self, production_root):
+    def __init__(self, production_root, on_saved=None):
         self.root = Path(production_root) / "operations"
+        self.on_saved = on_saved
 
     @staticmethod
     def validate(kind, body):
@@ -188,6 +189,13 @@ class ProductionOperations:
 
     def write(self, record):
         durable_json(self.path(record["body"]), record)
+        # Activity is deliberately outside the durable-operation contract: a
+        # failed log must never make speech or Resolve work run a second time.
+        if self.on_saved:
+            try:
+                self.on_saved(record)
+            except Exception:
+                pass
 
     def update(self, record, state, **values):
         saved = {**copy.deepcopy(record), **copy.deepcopy(values), "state": state, "updated_at": now()}

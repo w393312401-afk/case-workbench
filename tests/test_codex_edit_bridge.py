@@ -27,7 +27,7 @@ class CodexEditBridgeTests(unittest.TestCase):
         support.CodexStillsBridgeTests.setUp(self)
         self.ledger = self.folder / "davinci-ledger"
         self.ledger.mkdir()
-        self.profile.update(rules="保护配音与意群标记，只修改交接的目标时间线。", timeout=EDIT_TIMEOUT, dirs=[str(self.ledger)])
+        self.profile.update(rules="保护配音与意群标记，只修改交接的目标时间线。", timeout=EDIT_TIMEOUT, dirs=[])
 
     def bridge(self, scenario=complete, *, timeout=2, config_transform=None, unknown_model=False):
         def factory(arguments, **options):
@@ -89,9 +89,9 @@ class CodexEditBridgeTests(unittest.TestCase):
         self.assertEqual(turn["input"][1], {"type": "skill", "name": "editing", "path": str(skill)})
         # Codex ignores a task-folder copy as a skill input, so its text must be in the instructions.
         self.assertIn(f'<skill name="editing">\n{skill.read_text(encoding="utf-8")}\n</skill>', thread["developerInstructions"])
-        self.assertEqual(turn["sandboxPolicy"]["writableRoots"], [str(self.job), str(self.ledger)])
+        self.assertEqual(turn["sandboxPolicy"]["writableRoots"], [str(self.job)])
         self.assertFalse(turn["sandboxPolicy"]["networkAccess"])
-        self.assertEqual(thread["config"]["sandbox_workspace_write"]["writable_roots"], [str(self.job), str(self.ledger)])
+        self.assertEqual(thread["config"]["sandbox_workspace_write"]["writable_roots"], [str(self.job)])
         self.assertIn("剪辑并保存工程", thread["developerInstructions"])
         self.assertIn("保护配音", thread["developerInstructions"])
         self.assertNotIn("不修改项目", thread["developerInstructions"])
@@ -111,14 +111,14 @@ class CodexEditBridgeTests(unittest.TestCase):
         self.assertIsNone(session["model"])
         self.assertIsNone(session["reasoning_effort"])
 
-    def test_file_relay_reads_writes_edits_and_searches_job_and_ledger(self):
-        project = str(self.ledger / "Lab.json")
+    def test_file_relay_reads_writes_edits_and_searches_only_the_job(self):
+        project = str(self.job / "Lab.json")
         calls = [(101, "Write", {"file_path": "shots.json", "content": "[]"}),
                  (102, "Write", {"file_path": project, "content": '{"shots":1}'}),
                  (103, "Edit", {"file_path": project, "old_string": "1", "new_string": "2"}),
                  (104, "Read", {"file_path": project}),
-                 (105, "Glob", {"pattern": "*.json", "path": str(self.ledger)}),
-                 (106, "Grep", {"pattern": "shots", "path": str(self.ledger)}),
+                 (105, "Glob", {"pattern": "Lab.json"}),
+                 (106, "Grep", {"pattern": "shots"}),
                  (107, "Glob", {"pattern": "*.json"})]
         self.run_bridge(self.bridge(self.calls(calls)))
         responses = self.responses()
@@ -128,7 +128,7 @@ class CodexEditBridgeTests(unittest.TestCase):
         self.assertIn('"shots":2', responses[104]["contentItems"][0]["text"])
         self.assertEqual(responses[105]["contentItems"][0]["text"], "Lab.json")
         self.assertIn("Lab.json:1", responses[106]["contentItems"][0]["text"])
-        self.assertEqual(responses[107]["contentItems"][0]["text"], "shots.json")
+        self.assertIn("shots.json", responses[107]["contentItems"][0]["text"])
 
     def test_file_relay_rejects_other_directories_and_protected_handoff_and_skill(self):
         (self.job / "handoff.md").write_text("protected", encoding="utf-8")
@@ -142,19 +142,21 @@ class CodexEditBridgeTests(unittest.TestCase):
                  (104, "Read", {"file_path": str(outside)}),
                  (105, "Glob", {"pattern": "*", "path": str(self.folder)}),
                  (106, "Grep", {"pattern": "private", "path": str(self.folder)}),
-                 (107, "Write", {"file_path": str(self.ledger / ".codex" / "config.toml"), "content": "unsafe"})]
+                 (107, "Write", {"file_path": str(self.ledger / ".codex" / "config.toml"), "content": "unsafe"}),
+                 (108, "Write", {"file_path": str(self.ledger / "Lab.json"), "content": "changed"})]
         self.run_bridge(self.bridge(self.calls(calls)))
         self.assertEqual(outside.read_text(), "private")
         self.assertEqual((self.job / "handoff.md").read_text(), "protected")
         self.assertEqual((self.job / "skill" / "SKILL.md").read_text(), "protected")
         self.assertFalse((self.ledger / ".codex").exists())
+        self.assertFalse((self.ledger / "Lab.json").exists())
         self.assertTrue(all(result["success"] is False for result in self.responses().values()))
 
-    def test_profile_rejects_unsafe_tools_extra_roots_and_parent_ledger_before_launch(self):
+    def test_profile_rejects_unsafe_tools_and_any_extra_root_before_launch(self):
         valid = copy.deepcopy(self.profile)
         invalid = [{**valid, "allowed": [*valid["allowed"], value]} for value in (
             "Bash", "mcp__resolve__run_script_unsafe", "mcp__resolve__launch_resolve", "mcp__unrelated__search")]
-        invalid.extend({**valid, "dirs": value} for value in ([], [str(self.folder)], [str(self.ledger), str(self.folder)], ["relative"]))
+        invalid.extend({**valid, "dirs": value} for value in ([str(self.ledger)], [str(self.folder)], [str(self.ledger), str(self.folder)], ["relative"]))
         invalid.extend({**valid, "timeout": value} for value in (0, True, EDIT_TIMEOUT + 1))
         for profile in invalid:
             with self.subTest(profile=profile):
