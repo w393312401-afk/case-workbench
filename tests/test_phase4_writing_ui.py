@@ -51,7 +51,7 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
 
     def test_manual_script_derivation_release_and_case_conclusion_preserve_old_version(self):
         page = self.open_page(width=390)
-        page.locator("#add-top").click()  # the top bar "保存脚本" opens the manual editor
+        page.locator("#script-manual-open").click()  # the page header 「手动录入脚本」 opens the manual editor
         dialog = page.locator("#script-editor-dialog")
         dialog.locator('[name="title"]').fill("一个明确角度")
         dialog.locator('[name="text"]').fill("Keep the same angle across each pass.")
@@ -127,7 +127,7 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
 
     def test_unknown_save_response_retries_same_request_without_duplicate_script(self):
         page = self.open_page()
-        page.locator("#add-top").click()  # the top bar "保存脚本" opens the manual editor
+        page.locator("#script-manual-open").click()  # the page header 「手动录入脚本」 opens the manual editor
         dialog = page.locator("#script-editor-dialog")
         dialog.locator('[name="title"]').fill("保留请求标识")
         dialog.locator('[name="text"]').fill("One saved version, even after a lost response.")
@@ -171,7 +171,7 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
 
     def test_script_draft_survives_cancelled_navigation(self):
         page = self.open_page()
-        page.locator("#add-top").click()  # the top bar "保存脚本" opens the manual editor
+        page.locator("#script-manual-open").click()  # the page header 「手动录入脚本」 opens the manual editor
         page.locator('#script-editor-dialog [name="text"]').fill("Keep this draft until I choose.")
         page.evaluate("location.hash='#/202H/library'")
         page.locator("#script-discard-dialog[open]").wait_for()

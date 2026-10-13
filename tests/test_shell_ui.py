@@ -60,10 +60,10 @@ class ShellBrowserTests(unittest.TestCase):
             ("#library", "library", "#case-search", "收录案例", "", {}),
             ("#native", "library", "#case-search", "收录案例", "", {"view": "native"}),
             (f"#case/{self.identifier}/history", "case", ".history-item", "用这个案例写稿", f"/{self.identifier}/history", {}),
-            ("#files", "settings", ".settings-page", "重新检查", "", {}),
-            ("#videos", "videos", ".perf-tabs", "同步数据", "", {}),
+            ("#files", "settings", ".settings-page", "", "", {}),
+            ("#videos", "videos", ".perf-tabs", "", "", {}),
             ("#directions", "directions", "#direction-filters", "新建方向", "", {}),
-            ("#reviews", "reviews", "#rev-page", "重新同步", "", {}),
+            ("#reviews", "reviews", "#rev-page", "", "", {}),
             ("#ai", "ai", "#ai-task-list", "开始写稿", "", {}),
         ]
         for old, name, ready, action, tail, query in routes:
@@ -71,7 +71,11 @@ class ShellBrowserTests(unittest.TestCase):
                 page.goto(self.base + "/" + old)
                 page.locator(ready).first.wait_for()
                 self.assert_route(page, name, tail=tail, **query)
-                self.assertEqual(page.locator("#add-top").inner_text().strip(), action)
+                # Pages whose actions only sync or check data keep them in the page header, not the top bar.
+                if action:
+                    self.assertEqual(page.locator("#add-top").inner_text().strip(), action)
+                else:
+                    self.assertFalse(page.locator("#add-top").is_visible())
         page.locator("#add-top").click()
         page.locator("#ai-create-dialog[open]").wait_for()
         self.assertIn("空白写稿", page.locator("#ai-create-case").inner_text())

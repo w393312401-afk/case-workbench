@@ -21,12 +21,12 @@
 .connection-status[open] .connection-chevron{transform:rotate(180deg)}
 .connection-menu{padding:6px 0 2px}
 .sidebar .connection-menu .sync-detail{position:static;width:auto;height:auto;margin:0 0 5px;overflow:visible;clip-path:none;white-space:normal;overflow-wrap:anywhere;line-height:1.6}
-.sidebar .connection-menu p{display:block;margin:0 0 7px;font-size:11px;line-height:1.6}
+.sidebar .connection-menu p{display:block;margin:0 0 7px;font-size:12px;line-height:1.6}
 .connection-status.has-problem>.connection,.connection-status.has-problem #sync-detail{color:var(--warn)}
 .connection-status.has-problem #connection-dot{background:var(--warn)}
 .connection-menu #sync-button{margin:4px 0 0;min-height:32px;gap:6px}
 .sidebar-bottom>p:not(.sync-detail){display:none}
-.sidebar-bottom .sync-detail{font-size:11px}
+.sidebar-bottom .sync-detail{font-size:12px}
 .topbar-right{gap:10px}
 .topbar [hidden],.sidebar [hidden]{display:none!important}
 .global-search-trigger{gap:8px;border:1px solid var(--line);background:var(--surface);border-radius:8px;color:var(--muted);display:inline-flex;align-items:center;padding:9px 12px;font-size:12px}
@@ -122,6 +122,8 @@
 @media(max-width:760px){.sidebar-toggle,.sidebar-rail{display:none!important}}
 @media(max-width:760px){.sidebar-heading{display:contents}}
 @media(max-width:760px){.topbar-left{display:none}}
+/* Detail pages return through the pinned top-bar arrow and breadcrumb; the in-page link is only for phones, where the top bar hides them. */
+@media(min-width:761px){#content .back-link{display:none}}
 @media(prefers-reduced-motion:reduce){html.sidebar-collapsed body>.sidebar{transition:none}}
 
 /* The top bar stays pinned in every module on desktop; content that sticks below it uses --topbar-h. */

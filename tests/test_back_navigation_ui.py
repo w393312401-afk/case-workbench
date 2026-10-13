@@ -64,22 +64,26 @@ class BackNavigationBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator('[data-tier-filter="S"]').get_attribute("aria-pressed"), "true")
         self.assertEqual(page.locator('[data-status-filter="testing"]').get_attribute("aria-pressed"), "true")
         self.assertEqual(page.locator('[name="archive"]').input_value(), "all")
-        page.locator("#breadcrumb").get_by_role("link", name="工作空间", exact=True).click()
+        # The breadcrumb no longer repeats the sidebar's way home.
+        self.assertEqual(page.locator("#breadcrumb").get_by_role("link", name="工作空间", exact=True).count(), 0)
+        page.locator("#home-nav").click()
         self.assert_hash(page, "#/202H/home")
 
     def test_top_page_and_escape_actions_share_the_remembered_parent(self):
         page = self.open_page(self.filtered_list)
         list_hash = page.evaluate("location.hash")
-        for action in ("top", "page", "escape"):
+        for action in ("top", "breadcrumb", "escape"):
             with self.subTest(action=action):
                 self.open_direction(page)
                 self.assertEqual(page.locator("#navigate-up").get_attribute("href"), list_hash)
                 back = page.locator("#content").get_by_role("link", name="返回卖点与方向", exact=True)
                 self.assertEqual(back.get_attribute("href"), list_hash)
+                # On desktop the pinned top-bar arrow replaces the in-page link, which stays for phones.
+                self.assertFalse(back.is_visible())
                 if action == "top":
                     page.locator("#navigate-up").click()
-                elif action == "page":
-                    back.click()
+                elif action == "breadcrumb":
+                    self.parent_link(page).click()
                 else:
                     page.keyboard.press("Escape")
                 page.locator("#direction-filters").wait_for()
@@ -88,7 +92,7 @@ class BackNavigationBrowserTests(unittest.TestCase):
     def test_deep_link_has_safe_parent_and_reload_keeps_the_visited_filter_scope(self):
         direct = self.open_page(self.detail_route)
         self.assertEqual(self.parent_link(direct).get_attribute("href"), "#/202H/directions")
-        direct.locator(".back-link").click()
+        direct.locator("#navigate-up").click()
         direct.locator("#direction-filters").wait_for()
         self.assert_hash(direct, "#/202H/directions")
 
@@ -98,7 +102,7 @@ class BackNavigationBrowserTests(unittest.TestCase):
         visited.reload()
         visited.locator("#direction-definition").wait_for()
         self.assertEqual(self.parent_link(visited).get_attribute("href"), list_hash)
-        visited.locator(".back-link").click()
+        visited.locator("#navigate-up").click()
         visited.locator("#direction-filters").wait_for()
         self.assert_hash(visited, list_hash)
 
@@ -112,7 +116,7 @@ class BackNavigationBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator("#global-product").input_value(), "202H")
         for link in (self.parent_link(page), page.locator("#navigate-up"), page.locator(".back-link")):
             self.assertEqual(link.get_attribute("href"), list_hash)
-        page.locator(".back-link").click()
+        page.locator("#navigate-up").click()
         page.locator("#direction-filters").wait_for()
         self.assert_hash(page, list_hash)
         page.wait_for_function("expected => Math.abs(window.scrollY - expected) <= 2", arg=scroll_before)
@@ -144,7 +148,7 @@ class BackNavigationBrowserTests(unittest.TestCase):
                 page.locator("#direction-definition").wait_for()
                 for link in (self.parent_link(page), page.locator("#navigate-up"), page.locator(".back-link")):
                     self.assertEqual(link.get_attribute("href"), "#/202H/directions")
-                page.locator(".back-link").click()
+                page.locator("#navigate-up").click()
                 page.locator("#direction-filters").wait_for()
                 self.assert_hash(page, "#/202H/directions")
                 self.assertEqual(page.locator("#global-product").input_value(), "202H")

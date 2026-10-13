@@ -83,7 +83,10 @@ function harness(options = {}) {
     async api(url, config) {
       controls.requests.push({ url, config });
       assert.ok(!config.method || config.method === 'GET', 'search must stay read-only');
-      if (url.startsWith('/api/direction-catalog') && !options.catalogRequest) return { directions: options.directions || [] };
+      if (url.startsWith('/api/direction-catalog') && !options.catalogRequest) return { directions: options.directions || [], selling_points: options.points || [] };
+      if (url.startsWith('/api/creation')) return { scripts: options.scripts || [] };
+      if (url.startsWith('/api/ai/tasks')) return { tasks: options.tasks || [] };
+      if (url.startsWith('/api/production')) return { jobs: options.jobs || [], carousels: options.carousels || [] };
       if (options.catalogRequest && url.startsWith('/api/direction-catalog')) return options.catalogRequest(url, config, controls);
       if (options.request) return options.request(url, config, controls);
       return url.startsWith('/api/performance') ? { videos: options.videos || [] } : { reviews: options.reviews || [], total: (options.reviews || []).length };
@@ -337,6 +340,42 @@ test('catalog failure keeps matching case directions and reports the missing sou
     catalogRequest() { throw new Error('offline'); } });
   await h.search('202H-S1');
   assert.equal(h.list.options.length, 1);
-  assert.match(h.feedback.innerHTML, /方向暂时无法搜索/);
+  assert.match(h.feedback.innerHTML, /方向、卖点暂时无法搜索/);
   assert.equal(h.list.getAttribute('aria-busy'), 'false');
+});
+
+test('scripts, tasks, production orders and selling points are searchable within the current product', async () => {
+  const h = harness({
+    scripts: [{ id: 'SCR-aaaaaaaaaaaa', title: 'Paper slice script', product: '202H', direction_id: '202H-S1', version: 2 }, { id: 'SCR-bbbbbbbbbbbb', title: 'Paper other product', product: '152N' }],
+    tasks: [{ task_id: 'AIT-aaaaaaaaaaaa', product: '202H', case_title: 'Paper case', instruction: 'write a paper hook' }],
+    jobs: [{ id: 'PRD-aaaaaaaaaaaa', title: 'Paper voice order', product: '202H' }],
+    carousels: [{ id: 'CAR-aaaaaaaaaaaa', title: 'Paper carousel', product: '202H', archived: true }],
+    points: [{ code: 'S1', title: 'Paper thin edge', product: '202H' }, { code: 'S2', title: 'Paper elsewhere', product: '152N' }],
+  });
+  await h.search('paper');
+  const routes = h.list.options.map(node => node.href);
+  assert.deepEqual(routes, [
+    '#/202H/directions?q=Paper+thin+edge&product=202H', '#/202H/scripts/SCR-aaaaaaaaaaaa', '#/202H/ai/AIT-aaaaaaaaaaaa',
+    '#/202H/production/CAR-aaaaaaaaaaaa', '#/202H/production/PRD-aaaaaaaaaaaa',
+  ]);
+  assert.doesNotMatch(h.list.innerHTML, /other product|elsewhere/);
+  assert.match(h.list.innerHTML, /第 2 版/);
+  assert.match(h.list.innerHTML, /图文制作单 · 已归档/);
+  assert.ok(['/api/creation?product=202H', '/api/ai/tasks?product=202H', '/api/production?product=202H'].every(url => h.controls.requests.some(r => r.url === url)));
+});
+
+test('empty search offers pages and actions; an action runs instead of navigating', async () => {
+  const h = harness();
+  assert.match(h.list.innerHTML, /工作概览/);
+  assert.match(h.list.innerHTML, /<button type="button" class="global-search-result"[^>]*>.*开始写稿/);
+  let started = 0;
+  h.window.CaseAI = { startBlank() { started += 1; } };
+  await h.search('写稿');
+  assert.match(h.list.innerHTML, /开始<mark>写稿<\/mark>/);
+  const pageRows = h.list.options.length;
+  for (let step = 0; step < pageRows; step += 1) h.input.emit('keydown', { key: 'ArrowDown' });
+  h.input.emit('keydown', { key: 'Enter' });
+  assert.equal(started, 1);
+  assert.equal(h.dialog.open, false);
+  assert.equal(h.location.hash, '#/202H/home');
 });

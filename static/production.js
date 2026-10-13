@@ -88,7 +88,7 @@ window.CaseProduction = (() => {
   const seconds = value => value === null || value === undefined ? '—' : `${Number(value).toFixed(2)} 秒`;
   const voiceLabel = voice => [voice.note,voice.name].filter(Boolean).join(' · ') || voice.voice_id;
   const audioURL = (job,take,kind,download = false) => `/api/production/audio/${encodeURIComponent(job)}/${encodeURIComponent(take)}/${kind}${download ? '?download=1' : ''}`;
-  const tabs = () => `<nav class="scripts-tabs" aria-label="内容创作"><a href="${esc(url('#ai'))}">协作任务</a><a href="${esc(url('#scripts'))}">脚本版本</a><a href="${esc(url('#production'))}" aria-current="page">内容制作</a></nav>`;
+  const tabs = () => `<nav class="scripts-tabs" aria-label="内容创作"><a href="${esc(url('#ai'))}">协作任务</a><a href="${esc(url('#scripts'))}">脚本版本</a><a href="${esc(url('#production'))}" aria-current="page">制作单</a></nav>`;
   // Material pickers only offer finished-material timelines; edits and stills must not pull from output timelines.
   const finishedMark = '成品素材';
   const finishedOnly = names => names.filter(name => name.includes(finishedMark));
@@ -250,7 +250,7 @@ window.CaseProduction = (() => {
     }
     if (refreshStatus) statusReads.forEach(entry => {entry.expires = 0;});
     if (view.modal && !view.modal.busy) closeModal(true);
-    $('#breadcrumb').innerHTML = `工作空间 <span>/</span> 内容创作 <span>/</span> ${tail ? '制作单' : '内容制作'}`;
+    $('#breadcrumb').innerHTML = `内容创作 <span>/</span> 制作单`;
     if (!keepScroll) $('#content').innerHTML = skeletonMarkup(2);
     try {
       if (tail) applyActivityTarget(decodeURIComponent(tail),hash);
@@ -271,6 +271,7 @@ window.CaseProduction = (() => {
       }
     } catch (error) {
       if (seq !== view.sequence || hash !== pageHash()) return;
+      if (tail && error.status === 404) {$('#content').innerHTML = `<div class="empty"><h3>这张制作单已不存在</h3><p>可能已被删除，或属于其他产品。</p><a class="secondary" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#production'))}">返回制作清单</a></div>`;return;}
       $('#content').innerHTML = `<div class="empty"><h3>暂时无法读取制作资料</h3><p>${esc(fail(error))}</p><button class="secondary" id="production-retry">重新读取</button></div>`;
       $('#production-retry').onclick = () => route(true);
     }
@@ -340,6 +341,8 @@ window.CaseProduction = (() => {
         .sort((a,b) => String(b.item.updated_at || '').localeCompare(String(a.item.updated_at || '')) || String(a.item.id).localeCompare(String(b.item.id)));
       const visible = rows.filter(row => (view.type === 'all' || row.kind === view.type) && (view.status === 'all' || row.state.key === view.status));
       $('#production-queue-count').textContent = `${visible.length} / ${rows.length} 张`;
+      // Filters and batch actions only mean something once there are orders to act on.
+      const filters = $('.production-queue-filters');if (filters) filters.hidden = !rows.length;
       statusNode.hidden = !deliveryState.loading && !deliveryState.error;
       statusNode.innerHTML = deliveryState.error ? `<span>暂时无法核对审查与领取状态：${esc(deliveryState.error)}</span><button type="button" class="subtle" data-delivery-reload>重新读取</button>` : deliveryState.loading ? '<span>正在核对审查与领取状态…</span>' : '';
       $('[data-delivery-reload]',statusNode)?.addEventListener('click',load);
@@ -410,13 +413,14 @@ window.CaseProduction = (() => {
     view.listProduct = product;
     const archivedCount = [...(data.jobs || []), ...(data.carousels || [])].filter(item => item.archived).length;
     const voices = data.voices || [];
-    $('#content').innerHTML = `<div class="page-heading"><div><h1>内容制作</h1><p>管理视频与图文制作单，继续配音、剪辑或出图，核对并领取成品。</p></div><button type="button" class="secondary" id="production-settings-open" aria-haspopup="dialog" aria-controls="production-settings">${icon('folder')}制作设置</button></div>${tabs()}<div class="production-service-warning" id="production-service-warning" role="status" hidden></div><div class="production-main"><section aria-labelledby="production-queue-title"><div class="section-title-row production-list-head"><h2 id="production-queue-title">制作清单 <small id="production-queue-count"></small></h2>${archivedCount ? `<label class="production-toggle"><input type="checkbox" id="production-archived" ${view.showArchived ? 'checked' : ''}>显示已归档（${archivedCount}）</label>` : ''}</div><div class="production-queue-filters"><div class="production-type-field"><span id="production-type-label">类型</span><div class="production-type-group" id="production-type" role="group" aria-labelledby="production-type-label">${Object.entries(queueTypes).map(([key,label]) => `<button type="button" class="production-type-choice" data-type="${key}" aria-pressed="false">${label}</button>`).join('')}</div></div><label>状态<select id="production-status">${Object.entries(queueStatuses).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select></label><button type="button" class="secondary compact" id="production-batch-toggle" aria-pressed="false">批量管理</button></div><div class="production-batchbar" id="production-batchbar" hidden></div><div class="production-queue-status" id="production-queue-status" role="status"></div><div id="production-queue" class="script-rows"></div></section></div><dialog id="production-settings" class="rev-drawer production-drawer" aria-labelledby="production-settings-title"><div class="rev-drawer-head"><h2 id="production-settings-title">制作设置</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭制作设置">${icon('close')}</button></div><div class="rev-drawer-body"><section class="production-setting"><h2>配音服务</h2><div class="production-eleven" id="production-eleven"></div></section><section class="production-setting"><h2>音色库</h2><p class="context-note">生成过的音色会自动留在这里；备注写清是谁的声音、适合什么稿。</p><ul class="voice-list">${voices.length ? voices.map(voice => `<li class="voice-row ${voice.disabled ? 'disabled' : ''}"><div><strong>${esc(voiceLabel(voice))}</strong>${product && data.defaults?.[window.WorkbenchShell.normalizeProduct(product)] === voice.voice_id ? '<span class="script-status published">默认</span>' : ''}${voice.disabled ? '<span class="script-status">已停用</span>' : ''}<code>${esc(voice.voice_id)}</code><small>使用 ${voice.use_count || 0} 次${voice.last_used_at ? ` · 最近 ${esc(readableDate(voice.last_used_at))}` : ''}</small></div><div class="voice-actions"><button type="button" class="subtle" data-voice-note="${esc(voice.voice_id)}">备注</button>${product && !voice.disabled ? `<button type="button" class="subtle" data-voice-default="${esc(voice.voice_id)}">设为默认</button>` : ''}<button type="button" class="subtle" data-voice-toggle="${esc(voice.voice_id)}">${voice.disabled ? '启用' : '停用'}</button></div></li>`).join('') : '<li class="context-note">还没有音色。</li>'}</ul><form id="voice-add" class="inline-form"><label class="field"><span>音色 ID</span><input name="voice_id" required pattern="[A-Za-z0-9]{10,64}" autocomplete="off"></label><label class="field"><span>备注</span><input name="note" maxlength="500" placeholder="例如：Zack 男声，适合测评稿"></label><button type="submit" class="secondary">核对并加入</button><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="production-setting"><h2>读法表${product ? ` · ${esc(product)}` : ''}</h2>${product ? `<p class="context-note">只改送去配音的文字，稿件原文不变。按整词、区分大小写替换。</p><ul class="reading-list">${(data.readings || []).map(item => `<li><span><code>${esc(item.written)}</code> 读作 <strong>${esc(item.spoken)}</strong></span><button type="button" class="subtle" data-reading-remove="${esc(item.id)}">删除</button></li>`).join('') || '<li class="context-note">还没有登记读法。</li>'}</ul><form id="reading-add" class="inline-form"><label class="field"><span>稿中写法</span><input name="written" required maxlength="100" placeholder="例如 202H"></label><label class="field"><span>配音读法</span><input name="spoken" required maxlength="200" placeholder="例如 two oh two H"></label><button type="submit" class="secondary">添加读法</button><p class="ai-error" data-error role="alert" hidden></p></form>` : '<p class="context-note">选择具体产品后维护读法。</p>'}</section>${resolveSettings(data,product)}</div></dialog>`;
+    $('#content').innerHTML = `<div class="page-heading"><div><h1>内容创作</h1><p>管理视频与图文制作单，继续配音、剪辑或出图，核对并领取成品。</p></div><div class="scripts-start-actions"><button type="button" class="secondary" id="production-refresh">${icon('refresh')}刷新</button><button type="button" class="secondary" id="production-settings-open" aria-haspopup="dialog" aria-controls="production-settings">${icon('folder')}制作设置</button></div></div>${tabs()}<div class="production-service-warning" id="production-service-warning" role="status" hidden></div><div class="production-main"><section aria-labelledby="production-queue-title"><div class="section-title-row production-list-head"><h2 id="production-queue-title">制作清单 <small id="production-queue-count"></small></h2>${archivedCount ? `<label class="production-toggle"><input type="checkbox" id="production-archived" ${view.showArchived ? 'checked' : ''}>显示已归档（${archivedCount}）</label>` : ''}</div><div class="production-queue-filters"><div class="production-type-field"><span id="production-type-label">类型</span><div class="production-type-group" id="production-type" role="group" aria-labelledby="production-type-label">${Object.entries(queueTypes).map(([key,label]) => `<button type="button" class="production-type-choice" data-type="${key}" aria-pressed="false">${label}</button>`).join('')}</div></div><label>状态<select id="production-status">${Object.entries(queueStatuses).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select></label><button type="button" class="secondary compact" id="production-batch-toggle" aria-pressed="false">批量管理</button></div><div class="production-batchbar" id="production-batchbar" hidden></div><div class="production-queue-status" id="production-queue-status" role="status"></div><div id="production-queue" class="script-rows"></div></section></div><dialog id="production-settings" class="rev-drawer production-drawer" aria-labelledby="production-settings-title"><div class="rev-drawer-head"><h2 id="production-settings-title">制作设置</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭制作设置">${icon('close')}</button></div><div class="rev-drawer-body"><section class="production-setting"><h2>配音服务</h2><div class="production-eleven" id="production-eleven"></div></section><section class="production-setting"><h2>音色库</h2><p class="context-note">生成过的音色会自动留在这里；备注写清是谁的声音、适合什么稿。</p><ul class="voice-list">${voices.length ? voices.map(voice => `<li class="voice-row ${voice.disabled ? 'disabled' : ''}"><div><strong>${esc(voiceLabel(voice))}</strong>${product && data.defaults?.[window.WorkbenchShell.normalizeProduct(product)] === voice.voice_id ? '<span class="script-status published">默认</span>' : ''}${voice.disabled ? '<span class="script-status">已停用</span>' : ''}<code>${esc(voice.voice_id)}</code><small>使用 ${voice.use_count || 0} 次${voice.last_used_at ? ` · 最近 ${esc(readableDate(voice.last_used_at))}` : ''}</small></div><div class="voice-actions"><button type="button" class="subtle" data-voice-note="${esc(voice.voice_id)}">备注</button>${product && !voice.disabled ? `<button type="button" class="subtle" data-voice-default="${esc(voice.voice_id)}">设为默认</button>` : ''}<button type="button" class="subtle" data-voice-toggle="${esc(voice.voice_id)}">${voice.disabled ? '启用' : '停用'}</button></div></li>`).join('') : '<li class="context-note">还没有音色。</li>'}</ul><form id="voice-add" class="inline-form"><label class="field"><span>音色 ID</span><input name="voice_id" required pattern="[A-Za-z0-9]{10,64}" autocomplete="off"></label><label class="field"><span>备注</span><input name="note" maxlength="500" placeholder="例如：Zack 男声，适合测评稿"></label><button type="submit" class="secondary">核对并加入</button><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="production-setting"><h2>读法表${product ? ` · ${esc(product)}` : ''}</h2>${product ? `<p class="context-note">只改送去配音的文字，稿件原文不变。按整词、区分大小写替换。</p><ul class="reading-list">${(data.readings || []).map(item => `<li><span><code>${esc(item.written)}</code> 读作 <strong>${esc(item.spoken)}</strong></span><button type="button" class="subtle" data-reading-remove="${esc(item.id)}">删除</button></li>`).join('') || '<li class="context-note">还没有登记读法。</li>'}</ul><form id="reading-add" class="inline-form"><label class="field"><span>稿中写法</span><input name="written" required maxlength="100" placeholder="例如 202H"></label><label class="field"><span>配音读法</span><input name="spoken" required maxlength="200" placeholder="例如 two oh two H"></label><button type="submit" class="secondary">添加读法</button><p class="ai-error" data-error role="alert" hidden></p></form>` : '<p class="context-note">选择具体产品后维护读法。</p>'}</section>${resolveSettings(data,product)}</div></dialog>`;
     elevenStatus($('#production-eleven'));
     mountQueue(data,product,view.sequence);
     bindResolveSettings(data,product);
     // Saving a setting re-reads the page; the drawer stays open while you keep editing.
     const drawer = $('#production-settings');
     $('#production-settings-open').onclick = () => {view.settingsOpen = true;drawer.showModal();};
+    $('#production-refresh').onclick = () => route(true,true);
     drawer.addEventListener('click',event => {if (event.target === drawer || event.target.closest('[data-drawer-close]')) drawer.close();});
     drawer.addEventListener('close',() => {view.settingsOpen = false;});
     if (view.settingsOpen) drawer.showModal();
@@ -602,7 +606,7 @@ window.CaseProduction = (() => {
         try {
           const fresh = await api(`/api/production/jobs/${encodeURIComponent(job.id)}`);
           if (!isCurrent()) return;
-          if (!(fresh.job.edits || []).some(edit => edit.status === 'running')) {await route(true);return;}
+          if (!(fresh.job.edits || []).some(edit => edit.status === 'running') && !view.modal) {await route(true);return;}
           $('#edit-runs').innerHTML = [...fresh.job.edits].reverse().map(edit => editRun(fresh.job,edit,fresh.historical_baseline_restore === true)).join('');bindRuns();mountActivityLogs(job.id);
         } catch {}
         setTimeout(poll,5000);
@@ -736,7 +740,7 @@ window.CaseProduction = (() => {
     const job = data.job, timelines = [...(job.timelines || [])].reverse(), creators = data.creators || [], config = data.product_settings;
     const creator = defaultCreator(data,choice);
     const form = !selected ? '<p class="context-note">先选用一版配音，再建时间线。</p>'
-      : !creators.length ? `<p class="context-note">还没有达人名，请到 <a href="${esc(url('#production',job.product))}">内容制作</a> 页的「达芬奇设置」里添加。</p>`
+      : !creators.length ? `<p class="context-note">还没有达人名，请到 <a href="${esc(url('#production',job.product))}">制作单</a> 页的「达芬奇设置」里添加。</p>`
       : `<form id="timeline-form"><div class="form-row"><label class="field"><span>达人</span><select name="creator">${creators.map(name => `<option ${name === creator ? 'selected' : ''}>${esc(name)}</option>`).join('')}</select></label><div></div></div><p class="context-note">将在项目「${esc(config.project)}」里新建 <code data-timeline-name>${esc(creator)}${esc(data.today)}-${esc(config.code)}-序号</code>（序号按项目里已有的时间线顺延）。配音放在单独的「配音」轨（音频 2），每个意群一个蓝色范围标记，备注里写着口播、中文和画面要求；视频轨留空，下一步交给剪辑。</p><div class="take-actions"><button type="submit" class="primary" ${job.archived ? 'disabled' : ''}>在达芬奇建时间线</button>${timelines.length && timelines[0].take_id !== job.selected_take ? '<span>当前选用的配音和最近一条时间线用的不同，会另建一条新时间线，旧的保留。</span>' : ''}</div><p class="ai-error" data-error role="alert" hidden></p></form>`;
     return `<section class="section-card" id="timeline-panel"><h2>达芬奇时间线 <small>${timelines.length} 条</small></h2><p class="production-resolve" data-resolve-status>正在检查达芬奇…</p>${form}${timelines.map(item => `<article class="timeline-card" data-activity-source="${esc(item.unique_id)}"><div><strong>${esc(item.name)}</strong><small>${esc(item.creator)} · ${item.markers} 个意群标记 · ${(item.frames / Number(item.fps)).toFixed(1)} 秒 · 配音 ${esc(item.take_id)}${item.take_id === job.selected_take ? '（当前选用）' : ''} · ${esc(readableDate(item.built_at))}</small>${(item.warnings || []).length ? `<ul class="take-warnings">${item.warnings.map(text => `<li>${esc(text)}</li>`).join('')}</ul>` : ''}</div><button type="button" class="secondary" data-open-timeline="${esc(item.unique_id)}">在达芬奇打开</button></article>`).join('')}</section>`;
   }
@@ -891,10 +895,17 @@ window.CaseProduction = (() => {
     bindTimeline(data,choice,seq,request);
     bindEdit(data,choice,seq,request);
     if (job.voicing) {
-      const poll = () => {
-        if (seq !== view.sequence || pageHash().split('?')[0] !== `#production/${encodeURIComponent(job.id)}`) return;
-        if (document.hidden) {setTimeout(poll,3000);return;}
-        void route(true);
+      // Re-render only once voicing has ended and no dialog is open: route() closes dialogs and would drop a half-filled form.
+      const isCurrent = () => seq === view.sequence && pageHash().split('?')[0] === `#production/${encodeURIComponent(job.id)}`;
+      const poll = async () => {
+        if (!isCurrent()) return;
+        if (document.hidden || view.modal) {setTimeout(poll,3000);return;}
+        try {
+          const fresh = await api(`/api/production/jobs/${encodeURIComponent(job.id)}`);
+          if (!isCurrent()) return;
+          if (!fresh.job.voicing && !view.modal) {await route(true);return;}
+        } catch (error) {if (error.status === 404 && isCurrent() && !view.modal) {await route(true);return;}}
+        setTimeout(poll,3000);
       };
       setTimeout(poll,3000);
     }
@@ -1748,7 +1759,7 @@ window.CaseProduction = (() => {
   }
   function renderCarousel(data) {
     const item = data.carousel;
-    $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 内容创作 <span>/</span> 图文制作单';
+    $('#breadcrumb').innerHTML = '内容创作 <span>/</span> 图文制作单';
     view.clipCounts = data.clip_picks?.counts || null;
     $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#production',item.product))}">${icon('back')}返回制作单</a><div class="page-heading"><div><span class="eyebrow">PHOTO CAROUSEL</span><h1>${esc(item.title)}</h1><p>${esc(item.product)} · ${esc(item.direction_id || '未指定方向')}${item.variant_label ? ` · ${esc(item.variant_label)}` : ''} · <span class="script-status">${esc(carouselLabel(item))}</span>${data.script ? ` · <a href="${esc(url(`#scripts/${encodeURIComponent(data.script.id)}`,item.product))}">脚本版本 ${esc(data.script.version)}</a>` : ' · 脚本版本已不可读'}</p></div><div class="scripts-start-actions"><button class="secondary" id="carousel-archive">${item.archived ? '恢复制作单' : '归档'}</button><button class="secondary danger" id="carousel-delete">永久删除</button></div></div>${problemsMarkup(item.problems)}<section class="section-card"><div class="section-title-row"><h2>逐张表 <small>${item.slides.length} 张</small></h2><button type="button" class="subtle" id="carousel-slides-edit">${icon('edit')}编辑作用、素材来源与禁写</button></div>${slidesTable(item.slides)}<p class="context-note">叠字、正文和中文属于已采纳的脚本版本，不在这里改；改稿请另存脚本新版本再建制作单。已有成品可在「出图」步骤用「导入现有成品」登记，再逐张确认选用；从素材开始制作时，先选底图，再生成首张并继续余图。</p></section>${stillSection(data)}${pickSection(item)}<section class="section-card"><div class="section-title-row"><h2>图文发布文案</h2><button type="button" class="subtle" id="carousel-caption-copy">${icon('copy')}复制英文</button></div><p class="carousel-caption">${esc(item.caption_en || '—')}</p><p class="context-note">${esc(item.caption_zh || '')}</p></section><details class="section-card production-history"><summary>制作记录（${item.history.length} 条）</summary><ol>${[...item.history].reverse().map(entry => `<li>${esc(readableDate(entry.at))} · ${esc(entry.note || entry.event)}</li>`).join('')}</ol></details>`;
     $('#carousel-caption-copy').onclick = () => copyText(item.caption_en || '','图文发布文案已复制');

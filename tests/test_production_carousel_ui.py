@@ -113,7 +113,7 @@ class CarouselBrowserTests(unittest.TestCase):
             content_type="application/json", body=json.dumps({"ok": True})))
         page.locator('#carousel-archive').click()
         page.get_by_role("button", name="恢复制作单", exact=True).wait_for()
-        page.locator('.back-link').click()
+        page.locator('#navigate-up').click()
         page.locator('#production-archived').wait_for()
         self.assertEqual(page.locator('.production-card').count(), 0)
         page.locator('#production-archived').check()

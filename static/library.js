@@ -66,7 +66,7 @@ function card(item) {
   const metric = (label, value, suffix = "", accent = false) => `<div><span class="metric-label">${label}</span><span class="metric-value${accent ? " accent" : ""}${value === undefined ? " missing-value" : ""}">${displayValue(value)}${value !== undefined && suffix ? `<small>${suffix}</small>` : ""}</span></div>`;
   return `<a draggable="false" class="case-card" href="#case/${item.case_id}" aria-label="查看案例：${esc(shortTitle(item))}">${media}
     <div class="card-body"><div class="card-topline"><span class="case-badges">${badge(item)}${sourceBadges(item)}${item.archived ? archiveBadge(item) : ""}</span></div><h2>${esc(shortTitle(item))}</h2><p class="card-description">${esc(cur.conclusion || "等待整理当前结论、有效视频和文案。")}</p>
-    ${hasMetrics ? `<div class="card-metrics">${metric("播放量", m.views_display)}${metric("CTOR", m.ctor_display, "", true)}${metric("售出", m.items_sold, "件")}</div>` : `<div class="card-metrics is-empty"><span>${esc(salesStatusLabel(item))}</span></div>`}
+    ${hasMetrics ? `<div class="card-metrics">${metric("播放量", m.views_display)}${metric("CTOR", m.ctor_display, "", true)}${metric("售出", m.items_sold, "件")}</div>` : item.sales_data?.status === "unavailable" ? "" : `<div class="card-metrics is-empty"><span>${esc(salesStatusLabel(item))}</span></div>`}
     <div class="card-foot"><span class="card-direction-name" title="${esc(cur.test_direction?.main_difference || "")}">${esc(directionLabel(item))}</span><span>${esc(String(readableDate(item.updated_at)).split(" ")[0])}</span></div></div></a>`;
 }
 function libraryPerformance(item) {
@@ -99,7 +99,7 @@ function renderLibrary() {
   const content=navigationContent(),archived=libraryArchiveStatus()==="archived",scope=scopedCases();
   const saved=window.LibraryViews?.available() || [];
   const presets={all:"全部案例",positive:"转化正向",mixed:"高播放低转化",pending:"待验证",native:"本土表达",legacy:"旧库资料",archived:"已归档"};
-  $("#breadcrumb").innerHTML="工作空间 <span>/</span> 案例库";
+  $("#breadcrumb").innerHTML="案例库";
   window.WorkbenchShell?.registerProducts(state.cases);
   const summary=content==="native"?nativeSummary(scope):"";
   const field=(id,label,values,current)=>libraryFilterMarkup(id,label,values,current);
@@ -190,9 +190,11 @@ function renderCards() {
     content === "native" && state.nativeMode === "entries"
       ? nativeEntryRows(items, state.query)
       : null;
-  $("#result-count").textContent = nativeRows
+  // An unreadable sales table affects every card alike, so it is said once here instead of on each card.
+  const salesDown = items.some((item) => item.sales_data?.status === "unavailable");
+  $("#result-count").textContent = (nativeRows
     ? `${nativeRows.length} 条表达 · ${items.length} 条视频`
-    : `${items.length} 条案例`;
+    : `${items.length} 条案例`) + (salesDown ? " · 销售数据表暂不可用，卡片暂不显示表现" : "");
   if ($("#library-drawer-done")) $("#library-drawer-done").textContent = `显示 ${items.length} 条结果`;
   let emptyTitle, emptyText, action, actionLabel;
   if (scope.length && (query || state.product || state.sourceType !== "all" || state.direction || state.variantType !== "all")) {

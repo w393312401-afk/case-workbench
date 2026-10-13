@@ -77,7 +77,7 @@ window.CaseScripts = (() => {
   async function route(keepScroll = false) {
     const hash = pageHash(), seq = ++workspace.sequence, tail = hash.replace(/^#scripts\/?/,'').split('?')[0];
     const mounted = keepScroll && !tail && workspace.listProduct === currentProduct() ? captureListState() : null;
-    $('#breadcrumb').innerHTML = `工作空间 <span>/</span> 内容创作 <span>/</span> ${tail ? '脚本详情' : '脚本版本'}`;
+    $('#breadcrumb').innerHTML = `内容创作 <span>/</span> ${tail ? '脚本详情' : '脚本版本'}`;
     $('#content').innerHTML = skeletonMarkup(2);
     try {
       if (tail) {
@@ -91,7 +91,12 @@ window.CaseScripts = (() => {
         workspace.loaded = data;renderList(data,mounted);
       }
       if (!keepScroll) window.scrollTo(0,0);
-    } catch (error) {if (seq !== workspace.sequence || hash !== pageHash()) return;$('#content').innerHTML = `<div class="empty"><h3>暂时无法读取脚本</h3><p>${esc(fail(error))}</p><button class="secondary" id="script-retry">重新读取</button></div>`;$('#script-retry').onclick = () => route(true);}
+    } catch (error) {
+      if (seq !== workspace.sequence || hash !== pageHash()) return;
+      // A script that no longer exists cannot come back by reading again; offer the way back instead.
+      if (tail && error.status === 404) {$('#content').innerHTML = `<div class="empty"><h3>这份脚本已不存在</h3><p>可能已被删除，或属于其他产品。</p><a class="secondary" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#scripts'))}">返回脚本版本</a></div>`;return;}
+      $('#content').innerHTML = `<div class="empty"><h3>暂时无法读取脚本</h3><p>${esc(fail(error))}</p><button class="secondary" id="script-retry">重新读取</button></div>`;$('#script-retry').onclick = () => route(true);
+    }
   }
   function captureListState() {
     const list = $('#script-list'), query = $('#script-query'), status = $('#script-status-filter');
@@ -101,7 +106,7 @@ window.CaseScripts = (() => {
   function renderList(data,mounted = null) {
     workspace.listProduct = currentProduct();
     const scripts = data.scripts || [];
-    $('#content').innerHTML = `<div class="page-heading"><div><h1>脚本版本</h1><p>采纳的正文与每次改稿分别保存，登记视频后连接销售表现和案例结论。新增一份用顶栏的「保存脚本」。</p></div></div><nav class="scripts-tabs" aria-label="内容创作"><a href="${esc(url('#ai'))}">协作任务</a><a href="${esc(url('#scripts'))}" aria-current="page">脚本版本</a><a href="${esc(url('#production'))}">内容制作</a></nav><div class="script-list-filters"><label class="search">${icon('search')}<input id="script-query" type="search" placeholder="搜索标题、正文或方向编号" aria-label="搜索脚本"></label><label class="script-status-choice"><span>状态</span><select id="script-status-filter"><option value="">全部</option>${Object.entries(labels).map(([key,value]) => `<option value="${key}">${value}</option>`).join('')}</select></label></div><div id="script-list"></div>`;
+    $('#content').innerHTML = `<div class="page-heading"><div><h1>内容创作</h1><p>采纳的正文与每次改稿分别保存，登记视频后连接销售表现和案例结论。</p></div><div class="scripts-start-actions"><button type="button" class="secondary" id="script-manual-open">${icon('plus')}手动录入脚本</button></div></div><nav class="scripts-tabs" aria-label="内容创作"><a href="${esc(url('#ai'))}">协作任务</a><a href="${esc(url('#scripts'))}" aria-current="page">脚本版本</a><a href="${esc(url('#production'))}">制作单</a></nav><div class="script-list-filters"><label class="search">${icon('search')}<input id="script-query" type="search" placeholder="搜索标题、正文或方向编号" aria-label="搜索脚本"></label><label class="script-status-choice"><span>状态</span><select id="script-status-filter"><option value="">全部</option>${Object.entries(labels).map(([key,value]) => `<option value="${key}">${value}</option>`).join('')}</select></label></div><div id="script-list"></div>`;
     const saved = window.WorkbenchShell?.listState?.('scripts',currentProduct()) || mounted;
     if (saved) {
       $('#script-query').value = typeof saved.q === 'string' ? saved.q : '';
@@ -111,9 +116,10 @@ window.CaseScripts = (() => {
       const status = $('#script-status-filter').value, query = $('#script-query').value.trim().toLocaleLowerCase();
       const visible = scripts.filter(script => (!status || script.status === status) && (!query || `${script.title} ${script.text} ${script.direction_id}`.toLocaleLowerCase().includes(query)));
       const groups = new Map();for (const script of visible) {const key = `${script.product} · ${script.direction_id || '独立脚本'}`;if (!groups.has(key)) groups.set(key,[]);groups.get(key).push(script);}
-      $('#script-list').innerHTML = visible.length ? [...groups].map(([title,items]) => `<section class="script-list-group"><h2>${esc(title)} <small>${items.length} 个版本</small></h2><div class="script-rows">${items.map(scriptCard).join('')}</div></section>`).join('') : '<div class="empty"><h3>还没有符合条件的脚本版本</h3><p>可以在协作任务里把完成的候选采纳为脚本版本，或用顶栏的「保存脚本」手动保存一份正文。</p></div>';
+      $('#script-list').innerHTML = visible.length ? [...groups].map(([title,items]) => `<section class="script-list-group"><h2>${esc(title)} <small>${items.length} 个版本</small></h2><div class="script-rows">${items.map(scriptCard).join('')}</div></section>`).join('') : '<div class="empty"><h3>还没有符合条件的脚本版本</h3><p>可以在协作任务里把完成的候选采纳为脚本版本，或点上方「手动录入脚本」保存一份正文。</p></div>';
     };
     $('#script-status-filter').onchange = show;$('#script-query').oninput = show;show();
+    $('#script-manual-open').onclick = () => void openManual();
   }
   function renderDetail(data) {
     const script = data.script, id = scriptId(script), source = script.source || {};

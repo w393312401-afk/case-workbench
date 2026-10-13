@@ -179,9 +179,9 @@
     const rows = board ? [] : filtered();
     const accounts = [...new Set(perf.videos.map((v) => v.account).filter(Boolean))].sort();
     const gaps = s.coverage.gaps.map(([a, b]) => (a === b ? a : `${a} 至 ${b}`)).join("、");
-    $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 视频数据";
+    $("#breadcrumb").innerHTML = "视频数据";
     $("#content").innerHTML = `<div class="page-heading perf-heading"><div><h1>视频数据</h1><p>${s.coverage.first ? `后台导出覆盖 ${s.coverage.first} 至 ${s.coverage.last}${gaps ? `，缺 ${gaps}` : ""}。` : "还没有导入后台数据。"}跟进状态按${esc(s.rule.window)}判断。</p></div>
-      <div class="perf-actions"><button type="button" class="secondary" id="perf-upload">${icon("plus")}导入表格</button><details class="perf-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" id="perf-copy">复制复盘材料</button><button type="button" role="menuitem" id="perf-sync">同步数据文件夹</button></div></details><input type="file" id="perf-file" accept=".xlsx" multiple hidden></div></div>
+      <div class="perf-actions"><button type="button" class="secondary" id="perf-sync">${icon("refresh")}同步数据</button><button type="button" class="secondary" id="perf-upload">${icon("plus")}导入表格</button><details class="perf-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" id="perf-copy">复制复盘材料</button></div></details><input type="file" id="perf-file" accept=".xlsx" multiple hidden></div></div>
       <details class="perf-about"><summary>数据来源与口径</summary><p>数据文件夹：${s.sources.length ? s.sources.map((p) => `<code>${esc(p)}</code>`).join("、") : "未设置"} · 已导入 ${s.imports.files} 个文件${s.imports.last ? `，最近一次 ${esc(s.imports.last.replace("T", " "))}` : ""}。</p><p>视频指标是后台导出里逐条视频的归因数据加总；店铺每日汇总来自另一份导出，口径更大，单独展示不与视频明细相加。点击率 = 商品点击 ÷ 播放，CTOR = 订单 ÷ 商品点击，GPM = 每千次播放的归因 GMV。${gaps ? `导出缺口：${esc(gaps)}，缺口所在周在走势里以短横表示。` : ""}</p></details>
       <div id="perf-import-result" role="status"></div>
       <div class="perf-tabs" role="tablist" aria-label="视频数据视图">${[["board", "数据看板"], ["list", "视频明细"]].map(([k, label]) => `<button type="button" role="tab" id="perf-tab-${k}" data-perf-tab="${k}" aria-selected="${k === f.tab}" class="${k === f.tab ? "is-active" : ""}">${label}</button>`).join("")}</div>
@@ -458,7 +458,7 @@
       if (!restored) perf.shown = 200;
     }
     if (["board", "list"].includes(linked.get("tab"))) perf.filters.tab = linked.get("tab");
-    $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 视频数据";
+    $("#breadcrumb").innerHTML = "视频数据";
     if (!perf.videos || (!$("#perf-board") && !$("#perf-results"))) $("#content").innerHTML = skeletonMarkup(3);
     try {
       const loading = load();

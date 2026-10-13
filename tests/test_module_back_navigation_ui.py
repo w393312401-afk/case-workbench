@@ -73,8 +73,8 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
     def leave_detail(self, page, action):
         if action == "top":
             page.locator("#navigate-up").click()
-        elif action == "page":
-            page.locator("#content .back-link").click()
+        elif action == "breadcrumb":
+            page.locator("#breadcrumb li:not([aria-current]) a").last.click()
         else:
             page.locator("#content h1").click()
             page.keyboard.press("Escape")
@@ -84,13 +84,14 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
         page.locator("#script-query").fill("导航目标")
         page.locator("#script-status-filter").select_option("adopted")
         self.create_scrolling_list(page, "#script-list")
-        for action in ("top", "page", "escape"):
+        for action in ("top", "breadcrumb", "escape"):
             with self.subTest(action=action):
                 self.assertEqual(page.locator("#script-list .script-card").count(), 1)
                 link = page.locator("#script-list .script-card")
                 scroll = self.enter_detail(page, link, "#script-production-toggle")
                 self.assertEqual(page.locator("#navigate-up").get_attribute("href"), "#/202H/scripts")
                 self.assertEqual(page.locator("#content .back-link").inner_text().strip(), "返回脚本版本")
+                self.assertFalse(page.locator("#content .back-link").is_visible())
                 self.leave_detail(page, action)
                 self.assert_return(page, "#/202H/scripts", "#script-query", scroll)
                 self.assertEqual(page.locator("#script-query").input_value(), "导航目标")
@@ -100,7 +101,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
         page = self.open_page("#/202H/production")
         page.locator("#production-archived").check()
         self.create_scrolling_list(page, ".production-main")
-        for action in ("top", "page", "escape"):
+        for action in ("top", "breadcrumb", "escape"):
             with self.subTest(action=action):
                 link = page.locator(f'.production-card[href$="/{self.job["id"]}"]')
                 scroll = self.enter_detail(page, link, "#job-archive")
@@ -115,7 +116,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
         page = self.open_page("#/all/production")
         page.locator("#production-archived").check()
         self.create_scrolling_list(page, ".production-main")
-        for action in ("page", "breadcrumb"):
+        for action in ("top", "breadcrumb"):
             with self.subTest(action=action):
                 link = page.locator(f'.production-card[href$="/{self.job["id"]}"]')
                 scroll = self.enter_detail(page, link, "#job-archive")
@@ -123,9 +124,9 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
                 for selector in ("#navigate-up", "#content .back-link"):
                     self.assertEqual(page.locator(selector).get_attribute("href"), "#/all/production")
                 if action == "breadcrumb":
-                    page.locator("#breadcrumb").get_by_role("link", name="内容制作", exact=True).click()
+                    page.locator("#breadcrumb").get_by_role("link", name="制作单", exact=True).click()
                 else:
-                    page.locator("#content .back-link").click()
+                    page.locator("#navigate-up").click()
                 self.assert_return(page, "#/all/production", "#production-archived", scroll)
                 self.assertTrue(page.locator("#production-archived").is_checked())
                 self.assertEqual(page.locator("#global-product").input_value(), "")
@@ -136,7 +137,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
         page.locator('[data-ai-filter="completed"]').click()
         page.locator("#ai-group-by").select_option("case")
         self.create_scrolling_list(page, "#ai-task-list")
-        for action in ("page", "top", "escape"):
+        for action in ("breadcrumb", "top", "escape"):
             with self.subTest(action=action):
                 link = page.locator(f'[data-ai-task-id="{task["task_id"]}"] .ai-task-card')
                 scroll = self.enter_detail(page, link, "#ai-rounds")
@@ -155,7 +156,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
         page.reload()
         page.locator("#script-production-toggle").wait_for()
         self.assertEqual(page.locator("#content .back-link").get_attribute("href"), "#/all/scripts")
-        page.locator("#content .back-link").click()
+        page.locator("#navigate-up").click()
         page.locator("#script-query").wait_for()
         self.assertEqual(page.evaluate("location.hash"), "#/all/scripts")
         self.assertEqual(page.locator("#script-query").input_value(), "导航目标")
@@ -177,7 +178,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
         page.locator("#content h1").get_by_text("导航目标脚本", exact=True).wait_for()
         self.assertEqual(page.evaluate("location.hash"), f'#/202H/scripts/{self.script["id"]}')
         self.assertEqual(page.locator("#content .back-link").get_attribute("href"), "#/all/scripts")
-        page.locator("#content .back-link").click()
+        page.locator("#navigate-up").click()
         page.locator("#script-query").wait_for()
         self.assertEqual(page.locator("#script-query").input_value(), "导航子版本")
         self.assertEqual(page.locator("#global-product").input_value(), "")
@@ -186,10 +187,10 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
     def test_direct_all_product_production_deep_link_has_consistent_parent(self):
         page = self.open_page(f'#/all/production/{self.job["id"]}')
         page.locator("#job-archive").wait_for()
-        breadcrumb = page.locator("#breadcrumb").get_by_role("link", name="内容制作", exact=True)
+        breadcrumb = page.locator("#breadcrumb").get_by_role("link", name="制作单", exact=True)
         for link in (breadcrumb, page.locator("#navigate-up"), page.locator("#content .back-link")):
             self.assertEqual(link.get_attribute("href"), "#/all/production")
-        page.locator("#content .back-link").click()
+        page.locator("#navigate-up").click()
         page.locator("#production-settings-open").wait_for()
         self.assertEqual(page.evaluate("location.hash"), "#/all/production")
         self.assertEqual(page.locator("#global-product").input_value(), "")

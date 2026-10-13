@@ -446,10 +446,15 @@ window.MaterialBasket = (() => {
     if (!modal.open) modal.showModal();
     form.elements.text.focus();
   }
+  // Wide screens dock the basket beside the page so items can be added while browsing; narrower ones keep the overlay.
+  const dockable = () => window.matchMedia("(min-width:1200px)").matches;
   async function open() {
     initialize();
     const modal = dialog();
-    if (!modal.open) modal.showModal();
+    if (!modal.open) {
+      if (dockable()) { modal.show(); document.documentElement.classList.add("basket-docked"); }
+      else modal.showModal();
+    }
     render();
     await refresh().catch(() => {});
   }
@@ -594,7 +599,9 @@ window.MaterialBasket = (() => {
     initialized = true;
     const modal = document.createElement("dialog"); modal.id = "material-basket-dialog"; modal.setAttribute("aria-labelledby", "material-basket-title"); document.body.append(modal);
     // Esc, the backdrop and close() all end here; the next opening builds a fresh frame. Undo is kept (see offerUndo).
-    modal.addEventListener("close", () => { basket.filter = { type: "", query: "" }; modal.innerHTML = ""; warnConflicts(); });
+    modal.addEventListener("close", () => { basket.filter = { type: "", query: "" }; modal.innerHTML = ""; document.documentElement.classList.remove("basket-docked"); warnConflicts(); });
+    // A docked basket is not modal, so Esc only closes it while focus is inside; elsewhere Esc keeps its page meaning.
+    modal.addEventListener("keydown", event => { if (event.key === "Escape" && !modal.matches(":modal")) { event.preventDefault(); close(); } });
     modal.addEventListener("pointerdown", event => { pointerAt = event.timeStamp; backdropDown = event.target === modal && outside(event); }, true);
     modal.addEventListener("click", onClick);
     modal.addEventListener("change", onChange);
@@ -615,5 +622,5 @@ window.MaterialBasket = (() => {
     window.addEventListener("beforeunload", event => { if (basket.drafts.size) { event.preventDefault(); event.returnValue = ""; } });
     void refresh().catch(() => {});
   }
-  return { initialize, open, close, add, has, count, refresh, selection, markdown, openTheme, openHook, saveDrafts, modalOpen: () => Boolean(dialog()?.open || document.querySelector("#material-theme-dialog")?.open || document.querySelector("#material-hook-dialog")?.open), hasUnsavedInput: () => basket.drafts.size > 0 || [...hookDrafts.values()].some(item => item.text.trim() || item.note.trim()) };
+  return { initialize, open, close, add, has, count, refresh, selection, markdown, openTheme, openHook, saveDrafts, modalOpen: () => Boolean(dialog()?.matches(":modal") || document.querySelector("#material-theme-dialog")?.open || document.querySelector("#material-hook-dialog")?.open), hasUnsavedInput: () => basket.drafts.size > 0 || [...hookDrafts.values()].some(item => item.text.trim() || item.note.trim()) };
 })();

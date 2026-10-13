@@ -217,9 +217,10 @@ window.CaseAI = (() => {
   }
   function serviceMarkup() {return `<div class="ai-service-row"><p class="ai-service-status ${ai.status?.available ? 'available' : 'unavailable'}" id="ai-service-label">${esc(availabilityText())}</p><button type="button" class="subtle" id="ai-check-service">${icon('refresh')}重新检查</button></div>`;}
   function connectServiceButton() {$('#ai-check-service')?.addEventListener('click',async () => {await Promise.all([checkStatus(true),loadOptions(true)]);setText('#ai-service-label',availabilityText());if (ai.task) renderSettings('ai-continue',settingsForTask(ai.task));updateTaskControls();});}
+  // Writing variants from a case is the top bar's 「用这个案例写稿」; the card keeps review, retrospective and history.
   async function mountCaseActions(item) {
     const panel = document.createElement('section');panel.className = 'ai-case-actions';panel.dataset.caseId = item.case_id;
-    panel.innerHTML = `<div class="ai-case-heading"><div><h2>${icon('spark')}AI 协作</h2></div><div class="ai-action-buttons">${Object.entries(actions).map(([key,label]) => `<button type="button" class="secondary" data-ai-action="${key}">${esc(label)}</button>`).join('')}</div></div><details class="ai-case-history" hidden><summary>协作记录 <span class="ai-history-count"></span></summary><div class="ai-case-task-list"><p class="ai-muted">正在读取协作记录…</p></div></details>`;
+    panel.innerHTML = `<div class="ai-case-heading"><div><h2>${icon('spark')}AI 协作</h2></div><div class="ai-action-buttons">${Object.entries(actions).filter(([key]) => key !== 'variants').map(([key,label]) => `<button type="button" class="secondary" data-ai-action="${key}">${esc(label)}</button>`).join('')}</div></div><details class="ai-case-history" hidden><summary>协作记录 <span class="ai-history-count"></span></summary><div class="ai-case-task-list"><p class="ai-muted">正在读取协作记录…</p></div></details>`;
     const host = $('#detail-ai-panel'), tools = $('.detail-action-row > .detail-tools');
     if (host) host.replaceChildren(panel);
     else if (tools) tools.insertAdjacentElement('beforebegin',panel); else $('.detail-tabs')?.insertAdjacentElement('beforebegin',panel);
@@ -236,7 +237,8 @@ window.CaseAI = (() => {
   function modalOpen() {return !!ai.modal || $('#ai-delete-dialog').open;}
   function hasUnsavedInput() {return ai.deleting || !!ai.modal?.busy || !!ai.modal?.instruction?.trim() || [...ai.drafts.values()].some(value => value.trim()) || ai.pending.size > 0;}
   function conflictingModal() {return state.editor || state.deletion || state.deleteOperation || state.bulk || state.bulkOperation || state.archiveOperation || $('#ai-delete-dialog').open;}
-  async function openCreate(item,action) {
+  // Writing entries are labelled 「开始写稿」 everywhere, so their dialog carries the same name; the case card keeps its own action names.
+  async function openCreate(item,action,heading = actions[action]) {
     if (!actions[action] || ai.modal) return;
     if (conflictingModal()) {toast('请先完成或关闭当前编辑和操作，再开始 AI 协作。',true);return;}
     const product = item.product || window.WorkbenchShell?.product() || '';
@@ -244,7 +246,7 @@ window.CaseAI = (() => {
     const materialIds = pending?.payload.material_ids || item.material_ids || null;
     const modal = {key,caseId:item.case_id,product,directionId:pending?.payload.direction_id || item.direction_id || '',caseTitle:item.current?.title || item.title || item.direction_id || item.case_id || `${product} · 空白写稿`,revision:pending?.payload.revision || item.revision,planId:pending?.payload.plan_id || item.plan_id || '',action,instruction:pending?.payload.instruction || item.plan_note || '',includeBasket:pending ? !!(pending.payload.include_basket || pending.payload.material_ids?.length) : !!(materialIds?.length || item.direction_id),materialIds,materials:[],directions:item.direction_id ? [item] : [],variantSel:pending?.payload.variants ? pending.payload.variants.map(item => item.index) : pending ? [] : null,newVariants:pending?.payload.new_variant_count || 0,settings:{skill_selection:pending?.payload.skill_selection || 'auto'},busy:false,blocked:false,error:pending ? '上次提交结果尚未确认。请重试同一请求核对，不会重复创建任务。' : ''};
     ai.modal = modal;
-    setText('#ai-create-title',actions[action]);setText('#ai-create-case',modal.caseTitle);
+    setText('#ai-create-title',heading);setText('#ai-create-case',modal.caseTitle);
     setText('#ai-create-version',item.case_id ? '基于当前案例版本' : item.direction_id ? '基于当前方向定义' : '空白写稿');
     if ($('#ai-create-advanced')) $('#ai-create-advanced').open = false;
     $('#ai-create-defaults').innerHTML = defaultsMarkup('ai-create');
@@ -282,11 +284,11 @@ window.CaseAI = (() => {
   }
   async function startFromDirection(direction) {
     if (!direction?.direction_id || !direction.product) {toast('请先选择具体方向。',true);return false;}
-    await openCreate({...direction,title:`${direction.direction_id} · ${direction.main_difference || '方向写稿'}`},'variants');return !!ai.modal;
+    await openCreate({...direction,title:`${direction.direction_id} · ${direction.main_difference || '方向写稿'}`},'variants','开始写稿');return !!ai.modal;
   }
   async function startBlank(product = window.WorkbenchShell?.product()) {
     if (!product) {toast('请先选择一个具体产品，再开始空白写稿。',true);return false;}
-    await openCreate({product,title:`${product} · 空白写稿`},'variants');return !!ai.modal;
+    await openCreate({product,title:`${product} · 空白写稿`},'variants','开始写稿');return !!ai.modal;
   }
   async function startWithMaterials(items) {
     if (!Array.isArray(items) || !items.length) {toast('请先选择素材。',true);return false;}
@@ -294,7 +296,7 @@ window.CaseAI = (() => {
     if (!product || items.some(item => item.product && window.WorkbenchShell && !window.WorkbenchShell.matchesProduct(item.product,product))) {toast('请选取同一产品的素材后开始写稿。',true);return false;}
     const material_ids = items.map(item => item.id || item.material_id).filter(Boolean);
     if (material_ids.length !== items.length) {toast('素材信息不完整，请重新读取摘录篮。',true);return false;}
-    await openCreate({product,title:`${product} · 素材写稿`,material_ids},'variants');return !!ai.modal;
+    await openCreate({product,title:`${product} · 素材写稿`,material_ids},'variants','开始写稿');return !!ai.modal;
   }
   function currentProductForMaterials() {return window.WorkbenchShell?.product() || '';}
   async function startWriting(caseId) {
@@ -303,7 +305,7 @@ window.CaseAI = (() => {
     try {
       const item = await api(`/api/cases/${encodeURIComponent(caseId)}`);
       if (window.WorkbenchShell && (window.WorkbenchShell.product() !== product || !window.WorkbenchShell.matchesProduct(item.product))) return false;
-      await openCreate(item,'variants');
+      await openCreate(item,'variants','开始写稿');
       return !!ai.modal;
     } catch (error) {toast(`暂时无法开始写稿：${message(error)}`,true);return false;}
   }
@@ -448,8 +450,8 @@ window.CaseAI = (() => {
       restoreListState(saved);
       ai.page = 'list';ai.task = null;ai.lastList = '';
       ai.listProduct = window.WorkbenchShell?.product() || '';
-      $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 内容创作';
-      $('#content').innerHTML = `<div class="page-heading ai-list-heading"><div><h1>内容创作</h1><p>从方向、案例或空白要求开始，检查候选后采纳为脚本版本。</p></div><button type="button" class="ai-service-pill" id="ai-check-service" title="重新检查 AI 服务"><i></i><span id="ai-service-label">${esc(availabilityText())}</span></button></div><nav class="scripts-tabs" aria-label="内容创作"><a href="${esc(pageURL('#ai'))}" aria-current="page">协作任务</a><a href="${esc(pageURL('#scripts'))}">脚本版本</a><a href="${esc(pageURL('#production'))}">内容制作</a></nav>
+      $('#breadcrumb').innerHTML = '内容创作';
+      $('#content').innerHTML = `<div class="page-heading ai-list-heading"><div><h1>内容创作</h1><p>从方向、案例或空白要求开始，检查候选后采纳为脚本版本。</p></div><button type="button" class="ai-service-pill" id="ai-check-service" title="重新检查 AI 服务"><i></i><span id="ai-service-label">${esc(availabilityText())}</span></button></div><nav class="scripts-tabs" aria-label="内容创作"><a href="${esc(pageURL('#ai'))}" aria-current="page">协作任务</a><a href="${esc(pageURL('#scripts'))}">脚本版本</a><a href="${esc(pageURL('#production'))}">制作单</a></nav>
         <div class="ai-list-toolbar"><div class="ai-segment" role="group" aria-label="按状态筛选">${Object.entries(listFilters).map(([key,[label]]) => `<button type="button" data-ai-filter="${key}" aria-pressed="${(ai.filter || 'all') === key}">${label}<small data-ai-filter-count="${key}"></small></button>`).join('')}</div><label class="ai-group-choice"><span>分组</span><select id="ai-group-by"><option value="direction">按方向</option><option value="case">按案例</option></select></label><button type="button" class="subtle" id="ai-select-toggle" aria-pressed="false">选择</button></div>
         <div class="ai-selection-toolbar" id="ai-selection-toolbar" hidden><div class="ai-selection-main"><label class="select-all"><input type="checkbox" id="ai-select-all">全选</label><span id="ai-selected-count" class="selection-count">已选 0 条</span><span id="ai-selection-note" class="selection-count"></span></div><button type="button" class="danger-outline" id="ai-delete-selected" disabled>${icon('trash')}删除本地记录</button></div><div id="ai-list-error" class="ai-error" role="alert" hidden></div><div id="ai-task-list">${skeletonMarkup(2)}</div>`;
       $('#ai-group-by').value = saved?.groupBy === 'case' ? 'case' : 'direction';
@@ -643,7 +645,7 @@ window.CaseAI = (() => {
   }
   function renderTaskShell(task,keepScroll) {
     ai.page = task.task_id;
-    $('#breadcrumb').innerHTML = '工作空间 <span>/</span> 内容创作 <span>/</span> 任务详情';
+    $('#breadcrumb').innerHTML = '内容创作 <span>/</span> 任务详情';
     $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || pageURL('#ai'))}">${icon('back')}返回内容创作</a><div class="page-heading ai-task-heading"><div><p class="ai-task-meta"><span class="ai-status" id="ai-task-status"></span><span>${esc(actions[task.action] || 'AI 协作')}</span></p><h1>${esc(contextTitle(task))}</h1></div><button type="button" class="secondary compact" id="ai-cancel-task">取消处理</button></div>
       <div class="ai-task-context">${taskContextMarkup(task)}<span>独立候选，不改动案例正文</span></div><p id="ai-stale-warning" class="ai-stale-warning" hidden>案例已经更新。这个任务继续使用开始时的案例版本；若要基于新版讨论，请回到案例重新发起任务。</p>
       <div class="ai-task-progress"><p id="ai-task-progress" role="status"></p><small id="ai-stream-status" class="ai-stream-status"></small></div><p class="ai-error" id="ai-task-error" role="alert" hidden></p><div id="ai-rounds"></div>
@@ -702,7 +704,8 @@ window.CaseAI = (() => {
     markVariantNav();
   }
   function markVariantNav() {
-    const items = ai.variantItems || [], buttons = $$('.ai-variant-item',$('#ai-variant-nav'));
+    const nav = $('#ai-variant-nav');if (!nav) return; // the scroll listener outlives the task page
+    const items = ai.variantItems || [], buttons = $$('.ai-variant-item',nav);
     let current = -1;
     items.forEach((item,index) => {if (item.heading.isConnected && item.heading.getBoundingClientRect().top <= 120) current = index;});
     buttons.forEach((button,index) => button.classList.toggle('is-current',index === current));

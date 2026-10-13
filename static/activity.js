@@ -53,7 +53,8 @@ window.TaskActivity = (() => {
     button.title = available ? "任务提醒与运行日志" : "运行日志暂时不可用，任务可继续执行";
     for (const key of ["active", "unread"]) {
       const badge = button.querySelector(`[data-activity-${key}]`);
-      if (badge) { badge.textContent = key === "active" ? `${counts[key]} 进行中` : `${counts[key]} 未读`; badge.hidden = !counts[key]; }
+      // The word sits in its own span so the phone header can show the number alone as a corner badge.
+      if (badge) { badge.innerHTML = `${Number(counts[key]) || 0}<span class="activity-count-label"> ${key === "active" ? "进行中" : "未读"}</span>`; badge.hidden = !counts[key]; }
     }
   }
   function schedule(delay) { clearTimeout(timer); if (initialized && enabled()) timer = setTimeout(() => void poll(), delay); }
@@ -353,6 +354,8 @@ window.TaskActivity = (() => {
     dialog.querySelector("#activity-more").onclick = () => void loadPanel(true);
     dialog.querySelector("#activity-read-all").onclick = () => void markRead([], true);
     dialog.addEventListener("click", event => {
+      // The panel drops down from its button like a menu, so a click beside it closes it.
+      if (event.target === dialog) { const box = dialog.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) { dialog.close(); return; } }
       const filter = event.target.closest("[data-activity-filter]");
       if (filter) { panel.filter = filter.dataset.activityFilter; dialog.querySelectorAll("[data-activity-filter]").forEach(button => button.setAttribute("aria-pressed", String(button === filter))); void loadPanel(); }
       const log = event.target.closest("[data-activity-log]"), result = event.target.closest("[data-activity-result]");

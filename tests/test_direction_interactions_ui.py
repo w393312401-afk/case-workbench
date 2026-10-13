@@ -80,7 +80,7 @@ class DirectionInteractionTests(unittest.TestCase):
         page.locator("#direction-definition").wait_for()
         page.locator('#direction-definition .dir-ref[title]').first.wait_for()
         self.assertEqual(reads, [])
-        page.locator(".back-link").click()
+        page.locator("#navigate-up").click()
         page.locator("#direction-filters").wait_for()
         reads.clear()
 
@@ -134,7 +134,7 @@ class DirectionInteractionTests(unittest.TestCase):
         page.locator("#direction-definition").wait_for()
         full_html = page.locator("#content").inner_html()
         page.unroute(pattern, full_response)
-        page.locator(".back-link").click()
+        page.locator("#navigate-up").click()
         page.locator("#direction-filters").wait_for()
         page.locator('.dir-row[data-direction-id="202H-S1"] a').first.click()
         page.locator("#direction-definition").wait_for()

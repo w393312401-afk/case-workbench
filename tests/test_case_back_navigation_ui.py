@@ -38,21 +38,21 @@ class CaseBackNavigationBrowserTests(unittest.TestCase):
         page.wait_for_function('window.scrollY > 300')
         scroll = page.evaluate('window.scrollY')
         card.click()
-        page.locator('.case-dock-back').wait_for()
+        page.locator('.case-dock-title').wait_for()
         return scroll
 
     def test_page_breadcrumb_top_and_escape_preserve_filters_sort_and_scroll(self):
         page = self.filtered_library()
         list_hash = page.evaluate('location.hash')
-        for action in ('page', 'breadcrumb', 'top', 'escape'):
+        for action in ('breadcrumb', 'top', 'escape'):
             with self.subTest(action=action):
                 scroll = self.open_case(page)
                 parent = page.locator('#breadcrumb').get_by_role('link', name='案例库', exact=True)
                 for link in (parent, page.locator('#navigate-up'), page.locator('.case-dock-back')):
                     self.assertEqual(link.get_attribute('href'), list_hash)
-                if action == 'page':
-                    page.locator('.case-dock-back').click()
-                elif action == 'breadcrumb':
+                # On desktop the pinned top-bar arrow replaces the in-page link, which stays for phones.
+                self.assertFalse(page.locator('.case-dock-back').is_visible())
+                if action == 'breadcrumb':
                     parent.click()
                 elif action == 'top':
                     page.locator('#navigate-up').click()

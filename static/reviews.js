@@ -390,8 +390,8 @@
     cancelSearch();
     const f = rev.filters, s = rev.summary, sources = s.platforms.filter((p) => p.total).length;
     const select = (id, label, options, value) => `<label class="rev-field"><span>${label}</span><select id="${id}">${options.map(([k, v]) => `<option value="${esc(k)}" ${String(k) === String(value) ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>`;
-    $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 用户声音";
-    $("#content").innerHTML = `<div id="rev-page"><div class="page-heading rev-heading"><div><h1>用户声音</h1><p>${num(s.default_visible)} 条真实评论，来自 ${sources} 个来源${s.synced_at ? ` · 最近同步 ${esc(s.synced_at.slice(0, 16).replace("T", " "))}` : ""}。评论里的说法都未核实，不含评论者姓名。<button type="button" class="subtle rev-coverage-link" id="rev-coverage-toggle" aria-expanded="false" aria-controls="rev-coverage">数据来源说明</button></p></div><div class="perf-actions"><button type="button" class="subtle" id="rev-basket-toggle"></button><button type="button" class="secondary" id="rev-copy-all">${icon("copy")}复制当前结果</button><button type="button" id="rev-sync" hidden>重新同步</button></div></div>
+    $("#breadcrumb").innerHTML = "用户声音";
+    $("#content").innerHTML = `<div id="rev-page"><div class="page-heading rev-heading"><div><h1>用户声音</h1><p>${num(s.default_visible)} 条真实评论，来自 ${sources} 个来源${s.synced_at ? ` · 最近同步 ${esc(s.synced_at.slice(0, 16).replace("T", " "))}` : ""}。评论里的说法都未核实，不含评论者姓名。<button type="button" class="subtle rev-coverage-link" id="rev-coverage-toggle" aria-expanded="false" aria-controls="rev-coverage">数据来源说明</button></p></div><div class="perf-actions"><button type="button" class="subtle" id="rev-basket-toggle"></button><button type="button" class="secondary" id="rev-copy-all">${icon("copy")}复制当前结果</button><button type="button" class="secondary" id="rev-sync">${icon("refresh")}重新同步</button></div></div>
       <div id="rev-sync-result" role="status"></div><p class="rev-records" id="rev-records"></p>${coverageMarkup()}
       <div class="rev-searchbar"><label class="search">${icon("search")}<input id="rev-q" aria-label="搜索评论" placeholder="搜索评论：英文原词，或夹具、晃动、价格等中文词" value="${esc(f.q)}"></label><button type="button" class="secondary rev-filter-open" id="rev-filter-open" aria-haspopup="dialog" aria-controls="rev-drawer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>筛选<span class="rev-filter-count" id="rev-filter-count" hidden></span></button></div>
       <div class="rev-sources" id="rev-sources" role="group" aria-label="来源"></div>
@@ -759,7 +759,7 @@
   async function route() {
     const hash = pageHash(), product = currentProduct(), sequence = ++routeSequence;
     const isCurrent = () => sequence === routeSequence && hash === pageHash();
-    $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 用户声音";
+    $("#breadcrumb").innerHTML = "用户声音";
     // A background route check must leave the current draft to its scheduled search.
     if (searchTimer !== null && searchField?.isConnected && searchHash === hash && product === renderedProduct) return;
     const restored = window.WorkbenchShell?.listState?.("reviews", product);

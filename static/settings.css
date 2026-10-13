@@ -91,3 +91,10 @@
   .settings-backup-directory input, .settings-backup-grid input { font-size: 16px; }
   .settings-backup-item { flex-direction: column; gap: 4px; }
 }
+/* Section bar: pinned under the top bar on desktop so every group is one click away. */
+.settings-sections { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 20px; padding: 8px 0; background: var(--paper); }
+.settings-sections button { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: var(--font-meta); }
+.settings-sections button:hover { color: var(--accent); border-color: var(--accent); }
+.settings-group { scroll-margin-top: calc(var(--topbar-h) + 64px); }
+@media (min-width: 761px) { .settings-sections { position: sticky; top: var(--topbar-h); z-index: 5; } }
+@media (max-width: 760px) { .settings-sections { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; } .settings-sections button { flex-shrink: 0; } .settings-group { scroll-margin-top: 16px; } }

@@ -196,6 +196,21 @@ This paper cut? Thirty seconds ago, this knife was useless. Here's the trick: a 
     { id: "SCR-000000000003", product, direction_id: "D-省时", title: "厨师朋友不信 · 身份认同", version: 1, status: "draft", updated_at: `${day(0)}T09:00:00`, text: "My chef friend said guided sharpeners are for beginners. So we raced." },
     { id: "SCR-000000000004", product, direction_id: null, title: "露营刀开刃前后", version: 3, status: "reviewed", updated_at: `${day(-6)}T10:00:00`, text: "Same knife, two weeks apart. One trip with a dull edge was enough." },
   ];
+  // Script detail and one video production order, so those pages can be designed without real records.
+  const scriptDetail = (s) => ({ revision: `demo-${revision}`, video: null, case: null,
+    script: { ...s, script_id: s.id, family_id: s.id, parent_id: null, case_id: "", source: null, translation_zh: "", video_id: s.video_id || "", created_at: s.updated_at,
+      published_on: s.status === "published" ? s.updated_at.slice(0, 10) : "", history: [{ at: s.updated_at, note: "用户核对并保存这一版本", status: s.status }] },
+    sales_data: { status: s.video_id ? "not_found" : "missing_video_id", source_label: "销售数据表", metrics: {}, video: null,
+      evidence: { source: "销售数据表", status: "unverified", context: "演示数据没有销售数据表。" } } });
+  const productionModels = [{ id: "eleven_v4", name: "Eleven v4", settings: ["stability", "similarity_boost"], max_chars: 10000 }];
+  const productSettings = { project: product, code: "202", fps: "29.97", width: 1080, height: 1920, audio_bin: "音频字幕", timeline_bin: "时间线" };
+  const demoJob = { id: "PRD-000000000001", title: demoScripts[0].title, product, direction_id: "D-锋利感", variant_label: "变体 A · 问题-解决", archived: false, creator: "",
+    edits: [], timelines: [], takes: [], selected_take: "", status: "draft", voicing: false, recovery_operations: [], problems: [], text_sha256: "demo",
+    script_id: demoScripts[0].id, script_family: demoScripts[0].id, script_version: 2, source: { round_id: "", task_id: "", variant_index: null },
+    created_at: `${day(-2)}T16:00:00`, updated_at: `${day(-1)}T10:00:00`, history: [{ at: `${day(-2)}T16:00:00`, event: "created", note: "按已采纳脚本版本创建制作单" }],
+    lines: [["My knife couldn't even cut a tomato.", "我的刀连番茄都切不动。", "钝刀压烂番茄特写", "钝刀, 番茄"],
+      ["Thirty seconds on this sharpener —", "在这台磨刀器上 30 秒——", "夹刀、看刻度、来回 6 次", "磨刀, 刻度"],
+      ["and now it slices paper clean.", "现在切纸干净利落。", "切纸、切番茄对比", "切纸"]].map(([spoken, zh, proof, tags], i) => ({ number: i + 1, spoken, zh, proof, tags, evidence: "" })) };
   const json = (body, status = 200) => Promise.resolve(new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }));
   window.fetch = async (input, init = {}) => {
     const url = new URL(typeof input === "string" ? input : input.url, location.origin);
@@ -208,6 +223,16 @@ This paper cut? Thirty seconds ago, this knife was useless. Here's the trick: a 
       if (path === "/api/performance/videos") return json({ videos: videoList });
       if (path === "/api/ai/tasks") return json({ tasks });
       if (path === "/api/creation") return json({ plans: plans.filter((p) => ["pending", "working"].includes(p.status)), scripts: demoScripts, revision: `demo-${revision}` });
+      const oneScript = path.match(/^\/api\/scripts\/(SCR-\d{12})$/);
+      if (oneScript) { const s = demoScripts.find((x) => x.id === oneScript[1]); return s ? json(scriptDetail(s)) : json({ error: "这条文案版本不存在。" }, 404); }
+      if (path === "/api/production") return json({ voices: [], defaults: {}, settings: { creators: [], products: {} }, carousels: [], readings: [], jobs: [demoJob],
+        revision: `demo-${revision}`, product_settings: productSettings, models: productionModels, default_model: "eleven_v4" });
+      if (path === `/api/production/jobs/${demoJob.id}`) {
+        const spoken = demoJob.lines.map((line) => line.spoken);
+        return json({ job: demoJob, revision: `demo-${revision}`, readings: [], tts: { lines: spoken, text: spoken.join("\n"), characters: spoken.join("\n").length, substitutions: 0 },
+          historical_baseline_restore: true, recovery_operations: [], variant: null, voices: [], defaults: {}, models: productionModels, default_model: "eleven_v4", creators: [],
+          script: { id: demoScripts[0].id, title: demoScripts[0].title, status: demoScripts[0].status, version: 2, product, direction_id: "D-锋利感" }, product_settings: productSettings, today: "261012" });
+      }
       const oneCase = path.match(/^\/api\/cases\/(PVR-\d{12})$/);
       if (oneCase) {
         const c = cases.find((x) => x.case_id === oneCase[1]);

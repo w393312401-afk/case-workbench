@@ -75,7 +75,7 @@
 .dir-filters .search input:focus{background:var(--surface);border-color:var(--accent);outline:3px solid color-mix(in srgb,var(--accent) 22%,transparent);outline-offset:0}
 .dir-segment{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--fill)}
 .dir-segment button{display:inline-flex;align-items:center;gap:5px;padding:6px 11px;border-radius:8px;background:transparent;color:var(--muted);font-size:13px;font-weight:500;white-space:nowrap}
-.dir-segment button small{font-size:11px;color:var(--muted-soft);font-variant-numeric:tabular-nums}
+.dir-segment button small{font-size:12px;color:var(--muted-soft);font-variant-numeric:tabular-nums}
 .dir-segment button:hover{color:var(--ink)}
 .dir-segment button[aria-pressed=true]{background:var(--surface);color:var(--ink);box-shadow:0 1px 3px #0000001f,0 0 0 .5px #0000000a}
 @media(prefers-color-scheme:dark){.dir-segment button[aria-pressed=true]{background:#636366}}
@@ -97,7 +97,7 @@
 a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 .dir-sub{font-size:12px;color:var(--muted-soft);line-height:1.6;margin-top:2px;overflow-wrap:anywhere}
 .dir-flags{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.dir-flag{display:inline-flex;align-items:center;padding:1px 8px;border-radius:999px;background:var(--surface-warm);color:var(--warm-ink);font-size:11px;font-weight:500;cursor:help;position:relative;z-index:1}
+.dir-flag{display:inline-flex;align-items:center;padding:1px 8px;border-radius:999px;background:var(--surface-warm);color:var(--warm-ink);font-size:12px;font-weight:500;cursor:help;position:relative;z-index:1}
 .dir-side{display:flex;align-items:center;gap:6px;position:relative;z-index:1}
 .dir-status{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;background:var(--fill);color:var(--muted);font-size:12px;font-weight:500;white-space:nowrap}
 .dir-status.is-good{background:var(--surface-success);color:var(--success-ink)}
@@ -142,14 +142,14 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 #content .dir-variant:first-child{border-top:0;padding-top:6px}
 .dir-variant-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px}
 .dir-variant-head strong{font-size:13px;font-weight:600}
-.dir-badge{padding:1px 8px;border-radius:999px;background:var(--surface-tint);color:var(--accent-text);font-size:11px;font-weight:600}
+.dir-badge{padding:1px 8px;border-radius:999px;background:var(--surface-tint);color:var(--accent-text);font-size:12px;font-weight:600}
 .dir-progression select{appearance:none;-webkit-appearance:none;border:0;border-radius:999px;background:var(--fill);color:var(--ink);font-size:12px;padding:3px 10px;cursor:pointer}
 .dir-progression select:hover{background:var(--fill-hover)}
 .dir-variant-head .subtle{font-size:12px;padding:3px 8px;margin-left:auto}
 .dir-change{font-size:12px;color:var(--muted);margin-top:8px}
 .dir-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:-6px -22px 12px;padding:0 14px;overflow-x:auto;scrollbar-width:none}
 .dir-tabs button{display:inline-flex;align-items:center;gap:6px;padding:10px 10px 11px;background:transparent;color:var(--muted-soft);font-size:13px;font-weight:500;white-space:nowrap;border-bottom:2px solid transparent;margin-bottom:-1px}
-.dir-tabs button small{font-size:11px;padding:0 6px;border-radius:9px;background:var(--fill);color:var(--muted-soft)}
+.dir-tabs button small{font-size:12px;padding:0 6px;border-radius:9px;background:var(--fill);color:var(--muted-soft)}
 .dir-tabs button[aria-selected=true]{color:var(--ink);border-bottom-color:var(--accent)}
 .dir-empty{font-size:13px;color:var(--muted-soft);padding:8px 0}
 .dir-related .direction-related-list{display:flex;flex-direction:column;gap:0}
@@ -163,7 +163,7 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 .dir-aside-card{background:var(--surface);border-radius:14px;box-shadow:0 1px 2px #0000000a;padding:16px 18px}
 .dir-aside-card h2{font-size:13px;font-weight:600;color:var(--muted-soft);margin:0 0 10px}
 .dir-aside-title{display:flex;gap:8px;align-items:baseline;font-size:14px;font-weight:600;line-height:1.5}
-.dir-aside-title .dir-code{flex-shrink:0;min-width:30px;height:20px;font-size:11px}
+.dir-aside-title .dir-code{flex-shrink:0;min-width:30px;height:20px;font-size:12px}
 .dir-aside-text{font-size:13px;color:var(--muted);line-height:1.6;margin-top:6px}
 .dir-facts{display:grid;grid-template-columns:44px 1fr;gap:6px 10px;margin:10px 0 0;font-size:13px}
 .dir-facts dt{color:var(--muted-soft)}

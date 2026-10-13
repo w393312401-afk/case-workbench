@@ -152,7 +152,7 @@ test('choosing a writing case opens the existing variant dialog without posting 
   load(env, 'ai.js');
   assert.equal(await env.context.window.CaseAI.startWriting('C1'), true);
   assert.equal(env.node('#ai-create-dialog').open, true);
-  assert.equal(env.node('#ai-create-title').textContent, '生成变体');
+  assert.equal(env.node('#ai-create-title').textContent, '开始写稿');
   assert.equal(env.node('#ai-create-instruction').value, '');
   assert.equal(env.calls.some(call => call.options?.method === 'POST'), false);
 });

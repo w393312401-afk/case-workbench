@@ -279,7 +279,7 @@ window.CaseDirections = (() => {
     const firstRelated=(related.find(([, ,list])=>list.length)||related[0])[0];
     const relatedMarkup=([key,,list,markup,emptyText])=>key==="tasks"&&data.tasks_pending===true?'<p class="context-note" role="status">正在读取 AI 任务…</p>':list.length?`<div class="direction-related-list">${markup}</div>`:`<p class="dir-empty">${esc(emptyText)}</p>`;
     const progressionSelect=(variant,index)=>`<label class="dir-progression"><span class="sr-only">推进结构</span><select data-variant-progression="${index}" aria-label="第 ${index+1} 条的推进结构"><option value="">推进结构未标注</option>${progressions.map(item=>`<option ${variant.progression===item?"selected":""}>${esc(item)}</option>`).join("")}${variant.progression&&!progressions.includes(variant.progression)?`<option selected>${esc(variant.progression)}</option>`:""}</select></label>`;
-    $("#breadcrumb").innerHTML=`工作空间 <span>/</span> 卖点与方向 <span>/</span> ${esc(d.direction_id)}`;
+    $("#breadcrumb").innerHTML=`卖点与方向 <span>/</span> ${esc(d.direction_id)}`;
     $("#content").innerHTML=`<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || directionURL(d.product))}">${icon("back")}返回卖点与方向</a>
       <div class="page-heading dir-detail-heading"><div><p class="dir-meta">${p?`<span class="dir-code tier-${esc(p.tier)}">${esc(p.code)}</span>`:""}<span>${esc(d.direction_id)}</span>${statusChip(d.status)}${d.lead_tier&&d.lead_tier!=="S"?`<span class="dir-flag" title="${esc(d.notes||"方向应由 S 级卖点主打")}">${esc(d.lead_tier)} 级主打</span>`:""}</p><h1>${esc(p?.title || d.main_difference)}</h1></div>
         <div class="dir-detail-actions"><button type="button" class="secondary" id="direction-edit">${icon("edit")}编辑方向</button><button type="button" class="primary" id="direction-write">${icon("edit")}用这个方向写稿</button></div></div>
@@ -454,7 +454,7 @@ window.CaseDirections = (() => {
   async function route(force=false) {
     cancelFilterTimer();composing=false;
     const sequence=++requestSequence,values=routeValues();
-    $("#breadcrumb").innerHTML="工作空间 <span>/</span> 卖点与方向";
+    $("#breadcrumb").innerHTML="卖点与方向";
     const prior=listView;
     if(!force&&!values.id&&prior&&prior.form===$("#direction-filters")&&prior.values.hash!==values.hash
       &&prior.values.product===values.product&&prior.values.archive===values.archive

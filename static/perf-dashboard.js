@@ -205,8 +205,10 @@
   }
 
   // A card with a title, the latest figure and how it moved, then the chart.
-  function card({ title, note = "", head, chart, legend = "" }) {
-    return `<div class="perf-mini"><div class="perf-mini-head"><span>${esc(title)}</span>${head ? `<strong>${esc(head[0])}</strong><small>${esc(head[1])}</small>` : ""}</div>${note ? `<p class="perf-chart-note">${esc(note)}</p>` : ""}${chart}${legend}<div class="perf-tooltip" role="status" hidden></div></div>`;
+  // Gap weeks draw only a short dash, so charts that contain one say what it means instead of leaving a silent hole.
+  const gapNote = '<p class="perf-gap-note"><i aria-hidden="true"></i>短横的周导出有缺口，不计入走势</p>';
+  function card({ title, note = "", head, chart, legend = "", gaps = false }) {
+    return `<div class="perf-mini"><div class="perf-mini-head"><span>${esc(title)}</span>${head ? `<strong>${esc(head[0])}</strong><small>${esc(head[1])}</small>` : ""}</div>${note ? `<p class="perf-chart-note">${esc(note)}</p>` : ""}${chart}${legend}${gaps ? gapNote : ""}<div class="perf-tooltip" role="status" hidden></div></div>`;
   }
 
   function change(values, fmt) {
@@ -228,7 +230,7 @@
       const id = `c${serial++}`, values = series(read);
       tipFor(id, ws.map((w, i) => ({ value: w.complete ? fmt(values[i]) : "数据不全", when: `${w.week} 起一周`, lines: w.complete ? tipLines(w).filter(([label]) => label !== extra) : [["", note(w)]] })));
       const o = { tick, x: (i) => weekLabel(ws[i]) };
-      return card({ title, head: change(values, fmt), chart: (kind === "line" ? line : columns)(id, title, values, o) });
+      return card({ title, head: change(values, fmt), chart: (kind === "line" ? line : columns)(id, title, values, o), gaps: values.includes(null) });
     };
     return {
       gmv: make("gmv", "每周归因 GMV", (w) => w.gmv, money, (v) => compact(v, "$"), "columns", "GMV"),
@@ -260,7 +262,7 @@
       return card({
         title, head: latest ? [fmt(totalOf(latest)), `${latest.week.slice(5)} 起一周`] : null,
         chart: stacked(id, title, series, { n: ws.length, gap: (i) => !ws[i].complete, tick, x: (i) => weekLabel(ws[i]) }),
-        legend: legendFor(names, S, legendValue, legendFmt),
+        legend: legendFor(names, S, legendValue, legendFmt), gaps: ws.some((w) => !w.complete),
       });
     };
     const gmvOf = (name) => ws.reduce((sum, w) => sum + (w.byAccount.get(name) || 0), 0);

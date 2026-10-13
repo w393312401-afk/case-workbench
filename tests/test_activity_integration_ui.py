@@ -39,7 +39,9 @@ class ActivityIntegrationBrowserTests(unittest.TestCase):
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 390)
         button_box = page.locator("#task-activity-open").bounding_box()
         product_box = page.locator("#global-product").bounding_box()
-        self.assertGreaterEqual(button_box["y"], product_box["y"] + product_box["height"])
+        # The task button shares the single phone header row, to the right of the product picker.
+        self.assertGreaterEqual(button_box["x"], product_box["x"] + product_box["width"])
+        self.assertLess(abs(button_box["y"] + button_box["height"] / 2 - product_box["y"] - product_box["height"] / 2), 4)
         page.locator("#task-activity-open").click()
         expect(page.locator("#task-activity-dialog")).to_be_visible()
         self.assertTrue(page.evaluate("document.querySelector('#task-activity-dialog').scrollWidth <= document.querySelector('#task-activity-dialog').clientWidth"))

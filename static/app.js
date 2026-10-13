@@ -186,8 +186,7 @@ try {
 } catch {
   /* Navigation still works without browser storage. */
 }
-let toastTimer,
-  routeSequence = 0,
+let routeSequence = 0,
   mutationSequence = 0;
 
 function caseLocation(hash = location.hash) {
@@ -306,13 +305,29 @@ async function api(path, options = {}) {
   // Page modules decorate and filter their data; each reader owns its copy.
   return structuredClone(result);
 }
+// Messages stack instead of replacing each other, so a failure is not wiped out by the next success.
+// Warnings stay until closed; the same text shown again moves to the bottom instead of repeating.
 function toast(message, warning = false) {
-  const el = $("#toast");
-  el.textContent = message;
-  el.classList.toggle("warning", warning);
-  el.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (el.hidden = true), warning ? 9500 : 3500);
+  const stack = $("#toast");
+  const text = String(message);
+  const same = [...stack.children].find((item) => item.dataset.text === text);
+  const item = same || document.createElement("div");
+  clearTimeout(item.timer);
+  item.className = `toast-item${warning ? " warning" : ""}`;
+  item.dataset.text = text;
+  item.innerHTML = `<p></p><button type="button" class="toast-close" aria-label="关闭提示">${icon("close")}</button>`;
+  item.querySelector("p").textContent = text;
+  item.querySelector("button").onclick = () => dismissToast(item);
+  stack.append(item);
+  while (stack.children.length > 3) dismissToast(stack.firstElementChild);
+  stack.hidden = false;
+  if (!warning) item.timer = setTimeout(() => dismissToast(item), 3500);
+}
+function dismissToast(item) {
+  clearTimeout(item.timer);
+  const stack = item.parentElement;
+  item.remove();
+  if (stack && !stack.children.length) stack.hidden = true;
 }
 function showError(message) {
   $("#error-banner").textContent = message;
@@ -850,7 +865,7 @@ async function refresh(quiet = false) {
   }
 }
 function renderFiles() {
-  $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 本地文件";
+  $("#breadcrumb").innerHTML = "本地文件";
   const rows = [
     ["records", "正式案例记录", "保存原始资料、当前版本和每次修订。"],
     ["evidence", "视频与证据附件", "视频、截图和转写文件的保存位置。"],
@@ -1120,9 +1135,11 @@ document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && target === $("#case-search")) target.blur();
     return;
   }
-  if ($$("dialog[open]").length) return;
+  // A docked (non-modal) panel keeps the page's shortcuts working, except for keys pressed inside it.
+  if (event.defaultPrevented || target.closest?.("dialog") || $$("dialog[open]").some((dialog) => dialog.matches(":modal"))) return;
   if (event.key === "Escape") {
-    const destination = ["home", "library"].includes(state.routeKind) ? null : window.WorkbenchShell.parentURL();
+    // Like the top-bar arrow, Escape returns only from detail pages; module pages are left through the sidebar.
+    const destination = window.WorkbenchShell.parse().tail.length ? window.WorkbenchShell.parentURL() : null;
     if (destination) {
       event.preventDefault();
       location.hash = destination;

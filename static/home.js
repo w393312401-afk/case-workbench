@@ -164,7 +164,7 @@ window.WorkbenchHome = (() => {
     const saved = window.WorkbenchShell?.listState?.("home", product);
     if (["due", "tasks", "plans", "cases"].includes(saved?.tab)) chosenTab = saved.tab;
     else if (!$("[data-home-tab]")) chosenTab = null;
-    $("#breadcrumb").innerHTML = "工作空间 <span>/</span> 工作概览";
+    $("#breadcrumb").innerHTML = "工作概览";
     if (!$("#home-page")) $("#content").innerHTML = '<div id="home-page"><div class="page-heading"><div><span class="eyebrow">OVERVIEW</span><h1>工作概览</h1><p role="status">正在汇总本周工作…</p></div></div></div>';
     const isCurrent = () => seq === sequence && selectedProduct() === product && window.WorkbenchShell?.parse().page === "home";
     const results = Array.from({length:3}, () => ({status:"pending"}));

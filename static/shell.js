@@ -7,7 +7,7 @@
   const products = new Map([["202H", "SHARPAL 202H"]]);
   const listContexts = new Map(), detailContexts = new Map();
   const navigationStorageKey = "workbench-navigation-v1";
-  const pageLabels = { home: "工作概览", library: "案例库", directions: "卖点与方向", videos: "视频数据", reviews: "用户声音", ai: "内容创作", scripts: "脚本版本", production: "内容制作", settings: "设置" };
+  const pageLabels = { home: "工作概览", library: "案例库", directions: "卖点与方向", videos: "视频数据", reviews: "用户声音", ai: "内容创作", scripts: "脚本版本", production: "制作单", settings: "设置" };
   let navigationRoute = null, restoringList = null;
   let breadcrumbSource = null, breadcrumbHTML = null;
   try {
@@ -169,7 +169,7 @@
     const node = document.querySelector("#breadcrumb");
     if (!node) return;
     const parsed = parse(), page = parsed.page === "case" ? "library" : parsed.page;
-    const crumbs = [{ label: "工作空间", href: listURL("home", parsed.product) }];
+    const crumbs = [];
     if (["scripts", "production"].includes(page)) crumbs.push({ label: "内容创作", href: listURL("ai", parsed.product) });
     crumbs.push({ label: pageLabels[page] || "案例库", href: parsed.tail.length ? parentURL(parsed) : null });
     if (parsed.tail.length) {
@@ -187,10 +187,10 @@
     }
     const up = document.querySelector("#navigate-up");
     if (up) {
-      // Every module offers a return control; only the workspace home has no parent.
-      up.hidden = parsed.page === "home" && !parsed.tail.length;
+      // Only detail pages offer a return control; module pages are reached from the sidebar and their own tabs.
+      up.hidden = !parsed.tail.length;
       up.href = parentURL(parsed);
-      const parentLabel = parsed.page === "case" ? "案例库" : parsed.tail.length ? pageLabels[page] : ["scripts", "production"].includes(page) ? "内容创作" : "工作概览";
+      const parentLabel = parsed.page === "case" ? "案例库" : pageLabels[page] || "上一级";
       up.title = `返回${parentLabel}`;
       up.setAttribute("aria-label", up.title);
     }
@@ -311,17 +311,16 @@
     } catch (error) { toast(error.message, true); }
     finally { button.disabled = false; }
   }
+  // The blue top-bar button only creates or starts something, and a module keeps the same one on all its tabs.
+  // Sync, refresh and check actions sit in each page's own header, next to what they update.
   const actions = {
     home: ["开始写稿", "plus", () => window.CaseAI?.startBlank()],
     library: ["收录案例", "plus", () => openEditor(null)],
-    case: ["用这个案例写稿", "edit", () => { const id = state.detail?.case_id; if (id) void window.CaseAI?.startWriting(id); else editCurrentCase(); }],
+    case: ["用这个案例写稿", "spark", () => { const id = state.detail?.case_id; if (id) void window.CaseAI?.startWriting(id); else editCurrentCase(); }],
     directions: ["新建方向", "plus", () => window.CaseDirections?.openCreate()],
-    videos: ["同步数据", "refresh", () => document.querySelector("#perf-sync")?.click()],
-    reviews: ["重新同步", "refresh", () => document.querySelector("#rev-sync")?.click()],
     ai: ["开始写稿", "plus", () => window.CaseAI?.startBlank()],
-    scripts: ["保存脚本", "plus", () => window.CaseScripts?.openManual()],
-    production: ["刷新", "refresh", () => window.CaseProduction?.route(true, true)],
-    settings: ["重新检查", "refresh", () => window.WorkbenchSettings?.render()],
+    scripts: ["开始写稿", "plus", () => window.CaseAI?.startBlank()],
+    production: ["开始写稿", "plus", () => window.CaseAI?.startBlank()],
   };
   function initializeSidebar() {
     const sidebar = document.querySelector("#workbench-sidebar");
@@ -516,8 +515,13 @@
     });
     const columns = document.querySelector("#library-navigation");
     if (columns) columns.hidden = true;
-    const button = document.querySelector("#add-top"), action = actions[parsed.page];
-    if (button && action) { button.innerHTML = `${icon(action[1])}${action[0]}`; button.onclick = action[2]; }
+    // Task, script and order pages have their own main action (采纳、继续制作…), so the top bar does not add a second one.
+    const ownAction = parsed.tail.length && ["ai", "scripts", "production"].includes(parsed.page);
+    const button = document.querySelector("#add-top"), action = ownAction ? null : actions[parsed.page];
+    if (button) {
+      button.hidden = !action;
+      if (action) { button.innerHTML = `${icon(action[1])}${action[0]}`; button.onclick = action[2]; }
+    }
     const importer = document.querySelector("#import-video-top");
     if (importer) importer.hidden = !["library", "case"].includes(parsed.page);
     registerProducts(state.cases);

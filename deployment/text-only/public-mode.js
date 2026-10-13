@@ -20,7 +20,7 @@
     "[data-material-save]", "[data-material-remove]", "[data-material-theme]",
     "[data-home-plan-write]", "[data-home-plan]", "[data-direction-plan]",
     "#direction-write", "#direction-edit", "#direction-add-variant", "[data-edit-point]", "[data-use-point]",
-    "#script-new", "#script-derive", "#script-case", "#script-release", "#script-write-source",
+    "#script-new", "#script-manual-open", "#script-derive", "#script-case", "#script-release", "#script-write-source",
     "#script-use-selection", "#ai-start-blank", "[data-ai-action]", "#ai-cancel-task",
     "#ai-delete-selected", "[data-adopt-script]", "[data-write-case]", "#ai-check-service",
     "#ai-continue-form", ".ai-continue-card", ".ai-selection-toolbar", ".ai-task-select",

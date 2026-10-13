@@ -22,8 +22,8 @@
 .activity-row-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .activity-row h3 { font-size: 14px; line-height: 1.6; margin: 0; }
 .activity-row p { font-size: 13px; margin: 7px 0; color: var(--muted); white-space: pre-wrap; }
-.activity-row small { color: var(--muted-soft); font-size: 11px; }
-.activity-status { flex-shrink: 0; font-size: 11px; color: var(--muted); background: var(--surface-alt); padding: 3px 7px; border-radius: 9px; }
+.activity-row small { color: var(--muted-soft); font-size: 12px; }
+.activity-status { flex-shrink: 0; font-size: 12px; color: var(--muted); background: var(--surface-alt); padding: 3px 7px; border-radius: 9px; }
 .activity-status.is-active { background: var(--surface-blue); color: var(--blue-ink); }
 .activity-status.is-warning { background: var(--surface-warm); color: var(--warm-ink); }
 .activity-row-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
@@ -42,10 +42,10 @@
 .activity-log-summary { color: var(--muted-soft); font-size: 12px; margin-bottom: 12px; }
 .activity-log-lines { margin: 0; padding: 0; list-style: none; }
 .activity-log-lines li { display: grid; grid-template-columns: 124px minmax(0, 1fr); gap: 14px; padding: 10px 0; border-top: 1px solid var(--line); }
-.activity-log-lines time { font-size: 11px; color: var(--muted-soft); font-variant-numeric: tabular-nums; }
+.activity-log-lines time { font-size: 12px; color: var(--muted-soft); font-variant-numeric: tabular-nums; }
 .activity-log-lines strong { font-weight: 550; font-size: 12px; }
 .activity-log-lines p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.7; margin: 4px 0; }
-.activity-log-lines small { font-size: 11px; color: var(--muted-soft); }
+.activity-log-lines small { font-size: 12px; color: var(--muted-soft); }
 .activity-log-error { font-size: 12px; color: var(--warm-ink); margin: 8px 0; }
 .activity-notices { position: fixed; right: 20px; bottom: 20px; z-index: 24; display: grid; gap: 10px; width: min(370px, calc(100vw - 32px)); pointer-events: none; }
 .activity-notice { display: flex; pointer-events: auto; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 12px; box-shadow: 0 8px 30px #0002; padding: 12px 8px 12px 14px; }
@@ -53,15 +53,19 @@
 .activity-notice-view strong, .activity-notice-view span, .activity-notice-view small { display: block; overflow-wrap: anywhere; }
 .activity-notice-view strong { font-size: 13px; }
 .activity-notice-view span { font-size: 12px; margin: 5px 0; color: var(--muted); }
-.activity-notice-view small { font-size: 11px; color: var(--accent-text); }
+.activity-notice-view small { font-size: 12px; color: var(--accent-text); }
 .activity-notice-close { align-self: flex-start; font-size: 18px; padding: 0 8px; }
 .activity-settings .settings-actions { margin-top: 10px; }
 @media (max-width: 700px) { .activity-trigger { gap: 3px; padding: 7px 8px; } .activity-count { font-size: 10px; padding: 2px 4px; } }
-/* The phone's product picker and settings occupy the first fixed header row. */
+/* On phones the task button joins the single header row as an icon; its counts become corner badges. */
 @media (max-width: 760px) {
-  body:not(.public-text-mode) .topbar:has(#task-activity-open:not([hidden])) { height: 100px; align-items: flex-start; padding-top: 8px; }
-  .topbar-right > .activity-trigger { position: absolute; top: 55px; left: 10px; width: calc(100% - 20px); height: 35px; min-height: 35px; justify-content: flex-start; gap: 8px; padding: 6px 10px; }
-  .activity-trigger .activity-count { font-size: 11px; }
+  .topbar-right > .activity-trigger { position: relative; width: 40px; height: 40px; min-height: 40px; padding: 0; justify-content: center; gap: 0; }
+  .topbar-right > .activity-trigger > span:not([data-icon]):not(.activity-count) { display: none; }
+  .topbar-right > .activity-trigger svg { width: 19px; height: 19px; }
+  .activity-trigger .activity-count { position: absolute; right: -5px; min-width: 16px; padding: 0 4px; font-size: 10px; line-height: 16px; text-align: center; }
+  .activity-trigger .activity-count[data-activity-active] { top: -5px; }
+  .activity-trigger .activity-count[data-activity-unread] { bottom: -5px; }
+  .activity-trigger .activity-count-label { display: none; }
   .activity-notices { bottom: calc(var(--mobile-tabs, 60px) + env(safe-area-inset-bottom) + 12px); }
 }
 @media (max-width: 560px) {
@@ -76,4 +80,9 @@
   .activity-log-lines li { grid-template-columns: 1fr; gap: 3px; }
   .activity-inline-body { padding: 10px 12px; }
   .activity-notices { right: 16px; }
+}
+/* On desktop the task panel drops down under its top-bar button instead of covering the page centre. */
+@media (min-width: 761px) {
+  #task-activity-dialog { margin: calc(var(--topbar-h) - 6px) 24px auto auto; width: min(560px, calc(100vw - 48px)); max-height: min(720px, calc(100dvh - var(--topbar-h) - 24px)); box-shadow: 0 18px 48px #00000038; }
+  #task-activity-dialog::backdrop { background: transparent; backdrop-filter: none; }
 }
