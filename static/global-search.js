@@ -8,8 +8,8 @@ window.WorkbenchSearch = (() => {
     { key: "videos", label: "视频", icon: "video" },
     { key: "directions", label: "测试方向", icon: "layers" },
     { key: "points", label: "卖点", icon: "target" },
-    { key: "scripts", label: "脚本版本", icon: "file" },
-    { key: "tasks", label: "协作任务", icon: "bot" },
+    { key: "scripts", label: "采用稿", icon: "file" },
+    { key: "tasks", label: "协作记录", icon: "bot" },
     { key: "orders", label: "制作单", icon: "monitor" },
     { key: "reviews", label: "评论", icon: "chat" },
     { key: "commands", label: "页面与操作", icon: "arrow" },
@@ -19,17 +19,16 @@ window.WorkbenchSearch = (() => {
     { key: "page:home", title: "工作概览", words: "首页 本周 待办 home", route: "#home" },
     { key: "page:reviews", title: "用户声音", words: "评论 reviews", route: "#reviews" },
     { key: "page:directions", title: "卖点与方向", words: "方向 卖点 directions", route: "#directions" },
-    { key: "page:ai", title: "内容创作 · 协作任务", words: "写稿 ai 任务", route: "#ai" },
-    { key: "page:scripts", title: "内容创作 · 脚本版本", words: "脚本 scripts", route: "#scripts" },
-    { key: "page:production", title: "内容创作 · 制作单", words: "制作 配音 剪辑 出图 图文 production", route: "#production" },
-    { key: "page:videos", title: "视频数据", words: "数据 销量 看板 videos", route: "#videos" },
+    { key: "page:content", title: "内容创作 · 内容列表", words: "内容 采用稿 脚本 制作 配音 剪辑 出图 图文 content scripts production", route: "#content" },
+    { key: "page:ai", title: "内容创作 · 协作记录", words: "写稿 ai 任务 协作 历史", route: "#ai" },
+    { key: "page:videos", title: "带货数据", words: "数据 销量 看板 视频数据 图文 跨境 本土 videos", route: "#videos" },
     { key: "page:library", title: "案例库", words: "案例 library", route: "#library" },
     { key: "page:settings", title: "设置", words: "模型 备份 导出 settings", route: "#settings" },
     { key: "action:write", title: "开始写稿", words: "新建 写稿 变体", run: () => window.CaseAI?.startBlank() },
     { key: "action:case", title: "收录案例", words: "新建 案例", run: () => { if (typeof openEditor === "function") openEditor(null); } },
     { key: "action:basket", title: "打开摘录篮", words: "素材 摘录", run: () => window.MaterialBasket?.open() },
     { key: "action:tasks", title: "查看任务与运行日志", words: "任务 提醒 日志", run: () => document.querySelector("#task-activity-open")?.click() },
-  ].map(command => ({ ...command, description: command.run ? "操作" : "跳转页面" }));
+  ].map(command => ({ ...command, command: true, description: "" }));
   // The public text copy is read-only: it offers no actions and no settings page.
   const available = () => document.body?.classList?.contains("public-text-mode") ? commands.filter(command => !command.run && command.key !== "page:settings") : commands;
   const platforms = { amazon: "Amazon", tiktok_shop: "TikTok Shop", tiktok_video: "TikTok 视频", reddit: "Reddit", facebook: "Facebook" };
@@ -63,7 +62,7 @@ window.WorkbenchSearch = (() => {
     const items = (state.cases || []).filter(matchesProduct);
     const cases = items.filter(item => normalize(`${item.case_id} ${item.title || item.current?.title || ""} ${item.search_text || ""}`).includes(term)).map(item => ({
       key: `case:${item.case_id}`, title: item.title || item.current?.title || item.case_id,
-      description: `${item.product || "未标注产品"} · ${item.case_id}${item.archived ? " · 已归档" : ""}`,
+      description: [product() ? "" : item.product || "未标注产品",item.archived ? "已归档" : ""].filter(Boolean).join(" · "), identity: item.case_id,
       route: `#case/${encodeURIComponent(item.case_id)}`,
     })).sort(byRank(term)).slice(0, LIMIT);
     const directions = new Map();
@@ -96,32 +95,45 @@ window.WorkbenchSearch = (() => {
   async function scriptResults(term, signal) {
     const data = await cached(scoped("/api/creation"), signal);
     if (signal.aborted) return [];
-    return (data.scripts || []).filter(matchesProduct).filter(item => normalize(`${item.id} ${item.title || ""} ${item.text || ""} ${item.direction_id || ""}`).includes(term)).map(item => ({
-      key: `script:${item.id}`, title: item.title || "未命名脚本",
-      description: `${item.product || "未标注产品"} · ${item.direction_id || "独立脚本"}${item.version ? ` · 第 ${item.version} 版` : ""}`,
-      route: `#scripts/${encodeURIComponent(item.id)}`,
+    return (data.scripts || []).filter(matchesProduct).filter(item => normalize(`${item.id} ${item.title || ""} ${item.text || ""} ${item.direction_id || ""} ${item.video_id || ""}`).includes(term)).map(item => ({
+      key: `script:${item.id}`, title: item.title || "未命名采用稿",
+      description: [product() ? "" : item.product || "未标注产品",item.direction_id && !String(item.title || "").includes(item.direction_id) ? item.direction_id : "",item.version > 1 ? `第 ${item.version} 版` : "",item.created_at ? `${plain(item.created_at).slice(0,16).replace('T',' ')} 采纳` : ""].filter(Boolean).join(" · "), identity: item.id,
+      route: `#content/${encodeURIComponent(item.id)}`,
     })).sort(byRank(term)).slice(0, LIMIT);
   }
 
   async function taskResults(term, signal) {
     const data = await cached(scoped("/api/ai/tasks"), signal);
     if (signal.aborted) return [];
-    const title = task => task.case_title || task.context?.title || task.context?.direction_id || task.case_id || "空白写稿";
-    return (data.tasks || []).filter(matchesProduct).filter(task => normalize(`${task.task_id} ${title(task)} ${task.instruction || ""}`).includes(term)).map(task => ({
+    const title = task => window.CaseAI?.taskDisplayTitle?.(task) || task.display_title || task.case_title || task.context?.title || task.context?.direction_id || task.case_id || ({review:"审稿结论",retrospective:"复盘结论"}[task.action] || "空白写稿");
+    return (data.tasks || []).filter(matchesProduct).filter(task => normalize(`${task.task_id} ${title(task)} ${task.case_title || ""} ${task.context?.direction_id || ""} ${task.instruction || ""}`).includes(term)).map(task => ({
       key: `task:${task.task_id}`, title: title(task),
-      description: `${task.product || "未标注产品"}${task.instruction ? ` · ${excerpt(task.instruction, term, 80)}` : ""}`,
+      description: [product() ? "" : task.product || "未标注产品",{queued:"排队中",running:"进行中",failed:"失败",interrupted:"已中断",cancelled:"已停止"}[task.status] || window.CaseAI?.taskManagementLabel?.(task) || "查看结果",task.task_started_label || (task.created_at ? `${plain(task.created_at).slice(0,16).replace('T',' ')} 发起` : ""),task.round_count ? `${task.round_count} 轮` : "",task.archived ? "已归档" : ""].filter(Boolean).join(" · "), identity: task.task_id,
       route: `#ai/${encodeURIComponent(task.task_id)}`,
     })).sort(byRank(term)).slice(0, LIMIT);
+  }
+
+  // An order is found by its ID, title and script, and also by a DaVinci timeline name or ID or a registered
+  // post ID; those open the step where the timeline or the publication is shown.
+  function orderMatch(item, carousel, term) {
+    if (normalize(`${item.id} ${item.title || ""} ${item.variant_label || ""} ${item.script_id || ""}`).includes(term)) return { note: "", step: "" };
+    const timeline = (item.timelines || []).find(entry => normalize(`${entry.name || ""} ${entry.unique_id || ""}`).includes(term));
+    if (timeline) return { note: `时间线 ${timeline.name || timeline.unique_id}`, step: "timeline" };
+    if (normalize(item.display_title || "").includes(term)) return { note: "", step: "" };
+    const post = [item.current_publication, item.publication, ...(item.publication_history || [])].filter(Boolean)
+      .find(entry => normalize(`${entry.post_id || ""} ${entry.post_url || ""}`).includes(term));
+    if (post) return { note: `${carousel ? "图文" : "视频"} ID ${post.post_id}`, step: carousel ? "delivery" : "publish" };
+    return null;
   }
 
   async function orderResults(term, signal) {
     const data = await cached(scoped("/api/production"), signal);
     if (signal.aborted) return [];
     const orders = [...(data.jobs || []).map(item => ({ item, kind: "视频制作单" })), ...(data.carousels || []).map(item => ({ item, kind: "图文制作单" }))];
-    return orders.filter(({ item }) => matchesProduct(item) && normalize(`${item.id} ${item.title || ""} ${item.variant_label || ""}`).includes(term)).map(({ item, kind }) => ({
-      key: `order:${item.id}`, title: item.title || item.id,
-      description: `${item.product || "未标注产品"} · ${kind}${item.archived ? " · 已归档" : ""}`,
-      route: `#production/${encodeURIComponent(item.id)}`,
+    return orders.filter(({ item }) => matchesProduct(item)).map(row => ({ ...row, match: orderMatch(row.item, row.kind === "图文制作单", term) })).filter(row => row.match).map(({ item, kind, match }) => ({
+      key: `order:${item.id}`, title: item.display_title || item.title || item.id,
+      description: `${item.product || "未标注产品"} · ${kind}${match.note ? ` · ${match.note}` : ""}${item.archived ? " · 已归档" : ""}`,
+      route: `#production/${encodeURIComponent(item.id)}${match.step ? `?step=${match.step}` : ""}`,
     })).sort(byRank(term)).slice(0, LIMIT);
   }
 
@@ -153,7 +165,7 @@ window.WorkbenchSearch = (() => {
 
   async function videoResults(term, signal) {
     if (!videoCache || Date.now() - videoCacheTime > 30000) {
-      const data = await api("/api/performance/videos", { signal });
+      const data = await api("/api/performance/videos?shop=all", { signal });
       if (signal.aborted) return [];
       videoCache = data.videos || [];
       videoCacheTime = Date.now();
@@ -213,8 +225,8 @@ window.WorkbenchSearch = (() => {
       return `<div role="group" aria-labelledby="workbench-search-group-${group.key}"><div class="global-search-group" id="workbench-search-group-${group.key}">${esc(group.label)}<span>${rows.length} 条</span></div>${rows.map(row => {
         const index = results.length;
         results.push(row);
-        const inner = `<span class="global-search-result-icon">${icon(group.icon)}</span><span class="global-search-result-copy"><strong>${highlight(excerpt(row.title, query, 100))}</strong><small>${highlight(row.description)}${row.count ? ` · ${row.count} 条案例` : ""}</small>${row.hint ? `<span class="global-search-result-hint">${esc(row.hint)}</span>` : ""}</span><span class="global-search-result-arrow" aria-hidden="true">↵</span>`;
-        const attributes = `class="global-search-result" role="option" aria-selected="false" tabindex="-1" id="workbench-search-result-${index}" data-search-index="${index}"`;
+        const inner = `<span class="global-search-result-icon">${icon(row.command && row.run ? "plus" : group.icon)}</span><span class="global-search-result-copy"><strong>${highlight(excerpt(row.title, query, 100))}</strong>${row.description || row.count ? `<small>${highlight(row.description)}${row.count ? ` · ${row.count} 条案例` : ""}</small>` : ""}${row.hint ? `<span class="global-search-result-hint">${esc(row.hint)}</span>` : ""}</span><span class="global-search-result-arrow" aria-hidden="true">↵</span>`;
+        const attributes = `class="global-search-result${row.command ? ' is-command' : ''}" role="option" aria-selected="false" tabindex="-1" id="workbench-search-result-${index}" data-search-index="${index}"${row.identity ? ` title="${esc(row.identity)}"` : ''}`;
         // Actions run in place; everything else stays a real link so modified clicks still open a new tab.
         return row.run ? `<button type="button" ${attributes}>${inner}</button>` : `<a ${attributes} href="${esc(url(row.route))}"${row.hint ? ` aria-label="${esc(`${row.title}，${row.hint}`)}"` : ""}>${inner}</a>`;
       }).join("")}</div>`;
@@ -223,7 +235,7 @@ window.WorkbenchSearch = (() => {
     select(Math.max(0, results.findIndex(row => row.key === selected)));
     feedback.hidden = !failures.length;
     feedback.innerHTML = failures.length ? `<span>${esc(failures.join("、"))}暂时无法搜索，其他结果仍可使用。</span><button type="button" class="subtle" id="workbench-search-retry">重试</button>` : "";
-    status.textContent = !query ? "输入案例名称、视频、方向、卖点、脚本、协作任务、制作单或评论关键词；也可以直接跳转页面或执行操作。" : pending ? `正在搜索${results.length ? `，已找到 ${results.length} 条` : ""}…` : results.length ? `显示 ${results.length} 条结果，每类最多 ${LIMIT} 条。` : failures.length ? "部分数据未能读取，请重试。" : "没有找到匹配结果，试试其他关键词或切换产品。";
+    status.textContent = !query ? "搜索内容或编号，也可选择页面与操作。" : pending ? `正在搜索${results.length ? `，已找到 ${results.length} 条` : ""}…` : results.length ? `显示 ${results.length} 条结果，每类最多 ${LIMIT} 条。` : failures.length ? "部分数据未能读取，请重试。" : "没有找到匹配结果，试试其他关键词或切换产品。";
   }
 
   function invalidate() {
@@ -257,8 +269,8 @@ window.WorkbenchSearch = (() => {
         ["videos", "视频", () => videoResults(term, signal)],
         ["directions", "方向", () => directionResults(term, signal, catalog)],
         ["points", "卖点", async () => pointResults(term, await catalog())],
-        ["scripts", "脚本", () => scriptResults(term, signal)],
-        ["tasks", "协作任务", () => taskResults(term, signal)],
+        ["scripts", "采用稿", () => scriptResults(term, signal)],
+        ["tasks", "协作记录", () => taskResults(term, signal)],
         ["orders", "制作单", () => orderResults(term, signal)],
         ["reviews", "评论", () => reviewResults(text, signal)],
       ];
@@ -324,7 +336,7 @@ window.WorkbenchSearch = (() => {
         event.preventDefault();
         const row = results[active];
         close();
-        if (row.run) row.run(); else location.hash = url(row.route);
+        if (row.run) row.run(); else if (!window.CasePerformance?.openVideoHash?.(url(row.route))) location.hash = url(row.route);
       }
     });
     dialog.addEventListener("click", event => {

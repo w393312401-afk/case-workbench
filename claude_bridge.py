@@ -629,9 +629,10 @@ class ClaudeBridge:
         return "\n\n".join([rules, *(f'<skill name="{name}">\n{text}\n</skill>' for name, text in skill_texts)])
 
     def run(self, prompt, *, cwd, on_progress, cancel_event, model=None, reasoning_effort=None, skills=None,
-            on_event=None, require_image_view=False, video_path=None, profile=None):
+            on_event=None, require_image_view=False, video_path=None, profile=None, images=None):
         """`profile` runs a tool-using task instead of read-only writing: its own system rules, built-in tools,
-        allowed tools, MCP servers, working directory (the process cwd), extra directories and time limit."""
+        allowed tools, MCP servers, working directory (the process cwd), extra directories and time limit.
+        `images` is [(label, jpeg path)] the caller prepared; they are attached before the prompt."""
         if not isinstance(prompt, str) or not prompt.strip():
             raise BridgeError("请填写本次 AI 分析的问题。")
         if cancel_event.is_set():
@@ -670,6 +671,12 @@ class ClaudeBridge:
                 raise BridgeError("已登记原片，但没能抽取画面（需要本机 ffmpeg）；候选未作为完成结果保存。请检查原片文件。")
             for label, data in frames:
                 content.extend([{"type": "text", "text": label}, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}])
+        for label, path in images or []:
+            try:
+                data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+            except OSError as exc:
+                raise BridgeError("工作台准备的审查图片无法读取，请重新发起。") from exc
+            content.extend([{"type": "text", "text": label}, {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}])
         content.append({"type": "text", "text": prompt})
         payload = (json.dumps({"type": "user", "message": {"role": "user", "content": content}}, ensure_ascii=False) + "\n").encode("utf-8")
         deadline = time.monotonic() + ((profile or {}).get("timeout") or self.timeout)
@@ -1014,4 +1021,6 @@ class ModelRouter:
         target = self._target(options.get("model"))
         if target is self.claude:
             return self.claude.run(prompt, video_path=video_path, **options)
+        if getattr(self.codex, "accepts_video", False):
+            return self.codex.run(prompt, video_path=video_path, **options)
         return self.codex.run(prompt, **options)

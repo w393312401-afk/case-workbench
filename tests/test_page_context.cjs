@@ -29,13 +29,14 @@ function environment(product = '202H', legacy = '#library') {
   };
   const context = {
     window: {WorkbenchShell: shell, addEventListener() {}, scrollTo() {}}, location,
-    document: {hidden: false, addEventListener() {}, getElementById: node},
+    document: {hidden: false, addEventListener() {}, getElementById: node, querySelector: () => null},
     history: {replaceState(_state, _title, hash) {location.hash = hash;}},
     sessionStorage: {getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value)},
+    localStorage: {getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value)},
     state: {cases: [], token: 'test-token'}, $: node, $$: () => [], URLSearchParams,
     api: async (url, options) => {env.calls.push({url, options});return env.api ? env.api(url, options) : {tasks: []};},
     icon: () => '', esc: value => String(value ?? ''), skeletonMarkup: () => '<p>Loading</p>',
-    toast() {}, setInterval() {}, setTimeout, clearTimeout,
+    toast() {}, showError(error) {throw error;}, setInterval() {}, setTimeout, clearTimeout,
     addCalendarDays(value, days) {const date = new Date(`${value}T00:00:00Z`);date.setUTCDate(date.getUTCDate() + days);return date.toISOString().slice(0, 10);},
     readableDate: value => value || '',
   };
@@ -56,13 +57,16 @@ function load(env, file, marker, expose) {
 
 test('video list and dashboard use current product instead of a saved product', () => {
   const env = environment();
-  env.storage.set('video-data-filters', JSON.stringify({product: '999H', account: 'one', range: 'all'}));
+  env.storage.set('workbench-video-data-filters', JSON.stringify({product: '999H', account: 'one', range: 'all'}));
+  load(env, 'perf-creators.js');
+  load(env, 'perf-dashboard.js');
+  env.context.PerfDashboard = env.context.window.PerfDashboard;
   const page = load(env, 'performance.js', '  window.CasePerformance =', 'perf,filtered,boardContext,bind,reviewMaterial');
   page.perf.videos = [
-    {video_id: 'a', product: '202H', account: 'one'},
-    {video_id: 'b', product: 'SHARPAL 202H', account: 'one'},
-    {video_id: 'c', product: '1202H', account: 'one'},
-    {video_id: 'd', product: '202H', account: 'two'},
+    {video_id: 'a', product: '202H', account: 'one', title: 'First fixture video'},
+    {video_id: 'b', product: 'SHARPAL 202H', account: 'one', title: 'Alias fixture video'},
+    {video_id: 'c', product: '1202H', account: 'one', title: 'Other product fixture video'},
+    {video_id: 'd', product: '202H', account: 'two', title: 'Other account fixture video'},
   ];
   assert.equal(page.filtered().map(item => item.video_id).join(','), 'a,b');
   assert.equal(page.boardContext().filters.product, '202H');
@@ -86,7 +90,7 @@ test('dashboard includes all aliases even when an exact product label exists', (
 
 test('review product is independent of purchased SKU and does not clear other filters', () => {
   const env = environment('missing-product', '#reviews');
-  env.storage.set('review-library-filters', JSON.stringify({q: 'clamp', sku: '202H kit', rating: 'low'}));
+  env.storage.set('workbench-review-library-filters', JSON.stringify({q: 'clamp', sku: '202H kit', rating: 'low'}));
   const page = load(env, 'reviews.js', '  window.CaseReviews =', 'rev,params,filtersFromHash,writeHash');
   const params = page.params();
   assert.equal(params.get('product'), 'missing-product');

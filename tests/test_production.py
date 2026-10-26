@@ -11,8 +11,7 @@ from uuid import uuid4
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-CONFIG = json.loads((APP / "config.json").read_text(encoding="utf-8"))
-sys.path.insert(0, str(Path(CONFIG["skill_root"]) / "scripts"))
+sys.path.insert(0, str(APP / "scripts"))
 
 from creation_store import CreationStore
 from elevenlabs_client import ElevenLabsClient, VoiceError, clean_settings

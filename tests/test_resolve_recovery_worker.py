@@ -37,6 +37,32 @@ class RecoverableWorkerTests(unittest.TestCase):
         self.assertTrue(again["recovered"])
         self.assert_one_build()
 
+    def test_lead_in_places_voice_after_silence_and_recovers_at_that_position(self):
+        self.request["lead_frames"] = 15
+        append = self.project.pool.AppendToTimeline
+        def crashed(infos):
+            append(infos)
+            raise RuntimeError("lost append response")
+        with patch.object(self.project.pool, "AppendToTimeline", side_effect=crashed):
+            with self.assertRaises(RuntimeError):
+                worker.build(self.resolve, self.request)
+        result = worker.build(self.resolve, self.request)
+        target = self.project.items[0]
+        voice = target.GetItemListInTrack("audio", 2)[0]
+        self.assertEqual(voice.GetStart() - target.GetStartFrame(), 15)
+        self.assertEqual(result["audio_items"][0]["start"] - result["start_frame"], 15)
+        self.assert_one_build()
+
+    def test_chosen_name_is_used_and_a_taken_name_is_refused_before_any_journal(self):
+        self.request["name"] = "Lab-送礼版"
+        self.assertEqual(worker.build(self.resolve, self.request)["name"], "Lab-送礼版")
+        again = {**self.request, "operation_key": "b" * 64, "recovery_file": str(self.root / "other.json")}
+        with self.assertRaises(worker.WorkerError) as caught:
+            worker.build(self.resolve, again)
+        self.assertIn("已有名为「Lab-送礼版」", str(caught.exception))
+        self.assertFalse((self.root / "other.json").exists())
+        self.assert_one_build()
+
     def test_crash_between_create_and_journal_uid_recovers_unique_temporary_name(self):
         write = worker.durable_json
         def crashed(path, value):

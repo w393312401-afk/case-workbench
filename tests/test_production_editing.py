@@ -21,9 +21,15 @@ from production_store import ProductionStore, job_status
 from production_validation import snapshot
 from resolve_bridge import ResolveBridge
 from test_production import Bench, FakeEleven, CANDIDATE
-from workbench_editing import EditingWorkbenchMixin, edit_summary, final_report, handoff_markdown
+from workbench_editing import EditingWorkbenchMixin, edit_summary, final_report, handoff_markdown, project_key, with_location
+from workbench_production import meaning_markers
 
 REPORT = 'Done.\n\n```json\n{"timeline": "Lab261010-202-1", "shots": 3, "gaps": [], "questions": ["开头要不要换切纸？"], "saved": true}\n```'
+
+
+def judging_inspects(calls):
+    """Readbacks that could judge or save the timeline; the record-only delivery snapshot is not one of them."""
+    return [call for call in calls if call["command"] == "inspect" and not call.get("current_only")]
 
 
 def inspect_reply(gaps=(), voice_end=400, shots=((0, 25), (25, 50), (50, 200))):
@@ -142,6 +148,16 @@ class EditingTests(unittest.TestCase):
             time.sleep(.02)
         return self.bench.production.job(job_id)["edits"][-1]
 
+    def current_readback(self, job, shots=((0, 200), (200, 400))):
+        job = self.bench.production.job(job["id"])
+        timeline, take = job["timelines"][-1], job["takes"][-1]
+        reply = inspect_reply(shots=shots)
+        reply["tracks"]["audio"][1]["items"][0]["media_path"] = str(self.bench.production.audio / (take.get("wav") or take["audio"]))
+        reply["markers"] = [{**marker, "color": "Blue"} for marker in meaning_markers(job, take, timeline["fps"],
+                            lead_frames=timeline.get("lead_frames", 0))]
+        self.bench.runner.inspect = reply
+        return reply
+
     def test_unattended_edit_follows_current_skill_without_automatic_readback(self):
         job = self.timeline_job()
         started = self.start(job)["edit"]
@@ -171,8 +187,187 @@ class EditingTests(unittest.TestCase):
         self.assertIn(handoff, call["prompt"])
         self.assertFalse(self.bench.resolve.busy())
         self.assertIsNone(edit["baseline"])
-        self.assertFalse(any(call["command"] == "inspect" for call in self.bench.runner.calls))
+        self.assertEqual(judging_inspects(self.bench.runner.calls), [])
         self.assertEqual(self.bench.production.public("202H")["product_settings"]["material_timelines"], ["蓝点折刀成品素材"])
+
+    def test_archived_timeline_cannot_start_ai_until_restored(self):
+        job = self.timeline_job()
+        timeline_uid = job["timelines"][-1]["unique_id"]
+        before_calls = len(self.bench.runner.calls)
+        self.mutate("timeline_archive", job_id=job["id"], timeline_uid=timeline_uid, archived=True)
+        with self.assertRaises(VoiceError) as caught:
+            self.start(job)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(len(self.bench.runner.calls), before_calls)
+        self.assertEqual(self.editor.calls, [])
+        self.mutate("timeline_archive", job_id=job["id"], timeline_uid=timeline_uid, archived=False)
+        self.start(job)
+        self.assertEqual(self.wait(job["id"])["status"], "completed")
+
+    def test_saved_delivery_keeps_a_record_only_timeline_snapshot(self):
+        job = self.timeline_job()
+        started = self.start(job)["edit"]
+        edit = self.wait(job["id"])
+        # The snapshot changes nothing: status and validation come from the delivery alone.
+        self.assertEqual((edit["status"], edit["summary"], edit["validation"]), ("completed", None, None))
+        commands = [call["command"] for call in self.bench.runner.calls]
+        snapshots = [call for call in self.bench.runner.calls if call["command"] == "inspect"]
+        self.assertEqual(len(snapshots), 1)
+        request = snapshots[0]
+        self.assertIs(request["current_only"], True)
+        self.assertNotIn("save", request)
+        self.assertEqual((request["unique_id"], request["name"]), ("uid-1", job["timelines"][-1]["name"]))
+        # Taken right after the client's delivery, before usage marking rewrites the material timelines.
+        self.assertLess(commands.index("inspect"), commands.index("mark_usage"))
+        record = json.loads((self.bench.production.root / "edits" / started["id"] / "delivered-timeline.json").read_text(encoding="utf-8"))
+        self.assertEqual((record["schema_version"], record["edit_id"], record["purpose"]), (1, started["id"], "record_only"))
+        self.assertNotIn("ok", record["timeline"])
+        self.assertEqual([item["uid"] for item in record["timeline"]["tracks"]["video"][0]["items"]], ["v-0", "v-1", "v-2"])
+        self.assertEqual(edit["delivery_snapshot"], {"file": "delivered-timeline.json", "captured_at": record["captured_at"],
+                                                     "timeline": "Lab261010-202-1", "shots": 3})
+
+    def listing(self, used=()):
+        clip = {"uid": "mat-1", "start": 0, "end": 50, "name": "a.mov", "media_id": "m1", "media_path": "D:/a.mov",
+                "source_start": 0, "source_end": 49, "has_audio": True, "enabled": True, "online": "Online", "track": 1,
+                "labels": ["推磨 DG001"], "verified_labels": ["推磨 DG001"]}
+        return {"ok": True, "materials": [{"name": "蓝点折刀成品素材", "unique_id": "mat-tl", "start_frame": 0, "fps": "29.97",
+                                           "drop": False, "clips": [clip]}],
+                "missing": [], "used": list(used), "used_complete": True, "dedup_enabled": False, "usage_counted": True}
+
+    def run_with_listings(self, *listings, job=None, before_recount=None, plan=None):
+        """Run one edit whose snapshot and pre-edit recount return these listings in turn (an Exception raises).
+
+        before_recount runs when the second listing is asked for; plan stands in for the planners."""
+        calls, original, self.commands = [], Runner.__call__, []
+        replies = list(listings)
+
+        def runner(runner_self, args, input, **options):
+            request = json.loads(input.decode("utf-8"))
+            self.commands.append(request["command"])
+            if request["command"] == "candidates":
+                calls.append({**request, "editor_calls": len(self.editor.calls), "resolve_held": self.bench.resolve.busy()})
+                if len(calls) == 2 and before_recount:
+                    before_recount()
+                reply = replies.pop(0) if len(replies) > 1 else replies[0]
+                if isinstance(reply, Exception):
+                    raise reply
+                return subprocess.CompletedProcess(args, 0, json.dumps(reply, ensure_ascii=False).encode("utf-8"), b"")
+            return original(runner_self, args, input, **options)
+
+        job = job or self.timeline_job()
+        planner = patch.object(self.bench, "_plan_edit", side_effect=plan) if plan else \
+            patch.object(self.bench, "_plan_edit", return_value={"workers": 0, "completed": 0, "failed": 0})
+        with patch.object(Runner, "__call__", runner), planner:
+            started = self.start(job)["edit"]
+            edit = self.wait(job["id"])
+        return edit, self.bench.production.root / "edits" / started["id"], calls
+
+    def test_use_counts_are_read_again_right_before_the_ai_places_shots(self):
+        placed = {"timeline_name": "Lab261010-202-9", "timeline_uid": "other", "uid": "shot-1", "media_id": "m1",
+                  "media_path": "D:/a.mov", "source_start": 10, "source_end": 29, "start": 100, "end": 120}
+        edit, folder, calls = self.run_with_listings(self.listing(), self.listing([placed]))
+        # The snapshot and then the recount, which never opens another project.
+        self.assertEqual(len(calls), 2)
+        self.assertIs(calls[1]["current_only"], True)
+        self.assertEqual(calls[1]["target_uid"], calls[0]["target_uid"])
+        self.assertEqual(edit["status"], "completed")
+        self.assertEqual({key: edit["usage_refresh"][key] for key in ("changed", "unused")}, {"changed": 1, "unused": 0})
+        row = json.loads((folder / "candidates.json").read_text(encoding="utf-8"))["candidates"][0]
+        self.assertEqual((row["use_count"], row["used_by"]), (1, ["Lab261010-202-9"]))
+        self.assertIn("已用 1 次（Lab261010-202-9）", (folder / "candidates.md").read_text(encoding="utf-8"))
+        # The editor is told, in the prompt and in handoff.md, that the counts changed since the snapshot.
+        handoff = (folder / "handoff.md").read_text(encoding="utf-8")
+        self.assertIn("## 开剪前刷新的使用次数", handoff)
+        self.assertIn("1 个片段次数有变化，现在 0 个片段还没用过", handoff)
+        self.assertIn("## 开剪前刷新的使用次数", self.editor.calls[-1]["prompt"])
+        # The recount runs in the editing lease (after its project check), before the client starts.
+        self.assertEqual(self.commands[:3], ["candidates", "status", "candidates"])
+        self.assertEqual((calls[1]["editor_calls"], calls[1]["resolve_held"]), (0, True))
+
+    def test_unchanged_counts_leave_the_handoff_alone(self):
+        edit, folder, calls = self.run_with_listings(self.listing())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual({key: edit["usage_refresh"][key] for key in ("changed", "unused")}, {"changed": 0, "unused": 1})
+        self.assertNotIn("开剪前刷新的使用次数", (folder / "handoff.md").read_text(encoding="utf-8"))
+        self.assertNotIn("开剪前刷新的使用次数", self.editor.calls[-1]["prompt"])
+
+    def test_a_failed_recount_keeps_the_snapshot_counts_and_the_edit(self):
+        edit, folder, calls = self.run_with_listings(self.listing(), RuntimeError("达芬奇长时间没有响应"))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((edit["status"], edit["execution_status"]), ("completed", "completed"))
+        self.assertIn("error", edit["usage_refresh"])
+        row = json.loads((folder / "candidates.json").read_text(encoding="utf-8"))["candidates"][0]
+        self.assertEqual((row["use_count"], row["used_by"]), (0, []))
+        self.assertNotIn("开剪前刷新的使用次数", (folder / "handoff.md").read_text(encoding="utf-8"))
+
+    def test_no_snapshot_counts_means_no_recount(self):
+        # No candidate list at all, a list made without counts, and a list with no clips.
+        uncounted, empty = self.listing(), self.listing()
+        uncounted["usage_counted"] = False
+        empty["materials"][0]["clips"] = []
+        for listing in (None, uncounted, empty):
+            with self.subTest(listing=listing and ("uncounted" if listing is uncounted else "empty")):
+                if listing is None:
+                    job = self.timeline_job()
+                    self.start(job)
+                    edit = self.wait(job["id"])
+                    self.assertEqual(sum(call["command"] == "candidates" for call in self.bench.runner.calls), 1)
+                else:
+                    edit, folder, calls = self.run_with_listings(listing)
+                    self.assertTrue((folder / "candidates.json").is_file())
+                    self.assertEqual(len(calls), 1)
+                self.assertIsNone(edit["usage_refresh"])
+
+    def test_recount_swaps_a_finished_edits_plan_for_its_real_shots_and_never_counts_this_edits_own(self):
+        job = self.timeline_job()
+        config = with_location(self.bench.production.product_settings(self.bench.production.records(), job["product"]),
+                               job["timelines"][-1])
+        key = project_key(config)
+        listing = self.listing()
+        second = {**listing["materials"][0]["clips"][0], "uid": "mat-2", "start": 50, "end": 100, "source_start": 50,
+                  "source_end": 99, "labels": ["检查 DG002"], "verified_labels": ["检查 DG002"]}
+        listing["materials"][0]["clips"].append(second)
+        # Edit A (another timeline of this project) planned DG001 first and is still running when this edit snapshots.
+        with self.bench.lock:
+            self.bench.__dict__.setdefault("_edit_occupied", {}).setdefault(key, {})["EDT-a"] = {
+                "timeline": "Lab261010-202-8", "spans": [{"media_id": "m1", "media_path": "D:/a.mov", "source": [0, 50]}]}
+        snapshots = []
+
+        def plan(edit_id, folder, *args):
+            snapshots.append(json.loads(Path(folder, "candidates.json").read_text(encoding="utf-8"))["candidates"])
+            # This edit's own planners choose DG002.
+            Path(folder, "planning-results.json").write_text(json.dumps([{"worker": 1, "status": "completed", "output": "",
+                "picks": [row["key"] for row in snapshots[-1] if row["key"].startswith("DG002")], "unknown_picks": 0}]), encoding="utf-8")
+            return {"workers": 1, "completed": 1, "failed": 0}
+
+        def finished():
+            # A has placed its real shot on DG002 and stopped holding its plan.
+            self.bench._release_occupied("EDT-a")
+
+        placed = {"timeline_name": "Lab261010-202-8", "timeline_uid": "uid-a", "uid": "shot-a", "media_id": "m1",
+                  "media_path": "D:/a.mov", "source_start": 60, "source_end": 79, "start": 0, "end": 20}
+        edit, folder, calls = self.run_with_listings(listing, {**listing, "used": [placed]}, job=job,
+                                                     before_recount=finished, plan=plan)
+        before = {row["key"][:5]: row["used_by"] for row in snapshots[0]}
+        after = {row["key"][:5]: row["used_by"] for row in json.loads((folder / "candidates.json").read_text(encoding="utf-8"))["candidates"]}
+        self.assertEqual(before, {"DG001": ["Lab261010-202-8（剪辑中）"], "DG002": []})
+        # A's plan is gone, its real shot counts, and this edit's own choice of DG002 adds nothing.
+        self.assertEqual(after, {"DG001": [], "DG002": ["Lab261010-202-8"]})
+        self.assertEqual({key: edit["usage_refresh"][key] for key in ("changed", "unused")}, {"changed": 2, "unused": 1})
+
+    def test_snapshot_failure_never_changes_the_delivery(self):
+        for reply in (RuntimeError("达芬奇长时间没有响应"), {"ok": False, "error": "达芬奇当前打开的不是这次任务的项目「202H」，没有切换项目。"}):
+            with self.subTest(reply=reply):
+                job = self.timeline_job()
+                self.bench.runner.inspect = reply
+                started = self.start(job)["edit"]
+                edit = self.wait(job["id"])
+                self.assertEqual((edit["status"], edit["execution_status"], edit["validation"]), ("completed", "completed", None))
+                self.assertIn("error", edit["delivery_snapshot"])
+                self.assertFalse((self.bench.production.root / "edits" / started["id"] / "delivered-timeline.json").exists())
+                self.assertFalse(self.bench.resolve.busy())
+                # Usage marking still runs after a snapshot that could not be taken.
+                self.assertEqual(self.bench.runner.calls[-1]["command"], "mark_usage")
 
     def test_each_edit_copies_the_current_personal_skill(self):
         job = self.timeline_job()
@@ -181,12 +376,14 @@ class EditingTests(unittest.TestCase):
         self.start(job)
         self.wait(job["id"])
         first_copy = Path(self.editor.calls[-1]["cwd"]) / "skill" / "SKILL.md"
-        self.assertEqual(first_copy.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
+        # The copy carries the 2026-10-16 素材防复用 section after the personal skill.
+        self.assertTrue(first_copy.read_text(encoding="utf-8").startswith(source.read_text(encoding="utf-8")))
+        self.assertIn("素材防复用", first_copy.read_text(encoding="utf-8"))
         source.write_text("更新规则：完全按当前技能剪辑。", encoding="utf-8")
         self.start(job)
         self.wait(job["id"])
         second_copy = Path(self.editor.calls[-1]["cwd"]) / "skill" / "SKILL.md"
-        self.assertEqual(second_copy.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
+        self.assertTrue(second_copy.read_text(encoding="utf-8").startswith(source.read_text(encoding="utf-8")))
         self.assertNotEqual(first_copy.read_text(encoding="utf-8"), second_copy.read_text(encoding="utf-8"))
 
     def test_explicit_unsaved_delivery_is_retained_without_engineering_readback(self):
@@ -223,7 +420,7 @@ class EditingTests(unittest.TestCase):
         self.assertEqual((edit["status"], edit["execution_status"]), ("needs_material", "completed"))
         self.assertEqual(edit["report"], report)
         self.assertIsNone(edit["validation"])
-        self.assertFalse(any(call["command"] == "inspect" for call in self.bench.runner.calls))
+        self.assertEqual(judging_inspects(self.bench.runner.calls), [])
 
     def test_delete_edit_removes_record_files_and_recomputes_status(self):
         job = self.timeline_job()
@@ -297,14 +494,14 @@ class EditingTests(unittest.TestCase):
         restarted.interrupt_running()
         self.assertEqual(restarted.job(job["id"])["edits"][-1]["status"], "interrupted")
 
-    def test_task_does_not_add_engineering_preflight_and_handoff_can_be_copied(self):
+    def test_queued_task_requires_project_connection_before_editing_and_handoff_can_be_copied(self):
         job = self.timeline_job()
         self.bench.resolve = ResolveBridge(runner=lambda args, input, **o: subprocess.CompletedProcess(
             args, 0, json.dumps({"ok": False, "error": "达芬奇当前打开的是项目「X」"}, ensure_ascii=False).encode(), b""))
         self.start(job)
         edit = self.wait(job["id"])
-        self.assertEqual(edit["status"], "completed")
-        self.assertEqual(len(self.editor.calls), 1)
+        self.assertEqual(edit["status"], "failed")
+        self.assertEqual(len(self.editor.calls), 0)
         with self.assertRaises(VoiceError):
             self.start(job, mode="nope")
         result = self.bench.edit_handoff(job["id"], {"timeline": job["timelines"][-1]["unique_id"], "materials": [], "mode": "sync"})
@@ -325,7 +522,7 @@ class EditingTests(unittest.TestCase):
                 self.assertEqual(edit["status"], "completed")
                 self.assertIsNone(edit["validation"])
                 self.assertEqual(edit["execution_status"], "completed")
-                self.assertFalse(any(call["command"] == "inspect" for call in self.bench.runner.calls))
+                self.assertEqual(judging_inspects(self.bench.runner.calls), [])
 
     def test_unused_readback_failure_does_not_block_skill_delivery_or_leave_locks(self):
         for reply in ({"ok": True, "tracks": []}, RuntimeError("worker 返回损坏")):
@@ -389,6 +586,7 @@ class EditingTests(unittest.TestCase):
         record = next(item for item in data["jobs"] if item["id"] == job["id"])["edits"][-1]
         record["baseline"] = snapshot(json.loads(json.dumps(self.bench.runner.inspect).replace("{job}", job["id"])))
         self.bench.production.write(data)
+        self.current_readback(job)
         self.bench.runner.inspect["tracks"]["audio"][1]["items"][0]["properties"]["AudioVolume"] = -10
         self.bench.runner.inspect["tracks"]["audio"][1]["enabled"] = False
         result = self.bench.recheck_edit(job["id"], edit["id"], {"request_id": uuid4().hex})["edit"]
@@ -404,6 +602,7 @@ class EditingTests(unittest.TestCase):
         data = self.bench.production.read()
         old = next(item for item in data["jobs"] if item["id"] == job["id"])["edits"][-1]
         old.pop("baseline")
+        old.pop("completion_policy")  # Explicit historical engineering delivery keeps its baseline requirement.
         old["status"] = "completed"
         self.bench.production.write(data)
         result = self.bench.recheck_edit(job["id"], edit["id"], {"request_id": uuid4().hex})["edit"]
@@ -475,7 +674,7 @@ class EditingTests(unittest.TestCase):
         self.assertEqual(self.bench.recover_edit_results()["recovered"], [started["id"]])
         self.assertEqual(self.bench.production.job(job["id"])["edits"][-1]["status"], "completed")
 
-    def test_restart_without_a_result_file_can_request_manual_engineering_readback(self):
+    def test_restart_without_a_result_file_can_request_manual_current_coverage(self):
         job = self.timeline_job()
         self.bench.runner.inspect = inspect_reply(shots=((0, 200), (200, 400)))
         original = self.bench.production.mutate
@@ -494,9 +693,11 @@ class EditingTests(unittest.TestCase):
             self.start(job)
         self.assertEqual(caught.exception.status, 409)
         self.assertEqual(len(self.editor.calls), 1)
+        self.current_readback(job)
         result = self.bench.recheck_edit(job["id"], started["id"], {"request_id": uuid4().hex})["edit"]
-        self.assertEqual(result["status"], "needs_repair")
-        self.assertIn("baseline_missing", [issue["code"] for issue in result["validation"]["issues"]])
+        self.assertEqual((result["status"], result["execution_status"]), ("awaiting_review", "interrupted"))
+        self.assertEqual(result["validation"]["scope"], "current_coverage")
+        self.assertNotIn("baseline_missing", [issue["code"] for issue in result["validation"]["issues"]])
         self.assertEqual(len(self.editor.calls), 1)
 
     def test_busy_recheck_refuses_without_changing_existing_validation(self):
@@ -524,6 +725,7 @@ class EditingTests(unittest.TestCase):
         data = self.bench.production.read()
         record = next(item for item in data["jobs"] if item["id"] == job["id"])["edits"][-1]
         record["baseline"] = snapshot(json.loads(json.dumps(self.bench.runner.inspect).replace("{job}", job["id"])))
+        record.pop("completion_policy")  # Exercise the legacy engineering path's commit lock.
         self.bench.production.write(data)
         entered, release = threading.Event(), threading.Event()
         results, errors = [], []
@@ -613,6 +815,47 @@ class EditingTests(unittest.TestCase):
 
 
 class SummaryTests(unittest.TestCase):
+    def selection_handoff(self, mode, **values):
+        job = {"id": "PRD-0123456789ab", "title": "稿", "script_id": "SCR-0123456789ab", "script_version": 1,
+               "direction_id": "", "lines": [{"number": 1, "spoken": "Put tape between the clamp and blade.",
+               "zh": "夹爪和刀面之间有保护纸。", "proof": "完整贴纸过程", "tags": "贴纸", "evidence": "写稿时待确认"}]}
+        take = {"model_id": "eleven_v4", "groups": [{"number": 1, "start": 0, "end": 2, "coverage": 1}]}
+        config = {"project": "202H", "fps": "29.97", "width": 1080, "height": 1920}
+        return handoff_markdown(job, take, {"name": "Zack", "unique_id": "u", "frames": 59}, config, mode=mode,
+                                instruction=values.get("instruction", ""), materials=[], voice_label="Zack",
+                                notes={"opening": "品牌特写", "pickups": ["补拍贴纸全过程"]})
+
+    def test_explain_handoff_does_not_turn_old_recommendations_into_gates(self):
+        text = self.selection_handoff("explain")
+        self.assertIn("- 选画面模式：解释画面逻辑", text)
+        self.assertIn("允许用一组真实镜头共同说明", text)
+        self.assertIn("不以词级时间定位作为选材或覆盖的前提", text)
+        self.assertIn("贴好保护纸的近景可说明隔层", text)
+        self.assertIn("不能自动升级为本次素材必须逐项满足的硬条件", text)
+        self.assertIn("不额外要求身份特写", text)
+        self.assertIn("已有画面描述可以支持其明确记载的信息", text)
+        self.assertIn("各模式均保留真实动作、准确部件、工序阶段与效果的事实边界", text)
+        self.assertIn("画面推荐（写稿线索）", text)
+        # Keep the original recommendations available, while naming their provenance.
+        self.assertIn("完整贴纸过程", text)
+        self.assertIn("写稿时给的开头（选材线索）", text)
+        self.assertIn("写稿时列的补拍建议（本次先查实际素材，不据此判缺）", text)
+        self.assertIn("补拍贴纸全过程", text)
+
+    def test_each_mode_receives_its_execution_standard_and_explicit_instruction(self):
+        for mode, expected, excluded in (
+                ("explain", "按完整意群解释原因", "在已有意群区间内确定关键动作的实际口播时点"),
+                ("sync", "在已有意群区间内确定关键动作的实际口播时点", "贴好保护纸的近景可说明隔层"),
+                ("montage", "可跨意群安排主题与信息推进", "贴好保护纸的近景可说明隔层")):
+            with self.subTest(mode=mode):
+                text = self.selection_handoff(mode, instruction="开头使用切纸结果")
+                standards = text.split("## 本次画面模式执行标准", 1)[1].split("## 完整口播", 1)[0]
+                self.assertIn(expected, standards)
+                self.assertNotIn(excluded, standards)
+                self.assertIn("- 本次额外要求：开头使用切纸结果", text)
+                self.assertIn("本次明确选择的模式和额外要求优先于技能默认模式", text)
+                self.assertIn("这些标记和配音轨不要删除、移动或改写", text)
+
     def test_gaps_long_shots_and_changed_voiceover(self):
         job = {"id": "PRD-0123456789ab", "lines": [{}, {}, {}]}
         reply = json.loads(json.dumps(inspect_reply(gaps=[(200, 300)], shots=((0, 40), (40, 200), (300, 380)))).replace("{job}", job["id"]))
@@ -631,7 +874,7 @@ class SummaryTests(unittest.TestCase):
         config = {"project": "202H", "fps": "29.97", "width": 1080, "height": 1920}
         text = handoff_markdown(job, take, {"name": "Lab261010-202-1", "unique_id": "u", "frames": 59}, config, mode="explain",
                                 instruction="", materials=[], ledger="L", notes={}, voice_label="Zack")
-        self.assertIn("| 1 | A ／ B | 甲 乙 | 待补 |", text)
+        self.assertIn("| 1 | A ／ B | 甲 乙 | 无推荐 |", text)
         self.assertIn("未指定", text)
 
 

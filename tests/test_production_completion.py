@@ -106,6 +106,64 @@ class CompletionTests(unittest.TestCase):
             self.approve(job, edit)
         self.assertEqual(caught.exception.status, 409)
 
+    def current_skill_readback(self, job, *, shots=SHOTS):
+        job = self.bench.production.job(job["id"])
+        timeline, take = job["timelines"][-1], job["takes"][-1]
+        post = editing.inspect_reply(shots=shots)
+        post["tracks"]["audio"][1]["items"][0]["media_path"] = str(self.bench.production.audio / (take.get("wav") or take["audio"]))
+        post["markers"] = [{**marker, "color": "Blue"} for marker in meaning_markers(job, take, timeline["fps"],
+                            lead_frames=timeline.get("lead_frames", 0))]
+        self.bench.runner.final_inspect = post
+        return post
+
+    def test_skill_refresh_resolves_reported_gaps_and_allows_human_completion(self):
+        job, edit = self.skill_finished()
+        data = self.bench.production.read()
+        stored = next(item for item in data["jobs"] if item["id"] == job["id"])["edits"][-1]
+        gaps = [{"start": 30, "end": 60, "need": "旋钮动作"}]
+        stored.update(status="needs_material")
+        stored["report"]["gaps"] = gaps
+        self.bench.production.write(data)
+        self.current_skill_readback(job)
+        checked = self.recheck(job, edit)
+        self.assertEqual(checked["job"]["status"], "awaiting_review")
+        self.assertEqual(checked["edit"]["validation"]["scope"], "current_coverage")
+        self.assertEqual(checked["edit"]["report"]["gaps"], gaps)
+        self.assertEqual(checked["edit"]["summary"]["resolved_gaps"][0]["coverage_status"], "covered")
+        calls = len(self.bench.runner.calls)
+        approved = self.approve(job, edit)
+        self.assertTrue(approved["approved"])
+        self.assertEqual(len(self.bench.runner.calls), calls)
+        self.assertTrue(self.recheck(job, edit)["edit"]["approval"])
+
+    def test_current_voice_tail_trim_is_information_and_human_review_can_confirm_the_existing_cut(self):
+        job, edit = self.skill_finished()
+        post = self.current_skill_readback(job, shots=((0, 200), (200, 399)))
+        post["end_frame"] = 399
+        post["tracks"]["audio"][1]["items"][0].update(end=399, source_end=399)
+        checked = self.recheck(job, edit)
+        self.assertEqual(checked["edit"]["status"], "awaiting_review")
+        self.assertEqual(checked["edit"]["summary"]["voice_frames"], 399)
+        self.assertFalse(checked["edit"]["validation"]["checks"]["current_voice_position_record"])
+        self.assertEqual([issue["severity"] for issue in checked["edit"]["validation"]["issues"]], ["info"])
+        calls = len(self.bench.runner.calls)
+        self.assertTrue(self.approve(job, edit)["approved"])
+        self.assertEqual(len(self.bench.runner.calls), calls)
+
+    def test_skill_unverified_gap_requires_review_then_fresh_coverage(self):
+        self.editor.output = '```json\n{"shots":1,"saved":true,"gaps":[{"start":200,"end":400,"status":"unverified","need":"需查看夹刀近景"}]}\n```'
+        job, edit = self.skill_finished()
+        self.assertEqual(edit["status"], "needs_verification")
+        self.assertEqual(self.bench.production.job(job["id"])["status"], "needs_verification")
+        self.current_skill_readback(job, shots=((0, 200),))
+        checked = self.recheck(job, edit)
+        self.assertEqual(checked["edit"]["status"], "needs_verification")
+        with self.assertRaises(VoiceError):
+            self.approve(job, edit)
+        self.current_skill_readback(job)
+        self.assertEqual(self.recheck(job, edit)["edit"]["status"], "awaiting_review")
+        self.assertTrue(self.approve(job, edit)["approved"])
+
     def test_new_pending_result_is_recovery_not_failed_engineering_verification(self):
         job, edit = self.skill_finished()
         data = self.bench.production.read()

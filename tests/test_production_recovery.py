@@ -12,8 +12,7 @@ from uuid import uuid4
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-CONFIG = json.loads((APP / "config.json").read_text(encoding="utf-8"))
-sys.path.insert(0, str(Path(CONFIG["skill_root"]) / "scripts"))
+sys.path.insert(0, str(APP / "scripts"))
 
 from elevenlabs_client import VoiceError
 from production_operations import ProductionOperations, file_lock
@@ -34,6 +33,9 @@ class RecoveringResolve:
         self.calls.append(payload)
         key = payload["operation_key"]
         if key not in self.timelines:
+            # Like the worker, journal the build identity before anything changes in DaVinci.
+            Path(payload["recovery_file"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(payload["recovery_file"]).write_text(json.dumps({"operation_key": key}), encoding="utf-8")
             self.timelines[key] = {"ok": True, "name": payload["prefix"] + "1", "unique_id": "line-" + key[:12],
                                   "start_frame": 0, "end_frame": 400, "markers": payload["markers"], "saved": True}
             if self.lost_response:

@@ -1,4 +1,4 @@
-"""Fixed carousel delivery snapshots; all media comes from disposable fake jobs."""
+"""Checked latest-only carousel delivery snapshots, using disposable fake jobs."""
 import copy
 import hashlib
 import json
@@ -97,7 +97,7 @@ class CarouselDeliveryTests(unittest.TestCase):
         folders = list((self.bench._carousel_dir(self.identifier) / "deliveries").iterdir())
         self.assertEqual(len(folders), 1)
 
-    def test_old_information_package_remains_readable_and_new_collection_rebuilds_images_only(self):
+    def test_old_information_package_is_replaced_and_deleted_after_new_images_only_package_is_ready(self):
         self.ready()
         old = self.create()["delivery"]
         path = self.bench.carousel_delivery_file(self.identifier, old["id"])
@@ -115,32 +115,34 @@ class CarouselDeliveryTests(unittest.TestCase):
             data = self.bench.production.read()
             data["carousels"][0]["deliveries"][0] = copy.deepcopy(old)
             self.bench.production.write(data)
-        old_bytes = path.read_bytes()
         self.assertEqual(self.bench._checked_delivery(self.identifier, old, complete=True), path)
         self.assertFalse(self.bench.carousel_delivery_live(self.current())["deliveries"][0]["current"])
         new = self.create()["delivery"]
         self.assertNotEqual(new["id"], old["id"])
         self.assertTrue(new["images_only"])
-        self.assertEqual(path.read_bytes(), old_bytes)
+        self.assertFalse(path.exists())
+        self.assertEqual([entry["id"] for entry in self.current()["deliveries"]], [new["id"]])
         with zipfile.ZipFile(self.bench.carousel_delivery_file(self.identifier, new["id"])) as archive:
             self.assertEqual(archive.namelist(), ["01.png", "02.png", "03.png"])
 
-    def test_redo_makes_new_package_without_mutating_old_and_old_can_be_current_again(self):
+    def test_redo_keeps_only_latest_package_and_old_image_selection_can_be_packaged_again(self):
         self.ready()
         first = self.create()["delivery"]
         old_path = self.bench.carousel_delivery_file(self.identifier, first["id"])
-        old_bytes = old_path.read_bytes()
         self.fixture.generate(slides=[2])
         self.fixture.approve(2, self.current()["slides"][1]["outputs"][-1]["id"])
         second = self.create()["delivery"]
         self.assertNotEqual(second["id"], first["id"])
         live = self.bench.carousel_delivery_live(self.current())
-        self.assertEqual([(entry["current"], entry["stale"]) for entry in live["deliveries"]], [(False, True), (True, False)])
-        self.assertEqual(old_path.read_bytes(), old_bytes)
+        self.assertEqual([(entry["current"], entry["stale"]) for entry in live["deliveries"]], [(True, False)])
+        self.assertFalse(old_path.exists())
+        second_path = self.bench.carousel_delivery_file(self.identifier, second["id"])
         self.fixture.approve(2, first["slides"][1]["output_id"])
-        self.assertEqual(self.create()["delivery"]["id"], first["id"])
-        self.assertEqual(len(self.current()["deliveries"]), 2)
-        self.assertEqual(self.current()["deliveries"][0], first)
+        third = self.create()["delivery"]
+        self.assertNotIn(third["id"], {first["id"], second["id"]})
+        self.assertEqual([entry["id"] for entry in self.current()["deliveries"]], [third["id"]])
+        self.assertFalse(second_path.exists())
+        self.assertEqual(third["slides"][1]["output_id"], first["slides"][1]["output_id"])
 
     def test_stale_revision_and_invalid_request_leave_no_new_package_files(self):
         self.ready()
@@ -191,7 +193,7 @@ class CarouselDeliveryTests(unittest.TestCase):
         second = self.create()["delivery"]
         self.assertNotEqual(second["id"], record["id"])
 
-    def test_missing_or_changed_package_can_be_rebuilt_without_overwriting_history(self):
+    def test_missing_or_changed_package_is_rebuilt_and_superseded_files_are_removed(self):
         self.ready()
         first = self.create()["delivery"]
         first_path = self.bench.carousel_delivery_file(self.identifier, first["id"])
@@ -199,13 +201,14 @@ class CarouselDeliveryTests(unittest.TestCase):
         self.error(409, self.bench.carousel_delivery_file, self.identifier, first["id"])
         second = self.create()["delivery"]
         self.assertNotEqual(second["id"], first["id"])
-        self.assertEqual(first_path.read_bytes(), b"corrupt zip")
+        self.assertFalse(first_path.exists())
         second_path = self.bench.carousel_delivery_file(self.identifier, second["id"])
         second_path.unlink()
         self.error(404, self.bench.carousel_delivery_file, self.identifier, second["id"])
         third = self.create()["delivery"]
         self.assertEqual(len({first["id"], second["id"], third["id"]}), 3)
-        self.assertEqual(len(self.current()["deliveries"]), 3)
+        self.assertEqual([entry["id"] for entry in self.current()["deliveries"]], [third["id"]])
+        self.assertFalse(second_path.parent.exists())
 
     def test_download_belongs_to_carousel_and_rejects_tampered_path(self):
         self.ready()
@@ -353,6 +356,17 @@ class CarouselDeliveryTests(unittest.TestCase):
         self.video_job(("failed", "awaiting_review"))
         self.assertEqual(len(self.bench.production_deliveries()["items"]), 1)
 
+    def test_archived_timeline_is_not_an_active_video_delivery(self):
+        self.video_job()
+        self.assertEqual(len(self.bench.production_deliveries()["items"]), 1)
+        data = self.bench.production.read()
+        data["jobs"][0]["timelines"][0]["archived"] = True
+        self.bench.production.write(data)
+        self.assertEqual(self.bench.production_deliveries()["items"], [])
+        data["jobs"][0]["timelines"][0]["archived"] = False
+        self.bench.production.write(data)
+        self.assertEqual(len(self.bench.production_deliveries()["items"]), 1)
+
     def test_legacy_completed_and_missing_or_failed_validation_do_not_enter_overview(self):
         for state, validated in (("completed", False), ("awaiting_review", False), ("verification_failed", True), ("unverified", True)):
             with self.subTest(state=state, validated=validated):
@@ -372,6 +386,24 @@ class CarouselDeliveryTests(unittest.TestCase):
         self.assertEqual(self.bench.production_deliveries()["items"], [])
         self.video_job()
         self.assertEqual(len(self.bench.production_deliveries()["items"]), 1)
+
+    def test_current_coverage_resolves_old_report_without_erasing_it(self):
+        self.video_job(validation=False)
+        with self.bench.lock:
+            data = self.bench.production.read()
+            edit = data["jobs"][0]["edits"][0]
+            edit.update(completion_policy="skill_delivery", execution_status="completed",
+                        report={"saved": True, "gaps": [{"start": 0, "end": 30, "need": "old gap"}]},
+                        summary={"picture_gaps": [], "resolved_gaps": [{"start": 0, "end": 30}]},
+                        validation={"scope": "current_coverage", "status": "awaiting_review", "saved": True})
+            self.bench.production.write(data)
+        self.assertEqual(len(self.bench.production_deliveries()["items"]), 1)
+        self.assertEqual(self.bench.production.read()["jobs"][0]["edits"][0]["report"]["gaps"][0]["need"], "old gap")
+        with self.bench.lock:
+            data = self.bench.production.read()
+            data["jobs"][0]["edits"][0]["summary"]["picture_gaps"] = [{"start": 5, "end": 10}]
+            self.bench.production.write(data)
+        self.assertEqual(self.bench.production_deliveries()["items"], [])
 
 
 class CarouselDeliveryHTTPTests(unittest.TestCase):

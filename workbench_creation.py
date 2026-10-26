@@ -8,14 +8,17 @@ import re
 import time
 from pathlib import Path
 
-from creation_store import CreationError, text
+from creation_store import CreationError, PLAN_VARIANT_SNAPSHOT_KEYS, text
 from direction_store import product_key, fingerprint, now
 from review_store import NOTE_LIMIT
 from ai_tasks import MAX_PROMPT_CHARS
+from variant_parse import parse_variants
+from review_policy import review_context
 
 # The basket's input limits live here only; the page reads them from /api/materials.
 # prompt_chars is the whole writing task's context limit, which the page uses to size the selection.
 MATERIAL_LIMITS = {"note": NOTE_LIMIT, "hook_text": 6000, "prompt_chars": MAX_PROMPT_CHARS}
+VARIANT_IDENTITY_KEYS = ("main_difference", "concern", "closing", "variant_type", "execution_change")
 
 
 def _check_note(value, label="备注"):
@@ -24,14 +27,178 @@ def _check_note(value, label="备注"):
 
 
 class CreationWorkbenchMixin:
-    def creation_catalog(self, product=None):
+    def creation_catalog(self, product=None, *, include_usage=True):
         result = self.creation.public(product)
+        links = self._resolved_script_variant_links(result["variant_links"])
+        usage = self._script_production_usage(product) if include_usage else None
         for script in result["scripts"]:
             script["script_id"] = script["id"]
             source = script.get("source")
             if source:
                 script["source"] = {key: value for key, value in source.items() if key not in {"snapshot", "candidate_text"}}
+            self._attach_script_variant_link(script, links)
+            if usage is not None:
+                script["production_usage"] = usage.get(script["id"], [])
         return result
+
+    def _script_production_usage(self, product=None):
+        production = getattr(self, "production", None)
+        if production is None:
+            return {}
+        records = production.script_usage(product)
+        publications = getattr(self, "_video_publications", lambda: None)()
+        published_jobs = publications.read().get("jobs", {}) if publications else {}
+        usage = {}
+        for item in records:
+            kind = item["kind"]
+            publication = ((published_jobs.get(item["id"]) or {}).get("publication") if kind == "video"
+                           else item.get("publication")) or {}
+            usage.setdefault(item["script_id"], []).append({
+                "id": item["id"], "kind": kind, "status": item.get("status"),
+                "archived": bool(item.get("archived")),
+                "publication": {key: publication.get(key) for key in ("post_id", "published_on")}
+                               if publication else None})
+        return usage
+
+    def _resolved_script_variant_links(self, links):
+        candidates = [row for row in links if row.get("kind") == "script"]
+        if not candidates:
+            return {}
+        directions = self.directions.read()["directions"]
+        result = {}
+        counts = {}
+        for link in candidates:
+            counts[link.get("record_id")] = counts.get(link.get("record_id"), 0) + 1
+        for link in candidates:
+            if counts[link.get("record_id")] != 1:
+                continue
+            direction = next((row for row in directions if row["product"] == link.get("product") and
+                              row["direction_id"] == link.get("direction_id")), None)
+            snapshot = (link.get("variant_ref") or {}).get("snapshot")
+            if direction is None or not isinstance(snapshot, dict):
+                continue
+            identity = tuple(snapshot.get(key, "") for key in VARIANT_IDENTITY_KEYS)
+            matches = [index for index, row in enumerate(direction.get("variants", []))
+                       if not row.get("conflict") and tuple(row.get(key, "") for key in VARIANT_IDENTITY_KEYS) == identity]
+            if len(matches) == 1:
+                result[link["record_id"]] = {**copy.deepcopy(link), "resolved_index": matches[0]}
+        return result
+
+    @staticmethod
+    def _attach_script_variant_link(script, links):
+        link = links.get(script["id"])
+        if (link and product_key(script.get("product")) == link["product"] and
+                (not script.get("direction_id") or script["direction_id"] == link["direction_id"])):
+            script["variant_link"] = copy.deepcopy(link)
+
+    def _variant_link_source(self, kind, identifier, product, creation):
+        """Resolve formal records without rewriting their content or frozen sources."""
+        product = product_key(text(product, "产品", limit=200))
+        if product == "all":
+            raise CreationError(400, "请先选择具体产品。")
+        identifier = text(identifier, "历史记录编号", limit=200)
+        if not isinstance(kind, str) or kind not in {"script", "production", "video"}:
+            raise CreationError(400, "历史记录类型无效。")
+        if kind in {"script", "production"}:
+            production_kind = None
+            if kind == "script":
+                record = next((row for row in creation["scripts"] if row["id"] == identifier), None)
+                owners = []
+            else:
+                production = self.production.records()
+                found = [(row, row_kind) for key, row_kind in (("jobs", "video"), ("carousels", "carousel"))
+                         for row in production[key] if row["id"] == identifier]
+                if len(found) > 1:
+                    raise CreationError(409, "发现重复的制作记录编号，请先核对资料。")
+                record, production_kind = found[0] if found else (None, None)
+                owners = [row for row in creation["scripts"] if record and row["id"] == record.get("script_id")]
+            if record is None:
+                raise CreationError(404, "这条历史记录不存在。")
+            if any(product_key(row.get("product")) != product for row in [record, *owners]):
+                raise CreationError(409, "历史记录与所选产品不同，不能跨产品关联变体。")
+            directions = {row["direction_id"] for row in [record, *owners] if row.get("direction_id")}
+            if len(directions) > 1:
+                raise CreationError(409, "制作单与文案的方向不一致，请先核对原记录。")
+            brief = {key: copy.deepcopy(record[key]) for key in
+                     ("id", "title", "product", "status", "script_id", "video_id") if key in record}
+            brief.update(product=product, direction_id=next(iter(directions), ""))
+            if production_kind:
+                brief["production_kind"] = production_kind
+            return brief, fingerprint({"kind": kind, "record": record, "owners": owners})
+        if not re.fullmatch(r"\d{6,25}", identifier):
+            raise CreationError(400, "视频 ID 格式无效。")
+        links = [row for row in self.directions.read()["video_links"] if row.get("video_id") == identifier]
+        cases = []
+        for row in self.store.read_index()["cases"]:
+            current = row.get("current") or {}
+            if str((current.get("metrics") or {}).get("video_id") or "") == identifier:
+                cases.append({"case_id": row["case_id"], "product": row.get("product"), "current": current})
+        actual = self.performance.video_brief([identifier]).get(identifier)
+        products = {product_key(row.get("product")) for row in [*links, *cases, *([actual] if actual else [])]
+                    if row.get("product")}
+        if not products:
+            raise CreationError(404, "现有视频资料中没有这条视频的产品归属，尚不能关联变体。")
+        if products != {product}:
+            raise CreationError(409, "视频现有资料与所选产品不同，请先核对视频归属。")
+        directions = {row["direction_id"] for row in links if row.get("direction_id")}
+        directions.update((row["current"].get("test_direction") or {}).get("direction_id") for row in cases)
+        directions.discard(None)
+        directions.discard("")
+        if len(directions) > 1:
+            raise CreationError(409, "视频现有资料分属不同方向，请先核对方向归属。")
+        titles = [row["current"].get("title") for row in cases]
+        brief = {"id": identifier, "video_id": identifier, "product": product,
+                 "direction_id": next(iter(directions), ""),
+                 "title": next((title for title in titles if title), "") or
+                          (actual or {}).get("title") or identifier}
+        return brief, fingerprint({"kind": kind, "links": links, "cases": cases, "performance": actual})
+
+    def variant_link_source(self, kind, identifier, product):
+        with self.lock, self.store.index_snapshot():
+            creation = self.creation.read()
+            record, revision = self._variant_link_source(kind, identifier, product, creation)
+            result = {"revision": self.creation.revision(creation), "record_revision": revision, "record": record}
+            old = next((row for row in creation["variant_links"]
+                        if row["kind"] == kind and row["record_id"] == identifier), None)
+            if old:
+                result["existing_link"] = copy.deepcopy(old)
+            return result
+
+    def save_variant_link(self, body):
+        with self.lock, self.store.index_snapshot():
+            prior = self.creation.replay("variant_link", body)
+            if prior:
+                return {**prior, "catalog": self.creation_catalog()}
+            if not isinstance(body, dict) or not isinstance(body.get("link"), dict):
+                raise CreationError(400, "历史变体关联参数格式无效。")
+            value = body["link"]
+            creation = self.creation.read()
+            record, revision = self._variant_link_source(value.get("kind"), value.get("record_id"),
+                                                        value.get("product"), creation)
+            if body.get("record_revision") != revision:
+                raise CreationError(409, "历史记录已更新，请重新核对内容后再关联。")
+            direction = next((row for row in self.directions.read()["directions"]
+                              if row["product"] == record["product"] and row["direction_id"] == value.get("direction_id")), None)
+            if direction is None:
+                raise CreationError(400, "所选产品下没有这条方向，请重新选择。")
+            if record.get("direction_id") and record["direction_id"] != direction["direction_id"]:
+                raise CreationError(409, "历史记录已属于另一方向，请先核对原记录，不能直接跨方向关联。")
+            ref = self.creation._plan_variant_ref(value.get("variant_ref"))
+            variants = direction.get("variants") or []
+            if ref["index"] >= len(variants):
+                raise CreationError(409, "方向变体已更新，请重新核对后再关联。")
+            variant = variants[ref["index"]]
+            snapshot = {key: variant[key] for key in PLAN_VARIANT_SNAPSHOT_KEYS if key in variant}
+            if variant.get("conflict") or ref["snapshot"] != snapshot:
+                raise CreationError(409, "方向变体已更新或存在冲突，请重新核对后再关联。")
+            identity = tuple(snapshot.get(key, "") for key in VARIANT_IDENTITY_KEYS)
+            matches = [row for row in variants if not row.get("conflict") and
+                       tuple(row.get(key, "") for key in VARIANT_IDENTITY_KEYS) == identity]
+            if len(matches) != 1:
+                raise CreationError(409, "多个变体使用相同的完整链路，请先核对区分变体后再关联。")
+            result = self.creation.mutate("variant_link", body)
+            self.state_cache = None
+            return {**result, "catalog": self.creation_catalog()}
 
     def _creation_direction(self, product, identifier, *, optional=False, allow_archived=False):
         if not identifier and optional:
@@ -44,6 +211,44 @@ class CreationWorkbenchMixin:
             raise CreationError(409, "该方向已归档，请恢复方向后再创作。")
         return copy.deepcopy(item)
 
+    def _used_phrasing(self, product, recent=20, min_scripts=3):
+        """Openings, closings and sentences that keep coming back in this product's adopted scripts, so a new round can avoid copying them."""
+        rows, seen = [], set()
+        for script in sorted(self.creation.public()["scripts"], key=lambda row: str(row.get("created_at") or ""), reverse=True):
+            body = str(script.get("text") or "").strip()
+            if product_key(script.get("product")) != product or not body or body in seen or "图文" in str(script.get("title") or ""):
+                continue
+            seen.add(body)
+            rows.append([line.strip() for line in body.splitlines() if line.strip()])
+            if len(rows) == recent:
+                break
+        if len(rows) < min_scripts:
+            return None
+        def top(values):
+            counts = {}
+            for value in values:
+                counts[value] = counts.get(value, 0) + 1
+            return [value for value, n in sorted(counts.items(), key=lambda item: -item[1]) if n >= 2][:8]
+        grams = {}
+        for lines in rows:
+            words = re.findall(r"[a-z0-9']+", " ".join(lines).lower())
+            for gram in {" ".join(words[i:i + 4]) for i in range(len(words) - 3)}:
+                grams[gram] = grams.get(gram, 0) + 1
+        repeated = [gram for gram, n in sorted(grams.items(), key=lambda item: -item[1]) if n >= min_scripts][:15]
+        return {"scripts_checked": len(rows), "openings": list(dict.fromkeys(lines[0] for lines in rows))[:10], "repeated_closings": top(lines[-1] for lines in rows),
+                "repeated_phrases": repeated}
+
+    def _linked_reviews(self, product, direction, limit=12):
+        """Comments the user linked (关联主题) to this direction's concern or its selling point, frozen into the writing context."""
+        if not direction:
+            return []
+        point_id = direction.get("selling_point_id")
+        rows = [link for link in self.creation.public()["theme_links"] if product_key(link.get("product")) == product and link.get("review_id")
+                and (link.get("direction_id") == direction["direction_id"] or (point_id and link.get("selling_point_id") == point_id))]
+        return [{"review_id": link["review_id"], "linked_as": "方向顾虑" if link.get("role") == "concern" else "卖点证据",
+                 "target": link.get("target_label") or "", "quote": str(link.get("source_quote") or link.get("theme") or "")[:600],
+                 "user_note": str(link.get("note") or "")[:300]} for link in rows[-limit:]]
+
     @staticmethod
     def _script_alias(script):
         result = copy.deepcopy(script)
@@ -53,6 +258,8 @@ class CreationWorkbenchMixin:
     def script_detail(self, identifier):
         with self.lock:
             item = self.creation.get_script(identifier)
+            item["production_usage"] = self._script_production_usage().get(identifier, [])
+            self._attach_script_variant_link(item, self._resolved_script_variant_links(self.creation.read()["variant_links"]))
             result = {"revision": self.creation.public()["revision"], "script": self._script_alias(item)}
             video = item.get("video_id")
             result["sales_data"] = self.sales.resolve_case({"case_id": identifier, "current": {"metrics": {"video_id": video} if video else {}}})
@@ -87,13 +294,21 @@ class CreationWorkbenchMixin:
                 source = self.ai.candidate(requested.get("task_id"), requested.get("round_id"), requested.get("task_revision"))
                 if product != source["product"]:
                     raise CreationError(409, "候选与文案产品不一致。")
+                if "variant_index" in requested:
+                    index = requested["variant_index"]
+                    variants = parse_variants(source["candidate_text"])
+                    if type(index) is not int or not any(item["index"] == index for item in variants):
+                        raise CreationError(400, "所选变体编号无效，请重新选择候选变体。")
+                    source["variant_index"] = index
             result = self.creation.mutate("script", body, source)
+            if source:
+                self.ai.note_adoption(source["task_id"])
             self._link_script_plan(result["script"])
             result["script"] = self._script_alias(result["script"])
             self.state_cache = None
             return {**result, "catalog": self.creation_catalog()}
 
-    def save_script_status(self, identifier, body, *, carousel_id=None):
+    def save_script_status(self, identifier, body, *, carousel_id=None, video_job_id=None):
         with self.lock:
             body = copy.deepcopy(body)
             value = body.setdefault("script_status", {})
@@ -106,6 +321,13 @@ class CreationWorkbenchMixin:
             if prior:
                 return {**prior, "script": self._script_alias(prior["script"]), "catalog": self.creation_catalog()}
             script = self.creation.get_script(identifier)
+            video_publication = getattr(self, "video_publication_for_script", lambda _: None)(identifier)
+            if video_publication:
+                changed = (value.get("video_id", script.get("video_id")), value.get("published_on", script.get("published_on"))) != (
+                    video_publication["post_id"], video_publication["published_on"])
+                invalid_status = "status" in value and value["status"] not in {"published", "reviewed", "archived"}
+                if (changed or invalid_status) and video_job_id != video_publication["job_id"]:
+                    raise CreationError(409, "这条脚本已有视频成片发布登记，请到对应视频制作单修改，保留实际成片关联。")
             production = getattr(self, "production", None)
             for carousel in production.public().get("carousels", []) if production else []:
                 published = carousel.get("publication") or {}
@@ -113,7 +335,7 @@ class CreationWorkbenchMixin:
                     continue
                 changed = (value.get("video_id", script.get("video_id")), value.get("published_on", script.get("published_on"))) != (
                     published["post_id"], published["published_on"])
-                invalid_status = value.get("status", script["status"]) not in {"published", "reviewed", "archived"}
+                invalid_status = "status" in value and value["status"] not in {"published", "reviewed", "archived"}
                 if (changed or invalid_status) and carousel_id != carousel["id"]:
                     raise CreationError(409, "这条脚本已有图文发布登记，请到对应图文制作单修改，保留实际成品包关联。")
             video = str(value.get("video_id", script["video_id"]) or "")
@@ -266,6 +488,7 @@ class CreationWorkbenchMixin:
                 "title": str(review.get("text") or "评论摘录")[:100], "text": review.get("text") or "",
                 "product": product_key(review.get("product")), "note": (review.get("pick") or {}).get("note", ""),
                 "source_label": review.get("platform") or "评论", "source_url": review.get("url") or review.get("source_url") or "",
+                "author_name": review.get("author_name") or "", "author_handle": review.get("author_handle") or "",
                 "added": (review.get("pick") or {}).get("added"), "unverified": True}
 
     def _material_sources(self):
@@ -578,11 +801,23 @@ class CreationWorkbenchMixin:
             if prior:
                 return {**prior, "catalog": self.creation_catalog()}
             value = body.get("plan") or {}
+            old = {}
             if value.get("id"):
                 old = next((plan for plan in self.creation.public()["plans"] if plan["id"] == value["id"]), {})
                 value = {**old, **value}
-            self._creation_direction(value.get("product"), value.get("direction_id"),
-                                     allow_archived=bool(value.get("id") and value.get("status") in {"done", "cancelled"}))
+            direction = self._creation_direction(value.get("product"), value.get("direction_id"),
+                                                allow_archived=bool(value.get("id") and value.get("status") in {"done", "cancelled"}))
+            if value.get("source_review") is not None and old.get("source_review") is None:
+                self.review_followups.validate_source(value["source_review"], value.get("product"))
+            if "variant_ref" in value and old.get("variant_ref") is None:
+                ref = self.creation._plan_variant_ref(value["variant_ref"])
+                variants = direction.get("variants") or []
+                if ref["index"] >= len(variants):
+                    raise CreationError(409, "方向变体已更新，请重新打开后再选择测试变体。")
+                variant = variants[ref["index"]]
+                snapshot = {key: variant[key] for key in PLAN_VARIANT_SNAPSHOT_KEYS if key in variant}
+                if variant.get("conflict") or ref["snapshot"] != snapshot:
+                    raise CreationError(409, "方向变体已更新，请重新打开后再选择测试变体。")
             if value.get("task_id"):
                 task = self.ai.get(value["task_id"])
                 if product_key(task.get("product")) != product_key(value.get("product")) or (task.get("context") or {}).get("direction_id") != value.get("direction_id"):
@@ -643,12 +878,38 @@ class CreationWorkbenchMixin:
             variant = variants[index]
             if variant.get("conflict") or item.get("progression") != variant.get("progression"):
                 raise CreationError(409, "方向变体已更新，请重新打开窗口后再选择。")
-            picked.append({"number": index + 1, **{key: copy.deepcopy(variant[key]) for key in
-                ("progression", "baseline", "variant_type", "main_difference", "concern", "closing", "execution_change") if key in variant}})
+            entry = {"number": index + 1, **{key: copy.deepcopy(variant[key]) for key in
+                ("progression", "baseline", "variant_type", "main_difference", "concern", "closing", "execution_change") if key in variant}}
+            # The opening speaks to this crowd: the variant's own, else the direction's default.
+            audience = str(variant.get("audience") or "").strip() or str(direction.get("audience") or "").strip()
+            if audience:
+                entry["audience"] = audience
+                entry["audience_source"] = "variant" if str(variant.get("audience") or "").strip() else "direction"
+            picked.append(entry)
         if not picked and not count:
             raise CreationError(400, "请至少勾选一条变体，或填写新变体条数。")
         used = sorted({variant["progression"] for variant in variants if variant.get("progression") and not variant.get("conflict")})
         return {"variants": picked, "new_variant_count": count, "used_progressions": used}
+
+    @staticmethod
+    def _writing_mode(body, case, direction):
+        """Freeze 「原稿发散」: new scripts grown from the case's own script, each on a progression of its own."""
+        value = body.get("writing_mode")
+        if value is None:
+            return None
+        if not isinstance(value, dict) or value.get("mode") != "diverge" or set(value) - {"mode", "count"}:
+            raise CreationError(400, "写法参数无效。")
+        if body.get("action") != "variants" or not case:
+            raise CreationError(400, "原稿发散只用于从案例写稿。")
+        count = value.get("count", 3)
+        if type(count) is not int or not 1 <= count <= 5:
+            raise CreationError(400, "发散条数须为 1–5。")
+        recorded = (case.get("current") or {}).get("test_direction") or {}
+        used = sorted({variant["progression"] for variant in (direction or {}).get("variants") or []
+                       if variant.get("progression") and not variant.get("conflict")})
+        return {"mode": "diverge", "count": count, "used_progressions": used,
+                "original_direction": {key: copy.deepcopy(recorded[key]) for key in
+                    ("direction_id", "main_difference", "concern", "closing", "variant_type", "execution_change", "progression") if key in recorded}}
 
     def create_ai_task(self, body):
         with self.lock:
@@ -667,8 +928,26 @@ class CreationWorkbenchMixin:
             product = product_key(case.get("product") if case else body.get("product"))
             if not product or product == "all":
                 raise CreationError(400, "请先选择具体产品，再开始协作。")
-            direction_id = body.get("direction_id") or (((case or {}).get("current") or {}).get("test_direction") or {}).get("direction_id")
-            direction = self._creation_direction(product, direction_id, optional=True)
+            script_detail = self.script_detail(body["script_id"]) if body.get("script_id") else None
+            script = (script_detail or {}).get("script")
+            if script and product_key(script["product"]) != product:
+                raise CreationError(409, "文案与当前产品不一致。")
+            script_direction = (script or {}).get("direction_id") or ((script or {}).get("variant_link") or {}).get("direction_id")
+            if (script and body["action"] == "review" and script_direction and body.get("direction_id")
+                    and body["direction_id"] != script_direction):
+                raise CreationError(409, "审稿方向与采用稿登记的方向不一致，请从该稿重新发起。")
+            task_plan = None
+            if body.get("plan_id"):
+                task_plan = next((item for item in self.creation.public()["plans"] if item["id"] == body["plan_id"]), None)
+                if not task_plan:
+                    raise CreationError(404, "待写计划不存在。")
+                if product_key(task_plan["product"]) != product:
+                    raise CreationError(409, "待写计划与所选产品或方向不一致。")
+            direction_id = (body.get("direction_id") or script_direction
+                            or (None if script else (((case or {}).get("current") or {}).get("test_direction") or {}).get("direction_id"))
+                            or (task_plan or {}).get("direction_id"))
+            direction = self._creation_direction(product, direction_id, optional=True,
+                                                 allow_archived=bool(script and body["action"] == "review"))
             materials = self.material_catalog(product)["items"] if body.get("include_basket") or body.get("material_ids") else []
             if "material_ids" in body:
                 selected = body["material_ids"]
@@ -680,26 +959,94 @@ class CreationWorkbenchMixin:
             context = {"kind": "case" if case else "direction" if direction else "blank", "product": product,
                        "title": (case or {}).get("current", {}).get("title") or (direction or {}).get("direction_id") or "空白创作",
                        "direction": direction, "materials": materials}
+            used = self._used_phrasing(product) if body.get("action") == "variants" else None
+            if used:
+                context["used_phrasing"] = used
+            linked = self._linked_reviews(product, direction)
+            if linked:
+                context["linked_reviews"] = linked
             plan = self._writing_plan(body, direction)
             if plan:
                 context["writing_plan"] = plan
+            mode = self._writing_mode(body, case, direction)
+            if mode:
+                if plan:
+                    raise CreationError(400, "原稿发散与按变体写稿不能同时使用。")
+                context["writing_mode"] = mode
             if body.get("carousel"):
                 raise CreationError(400, "写稿不再同时出图文版：脚本定稿后，用口播稿的意群表配合图文技能另做逐张表。")
             if body.get("plan_id"):
-                plan = next((item for item in self.creation.public()["plans"] if item["id"] == body["plan_id"]), None)
-                if not plan:
-                    raise CreationError(404, "待写计划不存在。")
+                plan = task_plan
                 if plan["product"] != product or plan["direction_id"] != direction_id:
                     raise CreationError(409, "待写计划与所选产品或方向不一致。")
-                if plan["status"] not in {"pending", "working"} or plan["action"] == "stop":
+                if plan["status"] not in {"pending", "working"} or plan["action"] == "stop" or (plan.get("experiment") or {}).get("decision") == "stop":
                     raise CreationError(409, "该计划已结束或为停测计划，不能继续生成稿件。")
                 context["plan"] = copy.deepcopy(plan)
-            if body.get("script_id"):
-                script = self.creation.get_script(body["script_id"])
-                if script["product"] != product:
-                    raise CreationError(409, "文案与当前产品不一致。")
+                if plan.get("source_review"):
+                    context["source_review"] = copy.deepcopy(plan["source_review"])
+            if body.get("source_review") is not None:
+                if context.get("source_review") and body["source_review"] != context["source_review"]:
+                    raise CreationError(409, "本次复盘来源与计划冻结的来源不一致。")
+                if not context.get("source_review"):
+                    context["source_review"] = self.review_followups.validate_source(body["source_review"], product)
+            if body.get("review_video") is not None:
+                # Drafting a conclusion the user has not written yet: bind the video and its current window only.
+                ref = body["review_video"]
+                if body.get("action") != "retrospective" or case or context.get("source_review"):
+                    raise CreationError(400, "起草复盘结论只用于尚未绑定结论的视频复盘。")
+                if not isinstance(ref, dict) or not re.fullmatch(r"\d{6,25}", str(ref.get("video_id") or "")):
+                    raise CreationError(400, "请指定要复盘的视频。")
+                video = self.performance.video(str(ref["video_id"]))
+                if not video or product_key(video.get("product")) != product:
+                    raise CreationError(409, "复盘视频资料已变化，请核对视频所属产品。")
+                if not video.get("window_end") or video["window_end"] != ref.get("window_end"):
+                    raise CreationError(409, "视频观察窗已更新，请重新读取后再起草。")
+                context["review_draft"] = True
+                registered = next((row for row in self.review_videos() if row["video_id"] == video["video_id"]), None)
+                context["review_context"] = copy.deepcopy((registered or {}).get("review_context") or review_context(video))
+                context["review_video"] = copy.deepcopy(video)
+                context["review_summary"] = self.review_summary(video, product)
+                if not context.get("direction") and context["review_summary"]["direction_id"]:
+                    try:  # The video's own direction, when it is still registered, tells the draft what was being tested.
+                        context["direction"] = self._creation_direction(product, context["review_summary"]["direction_id"], allow_archived=True)
+                    except CreationError:
+                        pass
+                context["sales_data"] = self.sales.resolve_case({"case_id": video["video_id"], "current": {"metrics": {"video_id": video["video_id"]}}})
+                prepublish = self.prepublish_for_video(video["video_id"]) if hasattr(self, "prepublish_for_video") else None
+                if prepublish:  # Written before posting without any performance data; the draft checks its pre-mortem.
+                    context["prepublish_review"] = prepublish
+                context["title"] = f"{video['video_id']} · 复盘起草"
+            if context.get("source_review"):
+                ref = context["source_review"]
+                video = self.performance.video(ref["video_id"])
+                if not video or product_key(video.get("product")) != product:
+                    raise CreationError(409, "复盘视频资料已变化，请核对视频所属产品。")
+                if case and str(((case.get("current") or {}).get("metrics") or {}).get("video_id") or "") != ref["video_id"]:
+                    raise CreationError(409, "案例并未绑定这条复盘视频，请重新核对来源。")
+                if video.get("window_end") != ref["window_end"]:
+                    if not (context.get("plan") or {}).get("source_review"):
+                        raise CreationError(409, "视频观察窗已更新，请重新读取当前观察窗并核对复盘结论后再发起。")
+                    from sales_data import unavailable_data
+                    context["review_video"] = {"video_id": ref["video_id"], "product": product,
+                        "window_end": ref["window_end"], "status": "unavailable", "current_window_end": video.get("window_end")}
+                    context["sales_data"] = unavailable_data(ref["video_id"], reason="此计划保留历史复盘结论，但视频观察窗已更新；当前窗口数据不能代替来源观察窗，历史窗口表现暂不可用。")
+                else:
+                    context["review_video"] = copy.deepcopy(video)
+                    context["sales_data"] = self.sales.resolve_case({"case_id": ref["video_id"], "current": {"metrics": {"video_id": ref["video_id"]}}})
+                if not case:
+                    context["title"] = f"{ref['video_id']} · {'复盘' if body['action'] == 'retrospective' else '下一轮写稿'}"
+            if script:
                 context["script"] = {key: script[key] for key in ("id", "title", "text", "translation_zh")}
-                context["sales_data"] = self.script_detail(script["id"])["sales_data"]
+                if not context.get("source_review"):
+                    context["sales_data"] = script_detail["sales_data"]
+            if body["action"] in ("variants", "review"):
+                # A task keeps the exact references selected now, including an explicit empty result.
+                # Continuations and durable receipt replays never reselect from the live library.
+                try:
+                    context["review_experiences"] = copy.deepcopy(self.review_experiences_for_task(
+                        product, (context.get("direction") or {}).get("direction_id") or "", limit=8))
+                except Exception as exc:
+                    raise CreationError(503, "复盘经验暂时无法读取，本次任务未创建。请恢复经验库后重试。") from exc
             task = self.ai.create(identifier, body, context)
             self._link_task_plan(task)
             return task

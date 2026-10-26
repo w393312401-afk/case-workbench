@@ -62,7 +62,7 @@ class BackNavigationBrowserTests(unittest.TestCase):
         page.wait_for_function("expected => Math.abs(window.scrollY - expected) <= 2", arg=scroll_before)
         self.assertEqual(page.locator('[name="q"]').input_value(), "定角")
         self.assertEqual(page.locator('[data-tier-filter="S"]').get_attribute("aria-pressed"), "true")
-        self.assertEqual(page.locator('[data-status-filter="testing"]').get_attribute("aria-pressed"), "true")
+        self.assertEqual(page.locator('#direction-filters [name="status"]').input_value(), "testing")
         self.assertEqual(page.locator('[name="archive"]').input_value(), "all")
         # The breadcrumb no longer repeats the sidebar's way home.
         self.assertEqual(page.locator("#breadcrumb").get_by_role("link", name="工作空间", exact=True).count(), 0)
@@ -76,7 +76,7 @@ class BackNavigationBrowserTests(unittest.TestCase):
             with self.subTest(action=action):
                 self.open_direction(page)
                 self.assertEqual(page.locator("#navigate-up").get_attribute("href"), list_hash)
-                back = page.locator("#content").get_by_role("link", name="返回卖点与方向", exact=True)
+                back = page.locator("#content").get_by_role("link", name="返回卖点与方向", exact=True, include_hidden=True)
                 self.assertEqual(back.get_attribute("href"), list_hash)
                 # On desktop the pinned top-bar arrow replaces the in-page link, which stays for phones.
                 self.assertFalse(back.is_visible())

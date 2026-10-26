@@ -47,13 +47,13 @@ class CarouselTableTests(unittest.TestCase):
         self.assertEqual(status, 200, data)
         return data
 
-    def script(self):
+    def script(self, text="Seven plates. Overkill?\nThe clamp holds the angle."):
         creation = self.server.app.creation
         source = {"task_id": "AIT-0123456789ab", "round_id": "AIR-0123456789ab", "task_revision": 1, "product": "202H",
                   "case_id": None, "candidate_text": SOURCE, "candidate_sha256": "x", "snapshot": {}}
         return creation.mutate("script", {"request_id": uuid4().hex, "revision": creation.public()["revision"],
             "script": {"product": "202H", "direction_id": "202H-S2", "title": "回应质疑", "confirmed": True,
-                       "text": "Seven plates. Overkill?\nThe clamp holds the angle.", "translation_zh": "七块磨板，太夸张？\n夹具固定角度。"}}, source)["script"]
+                       "text": text, "translation_zh": "七块磨板，太夸张？\n夹具固定角度。"}}, source)["script"]
 
     def wait(self, table_id):
         deadline = time.monotonic() + 6
@@ -99,7 +99,8 @@ class CarouselTableTests(unittest.TestCase):
     def test_a_table_for_another_script_is_refused(self):
         self.server.app.ai.bridge = FakeBridge(output=TABLE)
         table = self.wait(self.start(self.script())["id"])
-        other = self.script()
+        # Adopting the same text again would return the same script, so the other one reads differently.
+        other = self.script(text="A different reading.\nOf the same candidate.")
         status, _, data = self.request("POST", "/api/production/carousels", {
             "revision": self.ok("GET", "/api/production")["revision"], "request_id": uuid4().hex,
             "carousel": {"script_id": other["id"], "table_id": table["id"]}})

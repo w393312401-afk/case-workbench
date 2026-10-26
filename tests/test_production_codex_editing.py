@@ -185,7 +185,7 @@ class CodexEditingTests(unittest.TestCase):
                 self.assertEqual(edit["execution_status"], "completed")
                 self.assertIsNone(edit["baseline"])
                 self.assertEqual(edit["completion_policy"], "skill_delivery")
-                self.assertFalse(any(call["command"] == "inspect" for call in self.bench.runner.calls))
+                self.assertEqual(fixture.judging_inspects(self.bench.runner.calls), [])
                 self.assertFalse(self.bench.resolve.busy())
         self.assertEqual(self.editor.calls, [])
 

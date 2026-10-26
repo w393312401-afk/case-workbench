@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from task_activity import ActivityStore, ActivityError, record_activity, safe_error, reconcile_activity
+from task_activity import ActivityStore, ActivityError, activity_label, record_activity, safe_error, reconcile_activity, settle_resolved_activity
 from data_backup import BackupManager
 
 
@@ -32,7 +32,7 @@ class ActivityStoreTests(unittest.TestCase):
         completed=self.store.record("ai:task:round",status="completed",phase="finished",message="候选已保存。")
         feed=self.store.feed(after=baseline["cursor"])
         self.assertEqual([event["event_id"] for event in feed["events"]],[completed])
-        self.assertEqual(feed["counts"],{"active":0,"unread":1})
+        self.assertEqual(feed["counts"],{"active":0,"queued":0,"unread":1})
         self.assertIn("?round=round",feed["items"][0]["url"])
         self.assertEqual(feed["items"][0]["product"],"202H")
         self.assertIsNone(self.store.record("ai:task:round",status="completed",phase="finished",message="候选已保存。"))
@@ -55,6 +55,19 @@ class ActivityStoreTests(unittest.TestCase):
         self.assertEqual(self.store.claim({**body,"event_ids":[first,recovered]})["claimed"],[recovered])
         self.assertEqual(self.store.feed()["counts"]["unread"],1)
 
+    def test_queued_counts_follow_admission_and_keep_waiting_tasks_current(self):
+        self.start()
+        run = "timeline:job:request"
+        self.store.record(run, kind="timeline", owner_id="job", source_id="request", title="建立时间线",
+                          status="queued", phase="等待达芬奇", message="空闲后自动开始。")
+        feed = self.store.feed(filter="current")
+        self.assertEqual(feed["counts"], {"active": 2, "queued": 1, "unread": 0})
+        self.assertEqual({row["run_id"] for row in feed["items"]}, {"ai:task:round", run})
+        self.store.record(run, status="running", phase="正在建立时间线")
+        self.assertEqual(self.store.feed()["counts"], {"active": 2, "queued": 0, "unread": 0})
+        self.store.record(run, status="completed", phase="已登记")
+        self.assertEqual(self.store.feed()["counts"], {"active": 1, "queued": 0, "unread": 1})
+
     def test_retry_same_request_can_reach_same_failed_terminal_again(self):
         self.start()
         first=self.store.record("ai:task:round",status="failed",phase="failed",message="请求未完成。",event_key="safe_failed:failed")
@@ -62,7 +75,7 @@ class ActivityStoreTests(unittest.TestCase):
         second=self.store.record("ai:task:round",status="failed",phase="failed",message="请求未完成。",event_key="safe_failed:failed")
         self.assertIsNotNone(second)
         self.assertNotEqual(first,second)
-        self.assertEqual(self.store.feed()["counts"],{"active":0,"unread":1})
+        self.assertEqual(self.store.feed()["counts"],{"active":0,"queued":0,"unread":1})
         self.assertIsNone(self.store.record("ai:task:round",status="failed",phase="failed",message="请求未完成。",event_key="safe_failed:failed"))
 
     def test_paginated_deltas_do_not_skip_completion_and_concurrent_logs_are_ordered(self):
@@ -109,7 +122,7 @@ class ActivityStoreTests(unittest.TestCase):
         self.store.delete_case("case")
         feed=self.store.feed(after=before)
         self.assertEqual(feed["removed"],["ai:task:round"])
-        self.assertEqual(feed["counts"],{"active":0,"unread":0})
+        self.assertEqual(feed["counts"],{"active":0,"queued":0,"unread":0})
         with self.store._connect() as db:
             for table in ("runs","logs","notifications","claims"):
                 self.assertEqual(db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0],0)
@@ -127,6 +140,100 @@ class ActivityStoreTests(unittest.TestCase):
                 self.store.feed(**kwargs)
         with self.assertRaises(ActivityError):
             self.store.read({"all":True})
+
+    def test_kind_search_and_attention_filters(self):
+        self.start()
+        self.store.record("edit:job:one",kind="edit",owner_id="job",source_id="one",product="202H",title="AI 剪辑 · 100%_变体",status="running",message="正在剪辑。")
+        self.store.record("voice:job:two",kind="voice",owner_id="job",source_id="two",product="202H",title="生成配音 · 100x变体",status="failed",message="未完成。")
+        self.store.record("images:job:three",kind="images",owner_id="job",source_id="three",product="202H",title="出图",status="needs_attention",message="待确认。")
+        ids=lambda **kwargs:{item["run_id"] for item in self.store.feed(**kwargs)["items"]}
+        self.assertEqual(ids(kind="voice"),{"voice:job:two"})
+        self.assertEqual(ids(q="100"),{"edit:job:one","voice:job:two"})
+        # LIKE wildcards in the search text are literal characters.
+        self.assertEqual(ids(q="100%_"),{"edit:job:one"})
+        self.assertEqual(ids(filter="attention"),{"voice:job:two","images:job:three"})
+        self.assertEqual(ids(filter="attention",kind="images"),{"images:job:three"})
+        for kwargs in ({"kind":"unknown"},{"q":"x"*101}):
+            with self.assertRaises(ActivityError):
+                self.store.feed(**kwargs)
+
+    def test_current_filter_keeps_open_runs_and_what_ended_since_the_bound(self):
+        self.start("ai:task:running")
+        for run, status in (("ai:task:failed","failed"),("ai:task:old","completed"),("ai:task:today","completed")):
+            self.start(run)
+            self.store.record(run,status=status,phase="finished",message="结束。")
+        # Its own task: a later round of the same task would settle the failure.
+        self.store.record("ai:task:failed",owner_id="other")
+        with self.store._connect() as db:
+            db.execute("UPDATE runs SET finished_at='2026-10-01T00:00:00.000+00:00',updated_at='2026-10-01T00:00:00.000+00:00' WHERE run_id IN ('ai:task:old','ai:task:failed')")
+        ids=lambda **kwargs:{item["run_id"] for item in self.store.feed(**kwargs)["items"]}
+        self.assertEqual(ids(filter="current"),{"ai:task:running","ai:task:failed"})
+        self.assertEqual(ids(filter="current",since="2026-10-02T00:00:00+08:00"),{"ai:task:running","ai:task:failed","ai:task:today"})
+        self.assertEqual(ids(filter="current",since="2026-10-01T00:00:00Z"),{"ai:task:running","ai:task:failed","ai:task:old","ai:task:today"})
+        for kwargs in ({"since":"yesterday"},{"since":"2026-10-02T00:00:00"},{"group":"case"}):
+            with self.assertRaises(ActivityError):
+                self.store.feed(**kwargs)
+
+    def test_current_filter_drops_a_failure_once_the_step_ran_again(self):
+        for run, kind in (("images:CAR-a:1","images"),("voice:CAR-a:1","voice")):
+            self.store.record(run,kind=kind,owner_id="CAR-a",source_id="1",title="出图 · a",status="failed",message="未完成。")
+        with self.store._connect() as db:
+            db.execute("UPDATE runs SET started_at='2026-10-01T00:00:00.000+00:00',finished_at='2026-10-01T00:00:01.000+00:00',updated_at='2026-10-01T00:00:01.000+00:00'")
+        ids=lambda **kwargs:{item["run_id"] for item in self.store.feed(**kwargs)["items"]}
+        self.assertEqual(ids(filter="current"),{"images:CAR-a:1","voice:CAR-a:1"})
+        self.store.record("images:CAR-a:2",kind="images",owner_id="CAR-a",source_id="2",title="出图 · a",status="completed",message="完成。")
+        self.assertEqual(ids(filter="current"),{"images:CAR-a:1","voice:CAR-a:1"})  # Different image scopes are not proof of resolution.
+        self.store.record("images:CAR-a:3",kind="images",owner_id="CAR-a",source_id="3",title="出图 · a",status="failed",message="又未完成。")
+        self.assertEqual(ids(filter="current"),{"voice:CAR-a:1","images:CAR-a:1","images:CAR-a:3"})
+
+    def test_owner_pages_hold_every_run_of_each_order(self):
+        for owner, count in (("CAR-a",3),("CAR-b",1),("CAR-c",2)):
+            for number in range(count):
+                self.store.record(f"images:{owner}:{number}",kind="images",owner_id=owner,source_id=str(number),product="202H",
+                                  title=f"出图 · {owner}",status="completed",message="完成。")
+        first=self.store.feed(group="owner",limit=2)
+        self.assertEqual(sorted(item["owner_id"] for item in first["items"]),["CAR-b","CAR-c","CAR-c"])
+        self.assertTrue(first["has_more"])
+        rest=self.store.feed(group="owner",limit=2,before=first["next_before"])
+        self.assertEqual([item["owner_id"] for item in rest["items"]],["CAR-a"]*3)
+        self.assertFalse(rest["has_more"])
+        # Filters choose runs first; an order is listed with only its matching runs.
+        self.store.record("images:CAR-a:0",status="needs_attention",message="待确认。")
+        self.assertEqual([item["run_id"] for item in self.store.feed(group="owner",filter="attention")["items"]],["images:CAR-a:0"])
+
+    def test_generic_variant_titles_carry_their_opening_line(self):
+        self.assertEqual(activity_label({"title":"202H-S2 变体 #4 · 身份认同","slides":[{"title_zh":"不用"}]}),"202H-S2 变体 #4 · 身份认同")
+        self.assertEqual(activity_label({"title":"第 1 条","slides":[{"title_zh":"从粗到细，一套配齐"}]}),"第 1 条「从粗到细，一套配齐」")
+        self.assertEqual(activity_label({"title":"第 2 条","direction_id":"202H-S2","lines":[{"spoken":"If you're into knives, you'll get it.","zh":""}]}),
+                         "If you're into knives, you'll get it.")
+        self.assertEqual(activity_label({"title":"第 1 条","text":"\nHook line\nsecond"}),"第 1 条「Hook line」")
+        self.assertEqual(activity_label({"title":"","id":"CAR-x"}),"CAR-x")
+
+    def test_video_activity_uses_the_same_timeline_and_topic_as_the_content_list(self):
+        job={"title":"202H-S2 别再拼零散磨具","direction_id":"202H-S2","selected_take":"T2","timelines":[
+            {"name":"202H-S2_旧配音","take_id":"T1"},{"name":"202H-S2_v2","take_id":"T2"},{"name":"202H-S2_试剪","take_id":"T1"}]}
+        self.assertEqual(activity_label(job),"202H-S2_v2｜别再拼零散磨具")
+        self.assertEqual(activity_label({**job,"selected_take":None}),"202H-S2_试剪｜别再拼零散磨具")
+        self.assertEqual(activity_label({**job,"timelines":[]}),"别再拼零散磨具")
+
+    def test_tail_pages_back_from_the_newest_lines(self):
+        self.start()
+        for number in range(7):
+            self.store.record("ai:task:round",message=f"步骤 {number}")
+        tail=self.store.logs("ai:task:round",tail="1",limit=3)
+        self.assertEqual([row["message"] for row in tail["logs"]],["步骤 4","步骤 5","步骤 6"])
+        self.assertTrue(tail["has_earlier"])
+        self.assertEqual(tail["next_seq"],tail["logs"][-1]["seq"])
+        earlier=self.store.logs("ai:task:round",before_seq=tail["first_seq"],limit=3)
+        self.assertEqual([row["message"] for row in earlier["logs"]],["步骤 1","步骤 2","步骤 3"])
+        oldest=self.store.logs("ai:task:round",before_seq=earlier["first_seq"],limit=3)
+        self.assertEqual([row["message"] for row in oldest["logs"]],["正在起草。","步骤 0"])
+        self.assertFalse(oldest["has_earlier"])
+        self.store.record("ai:task:round",message="步骤 7")
+        self.assertEqual([row["message"] for row in self.store.logs("ai:task:round",after_seq=tail["next_seq"])["logs"]],["步骤 7"])
+        for kwargs in ({"tail":"yes"},{"tail":"1","before_seq":"3"},{"limit":"501"}):
+            with self.assertRaises(ActivityError):
+                self.store.logs("ai:task:round",**kwargs)
 
     def test_recording_failure_never_raises_and_error_text_is_classified(self):
         with patch.object(self.store,"record",side_effect=sqlite3.OperationalError("disk full")):
@@ -172,6 +279,85 @@ class ActivityStoreTests(unittest.TestCase):
         reconcile_activity(app)
         self.assertEqual(self.store.feed()["cursor"],first)
 
+    def test_restart_names_generic_orders_without_moving_their_runs(self):
+        run="images:CAR-test:one"
+        self.store.record(run,kind="images",owner_id="CAR-test",source_id="one",product="202H",title="出图 · 第 1 条",status="completed",message="完成。")
+        before=self.store.feed()["items"][0]
+        catalog={"jobs":[],"carousels":[{"id":"CAR-test","title":"第 1 条","slides":[{"title_zh":"从粗到细"}],"generations":[]}]}
+        app=SimpleNamespace(activity=self.store,lock=threading.RLock(),runtime=self.runtime,
+                            production=SimpleNamespace(read=lambda:catalog),ai=SimpleNamespace(_locations={}))
+        reconcile_activity(app)
+        after=self.store.feed()["items"][0]
+        self.assertEqual(after["title"],"出图 · 第 1 条「从粗到细」")
+        self.assertEqual((after["updated_at"],after["status"]),(before["updated_at"],"completed"))
+        self.assertEqual(len(self.store.logs(run)["logs"]),1)
+        cursor=self.store.feed()["cursor"]
+        reconcile_activity(app)
+        self.assertEqual(self.store.feed()["cursor"],cursor)
+
+    def test_reconcile_replaces_old_video_labels_without_changing_run_history(self):
+        owner = {"id": "PRD-test", "title": "202H-S2 变体 B", "direction_id": "202H-S2",
+                 "selected_take": "T2", "lines": [{"zh": "一箱配齐精修路径", "spoken": "One case."}],
+                 "timelines": [{"name": "Lab261021-202-1", "take_id": "T1"},
+                               {"name": "Lab261021-202-2", "take_id": "T2"}], "edits": []}
+        labels = [owner["title"], "Lab261021-202-1", "Lab261021-202-2", "一箱配齐精修路径"]
+        for index, label in enumerate(labels):
+            self.store.record(f"edit:PRD-test:{index}", kind="edit", owner_id=owner["id"], source_id=str(index),
+                              title="AI 剪辑 · " + label, status="completed", message="完成。")
+        before = {row["run_id"]: row for row in self.store.feed()["items"]}
+        app = SimpleNamespace(activity=self.store, lock=threading.RLock(), runtime=self.runtime,
+                              production=SimpleNamespace(read=lambda: {"jobs": [owner], "carousels": []}),
+                              ai=SimpleNamespace(_locations={}))
+        reconcile_activity(app)
+        for row in self.store.feed()["items"]:
+            self.assertEqual(row["title"], "AI 剪辑 · Lab261021-202-2｜一箱配齐精修路径")
+            original = before[row["run_id"]]
+            self.assertEqual((row["updated_at"], row["status"]), (original["updated_at"], original["status"]))
+            self.assertEqual(len(self.store.logs(row["run_id"])["logs"]), 1)
+        cursor = self.store.feed()["cursor"]
+        reconcile_activity(app)
+        self.assertEqual(self.store.feed()["cursor"], cursor)
+
+    def test_restart_recovers_autopilot_completion_and_interruption_from_its_own_records(self):
+        runs = [{"id": "AUT-000000000001", "status": "completed", "phase": "成品已完成", "message": "五张成品已打包。",
+                 "completed_slides": [1, 2, 3, 4, 5]},
+                {"id": "AUT-000000000002", "status": "interrupted", "phase": "制作已中断", "message": "已有成图保留，可继续制作。",
+                 "completed_slides": [1]}]
+        for run in runs:
+            self.store.record("autopilot:" + run["id"], kind="images", owner_id="CAR-test", source_id=run["id"],
+                              step="images", status="running", phase="生成成图", message="处理中。")
+        # Same kind, different source collection: generation completion still asks
+        # for review, but a complete autopilot has already reviewed and packaged.
+        self.store.record("images:IMG-test", kind="images", owner_id="CAR-test", source_id="IMG-test", status="running")
+        catalog = {"jobs": [], "carousels": [{"id": "CAR-test", "autopilot_runs": runs,
+            "generations": [{"id": "IMG-test", "status": "completed"}]}]}
+        before_catalog = json.dumps(catalog)
+        app = SimpleNamespace(activity=self.store, lock=threading.RLock(), runtime=self.runtime,
+                              production=SimpleNamespace(read=lambda: catalog), ai=SimpleNamespace(_locations={}))
+        reconcile_activity(app)
+        rows = {row["source_id"]: row for row in self.store.feed()["items"]}
+        for run in runs:
+            row = rows[run["id"]]
+            self.assertEqual((row["status"], row["phase"], row["message"]), (run["status"], run["phase"], run["message"]))
+            self.assertEqual(row["result_count"], len(run["completed_slides"]))
+        self.assertEqual(rows["IMG-test"]["status"], "needs_attention")
+        self.assertEqual(json.dumps(catalog), before_catalog)
+        cursor = self.store.feed()["cursor"]
+        reconcile_activity(app)
+        self.assertEqual(self.store.feed()["cursor"], cursor)
+
+    def test_restart_keeps_unverified_material_delivery_actionable(self):
+        run = "edit:PRD-test:EDT-test"
+        self.store.record(run, kind="edit", owner_id="PRD-test", source_id="EDT-test", status="running")
+        catalog = {"jobs": [{"id": "PRD-test", "edits": [{"id": "EDT-test", "status": "needs_verification"}]}],
+                   "carousels": []}
+        app = SimpleNamespace(activity=self.store, lock=threading.RLock(), runtime=self.runtime,
+                              production=SimpleNamespace(read=lambda: catalog), ai=SimpleNamespace(_locations={}))
+        reconcile_activity(app)
+        row = self.store.feed()["items"][0]
+        self.assertEqual(row["status"], "needs_attention")
+        self.assertIn("待处理", row["message"])
+
     def test_restart_committed_voice_uses_saved_quality_and_never_resends(self):
         run="voice:PRD-test:request-12345"
         self.store.record(run,kind="voice",owner_id="PRD-test",source_id="request-12345",status="running")
@@ -216,6 +402,53 @@ class ActivityStoreTests(unittest.TestCase):
         cursor=self.store.feed()["cursor"]
         reconcile_activity(app)
         self.assertEqual(cursor,self.store.feed()["cursor"])
+
+    def attention(self, run, kind, owner, source):
+        self.store.record(run,kind=kind,owner_id=owner,source_id=source,product="202H",title="测试",status="running",phase=kind,message="处理中。")
+        return self.store.record(run,status="needs_attention",phase="reconciled",message="待逐张人工确认。")
+
+    def test_later_confirmation_settles_attention_without_a_new_alert(self):
+        self.attention("images:CAR:IMG-a","images","CAR","IMG-a")
+        self.attention("images:CAR:IMG-b","images","CAR","IMG-b")
+        self.assertEqual(self.store.feed()["counts"]["unread"],2)
+        output = lambda id,approved=True,stale=False: {"id":id,"approved":approved,"stale":stale,"review_runs":[]}
+        carousel={"id":"CAR","slides":[{"number":1,"base":{"id":"B1"},"output_id":"O1","outputs":[output("O1")]},
+                                      {"number":2,"base":{"id":"B2"},"output_id":"O2","outputs":[output("O2",stale=True)]}],
+                  "generations":[{"id":"IMG-a","status":"awaiting_first_approval","requested_slides":[1]},
+                                 {"id":"IMG-b","status":"completed","requested_slides":[1,2]}],"searches":[]}
+        cursor=self.store.feed()["cursor"]
+        settle_resolved_activity(SimpleNamespace(activity=self.store),"carousel",carousel)
+        rows={row["run_id"]:row for row in self.store.existing()}
+        self.assertEqual((rows["images:CAR:IMG-a"]["status"],rows["images:CAR:IMG-a"]["phase"]),("needs_attention","reconciled"))
+        self.assertEqual(rows["images:CAR:IMG-a"]["attention_resolved"], 1)
+        # Slide 2's confirmation went stale, so the run that covers it still asks for someone.
+        self.assertEqual(rows["images:CAR:IMG-b"]["status"],"needs_attention")
+        delta=self.store.feed(after=cursor)
+        self.assertEqual(delta["events"],[])
+        self.assertEqual(delta["counts"]["unread"],1)
+        self.assertEqual(self.store.logs("images:CAR:IMG-a")["logs"][-1]["phase"],"reconciled")
+        settle_resolved_activity(SimpleNamespace(activity=self.store),"carousel",carousel)
+        self.assertEqual(len(self.store.logs("images:CAR:IMG-a")["logs"]),2)
+
+    def test_job_completion_settles_edits_but_a_newer_unselected_take_still_asks(self):
+        self.attention("edit:PRD:EDT-a","edit","PRD","EDT-a")
+        self.attention("voice:PRD:old","voice","PRD","TAK-old")
+        self.attention("voice:PRD:new","voice","PRD","TAK-new")
+        job={"id":"PRD","status":"needs_material","selected_take":"TAK-mid",
+             "takes":[{"id":"TAK-old","created_at":"2026-10-13T01:00"},{"id":"TAK-mid","created_at":"2026-10-13T02:00"},{"id":"TAK-new","created_at":"2026-10-13T03:00"}]}
+        app=SimpleNamespace(activity=self.store)
+        settle_resolved_activity(app,"job",job)
+        status=lambda run:next("resolved" if row["attention_resolved"] else row["status"] for row in self.store.existing() if row["run_id"]==run)
+        self.assertEqual([status("edit:PRD:EDT-a"),status("voice:PRD:old"),status("voice:PRD:new")],["needs_attention","resolved","needs_attention"])
+        settle_resolved_activity(app,"job",{**job,"status":"approved"})
+        self.assertEqual([status("edit:PRD:EDT-a"),status("voice:PRD:new")],["resolved","resolved"])
+
+    def test_settling_never_touches_pending_recovery_and_survives_an_unavailable_store(self):
+        self.store.record("voice:PRD:req",kind="voice",owner_id="PRD",source_id="req",status="needs_attention",phase="结果待恢复",message="待恢复。")
+        settle_resolved_activity(SimpleNamespace(activity=self.store),"job",{"id":"PRD","status":"approved"})
+        self.assertEqual(self.store.existing()[0]["status"],"needs_attention")
+        broken=SimpleNamespace(attention=lambda owner:(_ for _ in ()).throw(sqlite3.OperationalError("locked")))
+        settle_resolved_activity(SimpleNamespace(activity=broken),"job",{"id":"PRD","status":"approved"})
 
 
 if __name__=="__main__":

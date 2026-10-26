@@ -33,6 +33,7 @@ const scope = vm.runInNewContext(`
   ${declaration('statuses')}
   ${declaration('active')}
   ${declaration('statusText')}
+  ${declaration('managementState')}
   ${declaration('taskProduct')}
   const state = {cases:[]};
   const updateNavCount = () => {};
@@ -45,11 +46,9 @@ const scope = vm.runInNewContext(`
   ({${helpers.join(',')},renderMarkdown,ai,localStorage});
 `);
 
-test('creation settings show exactly auto, unified skill and none', () => {
+test('creation settings no longer offer a skill picker', () => {
   const html = scope.settingsMarkup('test',{model:null,reasoning_effort:null,skill_selection:'auto'});
-  const skills = html.match(/<select id="test-skills">([\s\S]*?)<\/select>/)[1];
-  assert.deepEqual([...skills.matchAll(/<option value="([^"]+)"/g)].map(match => match[1]), ['auto','product-video-script-review','none']);
-  assert.doesNotMatch(skills, /tiktok-video-script-voiceover|both/);
+  assert.doesNotMatch(html, /<select|使用技能/);
 });
 
 test('historical selection migrates for continuation without changing its source round', () => {
@@ -141,7 +140,7 @@ test('ordinary settings show global defaults and keep model choices out of task 
   const settings = {skill_selection:'auto',model:'old-hidden-choice',reasoning_effort:'low'};
   const html = scope.settingsMarkup('client',settings);
   assert.doesNotMatch(html, /client-model|client-effort|old-hidden-choice/);
-  assert.match(scope.defaultsMarkup('client'), /使用全局默认 · GPT-6\.1-Sol · 思考高/);
+  assert.match(scope.defaultsMarkup('client'), /使用全局默认 · GPT-6\.1-Sol · 思考强度：高/);
   assert.match(scope.defaultsMarkup('client'), /href="#settings".*全局设置/);
   assert.equal(scope.settingsIssue(settings),'');
   scope.ai.options.models = [];

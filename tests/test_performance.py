@@ -159,7 +159,7 @@ class PerformanceHTTPTests(unittest.TestCase):
         self.assertEqual(len(result["imported"]), 5)
         status, _, data = self.request("GET", "/api/performance/videos")
         linked = next(v for v in data["videos"] if v["video_id"] == LINKED)
-        self.assertEqual((linked["case_id"], linked["status_label"]), (self.identifier, "重点复制"))
+        self.assertEqual((linked["case_id"], linked["review_status"]), (self.identifier, {"key": "pending", "label": "待复盘"}))
         status, _, detail = self.request("GET", f"/api/performance/videos/{LINKED}")
         self.assertEqual((status, detail["video"]["gmv"]), (200, 600))
         self.assertEqual(self.request("GET", "/api/performance/videos/7999999999999999999")[0], 404)
@@ -253,9 +253,23 @@ class PerformanceBrowserTests(unittest.TestCase):
         page.locator(".perf-board .empty").wait_for()
         page.locator("#global-product").select_option("202H")
         page.locator(".perf-kpis").wait_for()
-        page.locator(".perf-board [data-perf-tab=list]").click()
+        page.locator(".perf-board .perf-more[data-perf-tab=list]").click()
         page.locator(".perf-table").wait_for()
         self.assertEqual(page.locator("#perf-tab-list").get_attribute("aria-selected"), "true")
+
+    def test_deleted_export_rows_are_hidden_unless_searched_by_id(self):
+        deleted = "7695409803794926878"
+        values = row("7600000000000000003", 0)
+        values[HEADER.index("Video Info")], values[HEADER.index("Video ID")] = "", deleted
+        values[HEADER.index("Time")] = "2026/09/12 06:00:42"
+        export(self.folder / "9月" / "删除视频.xlsx", "2026-09-07", "2026-09-13", [values])
+        self.assertEqual(self.request("POST", "/api/performance/sync", {})[0], 200)
+        page = self.open_list()
+        self.assertEqual(page.locator(f'[data-video-row="{deleted}"]').count(), 0)
+        self.assertIn("已隐藏 1 条空视频", page.locator(".perf-toolbar .result-count").inner_text())
+        page.locator("#perf-q").fill(deleted)
+        page.locator(f'[data-video-row="{deleted}"]').wait_for()
+        self.assertNotIn("已隐藏", page.locator(".perf-toolbar .result-count").inner_text())
 
     def test_table_headers_sort_rows(self):
         page = self.open_list()
@@ -296,7 +310,7 @@ class PerformanceBrowserTests(unittest.TestCase):
         self.assertEqual(rows.count(), total)
         self.assertEqual(page.locator("#perf-reset").is_hidden(), True)
         picker.select_option("")
-        page.wait_for_url("**/#/all/videos")
+        page.wait_for_url("**/#/all/videos*")
         page.wait_for_function("(n) => document.querySelectorAll('.perf-table tbody tr').length === n", arg=total)
 
     def test_video_page_collect_and_case_sales_table_display(self):
@@ -304,13 +318,14 @@ class PerformanceBrowserTests(unittest.TestCase):
         table = page.locator(".perf-table")
         table.get_by_text("🤔 Is A Mirror Edge Overrated?").wait_for()
         linked_row = table.locator("tr", has_text="Is A Mirror Edge Overrated?")
-        linked_row.get_by_text("重点复制").wait_for()
+        linked_row.get_by_text("待复盘").wait_for()
         linked_row.locator("td.perf-title").click()  # a row opens the video's details drawer
         drawer = page.locator("#perf-video-drawer[open]")
         drawer.get_by_role("link", name="查看案例").wait_for()
         drawer.get_by_role("button", name="关闭视频详情").click()
         self.assertEqual(page.locator("#videos-nav.active").count(), 1)
-        page.locator('.perf-legend-item[data-status-filter="drop"]').click()
+        page.locator("#perf-q").fill("Angle guide demo")
+        page.wait_for_function("() => document.querySelectorAll('.perf-table tbody tr').length === 1")
         self.assertEqual(table.locator("tbody tr").count(), 1)
         table.locator("tr", has_text="Angle guide demo").locator("td.perf-title").click()
         page.locator("#perf-video-drawer[open]").get_by_role("button", name="收为案例").click()

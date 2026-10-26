@@ -8,20 +8,155 @@
   let dataPoll = null;
   const dataStates = new WeakMap();
   const modelStates = new WeakMap();
+  const remoteStates = new WeakMap();
   const effortNames = { none: "不启用", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高", ultra: "极致" };
   const loginPollInterval = 2500;
   const loginPollTimeout = 5 * 60 * 1000;
   const locations = [
     ["records", "正式案例记录", "原始资料、当前版本与每次修订。"],
-    ["directions", "卖点与方向", "卖点表、方向定义、视频关联与迁移记录；请一同备份。"],
-    ["creation", "创作与素材", "采纳的脚本版本、摘录篮、评论主题和待写计划；请一同备份。"],
+    ["directions", "卖点与方向", "卖点表、方向定义、视频关联与迁移记录。"],
+    ["creation", "创作与素材", "采纳的脚本版本、摘录篮、评论主题和待写计划。"],
     ["evidence", "视频与证据附件", "已导入的视频、截图和转写文件。"],
     ["library", "中文阅读目录", "随案例保存同步更新的阅读文件。"],
   ];
 
+  const locationStates = new WeakMap();
   function renderLocation([key, label, note]) {
     const path = typeof state.paths?.[key] === "string" ? state.paths[key] : "";
-    return `<div class="settings-location"><div class="settings-location-copy"><h3>${label}</h3><p>${note}</p><code class="settings-path">${esc(path || "路径暂时无法读取")}</code></div><div class="settings-actions"><button type="button" class="subtle" data-settings-copy="${key}" ${path ? "" : "disabled"}>${icon("copy")}复制路径</button><button type="button" class="secondary compact" data-settings-open="${key}" ${path ? "" : "disabled"}>${icon("folder")}打开文件夹</button></div></div>`;
+    return `<div class="settings-location" data-location="${key}"><div class="settings-location-copy"><h3>${label}</h3><p>${note}</p><code class="settings-path">${esc(path || "正在读取路径…")}</code></div><div class="settings-actions"><button type="button" class="subtle" data-settings-copy="${key}" ${path ? "" : "disabled"}>${icon("copy")}复制路径</button><button type="button" class="secondary compact" data-settings-open="${key}" ${path ? "" : "disabled"}>${icon("folder")}打开文件夹</button></div></div>`;
+  }
+
+  function paintLocations(panel, local) {
+    for (const [key] of locations) {
+      const row = panel.querySelector(`[data-location="${key}"]`);
+      if (!row) continue;
+      const path = typeof local.paths?.[key] === "string" ? local.paths[key].trim() : "";
+      row.dataset.state = path ? "ready" : local.loading ? "loading" : local.error ? "failed" : "unconfigured";
+      row.querySelector("code").textContent = path || (local.loading ? "正在读取路径…" : local.error ? "路径读取失败" : "未配置此位置");
+      row.querySelectorAll("button").forEach(button => { button.disabled = !path; });
+    }
+    const error = panel.querySelector("[data-location-error]");
+    error.hidden = !local.error;
+    error.querySelector("span").textContent = local.error || "";
+    error.querySelector("button").onclick = () => void loadLocations(panel, renderSequence);
+    panel.querySelectorAll("[data-settings-copy]").forEach(button => {
+      button.onclick = () => { const path = local.paths?.[button.dataset.settingsCopy]; if (path) copyText(path, "路径已复制"); };
+    });
+  }
+  async function loadLocations(panel, sequence) {
+    const local = {loading:true, paths:{...state.paths}, error:""};
+    locationStates.set(panel, local); paintLocations(panel, local);
+    try {
+      const result = await api("/api/settings/paths");
+      if (!result?.paths || typeof result.paths !== "object") throw new Error("目录信息返回不完整，请重试。");
+      for (const [key] of locations) if (!Object.hasOwn(result.paths, key)) throw new Error("目录信息返回不完整，请重试。");
+      if (locations.some(([key]) => result.paths[key] != null && typeof result.paths[key] !== "string")) throw new Error("目录信息格式不正确，请重试。");
+      local.paths = {...result.paths};
+    } catch (error) {
+      const complete = locations.every(([key]) => typeof state.paths?.[key] === "string" && state.paths[key].trim());
+      local.paths = complete ? {...state.paths} : {};
+      local.error = complete ? "" : `目录读取失败：${error.message || "请重试"}`;
+    }
+    if (!panel.isConnected || sequence !== renderSequence || locationStates.get(panel) !== local) return;
+    local.loading = false;
+    // No full-page rerender: other forms can contain unsaved input.
+    paintLocations(panel, local);
+  }
+
+  function localAccountSetup() {
+    return ["localhost", "127.0.0.1", "[::1]", "::1"].includes(window.location.hostname);
+  }
+
+  function renderRemoteAccount() {
+    const heading = `<div class="settings-card-heading"><span class="settings-symbol">${icon("lock")}</span><h2 id="settings-remote-heading">公网账号密码</h2></div>`;
+    if (!localAccountSetup()) return `<section class="section-card settings-card" aria-labelledby="settings-remote-heading">${heading}<p class="settings-note">账号密码在运行工作台的电脑上设置。</p></section>`;
+    return `<section class="section-card settings-card" aria-labelledby="settings-remote-heading">${heading}<p class="settings-note">设置用于公网访问的账号密码。后续可在这里更改；更改后，已登录的设备需要重新登录。</p><p id="settings-remote-status" class="settings-note" role="status" aria-live="polite">正在读取账号状态…</p><form id="settings-remote-form"><div class="settings-remote-grid"><label for="settings-remote-username">公网登录账号<input id="settings-remote-username" name="username" type="text" autocomplete="username" minlength="3" maxlength="64" value="admin" required disabled></label><label for="settings-remote-password">新密码<input id="settings-remote-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="256" aria-describedby="settings-remote-help" required disabled></label><label for="settings-remote-confirm">确认新密码<input id="settings-remote-confirm" name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required disabled></label></div><p id="settings-remote-help" class="settings-note">密码至少 12 个字符，最多 256 个 UTF-8 字节。密码只在本机设置，不会显示在页面或聊天中。</p><div class="settings-actions"><button id="settings-remote-save" type="submit" class="primary compact" disabled>保存账号密码</button><button id="settings-remote-refresh" type="button" class="subtle">重新读取账号状态</button></div></form><p id="settings-remote-error" class="settings-note settings-claude-error" role="alert" hidden></p></section>`;
+  }
+
+  function paintRemoteAccount(panel) {
+    const local = remoteStates.get(panel);
+    if (!local) return;
+    const disabled = local.loading || local.saving || !local.metadata?.remote_configured;
+    $$("#settings-remote-form input", panel).forEach(input => { input.disabled = disabled; });
+    $("#settings-remote-save", panel).disabled = disabled;
+    $("#settings-remote-save", panel).textContent = local.saving ? "正在保存…" : "保存账号密码";
+    $("#settings-remote-refresh", panel).disabled = local.loading || local.saving;
+    const publicReady = local.metadata?.public_ready === true, guestEnabled = local.metadata?.guest_enabled === true;
+    const accountStatus = publicReady
+      ? local.metadata?.configured
+        ? `已设置公网账号：${local.metadata.username}。${guestEnabled ? "访客无需登录即可浏览，登录后可使用完整功能。" : "登录后可使用完整功能。"}`
+        : `${guestEnabled ? "访客浏览已开放；" : "尚未设置公网登录账号。"}设置账号密码后，可登录使用完整功能。`
+      : local.metadata?.configured
+        ? `本机已设置账号：${local.metadata.username}。${local.metadata.auth_mode === "password" ? "账号密码登录已在本机就绪；公网入口是否已切换需另行确认。" : "当前公网入口仍使用 Cloudflare 登录。"}`
+        : "尚未设置公网登录账号。填写并保存后，本机账号密码即可就绪；Cloudflare 公网入口仍需切换。";
+    $("#settings-remote-status", panel).textContent = local.loading ? "正在读取账号状态…" : local.notice || accountStatus;
+    const error = $("#settings-remote-error", panel);
+    error.textContent = local.error || "";
+    error.hidden = !error.textContent;
+  }
+
+  async function loadRemoteAccount(panel) {
+    const local = remoteStates.get(panel), sequence = renderSequence;
+    if (!local || local.loading || local.saving) return;
+    local.loading = true;
+    local.error = "";
+    paintRemoteAccount(panel);
+    try {
+      const result = await api("/api/remote-account");
+      if (!panel.isConnected || sequence !== renderSequence) return;
+      if (!result || typeof result.configured !== "boolean" || typeof result.remote_configured !== "boolean") throw new Error("账号状态暂时无法读取，请重试。");
+      local.metadata = result;
+      local.notice = "";
+      local.error = result.error || "";
+      $("#settings-remote-username", panel).value = result.username || "admin";
+    } catch (error) {
+      if (panel.isConnected && sequence === renderSequence) local.error = error.message || "账号状态暂时无法读取，请重试。";
+    } finally {
+      local.loading = false;
+      if (panel.isConnected && sequence === renderSequence) paintRemoteAccount(panel);
+    }
+  }
+
+  async function saveRemoteAccount(panel) {
+    const local = remoteStates.get(panel), sequence = renderSequence;
+    if (!local || local.loading || local.saving || !local.metadata?.remote_configured) return;
+    const username = $("#settings-remote-username", panel).value.trim();
+    const password = $("#settings-remote-password", panel).value;
+    const confirmation = $("#settings-remote-confirm", panel).value;
+    local.error = "";
+    if (Array.from(username).length < 3 || Array.from(username).length > 64 || /[\p{C}]/u.test(username)) local.error = "账号名称须为 3–64 个字符，且不能包含控制字符。";
+    else if (Array.from(password).length < 12 || new TextEncoder().encode(password).length > 256) local.error = "密码至少 12 个字符，最多 256 个 UTF-8 字节。";
+    else if (password !== confirmation) local.error = "两次输入的密码不一致。";
+    if (local.error) { paintRemoteAccount(panel); return; }
+    local.saving = true;
+    local.notice = "";
+    paintRemoteAccount(panel);
+    try {
+      const result = await api("/api/remote-account", { method: "POST", body: { username, password, confirm_password: confirmation } });
+      if (!result?.saved || !result.configured) throw new Error("保存结果暂时无法确认，请重新读取账号状态。");
+      // Clear even if navigation detached this panel during the request.
+      $("#settings-remote-password", panel).value = "";
+      $("#settings-remote-confirm", panel).value = "";
+      if (!panel.isConnected || sequence !== renderSequence) return;
+      local.metadata = result;
+      $("#settings-remote-username", panel).value = result.username;
+      local.notice = result.notice || (result.public_ready === true
+        ? "公网账号已更新，已登录的设备需要重新登录；访客浏览不受影响。"
+        : "本机账号密码已就绪；Cloudflare 公网入口仍需切换。");
+    } catch (error) {
+      if (panel.isConnected && sequence === renderSequence) local.error = error.message || "保存失败，请重试。";
+    } finally {
+      local.saving = false;
+      if (panel.isConnected && sequence === renderSequence) paintRemoteAccount(panel);
+    }
+  }
+
+  function bindRemoteAccount(panel) {
+    if (!localAccountSetup()) return;
+    remoteStates.set(panel, { loading: false, saving: false, metadata: null, notice: "", error: "" });
+    $("#settings-remote-form", panel).onsubmit = event => { event.preventDefault(); void saveRemoteAccount(panel); };
+    $("#settings-remote-refresh", panel).onclick = () => { void loadRemoteAccount(panel); };
+    void loadRemoteAccount(panel);
   }
 
   function modelState(panel) {
@@ -387,6 +522,37 @@
     }
   }
 
+  // Pairing for the TK 看板 extension, which pushes public TikTok page counts into the sales table.
+  async function loadExtensionLink(panel, sequence) {
+    const target = $("#settings-extension-link", panel);
+    const show = (link) => {
+      target.innerHTML = `<div class="settings-source"><span class="settings-note">工作台地址</span><code class="settings-path">${esc(link.address)}</code><button type="button" class="subtle" data-extension-copy="address">${icon("copy")}复制</button></div><div class="settings-source"><span class="settings-note">连接码</span><code class="settings-path">${esc(link.key.slice(0, 4))}••••••••</code><button type="button" class="subtle" data-extension-copy="key">${icon("copy")}复制</button><button type="button" class="subtle" data-extension-rotate>重置</button></div>`;
+      $$("[data-extension-copy]", target).forEach(button => {
+        button.onclick = () => copyText(link[button.dataset.extensionCopy], button.dataset.extensionCopy === "key" ? "连接码已复制" : "地址已复制");
+      });
+      $("[data-extension-rotate]", target).onclick = async (event) => {
+        if (!window.confirm("重置后，插件里保存的旧连接码会失效，需要重新粘贴。继续？")) return;
+        event.currentTarget.disabled = true;
+        try {
+          const result = await api("/api/public-stats/link/rotate", { method: "POST", body: {} });
+          show({ ...link, key: result.key });
+          toast("连接码已重置，请到插件设置里粘贴新的连接码。");
+        } catch (error) {
+          toast(error.message, true);
+          event.currentTarget.disabled = false;
+        }
+      };
+    };
+    try {
+      const link = await api("/api/public-stats/link");
+      if (sequence !== renderSequence || !panel.isConnected) return;
+      show(link);
+    } catch (error) {
+      if (sequence !== renderSequence || !panel.isConnected) return;
+      target.innerHTML = `<p class="settings-note">连接码暂时无法读取：${esc(error.message || "请稍后重试。")}</p>`;
+    }
+  }
+
   async function loadSources(panel, sequence) {
     const target = $("#settings-data-sources", panel);
     try {
@@ -395,7 +561,7 @@
       const sources = Array.isArray(data.sources) ? data.sources.filter(path => typeof path === "string" && path.trim()) : [];
       target.innerHTML = sources.length
         ? sources.map((path, index) => `<div class="settings-source"><code class="settings-path">${esc(path)}</code><button type="button" class="subtle" data-settings-source="${index}">${icon("copy")}复制路径</button></div>`).join("")
-        : '<p class="settings-note">尚未设置销售数据文件夹，可先在「视频数据」导入表格。</p>';
+        : '<p class="settings-note">尚未设置销售数据文件夹，可先在「带货数据」导入表格。</p>';
       $$("[data-settings-source]", target).forEach(button => {
         button.onclick = () => copyText(sources[Number(button.dataset.settingsSource)], "路径已复制");
       });
@@ -476,8 +642,11 @@
     $("#settings-data-open", panel).disabled = busy || !local.status?.settings?.directory;
     $("#settings-data-import-confirm", panel).disabled = busy || !local.import;
     $("#settings-data-import", panel).disabled = busy || !local.import || !$("#settings-data-import-confirm", panel).checked;
+    $("#settings-data-refresh", panel).disabled = !!local.statusLoading;
     const progress = $("#settings-data-progress", panel);
-    progress.textContent = local.pending || (local.status?.busy ? "正在处理总数据，请稍候…" : "");
+    const operation = local.status?.operation || local.status?.operation_kind;
+    const action = {export:"导出",backup:"备份",inspect:"检查备份文件",restore:"恢复"}[operation] || "处理";
+    progress.textContent = (local.status?.busy && local.status.progress) || local.pending || (local.status?.busy ? `总数据正在${action}，请等待完成。离开页面后可回来检查状态。` : local.notice || "");
     progress.hidden = !progress.textContent;
   }
 
@@ -485,7 +654,12 @@
     if (!panel.isConnected) return;
     if (!result || typeof result.settings !== "object") throw new Error("总数据状态暂时无法读取，请重新检查。");
     const local = dataState(panel);
+    if (local.status?.busy && result.busy === false) {
+      local.notice = "总数据处理已结束，可以继续操作。若此前没有收到完成回复，请先核对结果。";
+      if (local.waitingForData) {dataError(panel);local.waitingForData = false;}
+    }
     local.status = result;
+    window.WorkbenchMaintenance?.update(result);
     if (fillForm || (!local.hydrated && !local.formDirty)) {
       const settings = result.settings;
       $("#settings-backup-enabled", panel).checked = !!settings.enabled;
@@ -560,24 +734,29 @@
   async function loadDataStatus(panel, { mirror = false } = {}) {
     const sequence = renderSequence;
     const local = dataState(panel);
+    local.mirrorPending ||= mirror;
+    if (local.statusLoading) return;
+    local.statusLoading = true;
     const controller = new AbortController();
     local.controllers.add(controller);
     try {
-      if (mirror) {
+      const result = await api("/api/data/status", { signal: controller.signal });
+      if (!panel.isConnected || sequence !== renderSequence || controller.signal.aborted) return;
+      applyDataStatus(panel, result);
+      if (local.mirrorPending && !result.busy && state.token) {
         try { await mirrorPreferences(controller.signal); }
         catch (error) {
           if (error.name === "AbortError" || controller.signal.aborted) throw error;
           if (panel.isConnected && sequence === renderSequence) dataError(panel, `浏览器视图设置暂未同步：${error.message || "请稍后重试。"}`);
         }
+        local.mirrorPending = false;
       }
-      if (!panel.isConnected || sequence !== renderSequence || controller.signal.aborted) return;
-      const result = await api("/api/data/status", { signal: controller.signal });
-      if (!panel.isConnected || sequence !== renderSequence || controller.signal.aborted) return;
-      applyDataStatus(panel, result);
     } catch (error) {
       if (panel.isConnected && sequence === renderSequence && error.name !== "AbortError") dataError(panel, error.message || "总数据状态暂时无法读取，请重新检查。");
     } finally {
       local.controllers.delete(controller);
+      local.statusLoading = false;
+      if (panel.isConnected && sequence === renderSequence) updateDataControls(panel);
       if (panel.isConnected && sequence === renderSequence) scheduleDataPolling(panel);
     }
   }
@@ -589,12 +768,18 @@
     const controller = new AbortController();
     local.controllers.add(controller);
     local.pending = message;
+    local.notice = "";
     dataError(panel);
     updateDataControls(panel);
     const active = () => panel.isConnected && sequence === renderSequence && !controller.signal.aborted;
     try { await action(controller.signal, active); }
     catch (error) {
-      if (active() && error.name !== "AbortError") dataError(panel, error.message || "操作暂未完成，请重试。");
+      if (active() && error.name !== "AbortError") {
+        const maintenance = window.WorkbenchMaintenance?.isError(error) || error.maintenance === true || (error.status === 409 && /总数据/.test(error.message));
+        local.waitingForData = maintenance;
+        if (!maintenance) dataError(panel, error.message || "操作未收到完成回复，请先检查总数据状态与结果，再决定是否重试。");
+        await loadDataStatus(panel);
+      }
     } finally {
       local.controllers.delete(controller);
       local.pending = "";
@@ -732,13 +917,14 @@
   function renderDataSettings() {
     return `<section class="section-card settings-card" id="settings-data-card" aria-labelledby="settings-data-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("folder")}</span><h2 id="settings-data-heading">总数据导入、导出与备份</h2></div><p class="settings-note">包含全部产品的案例、卖点与方向、脚本与素材、销售数据、视频附件，以及工作台视图设置。导出和本地备份均生成 ZIP 文件，可在这里完整恢复。</p>
       <div class="settings-data-transfer"><div><h3>导出总数据</h3><p class="settings-note">打包当前工作台的完整数据，下载到浏览器的保存位置。</p><button type="button" class="secondary compact" id="settings-data-export">导出全部数据</button></div><div><h3>从文件恢复</h3><label class="settings-data-file-label" for="settings-data-file">选择总数据 ZIP 文件</label><input id="settings-data-file" type="file" accept=".zip,application/zip"><div id="settings-data-import-preview" class="settings-data-import-preview" hidden><p id="settings-data-import-summary"></p><p class="settings-data-warning">恢复会整体替换当前工作台全部产品的数据。导入前会自动保存一份恢复备份；请核对文件内容后再继续。</p><label class="settings-data-check"><input type="checkbox" id="settings-data-import-confirm">我已核对文件，同意替换当前全部数据</label><button type="button" class="primary compact" id="settings-data-import" disabled>确认恢复总数据</button></div></div></div>
-      <form id="settings-backup-form" class="settings-backup-form"><div class="settings-backup-heading"><h3>本地自动备份</h3><label class="settings-data-check"><input type="checkbox" id="settings-backup-enabled">开启自动备份</label></div><label class="settings-backup-directory-label" for="settings-backup-directory">备份文件夹</label><div class="settings-backup-directory"><input type="text" id="settings-backup-directory" placeholder="例如 D:\\案例工作台备份" autocomplete="off"><button type="button" class="secondary compact" id="settings-data-pick">选择文件夹</button></div><p class="settings-note">可选择文件夹或填写完整路径。保存设置后，立即备份会使用该目录。</p><div class="settings-backup-grid"><label for="settings-backup-days">备份间隔（天）<input type="number" id="settings-backup-days" min="1" max="365" step="1" value="1" required></label><label for="settings-backup-time">备份时间（本机时间）<input type="time" id="settings-backup-time" value="02:00" required></label><label for="settings-backup-keep">保留最近多少份<input type="number" id="settings-backup-keep" min="0" max="3650" step="1" value="14" required><small>填 0 保留全部备份</small></label></div><div class="settings-actions"><button type="submit" class="primary compact">保存备份设置</button><button type="button" class="secondary compact" id="settings-data-backup" disabled>立即备份</button><button type="button" class="subtle" id="settings-data-open" disabled>打开备份文件夹</button><button type="button" class="subtle" id="settings-data-refresh">检查备份状态</button></div></form>
+      <form id="settings-backup-form" class="settings-backup-form"><div class="settings-backup-heading"><h3>本地自动备份</h3><label class="settings-data-check"><input type="checkbox" id="settings-backup-enabled">开启自动备份</label></div><label class="settings-backup-directory-label" for="settings-backup-directory">备份文件夹</label><div class="settings-backup-directory"><input type="text" id="settings-backup-directory" placeholder="例如 D:\\TK工作台备份" autocomplete="off"><button type="button" class="secondary compact" id="settings-data-pick">选择文件夹</button></div><p class="settings-note">可选择文件夹或填写完整路径。保存设置后，立即备份会使用该目录。</p><div class="settings-backup-grid"><label for="settings-backup-days">备份间隔（天）<input type="number" id="settings-backup-days" min="1" max="365" step="1" value="1" required></label><label for="settings-backup-time">备份时间（本机时间）<input type="time" id="settings-backup-time" value="02:00" required></label><label for="settings-backup-keep">保留最近多少份<input type="number" id="settings-backup-keep" min="0" max="3650" step="1" value="14" required><small>填 0 保留全部备份</small></label></div><div class="settings-actions"><button type="submit" class="primary compact">保存备份设置</button><button type="button" class="secondary compact" id="settings-data-backup" disabled>立即备份</button><button type="button" class="subtle" id="settings-data-open" disabled>打开备份文件夹</button><button type="button" class="subtle" id="settings-data-refresh">检查备份状态</button></div></form>
       <p id="settings-data-progress" class="settings-data-progress" role="status" aria-live="polite" hidden></p><p id="settings-data-error" class="settings-data-warning" role="alert" hidden></p><div class="settings-backup-state"><dl><div><dt>最近备份</dt><dd id="settings-backup-last">正在读取…</dd></div><div><dt>下次自动备份</dt><dd id="settings-backup-next">正在读取…</dd></div></dl><code class="settings-path" id="settings-backup-last-path"></code><p class="settings-note" id="settings-backup-scheduler"></p><p class="settings-data-warning" id="settings-backup-error" role="alert" hidden></p><details class="settings-backup-history"><summary>最近的本地备份</summary><div id="settings-backup-list"></div></details></div></section>`;
   }
 
   // The page is long, so a section bar jumps to each group; buttons scroll instead of changing the routed hash.
   const settingsSections = [
     ["settings-group-ai", "模型与连接", () => true],
+    ["settings-group-remote", "公网账号", () => true],
     ["settings-group-alerts", "任务提醒", () => Boolean(window.TaskActivity?.settingsMarkup?.())],
     ["settings-group-data", "数据与备份", () => true],
     ["settings-group-files", "本地文件", () => true],
@@ -756,11 +942,13 @@
           <section class="section-card settings-card" aria-labelledby="settings-ai-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("bot")}</span><h2 id="settings-ai-heading">AI 协作</h2></div><p id="settings-codex-status" class="settings-status" data-status="loading" role="status">正在检查…</p><p id="settings-codex-detail" class="settings-note"></p><p class="settings-note">写稿、审稿和复盘沿用全局默认模型。使用本机 Codex 的登录与额度。</p><div class="settings-actions"><button type="button" class="secondary compact" id="settings-check-codex">${icon("refresh")}重新检查</button><a class="subtle settings-link" href="#ai">查看协作记录 ${icon("arrow")}</a></div></section>
           <section class="section-card settings-card" id="settings-claude-card" aria-labelledby="settings-claude-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("spark")}</span><h2 id="settings-claude-heading">Claude 写稿</h2></div><p id="settings-claude-status" class="settings-status" data-status="loading" role="status">正在检查…</p><p id="settings-claude-detail" class="settings-note"></p><p class="settings-note">使用 Claude 桌面版自带的调用程序与同一账号的客户端额度，无需填写 key。首次使用点「连接 Claude 订阅」完成一次浏览器授权；桌面聊天登录与调用授权分别保存。在上方「全局默认模型」中选择 Claude；选用客户端默认时，默认沿用本机调用设置。</p><div class="settings-actions"><button type="button" class="primary compact" id="settings-claude-login" disabled>连接 Claude 订阅</button><button type="button" class="secondary compact" id="settings-claude-check">${icon("refresh")}检查 Claude</button></div><div id="settings-claude-recovery" class="settings-claude-recovery" hidden><p class="settings-note" id="settings-claude-url-note"></p><div class="settings-actions"><button type="button" class="secondary compact" id="settings-claude-copy" disabled>${icon("copy")}复制授权链接</button><a class="secondary compact settings-link" id="settings-claude-reopen" target="_blank" rel="noopener noreferrer" hidden>重新打开授权页 ${icon("arrow")}</a></div><form id="settings-claude-callback-form" class="settings-claude-callback-form"><label for="settings-claude-callback">填写回调链接或授权码</label><p class="settings-note" id="settings-claude-callback-help">完整回调链接，或完整授权码（包含 # 后的内容）</p><textarea id="settings-claude-callback" rows="3" autocomplete="off" spellcheck="false" aria-describedby="settings-claude-callback-help" placeholder="完整回调链接或授权码" disabled></textarea><div class="settings-actions"><button type="submit" class="primary compact" id="settings-claude-submit" disabled>提交回调</button><button type="button" class="subtle" id="settings-claude-cancel" disabled>取消本次授权</button></div></form></div><p id="settings-claude-login-error" class="settings-note settings-claude-error" role="alert" hidden></p></section>
       </div></div>
+      <div class="settings-group" id="settings-group-remote">${renderRemoteAccount()}</div>
       <div class="settings-group" id="settings-group-alerts">${window.TaskActivity?.settingsMarkup?.() || ""}</div>
       <div class="settings-group" id="settings-group-data">${renderDataSettings()}</div>
       <div class="settings-group" id="settings-group-files">
-        <section class="section-card settings-card" aria-labelledby="settings-files-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("folder")}</span><h2 id="settings-files-heading">本地文件</h2></div><p class="settings-note">备份时请同时保留案例记录、卖点与方向、创作与素材、视频附件，以及评论手动记录。</p><div class="settings-locations">${locations.map(renderLocation).join("")}</div></section>
+        <section class="section-card settings-card" aria-labelledby="settings-files-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("folder")}</span><h2 id="settings-files-heading">本地文件</h2></div><p class="settings-note"><a href="#settings-group-data" data-settings-backup-link>总数据备份</a>包含以下业务资料；仅保留阅读目录不能完整恢复。</p><div class="settings-locations">${locations.map(renderLocation).join("")}</div><p class="settings-note settings-claude-error" data-location-error role="alert" hidden><span></span> <button type="button" class="subtle">重新读取路径</button></p></section>
         <section class="section-card settings-card" aria-labelledby="settings-sources-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("chart")}</span><h2 id="settings-sources-heading">销售数据文件夹</h2></div><p class="settings-note">将后台导出的表格放进以下文件夹，再到「视频数据」同步数据。</p><div id="settings-data-sources" aria-live="polite"><p class="settings-note">正在读取文件夹…</p></div><div class="settings-source-footer"><p class="settings-note" id="settings-last-import"></p><a class="subtle settings-link" href="#videos">前往视频数据 ${icon("arrow")}</a></div></section>
+        <section class="section-card settings-card" aria-labelledby="settings-extension-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("link")}</span><h2 id="settings-extension-heading">TK 看板插件</h2></div><p class="settings-note">在插件设置「案例工作台」里填入下面的地址和连接码，之后在 TikTok 页面点「推送到工作台」，工作台里所有累计播放都改用公开页数字。只收工作台已有的视频；首两周播放和点击率等仍按销售数据表计算；参考价值以人工复盘分类为准。</p><div id="settings-extension-link" aria-live="polite"><p class="settings-note">正在读取连接码…</p></div></section>
       </div>
       <div class="settings-group" id="settings-group-views">
           <section class="section-card settings-card" aria-labelledby="settings-nav-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("layers")}</span><h2 id="settings-nav-heading">保存的视图</h2></div><p class="settings-note">把常用的案例库筛选保存为视图，管理名称、顺序与显示方式。</p><p class="settings-note">视图保存在当前浏览器，原栏目与收纳案例继续保留。</p><div class="settings-actions"><button type="button" class="secondary compact" id="settings-navigation">${icon("edit")}管理保存的视图</button></div></section>
@@ -795,12 +983,17 @@
       void submitClaudeLoginAction(panel, "callback");
     };
     $("#settings-claude-cancel", panel).onclick = () => submitClaudeLoginAction(panel, "cancel");
+    panel.querySelector("[data-settings-backup-link]").onclick = event => { event.preventDefault(); panel.querySelector("#settings-group-data")?.scrollIntoView({block:"start"}); };
+    void loadLocations(panel, sequence);
     void loadSources(panel, sequence);
+    void loadExtensionLink(panel, sequence);
     bindDataSettings(panel);
     bindModelSettings(panel);
+    bindRemoteAccount(panel);
     window.TaskActivity?.mountSettings?.(panel);
   }
 
-  window.WorkbenchSettings = { render };
+  window.WorkbenchSettings = { render, dataStatusActive:() => !!dataPoll?.panel?.isConnected,
+    dataActionActive:() => !!dataPoll?.panel?.isConnected && (!!dataState(dataPoll.panel).pending || !!$(".settings-data-result[open]",dataPoll.panel)) };
   window.addEventListener("hashchange", () => { ++renderSequence; stopLoginPolling(); stopDataPolling(); });
 })();

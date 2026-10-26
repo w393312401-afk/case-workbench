@@ -120,7 +120,7 @@ async function apiSnapshot(env, request, path) {
     if (!(base.state.cases || []).some(item => item.case_id === match[1])) throw new ApiError(404, '案例不存在。');
     fragment = `/data/case-${match[1]}.json`;
   } else if (/^\/api\/ai\/(?:status|options|tasks(?:\/AIT-[0-9a-f]{12})?)$/.test(path)) fragment = '/data/ai.json';
-  else if (/^\/api\/(?:creation|materials|scripts\/SCR-[0-9a-f]{12})$/.test(path)) fragment = '/data/creation.json';
+  else if (/^\/api\/(?:creation|review-followups|materials|scripts\/SCR-[0-9a-f]{12})$/.test(path)) fragment = '/data/creation.json';
   else if (/^\/api\/direction-catalog(?:\/[^/]{1,100})?$/.test(path)) fragment = '/data/direction-catalog.json';
   else if (path === '/api/directions') fragment = '/data/directions.json';
   else throw new ApiError(404, '页面不存在。');
@@ -329,8 +329,16 @@ function api(data, path, query) {
     const rows = [...(data.state?.cases || []), ...(data.performance?.videos || []),
       ...(data.direction_catalog?.selling_points || []), ...(data.direction_catalog?.directions || []),
       ...(data.creation?.scripts || []), ...(data.creation?.materials || [])];
-    const values = data.products || [...rows.map(row => row.product), ...(data.reviews?.summary?.products || [])];
-    return { products: [...new Set(values.filter(value => typeof value === 'string' && value.trim()))].sort() };
+    const catalog = data.product_catalog;
+    const names = values => [...new Set((Array.isArray(values) ? values : [])
+      .filter(value => typeof value === 'string' && value.trim()))].sort();
+    const deleted = names(catalog?.deleted), deletedSet = new Set(deleted);
+    const removed = names(catalog?.removed).filter(value => !deletedSet.has(value));
+    const excluded = new Set([...removed, ...deleted]);
+    const values = Array.isArray(catalog?.products) ? catalog.products
+      : Array.isArray(data.products) ? data.products
+      : [...rows.map(row => row.product), ...(data.reviews?.summary?.products || [])];
+    return { products: names(values).filter(value => !excluded.has(value)), removed, deleted };
   }
   if (path === '/api/state') {
     const since = one(query, 'since');
@@ -338,6 +346,7 @@ function api(data, path, query) {
     return data.state;
   }
   if (path === '/api/creation') return filteredCatalog(data.creation, one(query, 'product'));
+  if (path === '/api/review-followups') return filteredCatalog(data.review_followups || {entries: [], revision:'public'}, one(query, 'product'));
   if (path === '/api/materials') return filteredCatalog(data.materials, one(query, 'product'));
   if (path === '/api/direction-catalog') return filteredCatalog(data.direction_catalog, one(query, 'product'));
   if (path === '/api/directions') return directions(data, query);
@@ -351,7 +360,15 @@ function api(data, path, query) {
   if (path === '/api/performance/analytics') return data.performance?.analytics || {};
   if (path === '/api/performance/videos') {
     const product = one(query, 'product');
-    return { videos: array(data.performance?.videos, 'videos').filter(item => productMatches(item, product)) };
+    const all = array(data.performance?.videos, 'videos');
+    const selected = all.filter(item => productMatches(item, product));
+    if (one(query, 'projection') === 'home') {
+      const fields = ['video_id', 'product', 'headline', 'title', 'account', 'posted_on', 'window_end',
+        'status', 'status_label', 'review_status', 'missing_window', 'reference', 'flags', 'window_views', 'orders', 'views'];
+      return { videos: selected.map(item => Object.fromEntries(fields.filter(key => key in item).map(key => [key, item[key]]))),
+        published_video_ids: all.map(item => item.video_id) };
+    }
+    return { videos: selected };
   }
   if (path === '/api/reviews/summary') return data.reviews?.summary || {};
   if (path === '/api/reviews') return reviews(data, query);

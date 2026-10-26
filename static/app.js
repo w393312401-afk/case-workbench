@@ -63,11 +63,14 @@ const state = {
   cases: [],
   signature: "",
   digest: "",
+  publicStatsRevision: "",
+  reviewsRevision: "",
   token: "",
   paths: {},
   view: "reference-all",
   query: "",
   product: "",
+  libraryProduct: "",
   direction: "",
   variantType: "all",
   archiveCategory: "all",
@@ -200,7 +203,7 @@ function libraryHash() {
   const params = new URLSearchParams();
   if (state.view !== "reference-all") params.set("view", state.view);
   if (state.query) params.set("q", state.query);
-  if (state.product) params.set("product", state.product);
+  if (state.libraryProduct) params.set("caseProduct", state.libraryProduct);
   if (state.direction) params.set("direction", state.direction);
   if (state.variantType !== "all") params.set("variant", state.variantType);
   if (state.archiveCategory !== "all")
@@ -220,7 +223,7 @@ function readLibraryHash(hash = location.hash) {
   const view = params.get("view") || "reference-all";
   state.view = isNavigationView(view) ? view : "reference-all";
   state.query = params.get("q") || "";
-  state.product = window.WorkbenchShell?.product() ?? params.get("product") ?? "";
+  state.libraryProduct = window.WorkbenchShell?.normalizeProduct(params.get("caseProduct")) ?? params.get("caseProduct") ?? "";
   state.direction = params.get("direction") || "";
   state.variantType = ["direction", "execution"].includes(params.get("variant")) ? params.get("variant") : "all";
   state.archiveCategory = ["all", "positive", "mixed", "pending"].includes(
@@ -266,9 +269,18 @@ function skeletonMarkup(count = 3) {
 }
 
 const pendingApiReads = new Map();
+let initialWorkbenchLoad = null;
+// These pages read their own records while the case-library snapshot loads.
+// Home fills its case-dependent tab separately when that snapshot arrives.
+const independentStartupPages = new Set(["home", "content", "scripts", "production", "videos", "reviews", "settings"]);
 async function requestApi(path, options = {}) {
   const headers = { ...options.headers };
-  if (options.method === "POST") headers["X-Workbench-Token"] = state.token;
+  if (options.method === "POST") {
+    // A fast page may become interactive before the initial library read has
+    // supplied the session token. Wait for that read before submitting a write.
+    if (!state.token && initialWorkbenchLoad) await initialWorkbenchLoad;
+    headers["X-Workbench-Token"] = state.token;
+  }
   if (
     options.body &&
     typeof options.body !== "string" &&
@@ -282,15 +294,79 @@ async function requestApi(path, options = {}) {
   if (!response.ok) {
     const error = new Error(result.error || "操作失败");
     error.status = response.status;
+    error.maintenance = result.maintenance === true;
+    error.operation = result.operation || result.operation_kind || "";
+    if (dataMaintenanceError(error)) updateDataMaintenance({busy:true,operation:error.operation},error.message);
     throw error;
   }
   return result;
 }
+const dataOperationLabels = {export:"导出",backup:"备份",inspect:"检查备份文件",restore:"恢复"};
+let maintenanceCheck = null;
+function dataMaintenanceError(error) {
+  return error?.maintenance === true || (error?.status === 409 && /总数据.*(?:正在|处理|导入|导出|备份|恢复)/.test(error.message));
+}
+function updateDataMaintenance(result, message = "") {
+  const previous = state.dataMaintenance;
+  const operation = result?.operation || result?.operation_kind || "";
+  const busy = result?.busy === true;
+  state.dataMaintenance = busy ? {busy:true,operation,readBlocked:!operation || operation === "restore",message,
+    progress:result.progress || ""} : null;
+  let banner = $("#data-maintenance-banner");
+  if (!busy) {
+    banner?.remove();
+    if (previous?.readBlocked) {
+      state.maintenanceRecovery = true;
+      if (!state.polling) void refresh(true);
+    }
+    return Boolean(previous);
+  }
+  if (!banner) {
+    banner = document.createElement("div");banner.id = "data-maintenance-banner";banner.className = "banner";
+    banner.setAttribute("role","status");banner.setAttribute("aria-live","polite");
+    const note = document.createElement("span");note.dataset.maintenanceText = "";
+    const link = document.createElement("a");link.href = window.WorkbenchShell?.url("#settings") || "#settings";link.textContent = " 在设置查看状态";
+    banner.append(note,link);$("#error-banner").before(banner);
+  }
+  $("[data-maintenance-text]",banner).textContent = result.progress || message || `总数据正在${dataOperationLabels[operation] || "处理"}，请等待完成。`;
+  showError("");online(true);
+  syncDetail(state.dataMaintenance.readBlocked ? "总数据恢复进行中，完成后自动恢复资料读取。" : "总数据处理进行中，请等待完成。",false);
+}
+function maintenanceFailure(operation = "", message = "") {
+  const error = new Error(message || state.dataMaintenance?.message || `总数据正在${dataOperationLabels[operation] || "处理"}，请等待完成。`);
+  error.status = 409;error.maintenance = true;error.operation = operation;return error;
+}
+async function checkDataMaintenance() {
+  if (window.WorkbenchSettings?.dataStatusActive?.()) return state.dataMaintenance?.readBlocked === true;
+  if (!maintenanceCheck) {
+    maintenanceCheck = requestApi("/api/data/status",{cache:"no-store"}).then(result => {updateDataMaintenance(result);return state.dataMaintenance?.readBlocked === true;})
+      .catch(() => state.dataMaintenance?.readBlocked === true).finally(() => {maintenanceCheck = null;});
+  }
+  return maintenanceCheck;
+}
+function renderMaintenancePage() {
+  if (window.WorkbenchShell?.parse().page === "settings") {if (!$("#settings-data-card")) window.WorkbenchSettings?.render();return;}
+  if (state.editor || window.ContentFlow?.hasUnsavedInput?.() || window.CaseScripts?.hasUnsavedInput?.() || window.CaseProduction?.hasUnsavedInput?.() || window.CaseDirectionPicker?.hasVideoEdits?.()) return;
+  if ($("#data-maintenance-waiting")) return;
+  $("#content").innerHTML = '<section class="section-card" id="data-maintenance-waiting" role="status"><h1>总数据正在恢复</h1><p>资料读取暂时暂停，完成后会自动显示当前页面。可以在设置查看处理状态。</p></section>';
+}
+window.WorkbenchMaintenance = {update:updateDataMaintenance,isError:dataMaintenanceError,readBlocked:() => state.dataMaintenance?.readBlocked === true};
 async function api(path, options = {}) {
+  if (state.dataMaintenance?.busy && state.dataMaintenance.operation !== "inspect" && !["/api/data/status","/api/service/status"].includes(path.split("?")[0]) &&
+      (state.dataMaintenance.readBlocked || !["GET","HEAD"].includes(options.method || "GET")))
+    throw maintenanceFailure(state.dataMaintenance.operation);
   // Share only simultaneous plain reads. Signals and custom request options
   // retain their own lifecycle, and a write starts a fresh generation of reads.
   if (Object.keys(options).length) {
-    if (!["GET", "HEAD"].includes(options.method || "GET")) pendingApiReads.clear();
+    if (!["GET", "HEAD"].includes(options.method || "GET")) {
+      pendingApiReads.clear();
+      try { return await requestApi(path, options); }
+      finally {
+        // A poll begun during a save may still contain the previous snapshot.
+        // The caller's post-save refresh must issue a new read as well.
+        pendingApiReads.clear();
+      }
+    }
     return requestApi(path, options);
   }
   let request = pendingApiReads.get(path);
@@ -305,9 +381,16 @@ async function api(path, options = {}) {
   // Page modules decorate and filter their data; each reader owns its copy.
   return structuredClone(result);
 }
+// Each service start issues a new write token, and a hidden tab skips the state refresh that carries it.
+// The small unchanged-digest reply is enough to pick the current token up.
+async function renewPageToken() {
+  const data = await api("/api/state" + (state.digest ? "?since=" + state.digest : ""));
+  if (data?.token) state.token = data.token;
+}
 // Messages stack instead of replacing each other, so a failure is not wiped out by the next success.
 // Warnings stay until closed; the same text shown again moves to the bottom instead of repeating.
 function toast(message, warning = false) {
+  if (state.dataMaintenance?.busy && /总数据.*(?:正在|处理|导入|导出|备份|恢复)/.test(String(message))) return;
   const stack = $("#toast");
   const text = String(message);
   const same = [...stack.children].find((item) => item.dataset.text === text);
@@ -330,8 +413,11 @@ function dismissToast(item) {
   if (stack && !stack.children.length) stack.hidden = true;
 }
 function showError(message) {
-  $("#error-banner").textContent = message;
-  $("#error-banner").hidden = !message;
+  if ($("#error-banner").textContent === message && $("#error-banner").hidden === !message) return;
+  keepReadingPlace(() => {
+    $("#error-banner").textContent = message;
+    $("#error-banner").hidden = !message;
+  });
 }
 function syncDetail(text, problem = false) {
   const el = $("#sync-detail");
@@ -365,7 +451,7 @@ function markChecked() {
 }
 function online(ok) {
   $("#connection-dot").classList.toggle("offline", !ok);
-  $("#connection-text").textContent = ok ? "已连接本地案例库" : "连接暂时中断";
+  $("#connection-text").textContent = ok ? "案例库同步" : "连接暂时中断";
   $(".connection").title = `${$("#connection-text").textContent} · ${$("#sync-detail").textContent}`;
   updateConnectionStatus();
 }
@@ -408,7 +494,7 @@ function readableDate(value) {
   });
 }
 function mediaURL(id, kind, event) {
-  return `/media/${encodeURIComponent(id)}/${kind}${event ? "?event=" + encodeURIComponent(event) : ""}`;
+  return `${window.WorkbenchGuest ? "/guest-media" : "/media"}/${encodeURIComponent(id)}/${kind}${event ? "?event=" + encodeURIComponent(event) : ""}`;
 }
 function badge(item) {
   return `<span class="badge ${group(item)}">${esc(item.current?.category || "待整理")}</span>`;
@@ -689,7 +775,16 @@ function inNavigation(item, view) {
   return navigationMatches(item, view);
 }
 function scopedCases() {
-  return state.cases.filter((item) => inNavigation(item, state.view) && (!window.WorkbenchShell || window.WorkbenchShell.matchesProduct(item)));
+  return state.cases.filter((item) => inNavigation(item, state.view) && libraryProductMatches(item));
+}
+function libraryProductMatches(item, wanted = state.libraryProduct) {
+  if (window.WorkbenchShell) return window.WorkbenchShell.matchesProduct(item, wanted || "");
+  const normalize = value => {
+    const text = String(value || "").trim();
+    const codes = [...new Set((text.match(/(?<![A-Z0-9])\d{3}[A-Z](?![A-Z0-9])/gi) || []).map(code => code.toUpperCase()))];
+    return codes.length === 1 ? codes[0] : text;
+  };
+  return !wanted || normalize(productFilterGroup(item)).toLocaleLowerCase() === normalize(wanted).toLocaleLowerCase();
 }
 function shortTitle(item) {
   return (item.current?.title || item.title || "未命名案例").split("｜").at(-1);
@@ -709,7 +804,7 @@ function numeric(value) {
 function updateNav() {
   const hash = window.WorkbenchShell?.legacyHash() || location.hash;
   $$("[data-view]").forEach((el) => {
-    const view = el.dataset.view, count = state.cases.filter(item => inNavigation(item, view) && (!window.WorkbenchShell || window.WorkbenchShell.matchesProduct(item))).length;
+    const view = el.dataset.view, count = state.cases.filter(item => inNavigation(item, view) && libraryProductMatches(item)).length;
     const counter = el.querySelector(".nav-count");
     if (counter) counter.textContent = count;
     el.title = `${navigationLabel(view)} · ${count} 条案例`;
@@ -721,7 +816,7 @@ function updateNav() {
   $("#reviews-nav")?.classList.toggle("active", hash.startsWith("#reviews"));
   $("#ai-nav")?.classList.toggle(
     "active",
-    hash === "#ai" || hash.startsWith("#ai/"),
+    ["#content", "#ai", "#scripts", "#production"].some(prefix => hash === prefix || hash.startsWith(prefix + "/") || hash.startsWith(prefix + "?")),
   );
   $("#ai-nav").title = "内容创作";
   $("#files-nav").title = "设置";
@@ -737,6 +832,7 @@ function clearDeletedDetail(identifier) {
   state.view = navigationViewForContent("archived");
   state.query = "";
   state.product = "";
+  state.libraryProduct = "";
   state.archiveCategory = "all";
   state.archiveStatus = "archived";
   state.contentOrigin = "all";
@@ -782,7 +878,7 @@ function promptCaseUpdate() {
   };
 }
 async function refresh(quiet = false) {
-  if (quiet && (window.CaseDirectionPicker?.hasVideoEdits?.() || window.CaseScripts?.modalOpen?.() || window.CaseProduction?.modalOpen?.() || window.MaterialBasket?.modalOpen?.())) return;
+  if (quiet && !state.dataMaintenance?.busy && !state.maintenanceRecovery && (window.CaseDirectionPicker?.hasVideoEdits?.() || window.CaseScripts?.modalOpen?.() || window.CaseProduction?.modalOpen?.() || window.MaterialBasket?.modalOpen?.())) return;
   if (
     state.moving ||
     state.dragging ||
@@ -795,8 +891,10 @@ async function refresh(quiet = false) {
   state.polling = true;
   const mutation = mutationSequence;
   try {
+    if (state.dataMaintenance?.busy && await checkDataMaintenance()) {renderMaintenancePage();return;}
+    if (quiet && window.WorkbenchSettings?.dataActionActive?.()) return;
     // Background polls send the last digest; an unchanged library answers with a tiny reply.
-    const since = quiet && state.digest ? "?since=" + state.digest : "";
+    const since = quiet && state.digest && !state.maintenanceRecovery ? "?since=" + state.digest : "";
     const data = await api("/api/state" + since);
     if (mutation !== mutationSequence) return;
     if (data.unchanged) {
@@ -807,7 +905,12 @@ async function refresh(quiet = false) {
       showError("");
       return;
     }
-    const changed = state.signature !== data.signature;
+    const initialLoad = !state.signature;
+    const publicStatsChanged = !initialLoad && state.publicStatsRevision !== (data.public_stats_revision || "");
+    const commentsChanged = !initialLoad && state.reviewsRevision !== (data.reviews_revision || "");
+    const resumeAfterMaintenance = state.maintenanceRecovery === true;
+    const changed = state.signature !== data.signature || resumeAfterMaintenance;
+    state.maintenanceRecovery = false;
     Object.assign(state, {
       navigation: data.navigation || {},
       cases: data.cases,
@@ -815,7 +918,16 @@ async function refresh(quiet = false) {
       token: data.token,
       signature: data.signature,
       digest: data.digest || "",
+      publicStatsRevision: data.public_stats_revision || "",
+      reviewsRevision: data.reviews_revision || "",
+      libraryReadError: "",
     });
+    if (publicStatsChanged) void window.CasePerformance?.publicStatsChanged?.();
+    if (commentsChanged) {
+      void window.CaseReviews?.commentsChanged?.();
+      if (!publicStatsChanged) void window.CasePerformance?.publicStatsChanged?.();
+    }
+    if (initialLoad) window.WorkbenchHome?.libraryChanged?.();
     window.TaskActivity?.initialize();
     online(true);
     markChecked();
@@ -827,7 +939,7 @@ async function refresh(quiet = false) {
       return;
     }
     if (changed || !quiet) {
-      if (state.editor || state.deletion || state.bulk || window.CaseDirections?.modalOpen?.() || window.CaseScripts?.modalOpen?.() || window.CaseProduction?.modalOpen?.() || window.CaseAI?.modalOpen?.())
+      if (state.editor || state.deletion || state.bulk || window.CaseDirectionPicker?.hasVideoEdits?.() || window.CaseDirections?.modalOpen?.() || window.CaseScripts?.modalOpen?.() || window.CaseProduction?.modalOpen?.() || window.CaseAI?.modalOpen?.())
         state.pendingSync = true;
       else if (
         quiet &&
@@ -845,10 +957,17 @@ async function refresh(quiet = false) {
         $("#case-results")
       )
         refreshLibraryData();
-      else await route(true, true);
+      else if (!(quiet && $("dialog.perf-video-drawer[open]")) &&
+        !(initialLoad && !resumeAfterMaintenance && independentStartupPages.has(state.routeKind)) &&
+        !(quiet && state.routeKind === "settings" && $("#settings-data-card"))) await route(true, true);
     }
   } catch (error) {
     if (mutation !== mutationSequence) return;
+    if (dataMaintenanceError(error)) {renderMaintenancePage();return;}
+    if (!state.signature) {
+      state.libraryReadError = error.message;
+      window.WorkbenchHome?.libraryChanged?.();
+    }
     const inconsistent = /index|rebuild|stale|inconsistent/i.test(error.message);
     online(inconsistent);
     syncDetail(
@@ -858,7 +977,7 @@ async function refresh(quiet = false) {
       true,
     );
     showError(
-      `${error.message}。可在底部连接状态中重试同步；服务未启动时，请双击“打开案例工作台”。`,
+      `${error.message}。可在底部连接状态中重试同步；服务未启动时，请双击桌面「TK工作台」。`,
     );
   } finally {
     state.polling = false;
@@ -936,6 +1055,13 @@ const routeTable = {
 
   },
   home: async () => window.WorkbenchHome?.route(),
+  content: async ({ keepScroll }) => {
+    if (window.WorkbenchShell.parse().tail.length) {
+      window.ContentFlow?.leaveList?.();
+      return window.CaseScripts?.route(keepScroll);
+    }
+    return window.ContentFlow?.route(keepScroll);
+  },
   ai: async ({ keepScroll }) => window.CaseAI?.route(keepScroll),
   scripts: async ({ keepScroll }) => window.CaseScripts?.route(keepScroll),
   production: async ({ keepScroll }) => window.CaseProduction?.route(keepScroll),
@@ -948,7 +1074,15 @@ async function route(keepScroll = false, force = false) {
   const n = ++routeSequence, previous = state.routeKind;
   const previousLibraryHash = state.libraryHash;
   const incoming = window.WorkbenchShell.parse();
+  if (window.ContentFlow?.beforeNavigate && !window.ContentFlow.beforeNavigate(location.hash)) {
+    window.WorkbenchShell.update();
+    return;
+  }
   if (window.CaseScripts?.beforeNavigate && !window.CaseScripts.beforeNavigate(location.hash)) {
+    window.WorkbenchShell.update();
+    return;
+  }
+  if (window.CaseProduction?.beforeNavigate && !window.CaseProduction.beforeNavigate(location.hash)) {
     window.WorkbenchShell.update();
     return;
   }
@@ -979,6 +1113,7 @@ async function route(keepScroll = false, force = false) {
   state.routeKind = page;
   if (page !== "case") { state.selected = null; state.detail = null; }
   updateNav();
+  if (state.dataMaintenance?.readBlocked && page !== "settings") {renderMaintenancePage();return;}
   await routeTable[page]({ n, caseRoute, keepScroll, force });
   if (n !== routeSequence) return;
   updateNav();
@@ -1168,7 +1303,9 @@ window.addEventListener("beforeunload", (event) => {
     state.editor?.uploads ||
     state.editor?.saving ||
     state.deleteOperation ||
-    window.CaseScripts?.hasUnsavedInput?.()
+    window.ContentFlow?.hasUnsavedInput?.() ||
+    window.CaseScripts?.hasUnsavedInput?.() ||
+    window.CaseProduction?.hasUnsavedInput?.()
   ) {
     event.preventDefault();
     event.returnValue = "";
@@ -1247,7 +1384,12 @@ document.addEventListener("visibilitychange", () => {
 });
 // Later deferred scripts register the page modules. Start routing only after
 // they have all executed, even when /api/state responds very quickly.
-function startWorkbench() { window.MaterialBasket?.initialize(); void refresh(); }
+function startWorkbench() {
+  window.MaterialBasket?.initialize();
+  const independent = independentStartupPages.has(window.WorkbenchShell?.parse().page);
+  initialWorkbenchLoad = refresh(independent);
+  if (independent) void route();
+}
 if (document.readyState === "complete") startWorkbench();
 else document.addEventListener("DOMContentLoaded", startWorkbench, { once: true });
 setInterval(() => {
@@ -1256,27 +1398,36 @@ setInterval(() => {
 // The pages are read from disk on every load but the backend only at start-up: after an update the new pages
 // can ask for features the running process does not have. Say so instead of showing a cryptic error.
 let staleNoticeDismissed = false;
+const staleDismissedPids = new Set();
 async function checkServiceFresh() {
-  if (document.hidden || staleNoticeDismissed) return;
+  if (document.hidden) return;
   try {
     const response = await fetch("/api/service/status", { cache: "no-store" });
     if (!response.ok) return;
     const status = await response.json();
     let banner = document.getElementById("code-stale-banner");
     if (!status.code_stale) {
-      banner?.remove();
+      if (banner) keepReadingPlace(() => banner.remove());
       return;
     }
+    if (banner && banner.dataset.servicePid !== String(status.pid)) { keepReadingPlace(() => banner.remove()); banner = null; }
     if (banner) return;
+    const dismissalKey = `workbench:stale-later:${status.pid}`;
+    if (staleDismissedPids.has(status.pid)) return;
+    try { if (sessionStorage.getItem(dismissalKey) === '1') return; } catch {}
     banner = document.createElement("div");
     banner.id = "code-stale-banner";
+    banner.dataset.servicePid = String(status.pid);
     banner.setAttribute("role", "alert");
     banner.innerHTML =
-      '<span data-stale-text>工作台程序已更新，当前运行的服务还是旧版本，部分新功能（如图片上传）暂时不可用。点「重启工作台」即可更新；有 AI 任务、剪辑、配音或出图在运行时不会重启，也不会打断它们。</span>' +
+      '<span data-stale-text>程序已更新，重启后生效。</span>' +
+      '<details class="stale-explanation"><summary aria-label="更新与重启说明">说明</summary><p>有AI任务、剪辑、配音或出图运行时不会重启。若重启暂不可用，可以稍后通过桌面入口重启工作台。</p></details>' +
       '<button type="button" data-stale-restart>重启工作台</button><button type="button" data-stale-later>稍后</button>';
     const text = banner.querySelector("[data-stale-text]"), restart = banner.querySelector("[data-stale-restart]");
     banner.querySelector("[data-stale-later]").onclick = () => {
       staleNoticeDismissed = true;
+      staleDismissedPids.add(status.pid);
+      try { sessionStorage.setItem(dismissalKey, '1'); } catch {}
       banner.remove();
     };
     restart.onclick = async () => {
@@ -1287,7 +1438,9 @@ async function checkServiceFresh() {
       } catch (error) {
         restart.disabled = false;
         restart.textContent = "重启工作台";
-        text.textContent = `暂时不能重启：${error?.message || "请稍后重试"}`;
+        text.textContent = error?.status === 403 && /local workbench/i.test(error?.message || "")
+          ? "从公网地址打开时不能重启工作台。请在工作台电脑上双击桌面「TK工作台」，或在那台电脑上打开 http://127.0.0.1:8767 再点重启。"
+          : `暂时不能重启：${error?.message || "请稍后重试"}`;
         return;
       }
       text.textContent = "正在重启工作台，完成后页面会自动刷新…";
@@ -1310,7 +1463,8 @@ async function checkServiceFresh() {
         }
       }, 1500);
     };
-    document.body.append(banner);
+    const topbar = document.querySelector('.topbar');
+    keepReadingPlace(() => { if (topbar) topbar.insertAdjacentElement('afterend', banner); else document.body.prepend(banner); });
   } catch {}
 }
 setTimeout(checkServiceFresh, 3000);

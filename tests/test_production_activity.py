@@ -133,7 +133,7 @@ class EditingActivityTests(ActivityAssertions, unittest.TestCase):
         self.assertEqual((run["source_id"], run["status"]), (edit["id"], "completed"))
         self.assertIn("交人工审查", run["message"])
         self.assertNotIn("工程核验", [log["phase"] for log in self.logs(run)])
-        self.assertFalse(any(call["command"] == "inspect" for call in self.bench.runner.calls))
+        self.assertEqual(editing_fixture.judging_inspects(self.bench.runner.calls), [])
         self.assertNotIn("开头要不要换切纸", json.dumps(self.logs(run), ensure_ascii=False))
         body = {"request_id": uuid4().hex}
         self.bench.recheck_edit(job["id"], edit["id"], body)
@@ -152,6 +152,53 @@ class EditingActivityTests(ActivityAssertions, unittest.TestCase):
         run = self.runs("edit")[0]
         self.assertEqual(run["status"], "cancelled")
         self.assertIn("stopping", [log["status"] for log in self.logs(run)])
+
+    def test_resolve_wait_is_queued_until_the_edit_can_execute(self):
+        self.editor.block = True
+        job = self.timeline_job()
+        waiting = threading.Event()
+        phase = self.bench._edit_phase
+
+        def observe(edit_id, name, message):
+            phase(edit_id, name, message)
+            if name == "waiting_preparing":
+                waiting.set()
+
+        self.bench.resolve.lock.acquire()
+        try:
+            with patch.object(self.bench, "_edit_phase", side_effect=observe):
+                edit = self.start(job)["edit"]
+                self.assertTrue(waiting.wait(5))
+                run = self.runs("edit")[0]
+                self.assertEqual((run["status"], run["finished_at"]), ("queued", None))
+                self.assertEqual(self.bench.activity.feed()["counts"]["active"], 1)
+                self.assertEqual(self.editor.calls, [])
+                self.assertEqual(self.bench.production.job(job["id"])["edits"][-1]["status"], "running")
+        finally:
+            self.bench.resolve.lock.release()
+        try:
+            self.assertTrue(self.editor.started.wait(5))
+            run = self.runs("edit")[0]
+            self.assertEqual((run["status"], run["finished_at"]), ("running", None))
+            self.assertIn("queued", [log["status"] for log in self.logs(run)])
+        finally:
+            self.bench.cancel_edit(job["id"], edit["id"])
+            self.wait(job["id"])
+        self.assertEqual(self.runs("edit")[0]["status"], "cancelled")
+
+    def test_late_phase_updates_keep_a_cancelled_edit_stopping(self):
+        self.editor.block = True
+        job = self.timeline_job()
+        edit = self.start(job)["edit"]
+        self.assertTrue(self.editor.started.wait(5))
+        with self.bench.lock:
+            self.bench.cancel_edit(job["id"], edit["id"])
+            for phase in ("waiting_preparing", "preparing", "planning"):
+                self.bench._edit_phase(edit["id"], phase, "迟到的阶段更新")
+            run = self.runs("edit")[0]
+            self.assertEqual((run["status"], run["phase"]), ("stopping", "正在停止"))
+        self.wait(job["id"])
+        self.assertEqual(self.runs("edit")[0]["status"], "cancelled")
 
     def test_pending_edit_recovery_notifies_actual_saved_result_without_reediting(self):
         job = self.timeline_job()
@@ -214,7 +261,7 @@ class ImageActivityTests(ActivityAssertions, unittest.TestCase):
         generation = self.start()
         self.wait()
         run = self.runs("images")[0]
-        self.assertEqual((run["source_id"], run["status"], run["message"]), (generation["id"], "needs_attention", "首张已生成，待确认"))
+        self.assertEqual((run["source_id"], run["status"], run["message"]), (generation["id"], "needs_attention", "本次成图已保存，待逐张人工确认"))
         self.assertEqual(self.runs("image_review"), [])
         self.assertTrue(any("核对" in log["phase"] for log in self.logs(run)))
         self.recheck(1)
@@ -304,7 +351,7 @@ class ImageProgressActivityTests(unittest.TestCase):
         self.assertEqual(after["cursor"], before["cursor"])
         self.assertEqual(self.bench.activity.logs(run_id)["logs"], logs)
         self.assertEqual(after["events"], [])
-        self.assertEqual(after["counts"], {"active": 1, "unread": 0})
+        self.assertEqual(after["counts"], {"active": 1, "queued": 0, "unread": 0})
 
     def test_parent_generation_review_and_independent_review_use_their_own_runs(self):
         parent = self.start(phase="第 1 张 · 核对")
@@ -317,7 +364,7 @@ class ImageProgressActivityTests(unittest.TestCase):
         self.assertEqual(set(rows), {parent, independent})
         self.assertEqual((rows[parent]["message"], rows[parent]["phase"]), (parent_message, "第 1 张 · 核对"))
         self.assertEqual((rows[independent]["message"], rows[independent]["phase"]), (independent_message, "独立核对"))
-        self.assertEqual(self.bench.activity.feed()["counts"], {"active": 2, "unread": 0})
+        self.assertEqual(self.bench.activity.feed()["counts"], {"active": 2, "queued": 0, "unread": 0})
 
     def test_cancelled_or_removed_live_run_ignores_late_progress(self):
         run_id = self.start()

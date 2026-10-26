@@ -95,6 +95,10 @@
 
   let current = null; // Shared player, transcript cues, native cues and selected range.
   let follow = true;
+  // 循环播放 is remembered per browser; a played range keeps its own repeat setting.
+  let loopPlayback = false;
+  try { loopPlayback = localStorage.getItem("case-video-loop") === "1"; } catch {}
+  const SWITCH = '<span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span>';
   let pauseUntil = 0;
   let programmaticUntil = 0;
   let frame = 0;
@@ -341,15 +345,27 @@
     if (!button) {
       button = document.createElement("button");
       button.type = "button";
-      button.className = "subtle";
+      button.className = "ui-switch";
       button.id = "toggle-transcript-follow";
-      button.textContent = "跟随播放";
+      button.innerHTML = `${SWITCH}<span>跟随播放</span>`;
       button.title = "播放时文案自动滚动到当前句";
       button.onclick = () => {
         toggleFollow();
       };
       actions.prepend(button);
     }
+    let loopButton = actions.querySelector(".player-loop");
+    if (!loopButton) {
+      loopButton = document.createElement("button");
+      loopButton.type = "button";
+      loopButton.className = "ui-switch player-loop";
+      loopButton.innerHTML = `${SWITCH}<span>循环播放</span>`;
+      loopButton.title = "播完自动从头再播";
+      loopButton.onclick = toggleLoop;
+      button.after(loopButton);
+    }
+    loopButton.setAttribute("aria-pressed", String(loopPlayback));
+    loopButton.classList.toggle("is-active", loopPlayback);
     button.hidden = !visible;
     button.setAttribute("aria-pressed", String(follow));
     button.classList.toggle("is-active", follow);
@@ -372,11 +388,21 @@
   }
 
   function sync() {
-    document.querySelectorAll("#toggle-transcript-follow, .player-follow").forEach(button => {
+    document.querySelectorAll("#toggle-transcript-follow").forEach(button => {
       button.setAttribute("aria-pressed", String(follow));
       button.classList.toggle("is-active", follow);
-      button.textContent = follow ? "跟随播放：开" : "跟随播放：关";
     });
+    document.querySelectorAll(".player-loop").forEach(button => {
+      button.setAttribute("aria-pressed", String(loopPlayback));
+      button.classList.toggle("is-active", loopPlayback);
+    });
+    if (current?.video) current.video.loop = loopPlayback;
+  }
+
+  function toggleLoop() {
+    loopPlayback = !loopPlayback;
+    try { localStorage.setItem("case-video-loop", loopPlayback ? "1" : "0"); } catch {}
+    sync();
   }
 
   function toggleFollow() {
@@ -482,11 +508,10 @@
     if (!controls) {
       controls = document.createElement("div");
       controls.className = "segment-player-controls";
-      controls.innerHTML = '<div class="segment-track" role="group" aria-label="段落起止标记"></div><input class="segment-scrubber" type="range" min="0" max="1" step="0.01" value="0" aria-label="视频进度"><div class="segment-toolbar"><button type="button" class="subtle" data-segment-jump="-1" title="上一段（←）" aria-label="上一段">← 上一段</button><button type="button" class="subtle" data-segment-jump="1" title="下一段（→）" aria-label="下一段">下一段 →</button><label class="segment-speed-label">倍速<select class="segment-speed" aria-label="播放速度"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1">1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label><button type="button" class="subtle player-follow" aria-pressed="true" title="播放时自动滚动到当前段；手动滚动会暂缓跟随">跟随播放：开</button></div><div class="segment-range-row" hidden><span class="segment-range-state" role="status" aria-live="polite"></span><button type="button" class="subtle" id="clear-playback-range">取消片段</button></div>';
+      controls.innerHTML = '<div class="segment-track" role="group" aria-label="段落起止标记"></div><input class="segment-scrubber" type="range" min="0" max="1" step="0.01" value="0" aria-label="视频进度"><div class="segment-toolbar"><button type="button" class="subtle" data-segment-jump="-1" title="上一段（←）" aria-label="上一段">← 上一段</button><button type="button" class="subtle" data-segment-jump="1" title="下一段（→）" aria-label="下一段">下一段 →</button><label class="segment-speed-label">倍速<select class="segment-speed" aria-label="播放速度"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1">1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label></div><div class="segment-range-row" hidden><span class="segment-range-state" role="status" aria-live="polite"></span><button type="button" class="subtle" id="clear-playback-range">取消片段</button></div>';
       wrap.after(controls);
       controls.querySelectorAll("[data-segment-jump]").forEach(button => { button.onclick = () => jumpSegment(Number(button.dataset.segmentJump)); });
       controls.querySelector(".segment-speed").onchange = event => { if (current) current.video.playbackRate = Number(event.target.value); };
-      controls.querySelector(".player-follow").onclick = toggleFollow;
       controls.querySelector("#clear-playback-range").onclick = clearRange;
       controls.querySelector(".segment-scrubber").oninput = event => {
         if (!current) return;

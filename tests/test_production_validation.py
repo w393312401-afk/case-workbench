@@ -4,7 +4,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from production_validation import validate_edit
+from production_validation import delivery_gap_status, review_current_coverage, validate_edit
 
 JOB = {"id": "PRD-validation", "lines": [{"number": n} for n in (1, 2, 3)]}
 TIMELINE = {"frames": 90}
@@ -69,6 +69,146 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("reported_gap_not_gap", self.codes(stale))
         malformed = self.check(post, report={"gaps": [{"start": "60", "end": 90}]})
         self.assertIn("unmarked_picture_gap", self.codes(malformed))
+
+    def test_unverified_empty_range_is_not_confirmed_missing_material(self):
+        post = inspection()
+        post["tracks"]["video"][0]["items"] = post["tracks"]["video"][0]["items"][:2]
+        report = {"gaps": [{"start": 60, "end": 90, "status": "unverified", "need": "待查看推磨细节"}]}
+        result, summary = validate_edit(post, JOB, TIMELINE, inspection(edited=False), report=report)
+        self.assertEqual(result["status"], "needs_verification")
+        self.assertEqual(summary["gaps"][0]["status"], "unverified")
+        self.assertNotIn("missing_material", self.codes(result))
+        self.assertIn("material_unverified", self.codes(result))
+        self.assertEqual(delivery_gap_status(report), "needs_verification")
+        # Old prose is never used to silently reclassify a declared missing range.
+        report["gaps"][0].pop("status")
+        self.assertEqual(delivery_gap_status(report), "needs_material")
+
+    def test_adjacent_gaps_keep_missing_and_unverified_states_separate(self):
+        post = inspection()
+        post["tracks"]["video"][0]["items"] = post["tracks"]["video"][0]["items"][:1]
+        report = {"gaps": [{"start": 30, "end": 60, "status": "missing", "need": "缺切纸"},
+                           {"start": 60, "end": 90, "status": "unverified", "need": "待看锁角"}]}
+        result, summary = review_current_coverage(post, JOB, {**TIMELINE, "unique_id": "timeline-1"}, report=report)
+        self.assertEqual([(gap["start"], gap["end"], gap["status"]) for gap in summary["gaps"]],
+                         [(30, 60, "missing"), (60, 90, "unverified")])
+        self.assertEqual(result["status"], "needs_material")
+        self.assertIn("material_unverified", self.codes(result))
+
+    def test_current_refresh_never_expands_partial_declaration_into_unreported_empty_picture(self):
+        post = inspection()
+        post["tracks"]["video"][0]["items"] = post["tracks"]["video"][0]["items"][:1]
+        for state in ("missing", "unverified"):
+            with self.subTest(state=state):
+                report = {"gaps": [{"start": 60, "end": 90, "status": state, "need": "尾段画面"}]}
+                result, summary = review_current_coverage(post, JOB, {**TIMELINE, "unique_id": "timeline-1"}, report=report)
+                self.assertEqual([(gap["start"], gap["end"], gap["status"]) for gap in summary["gaps"]], [(60, 90, state)])
+                self.assertEqual([(gap["start"], gap["end"]) for gap in summary["uncovered"]], [(30, 60)])
+                self.assertEqual(result["status"], "needs_repair")
+                self.assertIn("unmarked_picture_gap", self.codes(result))
+                # The historical engineering path keeps its established tolerance.
+                _, legacy = validate_edit(post, JOB, TIMELINE, inspection(edited=False), report=report)
+                self.assertEqual([(gap["start"], gap["end"]) for gap in legacy["gaps"]], [(30, 90)])
+
+    def test_current_refresh_intersects_overlapping_declarations_with_missing_priority_in_both_orders(self):
+        post = inspection()
+        post["tracks"]["video"][0]["items"] = post["tracks"]["video"][0]["items"][:1]
+        pending = {"start": 30, "end": 70, "status": "unverified", "need": "待看"}
+        missing = {"start": 50, "end": 90, "status": "missing", "need": "缺画面"}
+        for declarations in ([pending, missing], [missing, pending]):
+            with self.subTest(order=declarations):
+                result, summary = review_current_coverage(post, JOB, {**TIMELINE, "unique_id": "timeline-1"}, report={"gaps": declarations})
+                self.assertEqual([(gap["start"], gap["end"], gap["status"]) for gap in summary["gaps"]],
+                                 [(30, 50, "unverified"), (50, 70, "missing"), (70, 90, "missing")])
+                self.assertEqual(summary["uncovered"], [])
+                self.assertEqual(result["status"], "needs_material")
+
+    def test_skill_manual_refresh_resolves_old_ranges_without_claiming_baseline_protection(self):
+        post = inspection()
+        report = {"gaps": [{"start": 0, "end": 30, "need": "锁角细节"}]}
+        timeline = {**TIMELINE, "unique_id": "timeline-1"}
+        result, summary = review_current_coverage(post, JOB, timeline, report=report,
+            voice_paths=["C:/media/voice.mov"], expected_markers=post["markers"])
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertEqual(result["scope"], "current_coverage")
+        self.assertIsNone(result["checks"]["baseline_comparison"])
+        self.assertNotIn("voice_preserved", result["checks"])
+        self.assertEqual(result["issues"], [])
+        self.assertEqual(summary["gaps"], [])
+        self.assertEqual(summary["resolved_gaps"][0]["coverage_status"], "covered")
+        self.assertIsNone(summary["voice_changed"])
+        self.assertEqual(report["gaps"], [{"start": 0, "end": 30, "need": "锁角细节"}])
+
+    def test_skill_manual_refresh_keeps_uncertain_and_unreported_empty_ranges_open(self):
+        post = inspection()
+        post["tracks"]["video"][0]["items"] = post["tracks"]["video"][0]["items"][:2]
+        timeline = {**TIMELINE, "unique_id": "timeline-1"}
+        report = {"gaps": [{"start": 60, "end": 90, "status": "unverified", "need": "需看候选"}]}
+        result, summary = review_current_coverage(post, JOB, timeline, report=report)
+        self.assertEqual(result["status"], "needs_verification")
+        self.assertFalse(result["checks"]["picture_coverage"])
+        self.assertEqual(summary["resolved_gaps"], [])
+        result, summary = review_current_coverage(post, JOB, timeline)
+        self.assertEqual(result["status"], "needs_repair")
+        self.assertIn("unmarked_picture_gap", self.codes(result))
+
+    def test_skill_manual_refresh_checks_current_identity_position_and_marker_record(self):
+        timeline = {**TIMELINE, "unique_id": "timeline-1"}
+        post = inspection()
+        result, _ = review_current_coverage(post, JOB, timeline, voice_paths=["C:/different.wav"])
+        self.assertIn("current_voice_identity_mismatch", self.codes(result))
+        post["tracks"]["audio"][1]["items"][0]["start"] += 1
+        result, _ = review_current_coverage(post, JOB, timeline, voice_paths=["C:/media/voice.mov"])
+        self.assertIn("current_voice_position_changed", self.codes(result))
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertFalse(result["checks"]["current_voice_position_record"])
+        self.assertEqual(next(issue for issue in result["issues"] if issue["code"] == "current_voice_position_changed")["severity"], "info")
+        expected = inspection()["markers"]
+        post["markers"][0]["frame"] += 1
+        result, _ = review_current_coverage(post, JOB, timeline, expected_markers=expected)
+        self.assertIn("current_group_markers_mismatch", self.codes(result))
+
+    def test_current_refresh_accepts_existing_991_frame_voice_trim_from_992_frame_record(self):
+        post = inspection()
+        start = post["start_frame"]
+        voice = post["tracks"]["audio"][1]["items"][0]
+        voice.update(end=start + 991, source_end=991)
+        template = post["tracks"]["video"][0]["items"][0]
+        boundaries = [round(number * 991 / 23) for number in range(24)]
+        post["tracks"]["video"][0]["items"] = [{**template, "uid": f"shot-{number}", "start": start + a, "end": start + b,
+                                                 "source_start": a, "source_end": b}
+                                                for number, (a, b) in enumerate(zip(boundaries, boundaries[1:]))]
+        post["end_frame"] = start + 991
+        report = {"gaps": [{"start": a, "end": b, "need": "原空段"} for a, b in ((0, 30), (200, 230), (400, 430), (600, 630))]}
+        result, summary = review_current_coverage(post, JOB, {"unique_id": "timeline-1", "frames": 992}, report=report,
+            voice_paths=["C:/media/voice.mov"], expected_markers=post["markers"])
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertEqual(summary["voice_frames"], 991)
+        self.assertEqual(summary["shots"], 23)
+        self.assertEqual(summary["picture_gaps"], [])
+        self.assertEqual(len(summary["resolved_gaps"]), 4)
+        self.assertTrue(result["checks"]["current_voice_record"])
+        self.assertFalse(result["checks"]["current_voice_position_record"])
+        self.assertEqual(summary["voice_preservation"], "not_compared")
+        self.assertIsNone(result["checks"]["baseline_comparison"])
+
+    def test_current_refresh_accepts_same_take_voice_pieces_with_different_source_points_but_rejects_other_take(self):
+        post = inspection()
+        voice_track = post["tracks"]["audio"][1]
+        original = voice_track["items"][0]
+        voice_track["items"] = [{**original, "uid": "piece-a", "start": 1000, "end": 1040, "source_start": 5, "source_end": 45},
+                                {**original, "uid": "piece-b", "start": 1040, "end": 1090, "source_start": 50, "source_end": 100}]
+        timeline = {**TIMELINE, "unique_id": "timeline-1"}
+        result, summary = review_current_coverage(post, JOB, timeline, voice_paths=["C:/media/voice.mov"])
+        self.assertEqual(result["status"], "awaiting_review")
+        self.assertEqual(summary["voice_items"], 2)
+        self.assertEqual(summary["voice_frames"], 90)
+        self.assertTrue(result["checks"]["current_voice_record"])
+        self.assertFalse(result["checks"]["current_voice_position_record"])
+        voice_track["items"][1]["media_path"] = "C:/media/another-take.mov"
+        result, _ = review_current_coverage(post, JOB, timeline, voice_paths=["C:/media/voice.mov"])
+        self.assertEqual(result["status"], "needs_repair")
+        self.assertIn("current_voice_identity_mismatch", self.codes(result))
 
     def test_same_duration_replacement_movement_and_property_change_are_detected(self):
         for key, value in (("media_id", "replacement"), ("source_start", 1), ("start", 1001), ("properties", {"AudioVolume": -12})):

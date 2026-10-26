@@ -1,0 +1,21 @@
+.tk-candidates .tk-cand-list{list-style:none;margin:0 0 10px;padding:0 18px;background:var(--surface);border-radius:14px;box-shadow:var(--shadow-card)}
+.tk-cand{padding:14px 0;border-bottom:1px solid var(--line)}
+.tk-cand:last-child{border-bottom:0}
+.tk-cand.done{opacity:.75}
+.tk-cand-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;font-size:14px;color:var(--ink)}
+.tk-cand-head strong{color:var(--accent-text)}
+.tk-cand-kind{font-size:var(--font-meta);color:var(--muted);background:var(--fill);border-radius:999px;padding:1px 8px}
+.tk-cand-meta{margin:4px 0 0;font-size:var(--font-meta);color:var(--muted)}
+.tk-cand-meta a{color:var(--accent-text)}
+.tk-cand-chain{margin:8px 0 0;font-size:13px;color:var(--ink);line-height:1.6}
+.tk-cand-script{margin-top:8px;font-size:13px}
+.tk-cand-script summary{cursor:pointer;color:var(--muted);font-size:var(--font-meta)}
+.tk-cand-script p{margin:6px 0}
+.tk-cand-script b{display:inline-block;min-width:76px;margin-right:6px;color:var(--muted);font-weight:500}
+.tk-cand-zh{display:block;color:var(--muted)}
+.tk-cand-lines{margin:6px 0;padding-left:20px}
+.tk-cand-lines li{margin:4px 0}
+.tk-cand-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}
+.tk-cand-state{font-size:var(--font-meta);color:var(--muted)}
+.tk-cand-footer{margin:0 0 0 4px;font-size:var(--font-meta);color:var(--muted)}
+.direction-source-note{margin:0 0 8px;font-size:var(--font-meta);color:var(--accent-text)}

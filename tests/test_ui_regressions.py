@@ -71,7 +71,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
         page.on("pageerror", lambda error: errors.append(str(error)))
         self.addCleanup(lambda: self.assertEqual(errors, [], "Browser JavaScript errors"))
         page.goto(f"http://127.0.0.1:{self.server.server_port}/{hash_route}")
-        page.locator("#connection-text").get_by_text("已连接本地案例库").wait_for()
+        page.locator("#connection-text").get_by_text("案例库同步").wait_for()
         return page
 
     def add_cases(self, count=8):
@@ -328,7 +328,9 @@ class WorkbenchBrowserTests(unittest.TestCase):
     def test_url_filters_and_return_restore_library_scroll(self):
         self.add_cases(9)
         page = self.open_page()
-        page.locator('[data-library-preset="positive"]').click()
+        open_library_filters(page)
+        page.locator("#archive-category-filter").select_option("positive")
+        close_library_filters(page)
         page.locator("#case-search").fill("SHARPAL")
         page.locator("#result-count").get_by_text("10 条案例").wait_for()
         open_library_filters(page)
@@ -340,7 +342,7 @@ class WorkbenchBrowserTests(unittest.TestCase):
         page.reload()
         self.assertEqual(page.locator("#case-search").input_value(), "SHARPAL")
         self.assertIn("售出", page.locator("#sort-filter").locator("option:checked").inner_text())
-        self.assertEqual(page.locator('[data-library-preset="positive"]').get_attribute("aria-pressed"), "true")
+        self.assertEqual(page.locator("#archive-category-filter").input_value(), "positive")
         page.locator(".case-card").nth(6).scroll_into_view_if_needed()
         scroll_before = page.evaluate("window.scrollY")
         self.assertGreater(scroll_before, 100)
@@ -399,7 +401,9 @@ class WorkbenchBrowserTests(unittest.TestCase):
             "current": current,
         })
         page = self.open_page()
-        page.locator('[data-library-preset="positive"]').click()
+        open_library_filters(page)
+        page.locator("#archive-category-filter").select_option("positive")
+        close_library_filters(page)
         page.get_by_role("link", name="查看案例：仅按案例分类归入正向组").wait_for()
 
     def test_editing_category_updates_manual_native_assignment_and_keeps_history(self):
@@ -439,7 +443,9 @@ class WorkbenchBrowserTests(unittest.TestCase):
         self.assertEqual(after["events"][:-1], before["events"])
         self.assertEqual(len(after["events"]), len(before["events"]) + 1)
         page.locator('[data-page="library"]').click()
-        page.locator('[data-library-preset="positive"]').click()
+        open_library_filters(page)
+        page.locator("#archive-category-filter").select_option("positive")
+        close_library_filters(page)
         page.get_by_role("link", name="查看案例：人工归属从本土参考转正向").wait_for()
 
     def test_content_origin_editor_saves_and_clears_without_reclassifying_case(self):

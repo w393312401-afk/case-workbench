@@ -43,15 +43,8 @@ function metricNumber(value) {
   );
 }
 function dataConsistency(item) {
-  const m = salesMetrics(item), notes = [];
-  const labels = { views_display: "播放量", items_sold: "售出件数", ctor_display: "CTOR" };
-  const patterns = { views_display: /播放(?:量)?\s*([\d.]+\s*[KMW万亿]?)/gi, items_sold: /售出\s*([\d.]+)\s*件/gi, ctor_display: /CTOR\s*([\d.]+%)/gi };
-  for (const [key, pattern] of Object.entries(patterns))
-    for (const match of (item.current?.conclusion || "").matchAll(pattern))
-      if (m[key] !== undefined && metricNumber(match[1]) !== metricNumber(m[key]))
-        notes.push(`${labels[key]}：既有结论写 ${match[1]}，销售数据表当前为 ${m[key]}。`);
-  if (!notes.length) return "";
-  return `<section class="section-card consistency-note"><h2>结论中的历史数据</h2>${notes.map(n => `<p class="data-warning">${esc(n)}</p>`).join("")}<p>结论保留原判断；引用当前表现时，以销售数据表及其统计窗口为准。</p></section>`;
+  if (!/\d/.test(item.current?.conclusion || "") || !hasPerformanceData(item)) return "";
+  return `<details class="consistency-note"><summary>结论数字与当前数据的口径</summary><p>结论保留当时的记录与判断；与当前数据不相等，不一定是错误。请先核对来源、累计或观察窗、截至日期。</p><p>${esc(caseMetricContext(item))}</p></details>`;
 }
 
 function normalizedScript(text) {
@@ -172,32 +165,72 @@ async function openComparison() {
     ],
     ["中文对照", chineseText],
   ];
-  dialog.innerHTML = `<div class="dialog-heading"><h2>同产品案例对比</h2><button class="secondary" id="close-comparison">关闭</button></div><p class="comparison-note">按当前记录并排展示。表现统一读取销售数据表，未匹配时不显示旧截图数值。统计窗口或投流条件不同，不能直接归因于文案优劣；原文与中文对照保留各自来源，屏显文字和历史片段均单独标明。播放、曝光、点击统一显示实际数量。</p><div class="comparison-scroll"><table class="comparison-table"><thead><tr><th>对比项</th>${items.map((i) => `<th><a href="#case/${esc(i.case_id)}" data-comparison-link>${esc(shortTitle(i))}</a></th>`).join("")}</tr></thead><tbody>${rows.map(([label, get]) => `<tr><th>${esc(label)}</th>${items.map((i) => `<td>${label === "证据与条件" ? `<details><summary>查看来源与条件</summary>${esc(get(i) || "未提供")}</details>` : esc(get(i) ?? "未提供")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+  const metricLabels = new Set(metrics.map(([,label]) => label));
+  rows.sort((a,b) => Number(metricLabels.has(b[0])) - Number(metricLabels.has(a[0])));
+  const common = new Set(rows.filter(([label,get]) => !metricLabels.has(label) && !["统计窗口","数据截至","证据状态","销售数据"].includes(label) && items.every(item => String(get(item) ?? "未提供") === String(get(items[0]) ?? "未提供"))).map(([label]) => label));
+  dialog.innerHTML = `<div class="dialog-heading"><h2>同产品案例对比</h2><button class="secondary" id="close-comparison">关闭</button></div><details class="comparison-note"><summary>来源、口径与对比边界</summary><p>按当前记录并排展示。表现统一读取销售数据表，未匹配时不显示旧截图数值。统计窗口或投流条件不同，不能直接归因于文案优劣；原文与中文对照保留各自来源，屏显文字和历史片段均单独标明。播放、曝光、点击统一显示实际数量。</p></details>${common.size ? `<button type="button" class="subtle" data-comparison-common aria-expanded="false">展开相同或未提供项（${common.size}）</button>` : ""}<div class="comparison-scroll"><table class="comparison-table"><thead><tr><th>对比项</th>${items.map((i) => `<th><a href="#case/${esc(i.case_id)}" data-comparison-link>${esc(shortTitle(i))}</a></th>`).join("")}</tr></thead><tbody>${rows.map(([label, get]) => `<tr ${common.has(label) ? 'data-comparison-common-row hidden' : ""}><th>${esc(label)}</th>${items.map((i) => `<td>${label === "证据与条件" ? `<details><summary>查看来源与条件</summary>${esc(get(i) || "未提供")}</details>` : esc(get(i) ?? "未提供")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
   document.body.append(dialog);
   dialog.querySelector("#close-comparison").onclick = () => dialog.close();
   dialog
     .querySelectorAll("[data-comparison-link]")
     .forEach((a) => (a.onclick = () => dialog.close()));
   dialog.addEventListener("close", () => dialog.remove());
+  dialog.querySelector("[data-comparison-common]")?.addEventListener("click", event => {
+    const expanded = event.currentTarget.getAttribute("aria-expanded") !== "true";
+    event.currentTarget.setAttribute("aria-expanded",String(expanded));
+    event.currentTarget.textContent = `${expanded ? "收起" : "展开"}相同或未提供项（${common.size}）`;
+    dialog.querySelectorAll("[data-comparison-common-row]").forEach(row => { row.hidden = !expanded; });
+  });
   dialog.showModal();
 }
 
 function hasPerformanceData(item) {
   return item.sales_data?.status === "matched";
 }
-function renderPerformanceSection(item) {
+function casePublicStats(item) {
+  return item.sales_data?.public_stats || item.sales_data?.video?.public_stats || null;
+}
+function casePublicStatsNote(snapshot) {
+  if (!snapshot) return '';
+  const stamp = snapshot.last_seen_at || snapshot.observed_at, moment = stamp ? new Date(stamp) : null;
+  const when = moment && !Number.isNaN(moment.getTime()) ? ` · 抓取于 <time datetime="${esc(stamp)}">${esc(moment.toLocaleString('zh-CN',{hour12:false}))}</time>` : '';
+  return `<p class="context-note" data-case-public-source>公开页数据来自 TK 看板插件${when}；— 表示尚未获取。</p>`;
+}
+function casePublicOnlyFigures(snapshot) {
+  if (!snapshot) return '';
+  const fields = [['views','播放量'],['likes','点赞'],['comments','评论'],['shares','转发'],['saves','收藏']];
+  return `<div data-case-public-stats><h3>公开页数据</h3><div class="facts-grid">${fields.map(([key,label]) => `<div><span class="metric-label">${label}</span><span class="metric-value">${displayValue(snapshot[key])}</span></div>`).join('')}</div>${casePublicStatsNote(snapshot)}</div>`;
+}
+// kind names whose figures these are (case, script, carousel), so an empty state speaks of the right thing.
+function renderPerformanceSection(item, kind = "case") {
   const m = salesMetrics(item), e = salesEvidence(item), v = item.sales_data?.video || {};
+  const publicStats = casePublicStats(item);
+  const reviewNames = {pending:'待复盘',unclassified:'待分类',none:'无参考价值',weak:'弱参考价值',medium:'中等参考价值',high:'高参考价值'};
+  const reviewLabel = reviewNames[v.review_status?.key] || '待复盘';
   const action = `<a class="secondary" href="${esc(salesDataURL(item))}">${icon("chart")}查看销售数据表</a>`;
-  if (!hasPerformanceData(item))
-    return `<section class="section-card performance-empty"><h2>表现数据</h2><div class="performance-empty-row"><p>${esc(salesStatusLabel(item))}</p>${action}</div><p class="context-note">${item.sales_data?.status === "missing_video_id" ? "在编辑案例中填写视频 ID 后，按同一视频匹配销售数据。" : "导入或同步销售数据表后，此处显示对应视频的表现。"}</p></section>`;
-  const figures = [...metrics.map(([key,label]) => [label,m[key]]), ...(v.orders != null ? [["订单数",v.orders]] : []), ...(v.gmv != null ? [["GMV", "$" + Number(v.gmv).toLocaleString("en-US", {maximumFractionDigits:2})]] : [])];
-  return `<section class="section-card"><div class="section-title-row"><h2>${icon("chart")}表现数据</h2>${action}</div><div class="facts-grid">${figures.map(([label,value]) => `<div><span class="metric-label">${esc(label)}</span><span class="metric-value ${label === "CTOR" ? "accent" : ""}">${displayValue(value)}</span></div>`).join("")}</div><p class="context-note">销售数据表 · ${esc(e.window || "统计窗口未提供")}${e.as_of ? ` · 截至 ${esc(e.as_of)}` : ""}</p>${e.context ? `<p class="context-note">${esc(e.context)}</p>` : ""}${v.status_label ? `<p class="context-note">跟进状态：${esc(v.status_label)}</p>` : ""}</section>`;
+  if (!hasPerformanceData(item)) {
+    const status = item.sales_data?.status, subject = kind === "carousel" ? "图文" : "视频";
+    // An unregistered script already says so in its side panel; an empty card would repeat it.
+    if (kind === "script" && status === "missing_video_id") return "";
+    const label = kind === "carousel" && status === "not_found" ? "销售数据表未匹配到此图文" : salesStatusLabel(item);
+    const hint = status === "missing_video_id" ? "在编辑案例中填写视频 ID 后，按同一视频匹配销售数据。" : `导入或同步销售数据表后，此处显示对应${subject}的表现。`;
+    return `<section class="section-card performance-empty">${casePublicOnlyFigures(publicStats)}<h2 class="visually-hidden">表现数据</h2><div class="performance-empty-row"><p><span class="performance-empty-label">表现数据</span><span>${esc(label)}</span><details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">${esc(hint)}</div></details></p>${action}</div></section>`;
+  }
+  const interactionValues = publicStats || v;
+  const interactionFields = [['likes','点赞'],['comments','评论'],['shares','转发'],['saves','收藏']];
+  const interactions = publicStats || interactionFields.some(([key]) => Object.hasOwn(v,key))
+    ? interactionFields.map(([key,label]) => [label,interactionValues[key]]) : [];
+  const figures = [...metrics.map(([key,label]) => [label,m[key]]), ...interactions, ...(v.orders != null ? [["订单数",v.orders]] : []), ...(v.gmv != null ? [["GMV", "$" + Number(v.gmv).toLocaleString("en-US", {maximumFractionDigits:2})]] : [])];
+  return `<section class="section-card"><div class="section-title-row"><h2>${icon("chart")}表现数据</h2>${action}</div><div class="facts-grid"${publicStats ? ' data-case-public-stats' : ''}>${figures.map(([label,value]) => `<div><span class="metric-label">${esc(label)}</span><span class="metric-value ${label === "CTOR" ? "accent" : ""}">${displayValue(value)}</span></div>`).join("")}</div>${casePublicStatsNote(publicStats)}<p class="detail-data-source">${esc(caseMetricContext(item))}</p>${e.context ? `<details class="detail-data-method"><summary>统计口径</summary><p>${esc(e.context)}</p></details>` : ""}<p class="context-note">复盘分类：${esc(reviewLabel)}</p></section>`;
 }
 function renderPerformanceSummary(item) {
+  const publicStats = casePublicStats(item);
+  if (!hasPerformanceData(item) && publicStats)
+    return `<button class="case-summary-item" data-summary="表现数据"><span class="case-summary-label">公开页数据 · TK 看板插件</span><div class="case-summary-metrics"><span>播放 <strong>${displayValue(publicStats.views)}</strong></span><span>点赞 <strong>${displayValue(publicStats.likes)}</strong></span><span>评论 <strong>${displayValue(publicStats.comments)}</strong></span></div><small>${esc(salesStatusLabel(item))}</small></button>`;
   if (!hasPerformanceData(item))
     return `<button class="case-summary-item is-empty" data-summary="表现数据"><span class="case-summary-label">表现数据</span><p>${esc(salesStatusLabel(item))}</p></button>`;
   const m = salesMetrics(item), e = salesEvidence(item);
-  return `<button class="case-summary-item" data-summary="表现数据"><span class="case-summary-label">销售数据表</span><div class="case-summary-metrics"><span>播放 <strong>${displayValue(m.views_display)}</strong></span><span>售出 <strong>${displayValue(m.items_sold)}</strong></span><span>CTOR <strong>${displayValue(m.ctor_display)}</strong></span></div><small>${esc(e.as_of ? "截至 " + e.as_of : e.window || "统计窗口未提供")}</small></button>`;
+  return `<button class="case-summary-item" data-summary="表现数据"><span class="case-summary-label">当前表现 · ${item.sales_data?.video?.views_source === "public" ? "播放来自公开页" : "销售数据表"}</span><div class="case-summary-metrics"><span>播放 <strong>${displayValue(m.views_display)}</strong></span><span>售出 <strong>${displayValue(m.items_sold)}</strong></span><span>CTOR <strong>${displayValue(m.ctor_display)}</strong></span></div><small>${esc(caseMetricContext(item))}</small></button>`;
 }
 
 function refreshDetailSalesData(summary) {
@@ -223,16 +256,16 @@ function refreshDetailSalesData(summary) {
     release.innerHTML = template.content.firstElementChild.innerHTML;
     bindReleaseEditor(item);
   }
-  const consistency = $("#detail-section-consistency");
+  const consistency = $("#detail-section-conclusion .consistency-note");
   const note = dataConsistency(item);
   if (note) {
     template.innerHTML = note;
     const updated = template.content.firstElementChild;
-    updated.id = "detail-section-consistency";
+    updated.classList.add("consistency-note");
     updated.dataset.detailGroup = "overview";
     updated.dataset.detailLabel = "数据一致性";
     if (consistency) consistency.replaceWith(updated);
-    else release?.after(updated);
+    else $("#detail-section-conclusion")?.append(updated);
   } else consistency?.remove();
   bindDetailInlineEditors(item);
 }
@@ -266,7 +299,7 @@ function renderReleaseSection(item) {
 
 function renderTranscriptSection(item) {
   const cur = item.current, display = transcriptDisplay(item);
-  return `<section class="section-card"><div class="section-title-row"><h2>${icon("file")}${esc(display.heading)}</h2><div class="transcript-actions"><button type="button" class="subtle" id="toggle-transcript-zh" aria-expanded="false" aria-controls="transcript-comparison">中文对照</button><button class="subtle" id="copy-transcript">${icon("copy")}复制</button></div></div><div class="transcript" id="transcript-original">${esc(display.text || "暂未整理当前有效文案。")}</div><div id="transcript-comparison" hidden></div><p class="transcript-status">${display.heading !== "完整文案" ? esc(display.status) : cur.source_case ? `文案状态：${esc(historicalTranscriptStatus(cur.transcript?.status || cur.source_case.transcript_status))}，以来源记录为准。<br>${esc(cur.transcript?.source || "历史转写，本次未重新听辨。")}` : esc(cur.transcript?.status || "核实状态未提供。")}</p></section>`;
+  return `<section class="section-card"><div class="section-title-row"><h2>${icon("file")}${esc(display.heading)}</h2><div class="transcript-actions"><button type="button" class="subtle" id="toggle-transcript-zh" aria-expanded="false" aria-controls="transcript-comparison">中文对照</button><button class="subtle" id="copy-transcript">${icon("copy")}复制</button></div></div><div class="transcript" id="transcript-original">${esc(display.text || "暂未整理当前有效文案。")}</div><div id="transcript-comparison" hidden></div><details class="transcript-status"><summary>${esc(display.heading === "完整文案" ? historicalTranscriptStatus(cur.transcript?.status || cur.source_case?.transcript_status) || cur.transcript?.status || "核实状态未提供" : display.status)}</summary><p>${display.heading !== "完整文案" ? esc(display.status) : cur.source_case ? `文案状态：${esc(historicalTranscriptStatus(cur.transcript?.status || cur.source_case.transcript_status))}，以来源记录为准。<br>${esc(cur.transcript?.source || "历史转写，本次未重新听辨。")}` : esc(cur.transcript?.status || "核实状态未提供。")}</p></details></section>`;
 }
 
 // A section owns its label, outline group, visibility and renderer in one place.
@@ -274,11 +307,11 @@ const detailSectionDefinitions = [
   {
     id: "conclusion", label: "当前结论", group: "overview", tab: "current", edit: "overview",
     when: item => Boolean(item.current),
-    render: item => `<section class="section-card"><h2>${icon("spark")}当前结论</h2><p class="conclusion">${esc(item.current.conclusion)}</p></section>`,
+    render: item => `<section class="section-card"><h2>${icon("spark")}当前结论</h2><p class="conclusion">${esc(caseReadingState(item).conclusion)}</p>${dataConsistency(item)}${caseReadingState(item).neutral ? `<details class="case-placeholder-original"><summary>收录时的占位记录</summary><p>${esc(item.current.category)} · ${esc(item.current.conclusion)}</p></details>` : ""}</section>`,
   },
   {
     id: "purchase-reason", label: "主要购买理由", group: "overview", tab: "current",
-    when: item => Boolean(item.current),
+    when: item => Boolean(item.current?.purchase_reason?.trim()),
     render: item => `<section class="section-card"><h2>${icon("check")}主要购买理由</h2><p class="conclusion">${esc(item.current.purchase_reason || "未单独整理")}</p></section>`,
   },
   {
@@ -287,19 +320,15 @@ const detailSectionDefinitions = [
   },
   {
     id: "test-direction", label: "测试方向", group: "overview", tab: "current", edit: "direction",
-    when: item => Boolean(item.current), render: renderTestDirection,
+    when: item => Boolean(item.current?.test_direction && Object.values(item.current.test_direction).some(value => String(value || "").trim())), render: renderTestDirection,
   },
   {
     id: "release", label: "发布与制作", group: "overview", tab: "data", edit: "release",
     when: item => Boolean(item.current), render: renderReleaseSection,
   },
   {
-    id: "consistency", label: "数据一致性", group: "overview", tab: "data",
-    when: item => Boolean(dataConsistency(item)), render: dataConsistency,
-  },
-  {
-    id: "native", label: "本土表达与场景", group: "deep", tab: "script", edit: "native",
-    when: item => Boolean(item.current?.native_reference), render: nativeDetail,
+    id: "consistency", label: "数据口径", group: "overview", tab: "current",
+    when: item => false, render: dataConsistency,
   },
   {
     id: "transcript", label: item => transcriptDisplay(item).heading, group: "deep", tab: "script", edit: "transcript",
@@ -307,12 +336,12 @@ const detailSectionDefinitions = [
   },
   {
     id: "highlights", label: "可借鉴的表达", group: "deep", tab: "script",
-    when: item => Boolean(item.current && !item.current.native_reference),
+    when: item => Boolean(item.current?.highlights?.length),
     render: item => `<section class="section-card"><h2>${icon("check")}可借鉴的表达</h2>${list(item.current.highlights)}</section>`,
   },
   {
     id: "limitations", label: "问题与适用边界", group: "deep", tab: "script",
-    when: item => Boolean(item.current),
+    when: item => Boolean(item.current?.limitations?.length),
     render: item => `<section class="section-card"><h2>${icon("search")}问题与适用边界</h2>${list(item.current.limitations)}</section>`,
   },
 ];
@@ -344,12 +373,19 @@ function renderDetailSections(item, tab = "current") {
       const section = container.querySelector(`#detail-section-${id}`);
       if (section) insights.append(section);
     }
+    if (!insights.children.length) insights.classList.add("detail-empty-edit-host");
     container.append(insights);
     const source = document.createElement("div");
     source.id = "detail-source-analysis";
     container.append(source);
   }
   if (tab === "current") {
+    if (!container.querySelector('[data-inline-section="direction"]')) {
+      const empty = document.createElement("div");
+      empty.dataset.inlineSection = "direction";
+      empty.className = "detail-empty-edit-host";
+      container.append(empty);
+    }
     const metrics = document.createElement("div");
     metrics.className = "detail-overview-metrics";
     metrics.innerHTML = `<div class="section-title-row"><h2>核心表现</h2><button type="button" class="subtle" data-detail-tab="data">查看数据</button></div>${renderPerformanceSummary(item)}`;
@@ -358,7 +394,8 @@ function renderDetailSections(item, tab = "current") {
   return container.outerHTML;
 }
 
-const detailTabs = { current: "概要", script: "文案与拆解", data: "数据", history: "历史" };
+// 文案与拆解 is used most, so it sits first; 概要 stays the default tab and the plain case URL.
+const detailTabs = { script: "文案与拆解", current: "概要", data: "数据", history: "历史" };
 const detailEditLabels = { overview: "编辑概要", transcript: "编辑文案", insights: "编辑拆解记录", direction: "编辑方向", release: "编辑发布信息", metrics: "编辑数据关联", assets: "编辑素材关联", native: "编辑本土表达" };
 function detailTabURL(item, tab) {
   const hash = `#case/${item.case_id}${tab === "current" ? "" : "/" + tab}`;
@@ -396,12 +433,15 @@ function detailCompletion(item) {
   ];
 }
 function renderDetailSide(item) {
-  const tasks = detailCompletion(item), missing = tasks.filter(task => !task.ready).length;
-  return `<aside class="detail-side" aria-label="案例协作与完整度"><div id="detail-ai-panel"></div><section class="detail-completion"><div class="section-title-row"><h2>待补全</h2><span>${missing ? `${missing} 项` : "已齐备"}</span></div><ul>${tasks.map(task => `<li class="${task.ready ? "is-ready" : "is-missing"}"><span>${icon(task.ready ? "check" : "edit")}${esc(task.label)}</span><button type="button" class="subtle" data-completion-section="${task.section}" data-completion-tab="${task.tab}">${task.ready ? "查看" : "补充"}</button></li>`).join("")}</ul></section></aside>`;
+  const tasks = [...detailCompletion(item),
+    {section:"overview",label:"购买理由",tab:"current",ready:Boolean(item.current?.purchase_reason?.trim())},
+    {section:"insights",label:"借鉴点与适用边界",tab:"script",ready:Boolean(item.current?.highlights?.length || item.current?.limitations?.length)}].filter(task => !task.ready), missing = tasks.length;
+  return `<aside class="detail-side" aria-label="案例协作与完整度"><div id="detail-ai-panel"></div>${missing ? `<details class="detail-completion"><summary>可补充资料 · ${missing} 项</summary><ul>${tasks.map(task => `<li class="${task.ready ? "is-ready" : "is-missing"}"><span>${icon(task.ready ? "check" : "edit")}${esc(task.label)}</span><button type="button" class="subtle" data-completion-section="${task.section}" data-completion-tab="${task.tab}">${task.ready ? "查看" : "补充"}</button></li>`).join("")}</ul></details>` : ""}</aside>`;
 }
 function bindDetailInlineEditors(item) {
   $$("[data-inline-section]").forEach(section => {
     const name = section.dataset.inlineSection;
+    if (section.classList.contains("detail-empty-edit-host")) return;
     if (section.querySelector(`[data-inline-edit="${name}"]`) || name === "release") return;
     const button = document.createElement("button");
     button.type = "button";
@@ -424,7 +464,7 @@ function bindDetailInlineEditors(item) {
     const target = $(`[data-inline-section="${button.dataset.completionSection}"]`);
     scrollDetailSection(target);
     const task = detailCompletion(item).find(task => task.section === button.dataset.completionSection);
-    if (!task.ready) window.CaseInlineEditor?.open(item, task.section);
+    if (!task?.ready) window.CaseInlineEditor?.open(item, button.dataset.completionSection);
   });
 }
 
@@ -440,9 +480,10 @@ function renderDetail(item) {
   $("#breadcrumb").innerHTML =
     "案例库 <span>/</span> 案例详情";
   $("#content").innerHTML =
-    `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || state.libraryHash)}">${icon("back")}返回${esc(navigationLabel())}</a><div class="detail-heading"><div><div class="case-badges">${badge(item)}${sourceBadges(item, true)}${archiveBadge(item)}</div><h1>${esc(cur?.title || item.title)}</h1><p class="detail-meta">${esc(item.product || "产品未提供")} · ${esc(m.creator_handle || "账号未提供")} · ${esc(item.case_id)}</p></div><div class="detail-tools"><details class="detail-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" id="open-case-folder">${icon("folder")}案例文件夹</button><button type="button" role="menuitem" id="archive-case" ${busy ? 'disabled aria-busy="true"' : ""}>${icon(item.archived ? "restore" : "archive")}${archiveBusy ? (state.archiveOperation.archived ? "正在归档…" : "正在恢复…") : item.archived ? "恢复案例" : "归档案例"}</button>${item.archived ? `<button type="button" role="menuitem" class="is-danger" id="delete-case" ${busy ? "disabled" : ""}>${icon("trash")}彻底删除</button>` : ""}</div></details><button class="secondary compact" id="edit-case" ${busy ? "disabled" : ""}>${icon("edit")}编辑案例</button></div></div><div class="archive-notice ${item.archived ? "is-archived" : ""}">${icon(item.archived ? "archive" : "restore")}<p>${item.archived ? "此案例已归档。视频、文案和修订历史仍可查看、编辑；恢复后回到原表现分类。" : "归档后可在“已归档”中查看并恢复，原表现分类和修订历史继续保留。"}</p></div>${archiveError ? `<div class="archive-error" role="alert">${esc(archiveError)}</div>` : ""}<div class="detail-tabs" role="tablist" aria-label="案例内容">${Object.entries(detailTabs).map(([tab, label]) => `<button type="button" role="tab" id="detail-tab-${tab}" class="tab" data-tab="${tab}" aria-controls="${tab === "history" ? "detail-other" : "detail-panel-" + tab}" aria-selected="false">${esc(label)}${tab === "history" ? ` <small>${item.events.length}</small>` : ""}</button>`).join("")}</div><div id="detail-body"></div><div id="detail-other" hidden></div>`;
+    `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || state.libraryHash)}">${icon("back")}返回${esc(navigationLabel())}</a><div class="detail-heading"><div><div class="case-badges">${caseReadingBadges(item)}</div><h1>${esc(cur?.title || item.title)}</h1>${productPickerMarkup(item)}<p class="detail-meta">${esc(m.creator_handle || "账号未提供")}</p><details class="detail-origin"><summary>来源与编号</summary><div>${sourceBadges(item, true)}<p>案例 ${esc(item.case_id)}${m.video_id ? ` · 视频 ${esc(m.video_id)}` : ""}</p><p>保存的分类：${esc(item.current?.category || "未分类")}</p>${item.current?.source_case?.library_id ? `<p>来源编号：${esc(item.current.source_case.library_id)}</p>` : ""}</div></details></div><div class="detail-tools"><details class="detail-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" id="open-case-folder">${icon("folder")}案例文件夹</button><button type="button" role="menuitem" id="archive-case" ${busy ? 'disabled aria-busy="true"' : ""}>${icon(item.archived ? "restore" : "archive")}${archiveBusy ? (state.archiveOperation.archived ? "正在归档…" : "正在恢复…") : item.archived ? "恢复案例" : "归档案例"}</button>${item.archived ? `<button type="button" role="menuitem" class="is-danger" id="delete-case" ${busy ? "disabled" : ""}>${icon("trash")}彻底删除</button>` : ""}</div></details><button class="secondary compact" id="edit-case" ${busy ? "disabled" : ""}>${icon("edit")}编辑案例</button></div></div><div class="archive-notice ${item.archived ? "is-archived" : ""}">${icon(item.archived ? "archive" : "restore")}<p>${item.archived ? "此案例已归档。视频、文案和修订历史仍可查看、编辑；恢复后回到原表现分类。" : "归档后可在“已归档”中查看并恢复，原表现分类和修订历史继续保留。"}</p></div>${archiveError ? `<div class="archive-error" role="alert">${esc(archiveError)}</div>` : ""}<div class="detail-tabs" role="tablist" aria-label="案例内容">${Object.entries(detailTabs).map(([tab, label]) => `<button type="button" role="tab" id="detail-tab-${tab}" class="tab" data-tab="${tab}" aria-controls="${tab === "history" ? "detail-other" : "detail-panel-" + tab}" aria-selected="false">${esc(label)}${tab === "history" ? `<small class="tab-count">${item.events.length}</small>` : ""}</button>`).join("")}</div><div id="detail-body"></div><div id="detail-other" hidden></div>`;
   mountDetailWorkspace(item);
   $("#edit-case").onclick = () => openEditor(item);
+  bindProductPicker(item);
   $("#archive-case").onclick = () => setArchived(item, !item.archived);
   $("#delete-case")?.addEventListener("click", () => openDelete(item));
   $(".detail-menu")?.addEventListener("click", event => { if (event.target.closest("[role=menuitem]")) event.currentTarget.open = false; });
@@ -493,6 +534,7 @@ function renderDetail(item) {
   if (aiPanel) $("#detail-ai-panel").append(aiPanel);
   bindDetailInlineEditors(item);
   mountVideoWorkspace(item);
+  window.CaseAutoBreakdown?.mount(item);
   bindReleaseEditor(item);
   void window.CaseReviews?.decorateCase(item);
   $("#detail-video-import").onclick = () => openVideoPicker(item);
@@ -559,7 +601,10 @@ function mountDetailWorkspace(item) {
     back.innerHTML = `${icon("back")}<span>返回</span>`;
     bar.append(back);
   }
-  bar.append(title, badges);
+  bar.append(title);
+  const picker = heading.querySelector("#detail-product");
+  if (picker) bar.append(picker);
+  bar.append(badges);
   const cases = filteredCases(), index = cases.findIndex(entry => entry.case_id === item.case_id);
   for (const [offset, label] of [[-1, "上一条"], [1, "下一条"]]) {
     const next = index >= 0 ? cases[index + offset] : null;
@@ -579,13 +624,17 @@ function mountDetailWorkspace(item) {
   const tabs = $(".detail-tabs");
   if (tabs) actions.append(tabs);
   meta.title = meta.textContent;
-  actions.append(meta, tools);
+  const origin = heading.querySelector(".detail-origin");
+  actions.append(meta);
+  if (origin) actions.append(origin);
+  actions.append(tools);
   dock.after(actions);
   heading.remove();
   if (!item.archived) $(".archive-notice")?.remove();
   const measure = () => {
     if (!dock.isConnected) { detailWorkspaceObserver?.disconnect(); return; }
-    $("#content").style.setProperty("--detail-sticky-top", `${Math.ceil(dock.getBoundingClientRect().height) + 12}px`);
+    const dockTop = Number.parseFloat(getComputedStyle(dock).top) || 0;
+    $("#content").style.setProperty("--detail-sticky-top", `${Math.ceil(dock.getBoundingClientRect().height + dockTop) + 12}px`);
   };
   measure();
   if ("ResizeObserver" in window) {
@@ -799,27 +848,13 @@ async function setArchived(item, archived) {
 }
 function renderHistory(item) {
   const events = [...item.events].reverse();
-  $("#detail-other").innerHTML =
-    `<div class="history-intro">${esc(item.current?.history_note || "每次保存、归档或恢复都会留下记录。下方展示当时的反馈与版本，引用案例时以“当前案例”为准。")}</div>${events
-      .map(
-        (ev, i) =>
-          `<article class="history-item"><div class="history-date">${esc(readableDate(ev.created_at))}${i === 0 ? " · 最近一次修订" : ""}</div><div class="section-card"><h2>${esc(typeof ev.lifecycle?.archived === "boolean" ? (ev.lifecycle.archived ? "案例归档" : "案例恢复") : kindNames[ev.feedback?.kind] || "修订记录")}</h2><p>${esc(ev.feedback?.text || "")}</p>${ev.feedback?.analysis ? `<details><summary>分析与说明</summary><p>${esc(ev.feedback.analysis)}</p></details>` : ""}${
-            ev.current
-              ? `<details><summary>查看当时的当前版本</summary><p>${esc(ev.current.title)}<br>${esc(ev.current.conclusion)}</p>${ev.current.transcript ? `<pre>${esc(ev.current.transcript.text)}</pre>` : ""}${Object.keys(
-                  ev.current.assets || {},
-                )
-                  .map(
-                    (kind) =>
-                      `<a class="history-asset" href="${mediaURL(item.case_id, kind, ev.event_id)}" target="_blank" rel="noopener">当时的${esc(assetLabels[kind] || kind)}</a>`,
-                  )
-                  .join("")}</details>`
-              : ""
-          }<details><summary>完整修订记录</summary><pre>${esc(JSON.stringify(ev, null, 2))}</pre></details></div></article>`,
-      )
-      .join(
-        "",
-      )}<article class="history-item"><div class="history-date">${esc(readableDate(item.created_at))} · 首次收录</div><div class="section-card"><h2>原始资料</h2><p>保留首次提供的内容；它可能已经被后续反馈修正。</p><details><summary>查看首次收录原文</summary><pre>${esc(item.original.text || item.original.url || "未提供")}</pre><p>${esc(item.original.source || "")}</p></details></div></article>`;
+  $("#detail-other").innerHTML = `${item.current?.history_note ? `<details class="history-intro"><summary>历史说明</summary><p>${esc(item.current.history_note)}</p></details>` : ""}<div class="history-list">${events.map((ev,index) => {
+    const label = typeof ev.lifecycle?.archived === "boolean" ? ev.lifecycle.archived ? "案例归档" : "案例恢复" : kindNames[ev.feedback?.kind] || "修订记录";
+    const summary = String(ev.feedback?.text || "").replace(/\s+/g," ");
+    return `<details class="history-item"><summary><time>${esc(readableDate(ev.created_at))}</time><span>${esc(label)}</span><span class="history-summary">${esc(summary.slice(0,110))}${summary.length > 110 ? "…" : ""}</span>${index === 0 ? '<small>最近</small>' : ""}</summary><div class="history-expanded"><p>${esc(ev.feedback?.text || "")}</p>${ev.feedback?.analysis ? `<details><summary>分析与说明</summary><p>${esc(ev.feedback.analysis)}</p></details>` : ""}${ev.current ? `<details><summary>查看当时的当前版本</summary><p>${esc(ev.current.title)}<br>${esc(ev.current.conclusion)}</p>${ev.current.transcript ? `<pre>${esc(ev.current.transcript.text)}</pre>` : ""}${Object.keys(ev.current.assets || {}).map(kind => `<a class="history-asset" href="${mediaURL(item.case_id,kind,ev.event_id)}" target="_blank" rel="noopener">当时的${esc(assetLabels[kind] || kind)}</a>`).join("")}</details>` : ""}<details><summary>完整修订记录</summary><pre>${esc(JSON.stringify(ev,null,2))}</pre></details></div></details>`;
+  }).join("")}<details class="history-item"><summary>${esc(readableDate(item.created_at))} · 首次收录</summary><div class="history-expanded"><p>首次提供的原始资料，可能已被后续反馈修正。</p><pre>${esc(item.original.text || item.original.url || "未提供")}</pre><p>${esc(item.original.source || "")}</p></div></details></div>`;
 }
+
 function markdownInline(value) {
   const pieces = String(value).split(/(`[^`]+`)/g);
   return pieces
@@ -933,19 +968,252 @@ function renderMarkdown(text) {
   }
   return blocks.join("\n");
 }
+// Case assignments use the same catalogue and labels as the sidebar.
+function productPickerMarkup(item) {
+  const key = window.WorkbenchShell.normalizeProduct(item.product);
+  const label = key ? window.WorkbenchShell.productLabel(key) : "产品未提供";
+  const readOnly = window.WorkbenchGuest || window.PublicTextMode;
+  return `<details class="detail-product" id="detail-product"><summary ${readOnly ? 'aria-disabled="true" tabindex="-1"' : 'aria-haspopup="dialog"'} title="${esc(label)}"><span class="detail-product-name">${esc(label)}</span>${item.product_manual ? '<small class="detail-product-tag">手动</small>' : ""}</summary></details>`;
+}
+function bindProductPicker(item) {
+  const box = $("#detail-product");
+  if (!box) return;
+  box.querySelector("summary").addEventListener("click", event => {
+    event.preventDefault();
+    if (window.WorkbenchGuest || window.PublicTextMode || document.querySelector("#case-product-dialog")) return;
+    if (state.editor) { toast("请先保存或取消正在编辑的内容，再更改所属产品。", true); return; }
+    openCaseProductPicker(item, box.querySelector("summary"));
+  });
+}
+function openCaseProductPicker(item, trigger) {
+  const shell = window.WorkbenchShell, current = shell.normalizeProduct(item.product);
+  const currentLabel = current ? shell.productLabel(current) : "产品未提供";
+  const dialog = document.createElement("dialog");
+  dialog.id = "case-product-dialog";
+  dialog.className = "detail-product-panel";
+  dialog.setAttribute("aria-labelledby", "case-product-title");
+  dialog.innerHTML = `<div class="case-product-heading"><h2 id="case-product-title">选择所属产品</h2><p>与侧边栏产品列表一致。选择后保存，仅更改当前案例的归属。</p></div><div class="case-product-current" data-product-current><span>当前归属</span><strong title="${esc(currentLabel)}">${esc(currentLabel)}</strong><small data-product-unlisted hidden>当前归属未在产品列表中，可选择已有产品重新归属。</small></div><label class="field"><span class="sr-only">搜索产品</span><input data-product-search type="search" placeholder="搜索型号或产品名称" autocomplete="off" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="case-product-options"></label><p class="case-product-status" data-product-status role="status">正在加载产品…</p><button type="button" class="secondary compact" data-product-retry hidden>重新加载</button><div id="case-product-options" role="listbox" aria-label="已有产品" aria-busy="true"></div><p class="case-product-selection" data-product-selection>请选择产品</p><p class="context-note">需要新增产品时，可在侧边栏「管理产品」中添加。</p><div class="detail-product-actions">${item.product_manual ? '<button type="button" class="subtle" data-product-auto>恢复自动识别</button>' : ""}<button type="button" class="secondary compact" data-product-cancel>取消</button><button type="button" class="primary compact" data-product-save disabled>保存</button></div>`;
+  document.body.append(dialog);
+  const search = dialog.querySelector("[data-product-search]"), list = dialog.querySelector("#case-product-options");
+  const status = dialog.querySelector("[data-product-status]"), retry = dialog.querySelector("[data-product-retry]");
+  const saveButton = dialog.querySelector("[data-product-save]");
+  let choices = [], rows = [], selected = null, active = -1, ready = false, saving = false;
+  const setStatus = message => { status.textContent = message; status.hidden = !message; };
+  const updateActions = () => {
+    saveButton.disabled = saving || !ready || !selected || selected === current || !choices.some(row => row.value === selected);
+    dialog.querySelectorAll("[data-product-cancel], [data-product-auto], [data-product-retry]").forEach(button => { button.disabled = saving; });
+    search.disabled = saving;
+    saveButton.textContent = saving ? "保存中…" : "保存";
+    const chosen = choices.find(row => row.value === selected);
+    dialog.querySelector("[data-product-selection]").textContent = chosen ? `已选择：${chosen.label}` : "请选择产品";
+  };
+  const highlight = index => {
+    active = index;
+    const options = [...list.querySelectorAll("[data-product-option]")];
+    options.forEach((option, i) => option.classList.toggle("is-active", i === active));
+    if (options[active]) search.setAttribute("aria-activedescendant", options[active].id);
+    else search.removeAttribute("aria-activedescendant");
+  };
+  const render = () => {
+    const query = search.value.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+    rows = choices.filter(row => query.every(word => `${row.value} ${row.label}`.toLocaleLowerCase().includes(word)));
+    let group = "";
+    list.innerHTML = rows.map((row, index) => {
+      const heading = /^\d{3}[A-Z]$/.test(row.value) ? "产品型号" : "其他产品";
+      const label = heading !== group ? `<div class="case-product-group" role="presentation">${heading}</div>` : "";
+      group = heading;
+      return `${label}<button type="button" id="case-product-option-${index}" data-product-option="${esc(row.value)}" role="option" aria-selected="${row.value === selected}" title="${esc(row.label)}" ${saving ? "disabled" : ""}><span>${esc(row.label)}</span><small>${row.value === selected ? "✓" : row.value === current ? "当前" : ""}</small></button>`;
+    }).join("");
+    if (ready && !rows.length) list.innerHTML = `<p class="case-product-empty">${choices.length ? "没有找到匹配的产品，试试型号或关键词。" : "暂无可选产品，请先在侧边栏添加产品。"}</p>`;
+    highlight(rows.length ? Math.max(0, rows.findIndex(row => row.value === selected)) : -1);
+    updateActions();
+  };
+  const choose = value => {
+    if (!ready || saving) return;
+    selected = value;
+    render();
+    search.focus();
+  };
+  const load = async () => {
+    ready = false;
+    retry.hidden = true;
+    setStatus("正在加载产品…");
+    list.setAttribute("aria-busy", "true");
+    list.replaceChildren();
+    updateActions();
+    try {
+      const loaded = await shell.refreshProducts();
+      if (!dialog.open) return;
+      choices = loaded;
+      ready = true;
+      if (!choices.some(row => row.value === selected)) selected = choices.some(row => row.value === current) ? current : null;
+      dialog.querySelector("[data-product-unlisted]").hidden = !current || choices.some(row => row.value === current);
+      setStatus("");
+      render();
+    } catch {
+      if (!dialog.open) return;
+      setStatus("产品列表加载失败，请重试。当前归属未更改。");
+      retry.hidden = false;
+    } finally { list.setAttribute("aria-busy", "false"); }
+  };
+  const save = async automatic => {
+    if (saving || (!automatic && saveButton.disabled)) return;
+    saving = true;
+    setStatus("");
+    render();
+    try {
+      let product = null;
+      if (!automatic) {
+        choices = await shell.refreshProducts();
+        const chosen = choices.find(row => row.value === selected);
+        if (!chosen) throw new Error("这个产品已从列表移除，请重新选择。");
+        product = chosen.label;
+      }
+      const result = await api(`/api/cases/${item.case_id}/product`, { method: "POST", body: { product } });
+      // Apply the confirmed assignment immediately even while a background
+      // library poll is in flight; that older response must not overwrite it.
+      mutationSequence++;
+      const updated = result.case;
+      const entry = state.cases.find(row => row.case_id === item.case_id);
+      if (entry) Object.assign(entry, updated);
+      state.digest = "";
+      if (caseLocation()?.id === item.case_id) {
+        routeSequence++;
+        Object.assign(item, updated);
+        state.detail = item;
+        shell.beginNavigation(shell.parse());
+        shell.canonicalize();
+        cleanupDetailWorkspace();
+        renderDetail(item);
+        shell.finishNavigation();
+        updateNav();
+      }
+      dialog.close();
+      toast(automatic ? "已恢复自动识别的产品名。" : "已更新当前案例的所属产品。");
+      void shell.refreshProducts().catch(() => {});
+    } catch (error) {
+      saving = false;
+      setStatus(error.message || "保存失败，请重试。");
+      render();
+    }
+  };
+  search.addEventListener("input", render);
+  search.addEventListener("keydown", event => {
+    if (event.isComposing || event.keyCode === 229 || saving) return;
+    if (["ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault();
+      if (!rows.length || !ready) return;
+      highlight((active + (event.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length);
+      list.querySelector(`#case-product-option-${active}`)?.scrollIntoView({ block: "nearest" });
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      if (rows[active]) choose(rows[active].value);
+    }
+  });
+  list.addEventListener("click", event => {
+    const option = event.target.closest("[data-product-option]");
+    if (option) choose(option.dataset.productOption);
+  });
+  retry.onclick = load;
+  saveButton.onclick = () => void save(false);
+  dialog.querySelector("[data-product-auto]")?.addEventListener("click", () => void save(true));
+  dialog.querySelector("[data-product-cancel]").onclick = () => dialog.close();
+  dialog.addEventListener("cancel", event => { if (saving) event.preventDefault(); });
+  const onRouteChange = () => dialog.close();
+  window.addEventListener("hashchange", onRouteChange);
+  dialog.addEventListener("close", () => {
+    window.removeEventListener("hashchange", onRouteChange);
+    dialog.remove();
+    if (trigger.isConnected) trigger.focus();
+    else if (caseLocation()?.id === item.case_id) document.querySelector("#detail-product > summary")?.focus();
+  }, { once: true });
+  dialog.showModal();
+  search.focus();
+  void load();
+}
 function structurePanel(structure) {
   if (!structure) return "";
   if (structure.ok)
-    return `<div class="structure-check is-ok" role="status">${icon("check")}<div><strong>八章结构检查：通过</strong><p>标题、表头、版本声明和可复用骨架符合案例模板。这只检查格式，不证明转写准确或销售效果。</p></div></div>`;
+    return `<span class="structure-chip is-ok" role="status" title="标题、表头、版本声明和可复用骨架符合案例模板。这只检查格式，不证明转写准确或销售效果。">${icon("check")}八章结构通过</span>`;
   const more = structure.count - structure.errors.length;
-  return `<div class="structure-check is-bad" role="alert">${icon("search")}<div><strong>八章结构检查：${structure.count} 个问题</strong><ul>${structure.errors.map((error) => `<li>${esc(error)}</li>`).join("")}</ul>${more > 0 ? `<p>另有 ${more} 个问题未列出。</p>` : ""}<p>请在来源文档中补正后，再让技能同步该案例。这只检查格式，不影响案例的当前评价。</p></div></div>`;
+  return `<details class="structure-chip is-bad"><summary>八章结构 ${structure.count} 个问题</summary><div class="structure-chip-body"><ul>${structure.errors.map((error) => `<li>${esc(error)}</li>`).join("")}</ul>${more > 0 ? `<p>另有 ${more} 个问题未列出。</p>` : ""}<p>请在来源文档中补正后，再让技能同步该案例。这只检查格式，不影响案例的当前评价。</p></div></details>`;
+}
+// 完整反推拆解按「## 」切成章节，每章可折叠；默认展开写稿最常用的 2 钩子、3 叙事、7 可复用策略、8 脚本骨架。
+const sourceChapterStore = "case-source-chapters";
+const sourceChapterDefaults = ["2", "3", "7", "8"];
+function sourceChapters(text) {
+  const parts = [{ title: "", lines: [] }];
+  let fence = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*```/.test(line)) fence = !fence;
+    const heading = !fence && line.match(/^##\s+(.+?)\s*#*\s*$/);
+    if (heading) parts.push({ title: heading[1], lines: [] });
+    else parts[parts.length - 1].lines.push(line);
+  }
+  return parts.map((part) => ({ ...part, key: part.title.match(/^(\d+)/)?.[1] || part.title, text: part.lines.join("\n") }));
+}
+function openSourceChapters(chapters) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(sourceChapterStore) || "null");
+    if (Array.isArray(saved)) return new Set(saved.map(String));
+  } catch {}
+  return chapters.some((chapter) => /^\d+$/.test(chapter.key)) ? new Set(sourceChapterDefaults) : new Set(chapters.map((chapter) => chapter.key));
+}
+function sourceChapterLabel(title) {
+  return title.replace(/[（(][^）)]*[）)]/g, "").replace(/^(\d+)[.、]\s*/, "$1 ").replace(/\s+/g, " ").replace(/([\u4e00-\u9fff]) (?=[\u4e00-\u9fff])/g, "$1").trim() || title;
+}
+function renderSourceReading(item, readingText) {
+  const [intro, ...all] = sourceChapters(readingText);
+  if (!all.length) return `<div class="markdown-body">${readingText.trim() ? renderMarkdown(readingText) : "<p>来源文件没有正文。</p>"}</div>`;
+  // 页面别处已有的内容不再重复：口播转写章（上方完整文案已有）、第 1 章基础资料表（顶部和数据页已有）、文档大标题。
+  const hasTranscript = Boolean(item.current?.transcript?.text?.trim());
+  const chapters = all
+    .filter((chapter) => !(hasTranscript && /口播|转写/.test(chapter.title)))
+    .map((chapter) => ({ ...chapter, text: chapter.text.replace(/^###\s+基础资料\s*$[\s\S]*?(?=^###\s|(?![\s\S]))/m, "") }));
+  const introText = intro.text.replace(/^#\s.*$/m, "");
+  const opened = openSourceChapters(chapters);
+  const nav = `<nav class="source-chapter-nav" aria-label="拆解章节">${chapters.map((chapter, index) => `<button type="button" class="source-chapter-chip" data-source-chapter="${index}">${esc(sourceChapterLabel(chapter.title))}</button>`).join("")}<button type="button" class="subtle source-chapter-all" data-source-chapters-all></button></nav>`;
+  const body = chapters.map((chapter, index) => {
+    return `<details class="source-chapter" data-source-chapter="${index}" data-chapter-key="${esc(chapter.key)}" ${opened.has(chapter.key) ? "open" : ""}><summary><span class="source-chapter-title">${markdownInline(chapter.title)}</span></summary><div class="markdown-body">${chapter.text.trim() ? renderMarkdown(chapter.text) : "<p>这一章没有内容。</p>"}</div></details>`;
+  }).join("");
+  return `${introText.trim() ? `<div class="markdown-body source-intro">${renderMarkdown(introText)}</div>` : ""}${nav}<div class="source-chapters">${body}</div>`;
+}
+function bindSourceChapters(root) {
+  const chapters = [...root.querySelectorAll("details.source-chapter")];
+  if (!chapters.length) return;
+  const allButton = root.querySelector("[data-source-chapters-all]");
+  const sync = () => {
+    const allOpen = chapters.every((chapter) => chapter.open);
+    allButton.textContent = allOpen ? "全部收起" : "全部展开";
+    root.querySelectorAll(".source-chapter-chip").forEach((chip) => chip.classList.toggle("is-open", chapters[Number(chip.dataset.sourceChapter)]?.open));
+  };
+  const save = () => {
+    try { localStorage.setItem(sourceChapterStore, JSON.stringify(chapters.filter((chapter) => chapter.open).map((chapter) => chapter.dataset.chapterKey))); } catch {}
+  };
+  chapters.forEach((chapter) => chapter.addEventListener("toggle", sync));
+  chapters.forEach((chapter) => chapter.querySelector("summary").addEventListener("click", () => setTimeout(save)));
+  root.querySelectorAll(".source-chapter-chip").forEach((chip) => chip.addEventListener("click", () => {
+    const chapter = chapters[Number(chip.dataset.sourceChapter)];
+    if (!chapter) return;
+    chapter.open = true;
+    save();
+    chapter.scrollIntoView({ block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  }));
+  allButton.addEventListener("click", () => {
+    const open = !chapters.every((chapter) => chapter.open);
+    chapters.forEach((chapter) => { chapter.open = open; });
+    save();
+    sync();
+  });
+  sync();
 }
 function renderSourceAnalysis(item) {
   const source = item.current.source_case,
     analysis = item.source_analysis;
   const transcriptStatus = historicalTranscriptStatus(source.transcript_status);
-  const metadata = `<div class="source-metadata"><div class="case-badges">${sourceBadges(item)}</div><p>历史分级与播放量沿用旧库记录，转化评价以当前案例的证据为准。</p>${source.library_id ? `<p>原案例编号：${esc(source.library_id)}</p>` : ""}${transcriptStatus ? `<p>文案状态：${esc(transcriptStatus)}，以来源记录为准。</p>` : ""}<p class="source-path">来源：${esc(analysis?.path || source.file_path || "未记录来源路径")}</p></div>`;
+  const path = analysis?.path || source.file_path || "未记录来源路径";
   if (!analysis?.exists) {
+    const metadata = `<div class="source-metadata"><div class="case-badges">${sourceBadges(item)}</div><p>历史分级与播放量沿用旧库记录，转化评价以当前案例的证据为准。</p>${source.library_id ? `<p>原案例编号：${esc(source.library_id)}</p>` : ""}${transcriptStatus ? `<p>文案状态：${esc(transcriptStatus)}，以来源记录为准。</p>` : ""}<p class="source-path">来源：${esc(path)}</p></div>`;
     $("#detail-source-analysis").innerHTML =
       metadata +
       `<div class="empty"><h3>原拆解文件暂不可用</h3><p>来源文件缺失或已移动。可以在修订历史中查看首次收录的完整原文。</p>${analysis?.error ? `<p>${esc(analysis.error)}</p>` : ""}<button class="secondary" id="view-source-history">查看修订历史</button></div>`;
@@ -955,11 +1223,16 @@ function renderSourceAnalysis(item) {
     return;
   }
   const readingText = String(analysis.text || "").replace(
-    /^\uFEFF?---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---[ \t]*(?:\r?\n|$)/,
+    /^﻿?---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---[ \t]*(?:\r?\n|$)/,
     "",
   );
+  // 来源说明（旧库分级、文案状态、文件路径）收进一个小按钮，正文前只留一行。
+  const notes = `<details class="source-meta-more"><summary>来源说明</summary><div class="source-meta-body">${source.library_id ? `<p>来源编号：${esc(source.library_id)}</p>` : ""}${analysis.structure?.ok ? structurePanel(analysis.structure) : ""}<p>来源分级与历史数字保留当时记录，转化评价需核对当前证据与窗口。</p><p class="source-path">来源：${esc(path)}</p></div></details>`;
+  // 来源标签已在页面顶部，文案状态已在完整文案卡片里，这里不再重复。
+  const meta = `<div class="source-meta-row">${analysis.structure?.ok ? "" : structurePanel(analysis.structure)}${notes}</div>`;
   $("#detail-source-analysis").innerHTML =
-    `${metadata}${structurePanel(analysis.structure)}<section class="section-card source-analysis"><div class="section-title-row"><h2>${icon("file")}完整反推拆解</h2><div class="source-actions"><button class="subtle" id="open-source-folder">${icon("folder")}来源文件夹</button><button class="subtle" id="copy-source-analysis">${icon("copy")}复制全文</button></div></div><div class="markdown-body">${readingText.trim() ? renderMarkdown(readingText) : "<p>来源文件没有正文。</p>"}</div><details class="source-raw"><summary>查看原始拆解全文</summary><pre>${esc(analysis.text || "")}</pre></details></section>`;
+    `<section class="section-card source-analysis"><div class="section-title-row"><h2>${icon("file")}完整反推拆解</h2><div class="source-actions"><button class="subtle" id="open-source-folder">${icon("folder")}来源文件夹</button><button class="subtle" id="copy-source-analysis">${icon("copy")}复制全文</button></div></div>${meta}${renderSourceReading(item, readingText)}</section>`;
+  bindSourceChapters($("#detail-source-analysis"));
   $("#copy-source-analysis").onclick = () =>
     copyText(analysis.text || "", "完整反推拆解已复制");
   $("#open-source-folder").onclick = () =>

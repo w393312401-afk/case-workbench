@@ -1,5 +1,6 @@
 """Permanent deletion of 内容制作 orders (archiving first is not required): record, request log and local files go; running ones are refused."""
 import json
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -100,6 +101,23 @@ class OrderDeleteTests(unittest.TestCase):
             self.bench.delete_job_order(job["id"], {"request_id": uuid4().hex})
         self.assertEqual(caught.exception.status, 409)
         self.assertTrue((self.root / "audio" / job["id"]).is_dir())
+
+    def test_a_build_that_never_reached_davinci_does_not_block_deletion(self):
+        job = self.video_job()
+        stale = {"schema_version": 1, "job_id": job["id"], "kind": "timeline", "state": "uncertain", "request_id": "r3", "operation_key": "c" * 64,
+                 "take_id": "", "body": {}, "updated_at": "2026-10-14T03:07:02+00:00", "error": "达芬奇正在执行另一项工作台操作"}
+        (self.root / "operations" / ("c" * 64 + ".json")).write_text(json.dumps(stale), encoding="utf-8")
+        journaled = {**stale, "request_id": "r4", "operation_key": "d" * 64}
+        (self.root / "operations" / ("d" * 64 + ".json")).write_text(json.dumps(journaled), encoding="utf-8")
+        (self.root / "operations" / ("d" * 64)).mkdir()
+        (self.root / "operations" / ("d" * 64) / "resolve.json").write_text("{}", encoding="utf-8")
+        with self.assertRaises(VoiceError) as caught:  # A journaled build may have changed DaVinci: recover it first.
+            self.bench.delete_job_order(job["id"], {"request_id": uuid4().hex})
+        self.assertEqual(caught.exception.status, 409)
+        shutil.rmtree(self.root / "operations" / ("d" * 64))
+        (self.root / "operations" / ("d" * 64 + ".json")).unlink()
+        self.assertEqual(self.bench.delete_job_order(job["id"], {"request_id": uuid4().hex})["deleted_job"], job["id"])
+        self.assertEqual(list((self.root / "operations").glob("*.json")), [])
 
     # -- carousel --------------------------------------------------------------------------------------------------
     def carousel(self):

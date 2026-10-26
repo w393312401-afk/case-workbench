@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="referrer" content="same-origin">
+  <title>登录 · TK工作台</title>
+  <link rel="stylesheet" href="/auth/login.css">
+  <script src="/auth/login.js" defer></script>
+</head>
+<body>
+  <main class="login-shell">
+    <a class="brand" href="/auth/login" aria-label="TK工作台登录页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>TK工作台</span></a>
+    <section class="login-card" aria-labelledby="login-title">
+      <h1 id="login-title">欢迎回来</h1>
+      <p class="intro">登录后，继续你的内容工作。</p>
+      <p id="login-availability" class="availability" role="status" hidden></p>
+      <form id="login-form" method="post" action="/auth/login">
+        <label class="field" for="username"><span>账号</span><input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="128" autofocus></label>
+        <label class="field" for="password"><span>密码</span></label>
+        <div class="password-field"><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024"><button id="show-password" type="button" aria-controls="password" aria-label="显示密码" aria-pressed="false">显示</button></div>
+        <p id="login-error" class="error" role="alert" hidden></p>
+        <button id="login-submit" class="submit" type="submit"><span id="submit-label">登录工作台</span><span class="spinner" aria-hidden="true" hidden></span></button>
+        <p id="login-status" class="visually-hidden" role="status" aria-live="polite"></p>
+      </form>
+      <a id="guest-browse" class="guest-browse" href="/" hidden>先随便看看</a>
+      <noscript><p class="error">请启用浏览器的 JavaScript 后登录。</p></noscript>
+    </section>
+    <p class="login-help">账号和密码可在本机工作台的设置中管理。</p>
+  </main>
+</body>
+</html>

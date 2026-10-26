@@ -35,12 +35,13 @@ class DirectionInteractionTests(unittest.TestCase):
         page.locator('[name="q"]').fill("")
         page.wait_for_function("()=>document.querySelectorAll('.dir-row').length===1&&document.querySelector('.dir-code').textContent==='A8'")
         page.locator('[data-tier-filter=""]').click()
-        page.locator('[data-status-filter="active"]').click()
+        page.wait_for_function("()=>document.querySelector('[data-tier-filter=\\\"\\\"]')?.getAttribute('aria-pressed')==='true'")
+        page.evaluate("()=>{const form=document.querySelector('#direction-filters');form.elements.status.value='active';form.requestSubmit();}")
         page.locator(".direction-empty").wait_for()
         self.assertEqual(reads, [])
         page.go_back()
         page.locator('.dir-row[data-point-id]').first.wait_for()
-        self.assertEqual(page.locator('[data-status-filter=""]').get_attribute("aria-pressed"), "true")
+        self.assertEqual(page.locator('#direction-filters [name="status"]').input_value(), "")
         self.assertEqual(reads, [])
 
     def test_archive_product_and_page_reopen_read_fresh_data(self):
@@ -132,6 +133,7 @@ class DirectionInteractionTests(unittest.TestCase):
         page.route(pattern, full_response)
         page.locator('.dir-row[data-direction-id="202H-S1"] a').first.click()
         page.locator("#direction-definition").wait_for()
+        page.wait_for_function("()=>!document.querySelector('#direction-progress-summary')?.textContent.startsWith('正在核对')")
         full_html = page.locator("#content").inner_html()
         page.unroute(pattern, full_response)
         page.locator("#navigate-up").click()
@@ -139,6 +141,7 @@ class DirectionInteractionTests(unittest.TestCase):
         page.locator('.dir-row[data-direction-id="202H-S1"] a').first.click()
         page.locator("#direction-definition").wait_for()
         page.wait_for_function("()=>document.querySelector('#direction-tasks-panel')?.getAttribute('aria-busy')!=='true'")
+        page.wait_for_function("()=>!document.querySelector('#direction-progress-summary')?.textContent.startsWith('正在核对')")
         self.assertEqual(page.locator("#content").inner_html(), full_html)
 
     def test_pending_search_does_not_navigate_after_leaving_or_product_switch(self):

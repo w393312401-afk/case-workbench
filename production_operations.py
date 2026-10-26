@@ -8,6 +8,7 @@ processes; a process restart releases locks but does not discard the recorded op
 from __future__ import annotations
 
 from contextlib import contextmanager, ExitStack
+from collections import OrderedDict
 import copy
 import hashlib
 import json
@@ -15,9 +16,12 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
+import threading
 
 from direction_store import fingerprint, now
 from elevenlabs_client import VoiceError
+from file_identity import file_identity
 
 REQUEST_ID = re.compile(r"[\w-]{10,100}")
 JOB_ID = re.compile(r"PRD-[0-9a-f]{12}")
@@ -34,7 +38,15 @@ def durable_bytes(path, value):
             stream.write(value)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        for attempt in range(20):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                # Windows refuses to replace a file another thread is reading, e.g. a page poll listing operations.
+                if os.name != "nt" or attempt == 19:
+                    raise
+                time.sleep(.05)
         if os.name != "nt":
             directory = os.open(path.parent, os.O_RDONLY)
             try:
@@ -93,6 +105,21 @@ class ProductionOperations:
     def __init__(self, production_root, on_saved=None):
         self.root = Path(production_root) / "operations"
         self.on_saved = on_saved
+        self._record_cache = OrderedDict()
+        self._cache_lock = threading.RLock()
+        self._cache_bytes = 0
+
+    def clear_cache(self):
+        with self._cache_lock:
+            self._record_cache.clear()
+            self._cache_bytes = 0
+
+    @staticmethod
+    def _file_key(path):
+        try:
+            return file_identity(path)
+        except OSError:
+            return None
 
     @staticmethod
     def validate(kind, body):
@@ -125,6 +152,30 @@ class ProductionOperations:
         return self.folder(record) / "resolve.json"
 
     def _read(self, path):
+        return copy.deepcopy(self._read_snapshot(Path(path)))
+
+    def _read_snapshot(self, path):
+        """Validated internal snapshot; callers of _read still receive independent records."""
+        with self._cache_lock:
+            stamp = self._file_key(path)
+            cached = self._record_cache.get(str(path))
+            if cached is not None and stamp is not None and cached[0] == stamp:
+                self._record_cache.move_to_end(str(path))
+                return cached[1]
+            if cached is not None:
+                self._cache_bytes -= cached[2]
+                del self._record_cache[str(path)]
+            result = self._read_file(path)
+            retained = stamp[2] * 8 if stamp is not None else 0
+            if stamp is not None and stamp == self._file_key(path) and retained <= 16 * 1024 * 1024:
+                self._record_cache[str(path)] = (stamp, result, retained)
+                self._cache_bytes += retained
+                while self._cache_bytes > 32 * 1024 * 1024 or len(self._record_cache) > 128:
+                    _, removed = self._record_cache.popitem(last=False)
+                    self._cache_bytes -= removed[2]
+            return result
+
+    def _read_file(self, path):
         try:
             value = json.loads(Path(path).read_text(encoding="utf-8"))
             if not isinstance(value, dict) or value.get("schema_version") != 1:
@@ -173,6 +224,12 @@ class ProductionOperations:
                 other = self._read(path)
                 if (other.get("job_id") == body["job_id"] and other.get("kind") == kind and
                         other.get("request_id") != body["request_id"] and other.get("state") not in TERMINAL):
+                    if kind == "timeline" and not self.recovery_file(other).exists():
+                        # This job's lock is held, so that build is not running; without its worker journal it
+                        # never changed DaVinci and must not block a new build.
+                        self.update(other, "safe_failed", error="这次建线没有开始，达芬奇里没有改动；已由新的建线请求取代。",
+                                    cancelled=True)
+                        continue
                     label = "配音" if kind == "take" else "建线"
                     raise VoiceError(409, f"这张制作单有一项{label}尚未恢复（请求 {other['request_id']}），请先恢复或核实该项结果。")
             yield record
@@ -236,10 +293,19 @@ class ProductionOperations:
             raise VoiceError(503, "已生成的配音文件未通过恢复核对，请保留原文件并先核对服务商记录，不能重新生成。") from exc
         return value
 
-    def public(self, job_id=None):
+    def records(self):
+        """One fresh journal read shared by all orders in one catalog response."""
+        return [self._read_snapshot(path) for path in self.root.glob("*.json")]
+
+    def latest(self, job_id, kind, *, records=None):
+        """The most recently updated operation of one kind for a job, finished or not."""
+        found = [record for record in (self.records() if records is None else records)
+                 if record.get("job_id") == job_id and record.get("kind") == kind]
+        return copy.deepcopy(max(found, key=lambda record: record.get("updated_at") or "", default=None))
+
+    def public(self, job_id=None, *, records=None):
         result = []
-        for path in self.root.glob("*.json"):
-            record = self._read(path)
+        for record in self.records() if records is None else records:
             if (job_id is None or record.get("job_id") == job_id) and record.get("state") not in TERMINAL:
                 state, kind = record.get("state"), record.get("kind")
                 has_response = kind == "take" and (self.folder(record) / "speech_response.json").is_file()
@@ -251,11 +317,13 @@ class ProductionOperations:
                 message = ("已找到音频，请先核对并恢复或导入该音频，不能按未生成重新发送。" if uncertain and has_audio else
                            "配音结果不确定，请先核对服务商记录；工作台不会再次发送配音请求。" if uncertain else
                            "已保存外部结果，可用原请求恢复资料登记。" if state in {"response_saved", "result_ready"} or has_response or has_result else
-                           "可用原请求恢复；建线将先核对已有时间线。" if kind == "timeline" else
+                           "可用原请求恢复；建线将先核对已有时间线。" if kind == "timeline" and self.recovery_file(record).exists() else
+                           "这次建线没有开始，达芬奇里没有改动；可按原请求继续，或直接重新建线。" if kind == "timeline" else
                            "尚未发送配音，可用原请求继续。")
                 result.append({key: copy.deepcopy(record.get(key)) for key in
                                ("request_id", "job_id", "kind", "state", "take_id", "updated_at", "error")} |
                               {"body": copy.deepcopy(record["body"]), "message": message, "uncertain": uncertain,
+                               "has_journal": kind == "timeline" and self.recovery_file(record).exists(),
                                "has_response": has_response, "has_result": has_result, "has_audio": has_audio,
                                "can_retry_not_generated": uncertain and not has_audio})
         return sorted(result, key=lambda item: item.get("updated_at") or "")

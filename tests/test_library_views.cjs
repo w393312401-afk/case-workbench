@@ -6,14 +6,16 @@ const vm = require('node:vm');
 const test = require('node:test');
 
 function fixture(items, views = []) {
-  const state = {cases:items,navigation:{},view:'all',query:'',product:'',direction:'',variantType:'all',archiveCategory:'all',sourceType:'all',contentOrigin:'all',archiveStatus:'active',sort:'updated',sortDir:'desc'};
+  const state = {cases:items,navigation:{},view:'all',query:'',product:'',libraryProduct:'',direction:'',variantType:'all',archiveCategory:'all',sourceType:'all',contentOrigin:'all',archiveStatus:'active',sort:'updated',sortDir:'desc'};
   const context=vm.createContext({window:{},state,structuredClone,URLSearchParams,console,
     salesMetrics:item=>item.sales_data?.metrics || {}, numeric:Number,
     productFilterGroup:item=>item.product, sourceType:()=> 'review',
   });
   for(const name of ['navigation.js','library.js']) vm.runInContext(fs.readFileSync(path.join(__dirname,'../static',name),'utf8'),context);
   context.views=views;
-  vm.runInContext('navigationItems=normalizeNavigation(views); function scopedCases(){return state.cases.filter(item=>navigationMatches(item,state.view));}',context);
+  vm.runInContext('navigationItems=normalizeNavigation(views); function inNavigation(item,view){return navigationMatches(item,view);}',context);
+  const appSource=fs.readFileSync(path.join(__dirname,'../static/app.js'),'utf8');
+  vm.runInContext(appSource.slice(appSource.indexOf('function scopedCases()'),appSource.indexOf('function shortTitle(')),context);
   return {state,context,api:vm.runInContext('({normalizeNavigation,libraryViewFilters,libraryPerformance,navigationMatches,filteredCases,views:window.LibraryViews})',context)};
 }
 const record=(id,current={},archived=false)=>({case_id:'PVR-'+String(id).padStart(12,'0'),product:'SHARPAL 202H',updated_at:String(id),archived,current:{category:'转化正向参考',...current},search_text:'knife reference'});

@@ -15,22 +15,23 @@ class ProductDefaultRequirementsTests(carousel_fixture.CarouselTests):
         script = self.adopt(carousel_text(parse_carousels(carousel_fixture.CANDIDATE)[0]))
         return self.bench.create_carousel(self.body(carousel={"script_id": script["id"]}))["carousel"]
 
-    def test_saved_settings_become_the_product_default_for_new_carousels(self):
+    def test_new_layout_defaults_keep_product_aspect_without_reauthorizing_older_generation(self):
         first = self.new_carousel()
-        self.assertNotIn("requirements", first)
+        self.assertEqual(first["requirements"]["mode"], "layout_only")
+        self.assertEqual(first["requirements"]["caption_layer"], "behind_subject")
         saved = self.bench.save_carousel_requirements(first["id"], self.body(requirements={
             "mode": "generated_visual", "editable_regions": ["background"], "style": "粗犷暖光", "aspect": "9:16",
             "instruction": "只用于这一单", "caption_area": "top"}))["carousel"]["requirements"]
         self.bench.save_production_settings(self.body(settings={"product": "202H", "project": "202H", "code": "202",
                                                                 "fps": "29.97", "width": 1080, "height": 1920}))
         second = self.new_carousel()
-        self.assertEqual({key: second["requirements"][key] for key in ("mode", "editable_regions", "style", "aspect")},
-                         {"mode": "generated_visual", "editable_regions": ["background"], "style": "粗犷暖光", "aspect": "9:16"})
+        self.assertEqual({key: second["requirements"][key] for key in ("mode", "editable_regions", "aspect", "hands_authorized")},
+                         {"mode": "layout_only", "editable_regions": ["text"], "aspect": "9:16", "hands_authorized": False})
         self.assertEqual(second["image_aspect"], "9:16")
         self.assertEqual(second["requirements"]["instruction"], "")
         self.assertNotIn("caption_area", second["requirements"])
         self.assertEqual(saved["instruction"], "只用于这一单")
-        self.assertEqual(second["history"][-1]["note"], "沿用该产品的默认出图设置")
+        self.assertEqual(second["history"][-1]["note"], "保存本次图文制作要求")
 
 
 for case, base in ((ProductDefaultRequirementsTests, carousel_fixture.CarouselTests),):

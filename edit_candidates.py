@@ -82,10 +82,13 @@ def rank_by_relevance(candidates, wanted_text):
     return [item for _, _, item in sorted(scored, key=lambda value: value[:2])]
 
 
-def build_candidates(listing, *, deduplicate_source_ranges=False):
-    """List complete material clips; archived source-range deduplication requires explicit opt-in."""
+def build_candidates(listing, *, deduplicate_source_ranges=False, count_usage=False):
+    """List complete material clips; archived source-range deduplication requires explicit opt-in.
+
+    count_usage keeps every clip whole but records which finished timelines already used it (use_count), so the edit
+    can prefer the least-used footage."""
     used = {}
-    for item in (listing.get("used") or []) if deduplicate_source_ranges else []:
+    for item in (listing.get("used") or []) if deduplicate_source_ranges or count_usage else []:
         span = source_span(item)
         if not span:
             continue
@@ -108,6 +111,7 @@ def build_candidates(listing, *, deduplicate_source_ranges=False):
                           "record": [clip["start"], clip["end"]], "source": [left, right], "frames": clip["end"] - clip["start"],
                           "free": free, "free_frames": sum(b - a for a, b in free),
                           "used_by": sorted({name for _, _, name in overlapping if name}),
+                          "use_count": len({name for _, _, name in overlapping if name}),
                           "media_id": clip.get("media_id"), "media_path": clip.get("media_path") or "", "has_audio": clip.get("has_audio"),
                           "label_status": label_status(clip)})
     if not deduplicate_source_ranges:
@@ -117,6 +121,82 @@ def build_candidates(listing, *, deduplicate_source_ranges=False):
         unique.setdefault(candidate["key"], candidate)
     return list(unique.values())
 
+
+IN_PROGRESS = "（剪辑中）"
+
+
+def label_code(key):
+    """The label code a candidate key starts with (DG043 in DG043-3d173093); empty for clips whose labels carry none."""
+    code = str(key or "").rsplit("-", 1)[0]
+    return code if CODE.fullmatch(code) else ""
+
+
+def pick_keys(picks, candidates, foreign=()):
+    """The candidate keys a planner's first-choice list names, and how many names in it matched none of `candidates`.
+
+    An entry is a candidate key, or an object holding one under "key" (or several under "key"/"keys" for a 意群 that
+    needs several shots). A key that is not listed still names its clip by its label code (planners write DG043, or
+    mistype the digest) when every candidate carrying that code comes from one media file: one clip, perhaps split into
+    adjacent pieces or listed on two material timelines. A code found on several media files needs the exact key.
+    `foreign` keys belong to clips the planner may see but does not own; they name nothing, not even by their code."""
+    keys = list(dict.fromkeys(item["key"] for item in candidates if item.get("key")))
+    media = {}
+    for item in candidates:
+        media.setdefault(label_code(item.get("key")), set()).add(_identity(item))
+    names = []
+    for entry in picks:
+        values = [entry.get(field) for field in ("key", "keys")] if isinstance(entry, dict) else [entry]
+        found = [value for item in values for value in (item if isinstance(item, list) else [item]) if value is not None]
+        names.extend(found or [None])
+    chosen, unknown = [], 0
+    for name in names:
+        name = name.strip() if isinstance(name, str) else ""
+        code = label_code(name)
+        found = [name] if name in keys else [] if name in foreign else (
+            [key for key in keys if label_code(key) == code] if code and len(media.get(code, ())) == 1 else [])
+        unknown += not found
+        chosen.extend(key for key in found if key not in chosen)
+    return chosen, unknown
+
+
+def planned_spans(keys, candidates):
+    """Source ranges of the candidates a running edit's planners chose first; the edit holds them until it ends."""
+    wanted = set(keys)
+    return [{"media_id": item.get("media_id"), "media_path": item.get("media_path") or "", "source": list(item["source"])}
+            for item in candidates if item.get("key") in wanted]
+
+
+def refreshed_usage(rows, fresh):
+    """The snapshot's candidates with use counts from a fresh listing, and how many of them changed.
+
+    Counts belong to the source range (the key), whatever material timeline lists it. A clip the fresh listing no
+    longer has, because it was trimmed or removed since, keeps the count the snapshot gave it."""
+    counts = {item["key"]: (item.get("use_count", 0), item.get("used_by", [])) for item in fresh}
+    updated, changed = [], 0
+    for row in rows:
+        before = (row.get("use_count", 0), row.get("used_by", []))
+        count, used_by = counts.get(row.get("key"), before)
+        changed += (count, used_by) != before
+        updated.append({**row, "use_count": count, "used_by": used_by})
+    return updated, changed
+
+
+def add_in_progress_usage(found, occupied):
+    """Count footage that edits still running have planned to use, as if their timelines were already finished.
+
+    occupied maps a running edit's target timeline name to its planned spans. A timeline the scan already counted
+    for a clip is not counted twice."""
+    for name, spans in occupied.items():
+        for candidate in found:
+            if name in candidate["used_by"] or name + IN_PROGRESS in candidate["used_by"]:
+                continue
+            left, right = candidate["source"]
+            same = [span for span in spans if (span["media_id"] and span["media_id"] == candidate.get("media_id")) or
+                    (span["media_path"] and _identity(span) == _identity(candidate))]
+            if any(max(span["source"][0], left) < min(span["source"][1], right) for span in same):
+                candidate["used_by"] = sorted([*candidate["used_by"], name + IN_PROGRESS])
+                candidate["use_count"] = len(candidate["used_by"])
+    return found
 
 def compose_grid(files, target, offsets):
     """One contact image of a single clip, frames in time order; each cell stays large enough to judge an action."""
@@ -186,14 +266,17 @@ def remember(entries, candidate, **values):
     return entry
 
 
-def _describe_free(candidate):
+def _describe_free(candidate, count_usage=False):
+    if count_usage:
+        used = candidate.get("used_by") or []
+        return f"已用 {len(used)} 次（{'、'.join(used)}）" if used else "未用过"
     if candidate["free"] == [candidate["source"]] and not candidate["used_by"]:
         return "全段可用"
     spans = " ".join(f"[{a}, {b})" for a, b in candidate["free"])
     return f"可用源帧 {spans}（其余已被 {'、'.join(candidate['used_by']) or '其他成片'} 用过）"
 
 
-def write_task_files(folder, found, index, entries, listing, *, deduplicate_source_ranges=False):
+def write_task_files(folder, found, index, entries, listing, *, deduplicate_source_ranges=False, count_usage=False):
     """candidates.json/.md in the task folder; contact images are linked in, not copied, when the volume allows."""
     target = Path(folder) / "candidates"
     target.mkdir(parents=True, exist_ok=True)
@@ -213,15 +296,20 @@ def write_task_files(folder, found, index, entries, listing, *, deduplicate_sour
         listed.append({**candidate, "grid": f"candidates/{image.name}" if image else None, "description": description})
     data = {"schema_version": 1, "materials": [material["name"] for material in listing.get("materials") or []],
             "missing": listing.get("missing") or [], "dedup_enabled": deduplicate_source_ranges,
-            "used_complete": bool(listing.get("used_complete")) if deduplicate_source_ranges else False, "candidates": listed}
+            "used_complete": bool(listing.get("used_complete")) if deduplicate_source_ranges or count_usage else False,
+            "usage_counted": count_usage, "candidates": listed}
     (Path(folder) / "candidates.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     lines = ["# 候选画面", "",
-             "每行一个素材片段：候选编号｜标签｜标签状态｜素材时间线位置（帧，半开）｜时长｜可用范围｜对照图｜画面描述。",
+             f"每行一个素材片段：候选编号｜标签｜标签状态｜素材时间线位置（帧，半开）｜时长｜{'使用次数' if count_usage else '可用范围'}｜对照图｜画面描述。",
              "「已核标签」是打标签技能看过画面后写的，可直接按标签选材；其余状态的片段，选用前先看对照图或已有描述。",
              ("可用范围按实时工程里其他成片时间线算出，源帧坐标；已被用尽的片段没有列出。"
-              if deduplicate_source_ranges else "按完整素材源区间提供候选，不因其他成片使用过而排除。"), ""]
+              if deduplicate_source_ranges else
+              "按完整素材源区间提供候选；每行注明这个片段已被几条成片用过（同一成片里用几次都算 1 次），同一素材时间线内按用过次数从少到多排列。"
+              if count_usage else "按完整素材源区间提供候选，不因其他成片使用过而排除。"), ""]
     for name in data["materials"]:
         rows = [item for item in listed if item["timeline"] == name]
+        if count_usage:
+            rows.sort(key=lambda item: item.get("use_count", 0))
         lines += [f"## {name}（{len(rows)} 个可用片段）", ""]
         for item in rows:
             text = item["description"]["summary"] if item["description"] else ("—" if item["label_status"] == "verified" else "未描述，请看对照图")
@@ -231,14 +319,15 @@ def write_task_files(folder, found, index, entries, listing, *, deduplicate_sour
                 text += "；有号召手势" if item["description"]["cta"] else "；无号召手势"
             lines.append(f"- {item['key']}｜{item['label'] or '无标签'}｜{LABEL_STATUS[item['label_status']]}｜"
                          f"[{item['record'][0]}, {item['record'][1]})｜{item['frames']} 帧｜"
-                         f"{_describe_free(item)}｜{item['grid'] or '无对照图'}｜{text}")
+                         f"{_describe_free(item, count_usage)}｜{item['grid'] or '无对照图'}｜{text}")
         lines.append("")
     (Path(folder) / "candidates.md").write_text("\n".join(lines), encoding="utf-8")
     return {"clips": len(found), "listed": len(listed), "used_up": len(found) - len(listed),
             "described": sum(1 for item in listed if item["description"]),
             "verified": sum(1 for item in listed if item["label_status"] == "verified"),
             "to_look": sum(1 for item in listed if item["label_status"] != "verified" and not item["description"]),
-            "grids": sum(1 for item in listed if item["grid"])}
+            "grids": sum(1 for item in listed if item["grid"]),
+            "unused": sum(1 for item in listed if not item.get("use_count")) if count_usage else None}
 
 
 def _note(value):

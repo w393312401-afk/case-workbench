@@ -176,6 +176,22 @@ class ElevenLabsClient:
         return {"audio": audio, "alignment": body.get("alignment"), "normalized_alignment": body.get("normalized_alignment"),
                 "request_id": str(headers.get("request-id") or headers.get("x-request-id") or "")[:200]}
 
+    def transcribe(self, audio, filename, models=("scribe_v2", "scribe_v1")):
+        """Speech to text with word timings; tries the newest Scribe model first, then the older one."""
+        last = None
+        for model_id in models:
+            try:
+                body, _ = self.call("POST", "/v1/speech-to-text", multipart={
+                    "file": (filename, audio, "audio/mpeg"), "model_id": model_id,
+                    "timestamps_granularity": "word", "tag_audio_events": "false"})
+                body["model_id"] = model_id
+                return body
+            except VoiceError as exc:
+                last = exc
+                if exc.provider_status not in {400, 422}:
+                    raise
+        raise last
+
     def align(self, audio, filename, text):
         body, _ = self.call("POST", "/v1/forced-alignment", multipart={"file": (filename, audio, "audio/mpeg"), "text": text})
         return body

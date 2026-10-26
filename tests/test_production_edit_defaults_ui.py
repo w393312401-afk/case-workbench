@@ -58,7 +58,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         form.locator('[name="instruction"]').fill("开头使用切纸结果")
         form.locator('[name="mode"]').select_option("sync")
         form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
-        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('AI 剪辑已开始')")
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertEqual(len(self.calls), 1)
         body = self.calls[0]["body"]
         self.assertNotIn("model", body)
@@ -80,7 +80,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.assertEqual(form.locator('[name="effort"] option').evaluate_all("rows => rows.map(row => row.value)"), ["", "high", "max"])
         form.locator('[name="effort"]').select_option("max")
         form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
-        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('AI 剪辑已开始')")
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertEqual((self.calls[0]["body"]["model"], self.calls[0]["body"]["effort"]), ("claude-opus", "max"))
 
     def test_default_changes_clear_stale_overrides_and_preserve_edit_work(self):
@@ -116,7 +116,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         expect(form.locator("[data-edit-usage]")).to_contain_text("使用 Codex 客户端当前登录账户的额度")
         expect(form.locator("[data-edit-override]")).to_be_hidden()
         form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
-        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('AI 剪辑已开始')")
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertEqual(len(self.calls), 1)
         self.assertNotIn("model", self.calls[0]["body"])
         self.assertNotIn("effort", self.calls[0]["body"])
@@ -146,7 +146,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
                          ["", "low", "medium", "high", "xhigh", "max", "ultra"])
         form.locator('[name="effort"]').select_option("ultra")
         form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
-        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('AI 剪辑已开始')")
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertEqual((self.calls[0]["body"]["model"], self.calls[0]["body"]["effort"]), ("gpt-6.1-sol", "ultra"))
 
     def test_unsupported_claude_model_is_not_offered_as_a_compatible_override(self):
@@ -178,12 +178,12 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_enabled()
         self.assertEqual(self.calls, [])
 
-    def test_busy_or_failed_client_check_blocks_start_and_refresh_recovers(self):
+    def test_busy_allows_start_but_failed_client_check_blocks_until_refresh(self):
         self.clients["busy"] = True
         page = self.open_page()
         form = page.locator("#edit-form")
-        expect(form.locator("[data-edit-provider-status]")).to_contain_text("已有达芬奇 AI 任务")
-        expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
+        expect(form.locator("[data-edit-provider-status]")).to_contain_text("需要操作达芬奇时会自动等待")
+        expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_enabled()
         self.clients["busy"] = False
         self.clients_error = "客户端状态读取失败"
         form.locator('[data-edit-default-refresh]').click()

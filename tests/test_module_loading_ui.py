@@ -1,8 +1,13 @@
 """Loading regressions use isolated records and deliberately held optional reads."""
 import json
+import re
 import unittest
 
 import test_review_ui as review
+
+# The data page asks for one shop at a time ("?shop=local"); these tests care which endpoint is read, not for which shop.
+SUMMARY, ANALYTICS = re.compile(r"/api/performance/summary(\?|$)"), re.compile(r"/api/performance/analytics(\?|$)")
+VIDEOS = re.compile(r"/api/performance/videos(\?shop=[a-z]+)?$")
 
 
 class ModuleLoadingTests(unittest.TestCase):
@@ -37,7 +42,7 @@ class ModuleLoadingTests(unittest.TestCase):
           window.salesFinished = [];
           const original = window.fetch;
           window.fetch = function(input, options) {
-            const path = String(input);
+            const path = String(input).replace(/[?&]shop=[a-z]+/, '');
             const salesRead = path.startsWith('/api/performance/') || path.startsWith('/api/direction-catalog');
             if (salesRead) window.salesReads.push({path,
               homeReady: Boolean(document.querySelector('.home-tabs')),
@@ -60,8 +65,8 @@ class ModuleLoadingTests(unittest.TestCase):
             chart_calls.append(route.request.url)
             route.fulfill(status=503, content_type="application/json", body=json.dumps({"error": "charts unavailable"}))
 
-        page.route("**/api/performance/summary", unavailable)
-        page.route("**/api/performance/analytics", unavailable)
+        page.route(SUMMARY, unavailable)
+        page.route(ANALYTICS, unavailable)
         page.goto(f"{self.base}/#/202H/home")
         page.locator(".home-tabs").wait_for()
         page.locator('[data-home-tab="cases"]').click()
@@ -72,7 +77,7 @@ class ModuleLoadingTests(unittest.TestCase):
 
     def test_video_table_opens_before_charts_and_direction_catalog(self):
         page, held = self.page(), []
-        self.hold_read(page, "**/api/performance/analytics", held)
+        self.hold_read(page, ANALYTICS, held)
         self.hold_read(page, "**/api/direction-catalog", held)
         page.goto(f"{self.base}/#/202H/videos?video={review.performance.LINKED}")
         page.locator(".perf-table").wait_for()
@@ -116,7 +121,7 @@ class ModuleLoadingTests(unittest.TestCase):
         page.locator('[data-page="settings"]').click()
         page.locator(".settings-page").wait_for()
         charts, catalog = [], []
-        self.hold_read(page, "**/api/performance/analytics", charts)
+        self.hold_read(page, ANALYTICS, charts)
         self.hold_read(page, "**/api/direction-catalog", catalog)
         page.locator('[data-page="videos"]').click()
         page.locator("#perf-board").get_by_text("正在读取看板数据…").wait_for()
@@ -132,14 +137,15 @@ class ModuleLoadingTests(unittest.TestCase):
     def test_home_only_reads_work_data_before_and_after_render(self):
         page, videos = self.page(), []
         self.track_sales_reads(page)
-        self.hold_read(page, "**/api/performance/videos", videos, "videos")
+        home_videos = "/api/performance/videos?projection=home&product=202H"
+        self.hold_read(page, "**" + home_videos, videos, "videos")
         page.goto(f"{self.base}/#/202H/home")
         page.wait_for_function("() => window.heldReads?.videos")
-        self.assertEqual(page.evaluate("salesReads.map(read => read.path)"), ["/api/performance/videos"])
+        self.assertEqual(page.evaluate("salesReads.map(read => read.path)"), [home_videos])
         videos.pop().continue_()
         page.locator(".home-tabs").wait_for()
-        self.assertEqual(page.evaluate("salesReads.map(read => read.path)"), ["/api/performance/videos"])
-        page.unroute("**/api/performance/videos")
+        self.assertEqual(page.evaluate("salesReads.map(read => read.path)"), [home_videos])
+        page.unroute("**" + home_videos)
         page.locator('#home-page a[href$="/videos?tab=board"]').click()
         page.locator("#perf-board .perf-trend-card").first.wait_for()
         self.assertTrue(page.evaluate("salesReads.some(read => read.path === '/api/performance/analytics')"))
@@ -147,8 +153,8 @@ class ModuleLoadingTests(unittest.TestCase):
     def test_video_defers_charts_and_catalog_until_table_has_rendered(self):
         page, summary, videos = self.page(), [], []
         self.track_sales_reads(page)
-        self.hold_read(page, "**/api/performance/summary", summary, "summary")
-        self.hold_read(page, "**/api/performance/videos", videos, "videos")
+        self.hold_read(page, SUMMARY, summary, "summary")
+        self.hold_read(page, VIDEOS, videos, "videos")
         page.goto(f"{self.base}/#/202H/videos?video={review.performance.LINKED}")
         page.wait_for_function("() => window.heldReads?.summary && window.heldReads?.videos")
         self.assert_no_optional_sales_reads(page)
@@ -157,7 +163,7 @@ class ModuleLoadingTests(unittest.TestCase):
         self.assert_no_optional_sales_reads(page)
         summary.pop().continue_()
         page.locator(".perf-table").wait_for()
-        page.wait_for_function("() => salesReads.filter(read => read.path === '/api/performance/analytics' || read.path.startsWith('/api/direction-catalog')).length === 2")
+        page.wait_for_function("() => salesReads.some(read => read.path === '/api/performance/analytics') && salesReads.some(read => read.path.startsWith('/api/direction-catalog'))")
         self.assertTrue(page.evaluate("salesReads.filter(read => read.path === '/api/performance/analytics' || read.path.startsWith('/api/direction-catalog')).every(read => read.videosReady)"))
 
     def test_leaving_before_foreground_reads_finish_does_not_start_optional_work(self):
@@ -166,8 +172,9 @@ class ModuleLoadingTests(unittest.TestCase):
                 page, summary, videos = self.page(), [], []
                 self.track_sales_reads(page)
                 if module == "videos":
-                    self.hold_read(page, "**/api/performance/summary", summary, "summary")
-                self.hold_read(page, "**/api/performance/videos", videos, "videos")
+                    self.hold_read(page, SUMMARY, summary, "summary")
+                video_path = "/api/performance/videos" + ("?projection=home&product=202H" if module == "home" else "")
+                self.hold_read(page, "**" + video_path if module == "home" else VIDEOS, videos, "videos")
                 page.goto(f"{self.base}/#/202H/{module}")
                 page.wait_for_function("() => window.heldReads?.videos")
                 if module == "videos":
@@ -177,7 +184,7 @@ class ModuleLoadingTests(unittest.TestCase):
                 if summary:
                     summary.pop().continue_()
                 videos.pop().continue_()
-                page.wait_for_function("() => salesFinished.includes('/api/performance/videos')")
+                page.wait_for_function("path => salesFinished.includes(path)", arg=video_path)
                 if module == "videos":
                     page.wait_for_function("() => salesFinished.includes('/api/performance/summary')")
                 page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
@@ -195,9 +202,9 @@ class ModuleLoadingTests(unittest.TestCase):
             else:
                 route.continue_()
 
-        page.route("**/api/performance/summary", summary)
+        page.route(SUMMARY, summary)
         page.goto(f"{self.base}/#/202H/videos?video={review.performance.LINKED}")
-        page.get_by_role("heading", name="视频数据暂不可用").wait_for()
+        page.get_by_role("heading", name="带货数据暂不可用").wait_for()
         self.assert_no_optional_sales_reads(page)
         page.reload()
         page.locator(".perf-table").wait_for()
@@ -213,7 +220,7 @@ class ModuleLoadingTests(unittest.TestCase):
             else:
                 route.continue_()
 
-        page.route("**/api/performance/videos", videos)
+        page.route("**/api/performance/videos?projection=home&product=202H", videos)
         page.goto(f"{self.base}/#/202H/home")
         page.locator("#home-page .data-warning [data-home-retry]").wait_for()
         page.locator('[data-home-tab="cases"]').click()
@@ -242,26 +249,37 @@ class ModuleLoadingTests(unittest.TestCase):
 
         page.route("**/api/production/eleven", connection)
         page.goto(f"{self.base}/#/202H/production")
+        page.locator("#content-flow-list").wait_for()
+        self.assertEqual(page.evaluate("location.hash"), "#/202H/content")
+        self.assertEqual(page.locator("#production-queue, #production-settings-open, .scripts-tabs").count(), 0)
+        self.assertEqual(len(calls), 0)
+        page.locator(".flow-main-menu > summary").click()
+        page.locator("#content-production-settings").click()
         page.locator("#production-eleven").get_by_text("ElevenLabs：正在检查连接…").wait_for(state="attached")
-        self.assertFalse(page.locator("#production-eleven").is_visible())
-        self.assertTrue(page.locator("#production-queue").is_visible())
-        page.evaluate("CaseProduction.route(true)")
+        self.assertTrue(page.locator("#production-eleven").is_visible())
+        self.assertTrue(page.locator("#content-flow-list").is_visible())
+        page.evaluate("CaseProduction.openSettings()")
         self.assertEqual(len(calls), 1)
         held.pop().fulfill(status=200, content_type="application/json", body=json.dumps({"ok": True}))
         page.locator("#production-eleven").get_by_text("ElevenLabs 已连接").wait_for(state="attached")
-        self.assertFalse(page.locator("#production-eleven").is_visible())
-        self.assertFalse(page.locator("#production-service-warning").is_visible())
-        page.evaluate("CaseProduction.route(true)")
+        self.assertTrue(page.locator("#production-eleven").is_visible())
+        self.assertEqual(page.locator("#production-service-warning").count(), 0)
+        page.evaluate("ContentFlow.route(true)")
         page.locator("#production-eleven").get_by_text("ElevenLabs 已连接").wait_for(state="attached")
         self.assertEqual(len(calls), 1)
-        page.locator("#production-settings-open").click()
         page.locator("#production-settings[open] #production-eleven").wait_for()
         page.locator("#production-eleven [data-recheck]").click()
         page.locator("#production-eleven").get_by_text("ElevenLabs 已连接").wait_for()
         self.assertEqual(len(calls), 2)
         page.locator("#production-settings [data-drawer-close]").click()
-        page.evaluate("CaseProduction.route(true, true)")
+        page.evaluate("ContentFlow.route(true)")
+        self.assertEqual(len(calls), 2)
+        page.locator(".flow-main-menu > summary").click()
+        page.locator("#content-production-settings").click()
         page.locator("#production-eleven").get_by_text("ElevenLabs 已连接").wait_for(state="attached")
+        self.assertEqual(len(calls), 2)
+        page.locator("#production-eleven [data-recheck]").click()
+        page.locator("#production-eleven").get_by_text("ElevenLabs 已连接").wait_for()
         self.assertEqual(len(calls), 3)
 
 

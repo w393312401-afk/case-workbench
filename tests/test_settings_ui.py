@@ -30,16 +30,22 @@ class SettingsBrowserTests(unittest.TestCase):
         cls.browser.close()
         cls.playwright.stop()
 
-    def open_page(self, responses, *, controlled_clock=False):
+    def open_page(self, responses, *, controlled_clock=False, origin=None):
         context = self.browser.new_context(viewport={"width": 920, "height": 800})
         self.addCleanup(context.close)
         page = context.new_page()
         if controlled_clock:
             page.clock.install()
-        page.set_content('<div id="breadcrumb"></div><main id="content"></main>')
+        markup = '<div id="breadcrumb"></div><main id="content"></main>'
+        if origin:
+            page.route(origin + "/**", lambda route: route.fulfill(status=200, content_type="text/html", body=markup))
+            page.goto(origin + "/")
+        else:
+            page.set_content(markup)
         page.add_style_tag(path=str(ROOT / "static" / "style.css"))
         page.add_style_tag(path=str(ROOT / "static" / "settings.css"))
         responses = {
+            "/api/settings/paths": {"paths": {"records":"C:/isolated/records", "evidence":"C:/isolated/evidence", "library":"C:/isolated/library", "directions":"C:/isolated/directions", "creation":"C:/isolated/creation"}},
             "/api/ai/preferences": {"preferences": {"model": None, "reasoning_effort": None}},
             "/api/ai/options": {"models": [], "default_settings": {"model": None, "reasoning_effort": None}, "defaults_configured": True},
             "/api/data/preferences": {"ok": True},
@@ -87,6 +93,93 @@ class SettingsBrowserTests(unittest.TestCase):
         page.evaluate("WorkbenchSettings.render()")
         return page
 
+    def test_remote_account_form_only_appears_on_loopback(self):
+        page = self.open_page({}, origin="https://workbench.example.com")
+        page.get_by_text("账号密码在运行工作台的电脑上设置。", exact=True).wait_for()
+        self.assertEqual(page.locator("#settings-remote-form").count(), 0)
+        self.assertNotIn("/api/remote-account", page.evaluate("window.calls"))
+
+    def test_local_account_saves_once_and_clears_passwords_without_browser_storage(self):
+        metadata = {"configured": False, "username": "", "auth_mode": "cloudflare", "remote_configured": True,
+                    "public_url": "https://workbench.example.com"}
+        page = self.open_page({"/api/remote-account#GET": metadata,
+                               "/api/remote-account#POST": {"deferred_fixture": True}}, origin="http://127.0.0.1:8765")
+        username = page.get_by_label("公网登录账号", exact=True)
+        password = page.get_by_label("新密码", exact=True)
+        confirm = page.get_by_label("确认新密码", exact=True)
+        self.assertEqual(username.input_value(), "admin")
+        self.assertEqual(password.get_attribute("autocomplete"), "new-password")
+        self.assertEqual(confirm.get_attribute("autocomplete"), "new-password")
+        username.fill("  fixture-admin  ")
+        password.fill("fixture-password-123")
+        confirm.fill("fixture-password-123")
+        page.evaluate("() => { const form = document.querySelector('#settings-remote-form'); form.dispatchEvent(new Event('submit', {cancelable:true})); form.dispatchEvent(new Event('submit', {cancelable:true})); }")
+        page.wait_for_function("window.deferredRequests.length === 1")
+        self.assertTrue(password.is_disabled())
+        posts = page.evaluate("window.requests.filter(call => call.path === '/api/remote-account' && call.method === 'POST')")
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["body"], {"username": "fixture-admin", "password": "fixture-password-123", "confirm_password": "fixture-password-123"})
+        page.evaluate("result => window.deferredRequests[0].resolve(result)",
+                      {**metadata, "username": "fixture-admin", "configured": True, "saved": True, "auth_mode": "password"})
+        page.get_by_text("本机账号密码已就绪；Cloudflare 公网入口仍需切换。", exact=True).wait_for()
+        self.assertEqual(password.input_value(), "")
+        self.assertEqual(confirm.input_value(), "")
+        self.assertEqual(page.evaluate("window.storageWrites"), [])
+
+    def test_local_account_confirmation_and_utf8_limits_prevent_submission(self):
+        page = self.open_page({"/api/remote-account": {"configured": False, "username": "", "remote_configured": True}}, origin="http://localhost:8765")
+        password = page.get_by_label("新密码", exact=True)
+        confirm = page.get_by_label("确认新密码", exact=True)
+        password.fill("fixture-password-123")
+        confirm.fill("another-password-456")
+        page.get_by_role("button", name="保存账号密码", exact=True).click()
+        page.get_by_text("两次输入的密码不一致。", exact=True).wait_for()
+        password.fill("密码" * 65)
+        confirm.fill("密码" * 65)
+        page.get_by_role("button", name="保存账号密码", exact=True).click()
+        page.get_by_text("密码至少 12 个字符，最多 256 个 UTF-8 字节。", exact=True).wait_for()
+        self.assertEqual(page.evaluate("window.requests.filter(call => call.path === '/api/remote-account' && call.method === 'POST')"), [])
+
+    def test_public_guest_readiness_explains_password_unlock_and_save_keeps_guest_access(self):
+        metadata = {"configured": False, "username": "", "auth_mode": "password", "remote_configured": True,
+                    "guest_enabled": True, "public_ready": True}
+        page = self.open_page({"/api/remote-account#GET": metadata,
+                               "/api/remote-account#POST": {**metadata, "username": "admin", "configured": True, "saved": True}},
+                              origin="http://127.0.0.1:8765")
+        page.get_by_text("访客浏览已开放；设置账号密码后，可登录使用完整功能。", exact=True).wait_for()
+        password = page.get_by_label("新密码", exact=True)
+        confirm = page.get_by_label("确认新密码", exact=True)
+        password.fill("fixture-password-123")
+        confirm.fill("fixture-password-123")
+        page.get_by_role("button", name="保存账号密码", exact=True).click()
+        page.get_by_text("公网账号已更新，已登录的设备需要重新登录；访客浏览不受影响。", exact=True).wait_for()
+        self.assertNotIn("Cloudflare", page.locator("#settings-remote-status").inner_text())
+        self.assertEqual(password.input_value(), "")
+        self.assertEqual(confirm.input_value(), "")
+        self.assertEqual(page.evaluate("window.storageWrites"), [])
+        page.evaluate("window.responses['/api/remote-account#GET'] = {...window.responses['/api/remote-account#GET'],configured:true,username:'admin'}")
+        page.get_by_role("button", name="重新读取账号状态", exact=True).click()
+        page.get_by_text("已设置公网账号：admin。访客无需登录即可浏览，登录后可使用完整功能。", exact=True).wait_for()
+
+    def test_guest_configuration_without_verified_deployment_keeps_pending_notice(self):
+        page = self.open_page({"/api/remote-account": {"configured": False, "username": "", "auth_mode": "password",
+                                                      "remote_configured": True, "guest_enabled": True, "public_ready": False}},
+                              origin="http://127.0.0.1:8765")
+        page.get_by_text("尚未设置公网登录账号。填写并保存后，本机账号密码即可就绪；Cloudflare 公网入口仍需切换。", exact=True).wait_for()
+        self.assertNotIn("访客浏览已开放", page.locator("#settings-remote-status").inner_text())
+
+    def test_remote_account_metadata_is_escaped_and_missing_config_disables_save(self):
+        name = '<img src=x onerror="window.injected=true">'
+        page = self.open_page({"/api/remote-account": {"configured": True, "username": name, "auth_mode": "password", "remote_configured": True}}, origin="http://localhost:8765")
+        page.wait_for_function("document.querySelector('#settings-remote-username').value.startsWith('<img')")
+        self.assertIn(name, page.locator("#settings-remote-status").inner_text())
+        self.assertEqual(page.locator("#settings-group-remote img").count(), 0)
+        self.assertFalse(page.evaluate("Boolean(window.injected)"))
+        page.evaluate("window.responses['/api/remote-account'] = {configured:false, username:'',remote_configured:false,error:'尚未配置公网连接，请先完成公网隧道配置。'}")
+        page.get_by_role("button", name="重新读取账号状态", exact=True).click()
+        page.get_by_text("尚未配置公网连接，请先完成公网隧道配置。", exact=True).wait_for()
+        self.assertTrue(page.get_by_role("button", name="保存账号密码", exact=True).is_disabled())
+
     def test_existing_actions_paths_and_source_text_are_preserved(self):
         source = 'C:/sales/<img src=x onerror="window.injected=true">'
         page = self.open_page({
@@ -104,7 +197,7 @@ class SettingsBrowserTests(unittest.TestCase):
         self.assertEqual(page.evaluate("window.actions"), [
             {"copy": "C:/isolated/records"}, {"open": "evidence"}, {"navigation": True}, {"copy": source},
         ])
-        self.assertEqual(page.evaluate("window.calls.filter(path => !path.startsWith('/api/data/') && !['/api/ai/preferences','/api/ai/options'].includes(path))"), ["/api/ai/status", "/api/performance/summary", "/api/ai/claude/login"])
+        self.assertEqual(page.evaluate("window.calls.filter(path => !path.startsWith('/api/data/') && !['/api/ai/preferences','/api/ai/options'].includes(path))"), ["/api/ai/status", "/api/settings/paths", "/api/performance/summary", "/api/public-stats/link", "/api/ai/claude/login"])
         self.assertFalse(page.evaluate("Boolean(window.injected)"))
 
     def test_independent_failure_retries_and_shutdown_status(self):
@@ -121,7 +214,7 @@ class SettingsBrowserTests(unittest.TestCase):
         page.get_by_role("button", name="重新检查", exact=True).click()
         page.get_by_role("button", name="重新读取", exact=True).click()
         page.get_by_text("服务正在关闭", exact=True).wait_for()
-        page.get_by_text("尚未设置销售数据文件夹，可先在「视频数据」导入表格。", exact=True).wait_for()
+        page.get_by_text("尚未设置销售数据文件夹，可先在「带货数据」导入表格。", exact=True).wait_for()
         self.assertFalse(page.get_by_role("button", name="重新检查", exact=True).is_disabled())
 
     def test_claude_uses_client_login_and_subscription_without_key_configuration(self):
@@ -170,7 +263,7 @@ class SettingsBrowserTests(unittest.TestCase):
         self.assertIn("订阅：pro", page.locator("#settings-claude-detail").inner_text())
         self.assertFalse(page.get_by_role("button", name="检查 Claude", exact=True).is_disabled())
         self.assertEqual(page.evaluate("window.calls.filter(path => !path.startsWith('/api/data/') && !['/api/ai/preferences','/api/ai/options'].includes(path))"), [
-            "/api/ai/status", "/api/performance/summary", "/api/ai/claude/login", "/api/ai/status",
+            "/api/ai/status", "/api/settings/paths", "/api/performance/summary", "/api/public-stats/link", "/api/ai/claude/login", "/api/ai/status",
         ])
         self.assertTrue(page.evaluate("window.aiStatuses.at(-1).providers.claude.available"))
 

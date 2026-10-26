@@ -90,7 +90,7 @@ class BackupBrowserTests(unittest.TestCase):
             const body = options.body instanceof File ? {name:options.body.name, size:options.body.size, type:options.body.type} : options.body ?? null;
             window.requests.push({path, method, body, headers});
             const result = window.responses[`${path}#${method}`] ?? window.responses[path];
-            if (result?.error_fixture) throw new Error(result.error_fixture);
+            if (result?.error_fixture) {const error = new Error(result.error_fixture);error.status = result.status_fixture;error.maintenance = result.maintenance_fixture;throw error;}
             if (result?.deferred_fixture) return await new Promise(resolve => window.deferredRequests.push({path, resolve, signal:options.signal}));
             return structuredClone(result);
           };
@@ -163,6 +163,18 @@ class BackupBrowserTests(unittest.TestCase):
         self.assertFalse(page.evaluate("Boolean(window.injected)"))
         self.assertTrue(page.locator("#settings-data-export").is_enabled())
         self.assertEqual(page.evaluate("window.unhandledErrors"), [])
+
+    def test_pending_export_displays_server_progress_during_status_poll(self):
+        page = self.open_page({"/api/data/export": {"deferred_fixture": True}}, controlled_clock=True)
+        self.ready(page)
+        page.get_by_role("button", name="导出全部数据", exact=True).click()
+        page.wait_for_function("window.deferredRequests.length === 1")
+        page.evaluate("window.responses['/api/data/status'] = {...window.responses['/api/data/status'],busy:true,operation:'export',progress:'正在打包文件 25/100'}")
+        page.locator("#settings-data-refresh").click()
+        page.locator("#settings-data-progress").get_by_text("正在打包文件 25/100", exact=True).wait_for()
+        self.assertTrue(page.locator("#settings-data-export").is_disabled())
+        self.assertEqual(len(self.requests(page, "/api/data/export")), 1)
+        self.assertFalse(page.locator("#settings-data-refresh").is_disabled())
 
     def test_import_requires_inspection_and_explicit_confirmation_then_restores_preferences(self):
         malicious = '<img src=x onerror="window.injected=true">'
@@ -306,14 +318,57 @@ class BackupBrowserTests(unittest.TestCase):
         self.ready(page)
         self.assertEqual(page.locator("#settings-backup-scheduler").inner_text(), "自动备份未开启，仍可随时手动备份。")
 
-    def test_leaving_while_preferences_mirror_pending_does_not_start_status_read(self):
+    def test_leaving_while_preferences_mirror_pending_does_not_start_another_status_read(self):
         page = self.open_page({"/api/data/preferences": {"deferred_fixture": True}}, controlled_clock=True)
         page.wait_for_function("window.deferredRequests.length === 1")
         page.evaluate("window.dispatchEvent(new Event('hashchange')); document.querySelector('#content').replaceChildren()")
         page.evaluate("window.deferredRequests[0].resolve({ok:true})")
         page.clock.run_for(60000)
-        self.assertEqual(self.requests(page, "/api/data/status"), [])
+        self.assertEqual(len(self.requests(page, "/api/data/status")), 1)
         self.assertEqual(page.evaluate("window.unhandledErrors"), [])
+
+    def test_busy_export_reads_status_before_preferences_and_allows_manual_status_check(self):
+        status = deepcopy(STATUS)
+        status.update(busy=True, operation="export", progress="正在打包文件 25/100")
+        page = self.open_page({"/api/data/status": status}, controlled_clock=True)
+        self.ready(page)
+        self.assertEqual(self.requests(page, "/api/data/preferences"), [])
+        self.assertTrue(page.locator("#settings-data-refresh").is_enabled())
+        self.assertTrue(page.locator("#settings-data-export").is_disabled())
+        self.assertIn("正在打包文件 25/100", page.locator("#settings-data-progress").inner_text())
+        page.evaluate("window.responses['/api/data/status'].busy = false")
+        page.locator("#settings-data-refresh").click()
+        page.wait_for_function("window.requests.filter(call => call.path === '/api/data/preferences').length === 1")
+        self.assertTrue(page.locator("#settings-data-export").is_enabled())
+        self.assertIn("总数据处理已结束", page.locator("#settings-data-progress").inner_text())
+
+    def test_incomplete_export_response_checks_status_without_starting_another_export(self):
+        page = self.open_page({"/api/data/export": {"error_fixture": "请求未收到完成回复", "status_fixture": 503}}, controlled_clock=True)
+        self.ready(page)
+        page.evaluate("Object.assign(window.responses['/api/data/status'], {busy:true,operation:'export',progress:'正在导出剩余文件'})")
+        page.locator("#settings-data-export").click()
+        page.get_by_text("正在导出剩余文件", exact=True).wait_for()
+        self.assertTrue(page.locator("#settings-data-export").is_disabled())
+        self.assertTrue(page.locator("#settings-data-refresh").is_enabled())
+        page.clock.run_for(5000)
+        self.assertEqual(len(self.requests(page, "/api/data/export")), 1)
+        page.evaluate("window.responses['/api/data/status'].busy = false")
+        page.locator("#settings-data-refresh").click()
+        page.wait_for_function("!document.querySelector('#settings-data-export').disabled")
+        self.assertEqual(len(self.requests(page, "/api/data/export")), 1)
+        self.assertEqual(page.evaluate("window.unhandledErrors"), [])
+
+    def test_maintenance_refusal_shows_busy_progress_instead_of_repeated_error(self):
+        page = self.open_page({"/api/data/export": {"error_fixture": "总数据正在恢复，请稍后再操作。", "status_fixture": 409,
+                                                   "maintenance_fixture": True}}, controlled_clock=True)
+        self.ready(page)
+        page.evaluate("Object.assign(window.responses['/api/data/status'], {busy:true,operation:'restore',progress:'正在恢复全部产品'})")
+        page.locator("#settings-data-export").click()
+        page.get_by_text("正在恢复全部产品", exact=True).wait_for()
+        self.assertFalse(page.locator("#settings-data-error").is_visible())
+        page.clock.run_for(10000)
+        self.assertEqual(len(self.requests(page, "/api/data/export")), 1)
+        self.assertTrue(page.locator("#settings-data-refresh").is_enabled())
 
 
 if __name__ == "__main__":

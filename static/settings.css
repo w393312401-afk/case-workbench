@@ -3,7 +3,7 @@
 .settings-page .settings-card { padding: 24px; }
 .settings-card-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .settings-card-heading h2 { margin: 0; font-size: 16px; }
-.settings-symbol { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-alt); color: var(--green-ink); flex-shrink: 0; }
+.settings-symbol { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-alt); color: var(--ink); flex-shrink: 0; }
 .settings-symbol svg { width: 18px; height: 18px; }
 .settings-note { color: var(--muted-soft); line-height: 1.8; margin: 8px 0; overflow-wrap: anywhere; }
 .settings-model-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 18px; margin: 20px 0 12px; max-width: 760px; }
@@ -11,6 +11,11 @@
 .settings-model-grid select { width: 100%; min-width: 0; padding: 11px 12px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: inherit; }
 .settings-model-grid select:disabled { opacity: .6; }
 .settings-model-card .settings-actions { margin: 18px 0 12px; }
+.settings-remote-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 20px 0 12px; }
+.settings-remote-grid label { display: grid; gap: 8px; font-size: var(--font-meta); }
+.settings-remote-grid input { width: 100%; min-width: 0; padding: 11px 12px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.settings-remote-grid input:disabled { opacity: .6; }
+#settings-remote-form .settings-actions { margin-top: 18px; }
 .settings-status { font-weight: 600; margin: 0 0 6px; display: flex; align-items: center; gap: 8px; }
 .settings-status::before { content: ""; width: 7px; height: 7px; background: var(--muted-soft); border-radius: 50%; flex-shrink: 0; }
 .settings-status[data-status="available"]::before { background: var(--green); }
@@ -59,7 +64,7 @@
 .settings-backup-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 20px 0; }
 .settings-backup-grid label { display: grid; align-content: start; gap: 8px; font-size: var(--font-meta); }
 .settings-backup-grid small { color: var(--muted-soft); }
-.settings-data-progress { padding: 12px 15px; border-radius: 8px; background: var(--surface-blue); color: var(--blue-ink); margin-top: 18px; font-size: var(--font-meta); line-height: 1.8; }
+.settings-data-progress { padding: 12px 15px; border-radius: 8px; background: var(--surface-tint); color: var(--blue-ink); margin-top: 18px; font-size: var(--font-meta); line-height: 1.8; }
 .settings-backup-state { border-top: 1px solid var(--line); padding-top: 18px; margin-top: 22px; }
 .settings-backup-state dl { display: flex; flex-wrap: wrap; gap: 15px 40px; margin: 0; }
 .settings-backup-state dl > div { min-width: 180px; }
@@ -78,6 +83,8 @@
   .settings-location { align-items: flex-start; flex-direction: column; }
 }
 @media (max-width: 570px) {
+  .settings-remote-grid { grid-template-columns: 1fr; gap: 14px; }
+  .settings-remote-grid input { font-size: 16px; }
   .settings-model-grid { grid-template-columns: 1fr; gap: 14px; }
   .settings-model-grid select { font-size: 16px; }
   .settings-page .settings-card { padding: 18px; }
@@ -98,3 +105,7 @@
 .settings-group { scroll-margin-top: calc(var(--topbar-h) + 64px); }
 @media (min-width: 761px) { .settings-sections { position: sticky; top: var(--topbar-h); z-index: 5; } }
 @media (max-width: 760px) { .settings-sections { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; } .settings-sections button { flex-shrink: 0; } .settings-group { scroll-margin-top: 16px; } }
+
+/* Compact locations keep all five reads and actions discoverable. */
+.settings-location{padding:10px 0;gap:12px}.settings-location-copy{min-width:0}.settings-location-copy h3{font-size:13px;margin:0}.settings-location-copy p{font-size:12px;margin:2px 0}.settings-location .settings-path{margin:3px 0;font-size:12px;overflow-wrap:anywhere}.settings-location .settings-actions{flex-wrap:wrap;gap:3px}.settings-location .settings-actions button{font-size:12px;padding:6px 8px}.settings-location[data-state="failed"] code{color:var(--danger-ink)}.settings-location[data-state="loading"] code,.settings-location[data-state="unconfigured"] code{color:var(--muted-soft)}
+.settings-page .settings-group{margin-bottom:18px}.settings-page .settings-card{padding:16px}.settings-page .settings-status{font-size:14px}.settings-page .settings-note{font-size:12px;line-height:1.5}

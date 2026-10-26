@@ -2,15 +2,25 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark"><title>案例工作台 · 视频参考库</title>
+  <meta name="color-scheme" content="light dark"><title>TK工作台</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/directions.css"><link rel="stylesheet" href="/navigation.css"><link rel="stylesheet" href="/shell.css"><link rel="stylesheet" href="/settings.css"><link rel="stylesheet" href="/global-search.css"><link rel="stylesheet" href="/library.css"><link rel="stylesheet" href="/detail.css"><link rel="stylesheet" href="/inline-editor.css">
-  <script src="/activity.js" defer></script>
-  <script src="/demo.js"></script><script src="/shell.js" defer></script><script src="/settings.js" defer></script><script src="/directions.js" defer></script><script src="/navigation.js" defer></script><script src="/native.js" defer></script><script src="/library.js" defer></script><script src="/bulk.js" defer></script><script src="/detail.js" defer></script>
+  <script src="/demo.js" defer></script><script src="/activity.js" defer></script>
+  <script src="/shell.js" defer></script><script src="/settings.js" defer></script><script src="/directions.js" defer></script><script src="/navigation.js" defer></script><script src="/native.js" defer></script><script src="/library.js" defer></script><script src="/bulk.js" defer></script><script src="/detail.js" defer></script>
   <link rel="stylesheet" href="/direction-picker.css"><script src="/direction-picker.js" defer></script>
+  <link rel="stylesheet" href="/tk-candidates.css"><script src="/tk-candidates.js" defer></script>
   <link rel="stylesheet" href="/reviews-layout.css"><link rel="stylesheet" href="/home.css"><link rel="stylesheet" href="/material-basket.css"><link rel="stylesheet" href="/scripts.css"><link rel="stylesheet" href="/production.css"><link rel="stylesheet" href="/writing.css">
-  <script src="/material-basket.js" defer></script><script src="/home.js" defer></script><script src="/scripts.js" defer></script><script src="/production.js" defer></script>
-  <script src="/transcript-sync.js" defer></script><script src="/delete.js" defer></script><script src="/editor.js" defer></script><script src="/inline-editor.js" defer></script><script src="/app.js" defer></script><script src="/ai.js" defer></script><script src="/perf-dashboard.js" defer></script><script src="/performance.js" defer></script><script src="/reviews.js" defer></script><script src="/global-search.js" defer></script>
+  <link rel="stylesheet" href="/workflow-links.css"><script src="/workflow-links.js" defer></script>
+  <link rel="stylesheet" href="/production-needs.css"><script src="/production-needs.js" defer></script>
+  <link rel="stylesheet" href="/review-experiences.css"><script src="/review-experiences.js" defer></script>
+  <link rel="stylesheet" href="/feedback-chain.css"><script src="/feedback-chain.js" defer></script>
+  <link rel="stylesheet" href="/delivery-provenance.css"><script src="/delivery-provenance.js" defer></script><script src="/copy-id.js" defer></script><script src="/drawer-resize.js" defer></script><link rel="stylesheet" href="/campaigns.css"><script src="/campaigns.js" defer></script>
+  <script src="/review-opportunities.js" defer></script><script src="/video-publication.js" defer></script><script src="/prepublish-review.js" defer></script><script src="/auto-breakdown.js" defer></script>
+  <script src="/material-basket.js" defer></script><script src="/review-followups.js" defer></script><script src="/home.js" defer></script><script src="/scripts.js" defer></script><script src="/production.js" defer></script>
+  <script src="/transcript-sync.js" defer></script><script src="/delete.js" defer></script><script src="/editor.js" defer></script><script src="/inline-editor.js" defer></script><script src="/app.js" defer></script><script src="/ai.js" defer></script><script src="/perf-dashboard.js" defer></script><script src="/perf-date-picker.js" defer></script><script src="/perf-creators.js" defer></script><script src="/performance.js" defer></script><script src="/reviews.js" defer></script><script src="/global-search.js" defer></script>
   <link rel="stylesheet" href="/activity.css">
+  <link rel="stylesheet" href="/content-flow.css"><script src="/content-flow.js" defer></script>
+  <link rel="stylesheet" href="/review-opportunities.css"><link rel="stylesheet" href="/video-publication.css"><link rel="stylesheet" href="/prepublish-review.css"><link rel="stylesheet" href="/auto-breakdown.css">
+  <link rel="stylesheet" href="/remote-session.css"><script src="/remote-session.js" defer></script>
 </head>
 <body>
   <div class="sidebar-rail" id="sidebar-rail" aria-label="模块快捷入口" hidden>
@@ -20,7 +30,7 @@
       <button type="button" class="sidebar-rail-item" data-sidebar-target="reviews-nav" aria-label="用户声音"><span data-icon="chat"></span></button>
       <button type="button" class="sidebar-rail-item" data-sidebar-target="directions-nav" aria-label="卖点与方向"><span data-icon="target"></span></button>
       <button type="button" class="sidebar-rail-item" data-sidebar-target="ai-nav" aria-label="内容创作"><span data-icon="writing"></span><span class="sidebar-rail-count" data-sidebar-count hidden></span></button>
-      <button type="button" class="sidebar-rail-item" data-sidebar-target="videos-nav" aria-label="视频数据"><span data-icon="chart"></span></button>
+      <button type="button" class="sidebar-rail-item" data-sidebar-target="videos-nav" aria-label="带货数据"><span data-icon="chart"></span></button>
       <button type="button" class="sidebar-rail-item" data-sidebar-target="library-nav" aria-label="案例库"><span data-icon="library"></span></button>
     </nav>
     <div class="sidebar-rail-tools">
@@ -29,14 +39,14 @@
     </div>
   </div>
   <aside class="sidebar" id="workbench-sidebar" aria-label="工作台边栏">
-    <div class="sidebar-heading"><label class="global-product"><span>当前产品</span><select id="global-product" aria-label="全局产品"><option value="202H">SHARPAL 202H</option></select></label><button type="button" class="sidebar-toggle" id="sidebar-pin" aria-label="固定边栏" title="固定边栏" aria-controls="workbench-sidebar" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg><span>固定</span></button></div>
+    <div class="sidebar-heading"><label class="global-product"><span>当前产品</span><select id="global-product" aria-label="全局产品"><option value="202H">SHARPAL 202H</option></select></label><button type="button" class="sidebar-toggle" id="sidebar-pin" aria-label="固定边栏" title="固定边栏" aria-controls="workbench-sidebar" hidden><span>固定</span></button></div>
     <div class="sidebar-label">内容工作流</div>
     <nav class="workflow-nav" aria-label="内容工作流">
       <button class="nav-item" id="home-nav" data-page="home"><span data-icon="calendar"></span>工作概览</button>
       <button class="nav-item" id="reviews-nav" data-page="reviews"><span data-icon="chat"></span>用户声音</button>
       <button class="nav-item" id="directions-nav" data-page="directions"><span data-icon="target"></span>卖点与方向</button>
-      <button class="nav-item" id="ai-nav" data-page="ai"><span data-icon="writing"></span>内容创作<span class="nav-count" id="ai-active-count" hidden></span></button>
-      <button class="nav-item" id="videos-nav" data-page="videos"><span data-icon="chart"></span>视频数据</button>
+      <button class="nav-item" id="ai-nav" data-page="content"><span data-icon="writing"></span>内容创作<span class="nav-count" id="ai-active-count" hidden></span></button>
+      <button class="nav-item" id="videos-nav" data-page="videos"><span data-icon="chart"></span>带货数据</button>
       <button class="nav-item" id="library-nav" data-page="library"><span data-icon="library"></span>案例库</button>
     </nav>
     <details class="library-navigation" id="library-navigation" hidden><summary>原案例栏目</summary>

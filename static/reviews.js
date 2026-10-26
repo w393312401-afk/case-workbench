@@ -2,7 +2,7 @@
 
 // Real-user review library: reviews from TikTok videos, TikTok Shop, Amazon, Reddit and Facebook, with full-text
 // search, classification chips and filters, the videos the comments sit under, and the records people keep here
-// (tag changes made by hand, quotes picked for a script). Reviewer names are never stored.
+// (tag changes made by hand, quotes picked for a script). Source-provided author names and handles stay with each quote.
 (() => {
   const pageHash = () => window.WorkbenchShell?.legacyHash() || location.hash;
   const currentProduct = () => window.WorkbenchShell?.product() || "";
@@ -14,8 +14,8 @@
   const fresh = () => ({ ...defaults, platform: [], nature: [], topic: [], competitor: [] });
   // threads: conversations already fetched (by review id). open / editing: the cards whose conversation / tag editor is
   // expanded; both are kept across repaints. Picks are shared with the global material basket.
-  const rev = { summary: null, data: null, shown: 50, request: 0, resultQuery: null, threads: {}, threadLoading: {}, open: new Set(), editing: new Set(), filters: fresh() };
-  let searchTimer = null, searchField = null, searchHash = "", submittedSearch = null;
+  const rev = { summary: null, data: null, shown: 50, request: 0, resultQuery: null, threads: {}, threadLoading: {}, commentsEpoch: 0, commentsDirty: false, summaryRequest: 0, open: new Set(), editing: new Set(), filters: fresh() };
+  let searchTimer = null, searchField = null, searchHash = "", submittedSearch = null, searchComposing = false;
 
   function cancelSearch() {
     clearTimeout(searchTimer);
@@ -34,6 +34,7 @@
     moreObserver?.disconnect();
     cancelSearch();
     rev.editing.clear();
+    searchComposing = false;
   }
 
   function prepareSearchRefresh() {
@@ -43,7 +44,7 @@
     save();
   }
   try {
-    const saved = JSON.parse(sessionStorage.getItem("review-library-filters") || "{}");
+    const saved = JSON.parse(localStorage.getItem("workbench-review-library-filters") || "{}");
     for (const key of Object.keys(defaults)) if (key in saved && typeof saved[key] === typeof defaults[key]) rev.filters[key] = saved[key];
   } catch {
     /* Filters fall back to defaults without browser storage. */
@@ -58,6 +59,12 @@
     verified_buyer: "已在平台验证购买", incentivized_buyer: "免费试用或有激励，写评价时有利益关系", unverified_buyer: "没有验证购买标记",
     viewer: "看视频的观众，不一定是买家", peer: "爱好者社区里的讨论者，多为转述", brand_account: "品牌或达人账号自己的回复，不是用户声音",
   };
+  const authorLabel = record => {
+    const name = String(record.author_name || '').trim(), handle = String(record.author_handle || '').trim().replace(/^@+/, '');
+    return [name, handle ? `@${handle}` : ''].filter(Boolean).join(' · ') || '评论者未记录';
+  };
+  const authorMarkup = record => `<span class="rev-meta rev-author" data-review-author>${esc(authorLabel(record))}</span>`;
+  const summaryText = summary => `${num(summary.default_visible)} 条真实评论，来自 ${summary.platforms.filter(item => item.total > 0).length} 个来源${summary.synced_at ? ` · 最近同步 ${summary.synced_at.slice(0,16).replace('T',' ')}` : ''}。保留来源提供的评论者昵称与账号；评论里的说法均未核实。`;
   const NL = String.fromCharCode(10);
   const num = (v) => Math.round(v).toLocaleString("en-US");
   const compact = (v) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v / 1e3)}K` : String(Math.round(v)));
@@ -112,7 +119,7 @@
   }
 
   const save = () => {
-    try { sessionStorage.setItem("review-library-filters", JSON.stringify(rev.filters)); } catch { /* ignore */ }
+    try { localStorage.setItem("workbench-review-library-filters", JSON.stringify(rev.filters)); } catch { /* ignore */ }
     writeHash();
   };
 
@@ -138,33 +145,37 @@
     return p;
   }
 
-  async function loadSummary() {
-    const summary = await api("/api/reviews/summary");
+  async function loadSummary(fresh = false) {
+    const request = ++rev.summaryRequest, epoch = rev.commentsEpoch;
+    const summary = await api("/api/reviews/summary", fresh ? {cache:"no-store"} : {});
+    if (request !== rev.summaryRequest || epoch !== rev.commentsEpoch) return false;
     // The page is served fresh from disk but the server only changes when it is restarted: an older server lacks the newer
     // fields, and the page must still work without them.
     summary.videos ||= [];
     summary.skus ||= [];
-    window.WorkbenchShell?.registerProducts(summary.products || []);
+    window.WorkbenchShell?.registerProducts((summary.products || []).filter(product => typeof product === "string" && product.trim()));
     summary.labels.competitor ||= {};
     for (const key of ["new_recent", "picks", "tag_edits"]) summary[key] ||= 0;
     rev.summary = summary;
+    return true;
   }
 
   let moreObserver = null;
 
-  async function loadResults() {
-    const mine = ++rev.request, hash = pageHash(), query = params().toString();
-    const isCurrent = () => mine === rev.request && pageHash() === hash && params().toString() === query;
+  async function loadResults(fresh = false) {
+    const mine = ++rev.request, hash = pageHash(), query = params().toString(), epoch = rev.commentsEpoch;
+    const isCurrent = () => mine === rev.request && epoch === rev.commentsEpoch && pageHash() === hash && params().toString() === query;
     submittedSearch = query;
     // A pending refresh can contain changed records even when its filters match the displayed data.
     rev.resultQuery = null;
     try {
-      const data = await api(`/api/reviews?${query}`);
+      const data = await api(`/api/reviews?${query}`, fresh || rev.commentsDirty ? {cache:"no-store"} : {});
       if (!isCurrent()) return false; // input changes invalidate old results before the next debounce fires
       data.facets.competitor ||= {};
       data.videos ||= {};
       rev.data = data;
       rev.resultQuery = query;
+      rev.commentsDirty = false;
       return true;
     } catch (error) {
       if (!isCurrent()) return false;
@@ -249,8 +260,8 @@
   // The rest of the conversation: the comment this one answers and its other replies, or the replies to this comment.
   function threadMarkup(rows) {
     if (!rows.length) return '<p class="rev-muted">库里没有这条评论的其他回复。</p>';
-    const items = rows.map((t) => `<div class="rev-reply${t.role === "brand_account" ? " is-brand" : ""}${t.is_reply ? "" : " is-parent"}"><div class="rev-reply-head"><span class="rev-role rev-role-${t.role}" title="${esc(roleHints[t.role] || "")}">${esc(labelOf("role", t.role))}</span><span class="rev-meta">${esc(t.posted_on || "")}${t.is_reply ? "" : " · 原评论"}</span>${t.likes != null ? `<span class="rev-meta">点赞 ${num(t.likes)}</span>` : ""}</div><p class="rev-text">${t.text ? esc(t.text) : "（没有文字）"}</p></div>`).join("");
-    return `${items}<p class="rev-muted">品牌或达人账号在评论区的回复同样未核实（价格、保修、适配范围都要以产品资料为准）。</p>`;
+    const items = rows.map((t) => `<div class="rev-reply${t.role === "brand_account" ? " is-brand" : ""}${t.is_reply ? "" : " is-parent"}"><div class="rev-reply-head">${authorMarkup(t)}<span class="rev-role rev-role-${t.role}" title="${esc(roleHints[t.role] || "")}">${esc(labelOf("role", t.role))}</span><span class="rev-meta">${esc(t.posted_on || "")}${t.is_reply ? "" : " · 原评论"}</span>${t.likes != null ? `<span class="rev-meta">点赞 ${num(t.likes)}</span>` : ""}</div><p class="rev-text">${t.text ? esc(t.text) : "（没有文字）"}</p></div>`).join("");
+    return `${items}${rows.some(row => row.role === "brand_account") ? '<p class="rev-muted">品牌回复未经核实；产品信息以产品资料为准。</p>' : ""}`;
   }
 
   // Every tag with its state; a click adds or removes it. The dashed ones were changed by hand.
@@ -259,15 +270,17 @@
       const on = r.tags[kind].includes(code), manual = r.manual?.[kind]?.[code] !== undefined;
       return `<button type="button" class="rev-filter${on ? " is-active" : ""}${manual ? " is-manual" : ""}" data-tag-edit="${esc(r.id)}" data-kind="${kind}" data-code="${esc(code)}" data-on="${on}" aria-pressed="${on}" title="${manual ? "手动改过" : "规则自动打的"}"><span>${esc(labelOf(kind, code))}</span></button>`;
     }).join("")}</div></div>`;
-    return `${group("nature", "性质")}${group("topic", "主题")}${group("competitor", "竞品")}<p class="rev-muted">点一下加上或去掉，会保存下来，重新同步后依然有效；虚线的是手动改过的。</p>`;
+    return `${group("nature", "性质")}${group("topic", "主题")}${group("competitor", "竞品")}<details class="rev-tag-help"><summary>标签与保存说明</summary><p class="rev-muted">点一下加上或去掉，会保存下来，重新同步后依然有效；虚线的是手动改过的。</p></details>`;
   }
 
   function card(r, terms) {
     const manual = (kind, t) => r.manual?.[kind]?.[t] === true;
+    const tagLabels = [["nature", r.tags.nature], ["topic", r.tags.topic], ["competitor", r.tags.competitor || []]]
+      .flatMap(([kind, values]) => values.map(code => labelOf(kind, code)));
     const tags = [["nature", r.tags.nature], ["topic", r.tags.topic], ["competitor", r.tags.competitor || []]]
       .flatMap(([kind, list]) => list.map((t) => `<span class="rev-tag rev-tag-${kind}${manual(kind, t) ? " is-manual" : ""}">${esc(labelOf(kind, t))}</span>`)).join("");
     const likes = r.likes != null ? `<span class="rev-meta rev-likes" title="${r.platform === "amazon" ? "觉得有帮助的人数" : "点赞"}">${r.platform === "amazon" ? "有帮助" : "赞"} ${num(r.likes)}</span>` : "";
-    const long = r.text.length > 520, excerpt = long ? excerptAround(r.text, terms) : null;
+    const long = r.text.length > 240 || r.text.split("\n").length > 4, excerpt = long ? excerptAround(r.text, terms) : null;
     // A long review shows its head; when the search word sits further down, show the passage around it instead.
     const body = r.text
       ? `<div class="rev-body${excerpt ? " has-excerpt" : ""}">${excerpt ? `<p class="rev-text rev-excerpt">${highlight(excerpt, terms)}</p>` : ""}<p class="rev-text rev-full${long && !excerpt ? " is-clamped" : ""}">${highlight(r.text, terms)}</p>${long ? '<button type="button" class="subtle rev-expand" data-expand>展开全文</button>' : ""}</div>`
@@ -275,10 +288,10 @@
     const editing = rev.editing.has(r.id), picked = Boolean(r.pick);
     const meta = [r.posted_on, r.sku, r.is_reply ? "回复" : "", r.language === "other" ? "其他语言" : ""].filter(Boolean).map(esc).join(" · ");
     return `<article class="rev-card${r.role === "brand_account" ? " is-brand" : ""}" data-id="${esc(r.id)}">
-      <header class="rev-head"><span class="rev-platform rev-platform-${r.platform}">${esc(labelOf("platform", r.platform))}</span><span class="rev-role rev-role-${r.role}" title="${esc(roleHints[r.role] || "")}">${esc(labelOf("role", r.role))}</span>${stars(r.rating)}${replyBadge(r)}${isNew(r) ? '<span class="rev-badge rev-badge-new" title="最近一次同步新增的评论">新</span>' : ""}<span class="rev-meta rev-date">${meta}</span>${likes}</header>
+      <header class="rev-head">${authorMarkup(r)}${r.product === "" ? '<span class="rev-meta">未关联产品</span>' : ""}${rev.filters.platform.length === 1 ? "" : `<span class="rev-platform rev-platform-${r.platform}">${esc(labelOf("platform", r.platform))}</span>`}<span class="rev-role rev-role-${r.role}" title="${esc(roleHints[r.role] || "")}">${esc(labelOf("role", r.role))}</span>${stars(r.rating)}${replyBadge(r)}${isNew(r) ? '<span class="rev-badge rev-badge-new" title="最近一次同步新增的评论">新</span>' : ""}<span class="rev-meta rev-date">${meta}</span>${likes}</header>
       ${r.title ? `<h3 class="rev-title">${highlight(r.title, terms)}</h3>` : ""}${body}
       ${r.context ? `<p class="rev-context">在帖子「${esc(r.context.slice(0, 80))}」下</p>` : ""}${videoLine(r)}
-      <footer class="rev-foot"><div class="rev-tags">${tags}</div><div class="rev-actions">${threadButton(r)}<button type="button" class="subtle rev-pick${picked ? " is-on" : ""}" data-pick="${esc(r.id)}" aria-pressed="${picked}" title="放进全局摘录篮，写稿时带入">${picked ? "已摘录" : "摘录"}</button><button type="button" class="subtle" data-copy="${esc(r.id)}">复制引用</button><details class="rev-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-edit-tags="${esc(r.id)}" aria-expanded="${editing}">改标签</button><button type="button" role="menuitem" data-review-theme="${esc(r.id)}">关联主题</button>${r.url ? `<a role="menuitem" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">打开原帖</a>` : ""}</div></details></div></footer>
+      <footer class="rev-foot"><div class="rev-tags">${tags ? `<details class="rev-tag-details"><summary>${esc(tagLabels.slice(0,3).join(" · "))}${tagLabels.length > 3 ? " · 更多标签" : ""}</summary><div>${tags}</div></details>` : ""}</div><div class="rev-actions">${threadButton(r)}<button type="button" class="subtle rev-pick${picked ? " is-on" : ""}" data-pick="${esc(r.id)}" aria-pressed="${picked}" title="放进全局摘录篮，写稿时带入">${picked ? "已摘录" : "摘录"}</button><button type="button" class="subtle" data-copy="${esc(r.id)}">复制引用</button><details class="rev-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-edit-tags="${esc(r.id)}" aria-expanded="${editing}">改标签</button><button type="button" role="menuitem" data-review-theme="${esc(r.id)}">关联主题</button><button type="button" role="menuitem" data-review-stance="${esc(r.id)}" title="站在评论者这边：先认同他说对的部分，再写你自己的真话">顺着这条写稿</button>${r.url ? `<a role="menuitem" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">打开原帖</a>` : ""}</div></details></div></footer>
       <div class="rev-tag-editor" id="rev-tags-${esc(r.id)}"${editing ? "" : " hidden"}>${editing ? tagEditor(r) : ""}</div>
       <div class="rev-thread" id="rev-thread-${esc(r.id)}" hidden></div></article>`;
   }
@@ -288,7 +301,7 @@
   function sourceBar() {
     const f = rev.filters, facets = rev.data.facets, all = rev.summary.platforms.reduce((sum, p) => sum + (facets.platform[p.platform] || 0), 0);
     const button = (code, label, count, on) => `<button type="button" class="rev-source${on ? " is-active" : ""}"${code ? ` data-chip="platform" data-code="${code}"` : " data-platform-all"} aria-pressed="${on}">${esc(label)}<span>${num(count)}</span></button>`;
-    return button("", "全部", all, !f.platform.length) + rev.summary.platforms.map((p) => button(p.platform, p.label, facets.platform[p.platform] || 0, f.platform.includes(p.platform))).join("");
+    return button("", "全部", all, !f.platform.length) + rev.summary.platforms.filter(p => (facets.platform[p.platform] || 0) > 0 || f.platform.includes(p.platform)).map((p) => button(p.platform, p.label, facets.platform[p.platform] || 0, f.platform.includes(p.platform))).join("");
   }
 
   // The tag groups inside the filter drawer. "未归类" comes last: the reviews the rules found nothing to say about.
@@ -391,7 +404,7 @@
     const f = rev.filters, s = rev.summary, sources = s.platforms.filter((p) => p.total).length;
     const select = (id, label, options, value) => `<label class="rev-field"><span>${label}</span><select id="${id}">${options.map(([k, v]) => `<option value="${esc(k)}" ${String(k) === String(value) ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>`;
     $("#breadcrumb").innerHTML = "用户声音";
-    $("#content").innerHTML = `<div id="rev-page"><div class="page-heading rev-heading"><div><h1>用户声音</h1><p>${num(s.default_visible)} 条真实评论，来自 ${sources} 个来源${s.synced_at ? ` · 最近同步 ${esc(s.synced_at.slice(0, 16).replace("T", " "))}` : ""}。评论里的说法都未核实，不含评论者姓名。<button type="button" class="subtle rev-coverage-link" id="rev-coverage-toggle" aria-expanded="false" aria-controls="rev-coverage">数据来源说明</button></p></div><div class="perf-actions"><button type="button" class="subtle" id="rev-basket-toggle"></button><button type="button" class="secondary" id="rev-copy-all">${icon("copy")}复制当前结果</button><button type="button" class="secondary" id="rev-sync">${icon("refresh")}重新同步</button></div></div>
+    $("#content").innerHTML = `<div id="rev-page"><div class="page-heading rev-heading"><div><h1>用户声音</h1><nav class="rev-page-tabs" aria-label="用户声音视图"><span aria-current="page">评论</span><a href="${esc(pageURL('#reviews?tab=opportunities'))}">选题机会</a></nav><p><span data-review-library-status>${esc(summaryText(s))}</span><button type="button" class="subtle rev-coverage-link" id="rev-coverage-toggle" aria-expanded="false" aria-controls="rev-coverage">数据来源说明</button></p></div><div class="perf-actions"><button type="button" class="subtle" id="rev-basket-toggle"></button><button type="button" class="secondary" id="rev-copy-all">${icon("copy")}复制当前结果</button><button type="button" class="secondary" id="rev-sync">${icon("refresh")}重新同步</button></div></div>
       <div id="rev-sync-result" role="status"></div><p class="rev-records" id="rev-records"></p>${coverageMarkup()}
       <div class="rev-searchbar"><label class="search">${icon("search")}<input id="rev-q" aria-label="搜索评论" placeholder="搜索评论：英文原词，或夹具、晃动、价格等中文词" value="${esc(f.q)}"></label><button type="button" class="secondary rev-filter-open" id="rev-filter-open" aria-haspopup="dialog" aria-controls="rev-drawer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>筛选<span class="rev-filter-count" id="rev-filter-count" hidden></span></button></div>
       <div class="rev-sources" id="rev-sources" role="group" aria-label="来源"></div>
@@ -419,6 +432,8 @@
   // The buttons and notes that depend on the records: what is new, how many are picked, what was changed by hand.
   function paintNotes() {
     const s = rev.summary, f = rev.filters;
+    const status = $("[data-review-library-status]");
+    if (status) status.textContent = summaryText(s);
     const records = [];
     if (s.state_error) records.push(`<span class="data-warning">${esc(s.state_error)}。手动改标签和摘录夹暂时不能保存，已有的记录没有被覆盖。</span>`);
     if (s.tag_edits) records.push(`手动改过 ${num(s.tag_edits)} 处标签 · <button type="button" class="subtle" id="rev-copy-edits" title="规则打错的地方，用来调整规则">复制纠错清单</button>`);
@@ -470,7 +485,8 @@
   }
 
   async function toggleThread(button, restore = false) {
-    const id = button.dataset.thread, box = document.getElementById(`rev-thread-${id}`);
+    const id = button.dataset.thread, box = document.getElementById(`rev-thread-${id}`), epoch = rev.commentsEpoch;
+    const current = () => epoch === rev.commentsEpoch && box?.isConnected && document.getElementById(`rev-thread-${id}`) === box;
     if (!box) return;
     if (rev.open.has(id) && !restore) {
       rev.open.delete(id);
@@ -484,25 +500,29 @@
     if (!rev.threads[id]) {
       box.innerHTML = '<p class="rev-muted">正在读取对话…</p>';
       try {
-        rev.threadLoading[id] ||= api(`/api/reviews/${id}`).then(data => {
-          rev.threads[id] = data.review.thread || [];
-        }).finally(() => { delete rev.threadLoading[id]; });
+        if (!rev.threadLoading[id]) {
+          const request = api(`/api/reviews/${id}`, {cache:"no-store"}).then(data => {
+            if (epoch === rev.commentsEpoch) rev.threads[id] = data.review.thread || [];
+          }).finally(() => { if (rev.threadLoading[id] === request) delete rev.threadLoading[id]; });
+          rev.threadLoading[id] = request;
+        }
         await rev.threadLoading[id];
       } catch (error) {
+        if (!current()) return;
         rev.open.delete(id);
         box.innerHTML = `<div class="data-warning">${esc(error.message)}</div>`;
         button.setAttribute("aria-expanded", "false");
         return;
       }
     }
-    if (rev.open.has(id)) box.innerHTML = threadMarkup(rev.threads[id]);
+    if (current() && rev.open.has(id)) box.innerHTML = threadMarkup(rev.threads[id] || []);
   }
 
   async function refresh() {
     prepareSearchRefresh();
     const hash = pageHash();
     try {
-      if (await loadResults()) paintResults();
+      if (await loadResults()) { paintResults(); paintNotes(); }
     } catch (error) {
       if (pageHash() !== hash || !$("#rev-results")) return;
       $("#rev-results").innerHTML = `<div class="data-warning">${esc(error.message)}</div>`;
@@ -520,6 +540,36 @@
       paintNotes();
     } catch (error) {
       toast(error.message);
+    }
+  }
+
+  async function commentsChanged() {
+    const epoch = ++rev.commentsEpoch, hash = pageHash();
+    ++rev.request;
+    ++rev.summaryRequest;
+    rev.commentsDirty = true;
+    rev.resultQuery = null;
+    submittedSearch = null;
+    rev.threads = {};
+    rev.threadLoading = {};
+    void window.MaterialBasket?.refresh?.(true).catch(() => {});
+    if (!hash.startsWith('#reviews')) { rev.summary = null; return; }
+    // A push can arrive during the first load, before the list exists. Start a
+    // new route read so the invalidated first response cannot leave a skeleton.
+    if (!$('#rev-results')) return route();
+    try {
+      // Search owns its pending keystrokes; its next read will use this new epoch.
+      const summary = loadSummary(true).then(loaded => {
+        if (loaded && epoch === rev.commentsEpoch && hash === pageHash() && $('#rev-results')) paintNotes();
+        return loaded;
+      });
+      if (searchTimer !== null || searchComposing) { await summary; return; }
+      const [,loaded] = await Promise.all([summary,loadResults(true)]);
+      if (!loaded || epoch !== rev.commentsEpoch || hash !== pageHash() || !$('#rev-results')) return;
+      await Promise.all(paintResults());
+      if (epoch === rev.commentsEpoch && hash === pageHash()) paintNotes();
+    } catch (error) {
+      if (epoch === rev.commentsEpoch && hash === pageHash()) toast(error.message);
     }
   }
 
@@ -561,8 +611,29 @@
     }
   }
 
+  // "顺着这条写稿": the comment becomes the stance a script agrees with. Feelings may be inferred by the model (marked 【AI反推】); concrete experiences and numbers only from the user.
+  function stanceInstruction(r) {
+    return [`顺着这条评论写稿（站在观众这边）。评论 ${r.id}｜${authorLabel(r)}｜${labelOf("platform", r.platform)}｜${labelOf("role", r.role)}（评论者说法未核实）：`, r.text,
+      "", "我的真话（选填，填了就照你写的用；留空让 AI 反推）：", "【留空】",
+      "", "写法：",
+      "1. 开头先认同评论里说对的部分，用我的口吻说；不反驳、不辩论，不用 Is/Are/Why 这类争议问句开场。",
+      "2. 中段转到我的真话：为什么即使评论说得对，我还是会用、还是想要。写情绪和身份认同，不写性能承诺。",
+      "3. 真话留空时由你反推：从这条评论和同类评论推出一个说得通的创作者动机或感受（如想要、忍不住、看着舒服），只写态度和感受，每版可不同；反推出来的句子后面标【AI反推】，方便我核对。",
+      "4. 反推只能是态度和感受，不能编具体经历、次数、数字或效果（如“我磨了 50 把刀”“锋利度提升 3 倍”）；这类句子只能来自我写的真话。",
+      "5. 产品只作为让我能这样做的工具出现，主打卖点照方向规则。评论者的话只能当观众观点引用，不写成我的经历。"].join("\n");
+  }
+  async function writeWithReview(r) {
+    if (window.CaseAI?.modalOpen()) { toast("请先完成或关闭当前写稿窗口。", true); return; }
+    const opened = await window.CaseAI?.startBlank(r.product || window.WorkbenchShell?.product());
+    if (!opened) return;
+    const input = document.querySelector("#ai-create-instruction"), text = stanceInstruction(r);
+    // A pending request/draft owned by the AI dialog keeps its original text.
+    if (input && !input.value.trim()) { input.value = text; input.dispatchEvent(new Event("input", { bubbles: true })); }
+    else if (input?.value !== text) toast("已打开保留的写稿请求。原请求未覆盖；请先完成当前请求。", true);
+  }
+
   function reviewQuote(r) {
-    const head = [labelOf("platform", r.platform), labelOf("role", r.role), r.rating != null ? `${r.rating}星` : null, r.posted_on].filter(Boolean).join("｜");
+    const head = [authorLabel(r), labelOf("platform", r.platform), labelOf("role", r.role), r.rating != null ? `${r.rating}星` : null, r.posted_on].filter(Boolean).join("｜");
     return `[${head}] ${r.title ? r.title + "｜" : ""}${r.text}${r.url ? `（${r.url}）` : ""}`;
   }
 
@@ -620,12 +691,12 @@
     };
     field.addEventListener("input", event => queue(event.isComposing));
     field.addEventListener("compositionstart", () => {
-      composing = true;
+      composing = searchComposing = true;
       ++rev.request;
       submittedSearch = null;
       cancelSearch();
     });
-    field.addEventListener("compositionend", () => {composing = false;queue();});
+    field.addEventListener("compositionend", () => {composing = searchComposing = false;queue();});
     field.addEventListener("keydown", event => {
       if (event.key !== "Enter" || composing || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
@@ -722,6 +793,8 @@
       if (pick) { setPick(pick.dataset.pick, pick.getAttribute("aria-pressed") !== "true"); return; }
       const theme = target.closest("[data-review-theme]");
       if (theme) { const review = rev.data.reviews.find(item => item.id === theme.dataset.reviewTheme); if (review) void window.MaterialBasket?.openTheme(review); return; }
+      const stance = target.closest("[data-review-stance]");
+      if (stance) { const review = rev.data.reviews.find(item => item.id === stance.dataset.reviewStance); if (review) void writeWithReview(review); return; }
       if (target.closest("#rev-copy-edits")) { copyEdits(); return; }
       const copy = target.closest("[data-copy]");
       if (copy) {
@@ -759,9 +832,11 @@
   async function route() {
     const hash = pageHash(), product = currentProduct(), sequence = ++routeSequence;
     const isCurrent = () => sequence === routeSequence && hash === pageHash();
+    if (window.ReviewOpportunities?.active()) {leaveList();return window.ReviewOpportunities.route();}
     $("#breadcrumb").innerHTML = "用户声音";
     // A background route check must leave the current draft to its scheduled search.
     if (searchTimer !== null && searchField?.isConnected && searchHash === hash && product === renderedProduct) return;
+    if (searchComposing && $('#rev-q') && product === renderedProduct) return;
     const restored = window.WorkbenchShell?.listState?.("reviews", product);
     if (restored?.filters) {
       cancelSearch();
@@ -844,9 +919,9 @@
     const box = document.createElement("div");
     box.id = "case-review-box";
     box.className = "perf-case-box";
-    box.innerHTML = `<div><strong>用户声音</strong><p>${num(s.default_visible)} 条真实评论可查：${parts}。评论里的说法均未核实。</p>${ownLine}</div><a class="secondary" href="#reviews">打开用户声音</a>`;
+    box.innerHTML = `<div><strong>用户声音</strong>${ownLine || '<p>暂未关联本视频评论。</p>'}<details><summary>全产品评论与来源</summary><p>${num(s.default_visible)} 条真实评论可查：${parts}。评论里的说法均未核实。</p></details></div><a class="secondary" href="#reviews">打开用户声音</a>`;
     section.append(box);
   }
 
-  window.CaseReviews = { route, decorateCase, captureListState, leaveList };
+  window.CaseReviews = { commentsChanged, route, decorateCase, captureListState, leaveList };
 })();

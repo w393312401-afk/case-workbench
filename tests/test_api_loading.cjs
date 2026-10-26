@@ -11,7 +11,7 @@ const implementation = source.slice(source.indexOf('const pendingApiReads ='), s
 function harness() {
   const calls = [];
   const context = vm.createContext({
-    Map, File: class {}, structuredClone, state: {token: 'test-token'},
+    Map, File: class {}, structuredClone, window: {}, state: {token: 'test-token'},
     fetch(url, options) {
       return new Promise((resolve, reject) => calls.push({url, options, resolve, reject}));
     },
@@ -78,6 +78,24 @@ test('failed shared reads preserve errors and allow a fresh retry', async () => 
   assert.equal(calls.length, 2);
   finish(1);
   await retry;
+});
+
+test('a post-save refresh cannot join a read begun while the save was pending', async () => {
+  const {api, calls, finish} = harness();
+  const write = api('/api/scripts', {method: 'POST', body: {text: 'saved'}});
+  const during = api('/api/creation');
+  assert.equal(calls.length, 2);
+  finish(0, {saved: true});
+  await write;
+  const after = api('/api/creation');
+  assert.equal(calls.length, 3, 'the confirmed save starts a fresh read generation');
+  finish(1, {revision: 'before-save'});
+  assert.equal((await during).revision, 'before-save');
+  const shared = api('/api/creation');
+  assert.equal(calls.length, 3, 'the old poll cannot evict the fresh read');
+  finish(2, {revision: 'after-save'});
+  assert.equal((await after).revision, 'after-save');
+  assert.equal((await shared).revision, 'after-save');
 });
 
 const aiSource = fs.readFileSync(path.join(__dirname, '../static/ai.js'), 'utf8');

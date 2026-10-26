@@ -84,6 +84,22 @@ test('product discovery includes every module without requesting full datasets',
   const legacy = await body('/api/products', environment());
   assert.ok(legacy.products.includes('other'));
   assert.ok(legacy.products.includes('SHARPAL 202H'));
+  assert.deepEqual(legacy.removed, []);
+  assert.deepEqual(legacy.deleted, []);
+});
+
+test('product catalog exclusions survive guest reload while all case data remains readable', async () => {
+  for (const products of [['198H'], []]) {
+    const env = splitEnvironment();
+    const catalog = { products, removed: ['hidden product'], deleted: ['202H'] };
+    Object.assign(env.files['/public-data.json'], { products: ['stale product'], product_catalog: catalog });
+    assert.deepEqual(await body('/api/products', env), catalog);
+    assert.deepEqual((await body('/api/state', env)).cases, fixture.state.cases);
+    assert.deepEqual(await body(`/api/cases/${caseId}`, env), fixture.cases[caseId]);
+    assert.deepEqual(await body(`/api/cases/${archivedId}`, env), fixture.cases[archivedId]);
+  }
+  assert.deepEqual(await body('/api/products', environment({ ...fixture, products: [] })),
+    { products: [], removed: [], deleted: [] });
 });
 
 test('only GET and HEAD can access the site', async () => {
@@ -97,6 +113,16 @@ test('only GET and HEAD can access the site', async () => {
   }
   assert.equal(env.calls.length, 0);
 });
+test('home projection retains the same safe manual classification as full video data', async () => {
+  const data = structuredClone(fixture);
+  const manual = {key:'weak',label:'弱参考价值'};
+  data.performance.videos[0].review_status = manual;
+  const full = await (await response('/api/performance/videos?product=202H',environment(data))).json();
+  const home = await (await response('/api/performance/videos?projection=home&product=202H',environment(data))).json();
+  assert.deepEqual(full.videos[0].review_status,manual);
+  assert.deepEqual(home.videos[0].review_status,manual);
+});
+
 test('private bundle, Worker source, local actions, all media and unknown APIs stay unavailable', async () => {
   const env = environment();
   for (const path of ['/public-data.json', '/public-data.json?download=1', '/public-data.json/', '/%70ublic-data.json', '/%2570ublic-data.json', '/_worker.js', '/_routes.json', '/media', '/media/x/video', '/api/open', '/api/upload', '/api/service/status', '/api/service/shutdown', '/api/service-other', '/api/sync', '/api/cases/invalid', `/api/cases/${caseId}/delete-preview`, `/api/ai/tasks/${taskId}/stream`, '/photo.jpg', '/image.svg', '/audio.mp3', '/movie.mp4']) {

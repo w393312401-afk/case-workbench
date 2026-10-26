@@ -1,7 +1,7 @@
 """Portable, verified full-data archives. Does not include application code or credentials."""
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -24,6 +24,9 @@ SKILL_PATHS = ("cases", "sources", "references/products", "deleted_case_sources.
 APP_PATHS = ("图文素材",)
 RUNTIME_EXCLUDED = frozenset({"auth", "credentials", "thumbnail-cache", "cache", "__pycache__",
     "staging", "split-staging", "text-public-sync", "data-transfer"})
+# Public access keeps this machine's tunnel token, login hashes and guest site here. Never exported, never
+# replaced by an import; older archives that carried it stay importable and only skip it.
+RUNTIME_PRIVATE = frozenset({"remote-access"})
 TEXT_SUFFIXES = {".json", ".jsonl", ".md", ".txt", ".csv", ".tsv", ".yaml", ".yml", ".xml", ".srt", ".vtt", ".html"}
 # These formats already compress their payload. Deflating gigabytes of finished
 # videos wastes daily-backup time and rarely makes the archive any smaller.
@@ -41,6 +44,7 @@ CHUNK = 1024 * 1024
 MAX_FILES = 250000
 MAX_MANIFEST = 64 * 1024 * 1024
 MAX_BYTES = 2 * 1024 ** 4
+SQLITE_SNAPSHOT_TIMEOUT = 30
 WINDOWS_RESERVED = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)", re.I)
 
 
@@ -138,12 +142,31 @@ def _sqlite_strings(path):
         tables = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
         for table in tables:
             columns = [row[1] for row in connection.execute("PRAGMA table_info(" + _quote(table) + ")")]
-            for column in columns:
-                for row in connection.execute("SELECT " + _quote(column) + " FROM " + _quote(table) +
-                        " WHERE typeof(" + _quote(column) + ") = 'text'"):
-                    yield row[0]
+            # Scan each table once, without materializing blob/index payloads.
+            selected = ["CASE WHEN typeof(" + _quote(column) + ") = 'text' THEN " + _quote(column) + " END" for column in columns]
+            for row in connection.execute("SELECT " + ", ".join(selected) + " FROM " + _quote(table)):
+                yield from (value for value in row if isinstance(value, str))
     finally:
         connection.close()
+
+
+def _snapshot_sqlite(source, destination):
+    deadline = time.monotonic() + SQLITE_SNAPSHOT_TIMEOUT
+
+    def progress(status, remaining, total):
+        if time.monotonic() >= deadline:
+            raise BackupError(f"数据库快照超时，请结束占用后重试：{source.name}", 503)
+
+    incoming = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=0)
+    try:
+        outgoing = sqlite3.connect(destination)
+        try:
+            # connect(timeout=...) does not bound backup's BUSY/LOCKED retries.
+            incoming.backup(outgoing, pages=256, progress=progress, sleep=.05)
+        finally:
+            outgoing.close()
+    finally:
+        incoming.close()
 
 
 def _json_strings(value):
@@ -171,13 +194,19 @@ class BackupManager:
         candidates = tuple(dict.fromkeys(Path(path).expanduser().resolve() for path in extra_sources))
         self.extra_sources = tuple(path for path in candidates if not any(path != other and path.is_relative_to(other) for other in candidates))
         self.transfer_root = self.runtime_root / "data-transfer"
+        self.on_progress = lambda message: None
 
     @contextmanager
-    def operation_lock(self):
-        """Shared by the local app and its independent daily backup worker."""
-        with self.lock, ExitStack() as stack:
+    def business_locks(self):
+        with ExitStack() as stack:
             for lock in self.locks:
                 stack.enter_context(lock)
+            yield
+
+    @contextmanager
+    def operation_lock(self, *, hold_business_locks=True):
+        """Shared by the local app and its independent daily backup worker."""
+        with self.lock, self.business_locks() if hold_business_locks else nullcontext():
             self.runtime_root.mkdir(parents=True, exist_ok=True)
             if self.transfer_root.exists() and linked(self.transfer_root):
                 raise BackupError("备份工作目录不能是链接。")
@@ -219,7 +248,7 @@ class BackupManager:
         if not self.runtime_root.exists():
             return []
         return sorted(path.name for path in self.runtime_root.iterdir()
-            if path.name.casefold() not in RUNTIME_EXCLUDED and not path.name.endswith(("-wal", "-shm")))
+            if path.name.casefold() not in RUNTIME_EXCLUDED | RUNTIME_PRIVATE and not path.name.endswith(("-wal", "-shm")))
 
     def _walk(self, path, root, archive_path, directories):
         safe_name(archive_path)
@@ -253,15 +282,11 @@ class BackupManager:
         return destination
 
     def create_archive(self, destination, kind="export", preferences=None):
-        with self.operation_lock():
+        with self.operation_lock(hold_business_locks=False):
             return self._create_archive(destination, kind, preferences)
 
-    def _create_archive(self, destination, kind, preferences=None):
-        destination = self._destination(destination)
-        created = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        name = "case-workbench-" + re.sub(r"[^a-zA-Z0-9_-]", "", str(kind))[:30] + "-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8] + ".zip"
-        final = destination / name
-        temporary = destination / ("." + name + ".partial")
+    def _archive_inputs(self):
+        """Enumerate a consistent business view before metadata discovery or compression."""
         directories, external, aliases, extra_roots, included_sources, queue = set(), {}, {}, {}, {}, []
         runtime_entries = self._runtime_entries()
         for relative in SKILL_PATHS:
@@ -279,6 +304,9 @@ class BackupManager:
         for source in self.extra_sources:
             if not source.exists():
                 continue  # Historical missing sales folders do not invalidate durable imported rows.
+            if source != self.runtime_root and self.runtime_root.is_relative_to(source):
+                # Walking it as an external folder would pack the excluded login and remote-access files.
+                raise BackupError("原始销售资料目录不能包含运行资料目录。")
             included = None
             if source.is_relative_to(self.runtime_root):
                 relative = source.relative_to(self.runtime_root)
@@ -300,13 +328,38 @@ class BackupManager:
                 external[key] = archive_name
                 external_seen[key] = archive_name
                 queue.append((archive_name, original, root))
-        seen, records, warnings = set(), [], []
+        return directories, external, aliases, extra_roots, included_sources, queue, runtime_entries, external_seen
+
+    def _create_archive(self, destination, kind, preferences=None, *, business_locked=False):
+        destination = self._destination(destination)
+        created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        name = "case-workbench-" + re.sub(r"[^a-zA-Z0-9_-]", "", str(kind))[:30] + "-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:8] + ".zip"
+        final = destination / name
+        temporary = destination / ("." + name + ".partial")
+        seen, records, warnings, references_seen = set(), [], [], set()
         # Discover and validate path aliases from metadata before streaming large
         # media. Newly discovered external JSON is inserted before pending media.
         metadata_suffixes = {".json", ".sqlite", ".db"}
-        queue.sort(key=lambda row: row[1].suffix.casefold() not in metadata_suffixes)
         with tempfile.TemporaryDirectory(prefix="backup-sqlite-", dir=self.transfer_root) as database_directory:
             try:
+                snapshots = {}
+                self.on_progress("正在建立业务资料快照")
+                with self.business_locks() if not business_locked else nullcontext():
+                    # Enumeration and metadata copies must see the same view:
+                    # even a GET can migrate catalogs and create history files.
+                    directories, external, aliases, extra_roots, included_sources, queue, runtime_entries, external_seen = self._archive_inputs()
+                    queue.sort(key=lambda row: row[1].suffix.casefold() not in metadata_suffixes)
+                    for number, (_, source, root) in enumerate(queue):
+                        no_links(source, root)
+                        snapshot = Path(database_directory) / str(number)
+                        if _sqlite(source):
+                            self.on_progress("正在保存数据库快照：" + source.name)
+                            _snapshot_sqlite(source, snapshot)
+                            snapshots[source] = (snapshot, True)
+                        elif source.suffix.casefold() in TEXT_SUFFIXES:
+                            shutil.copyfile(source, snapshot)
+                            snapshots[source] = (snapshot, False)
+                self.on_progress("正在整理素材引用并打包")
                 with zipfile.ZipFile(temporary, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as archive:
                     index = 0
                     while index < len(queue):
@@ -318,18 +371,15 @@ class BackupManager:
                         seen.add(archive_name.casefold())
                         if len(seen) > MAX_FILES:
                             raise BackupError("备份文件数量超过支持范围。")
-                        no_links(source, root)
-                        before = source.stat()
-                        read_path = source
-                        if _sqlite(source):
-                            read_path = Path(database_directory) / (str(index) + ".sqlite")
-                            incoming = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=30)
-                            outgoing = sqlite3.connect(read_path)
-                            try:
-                                incoming.backup(outgoing)
-                            finally:
-                                outgoing.close()
-                                incoming.close()
+                        read_path, is_database = snapshots.get(source, (source, False))
+                        if read_path == source:
+                            no_links(source, root)
+                            before = source.stat()
+                            if _sqlite(source):
+                                read_path = Path(database_directory) / (str(index) + ".sqlite")
+                                _snapshot_sqlite(source, read_path)
+                                is_database = True
+                        self.on_progress(f"正在打包 {index}/{len(queue)}：{source.name}")
                         digest, count = hashlib.sha256(), 0
                         json_content = bytearray() if source.suffix.casefold() == ".json" else None
                         entry = zipfile.ZipInfo(archive_name, date_time=datetime.now().timetuple()[:6])
@@ -360,7 +410,7 @@ class BackupManager:
                                 # A sound backup can repair a damaged live JSON catalog;
                                 # the safety archive must still retain its original bytes.
                                 warnings.append("原数据 JSON 无法解析，恢复包已保留原始文件：" + archive_name)
-                        elif read_path != source:
+                        elif is_database:
                             strings = _sqlite_strings(read_path)
                         for value in strings:
                             # DB cells may contain serialized JSON with nested asset paths.
@@ -374,6 +424,9 @@ class BackupManager:
                                 reference = Path(candidate)
                                 if not reference.is_absolute() or candidate.startswith(("\\\\", "//")):
                                     continue
+                                if candidate in references_seen:
+                                    continue
+                                references_seen.add(candidate)
                                 if _credential_reference(reference):
                                     continue
                                 # Platform skill links resolve to the canonical business root; keep
@@ -562,16 +615,31 @@ class BackupManager:
             raise BackupError("备份的已迁移原始数据目录无效。")
         return manifest
 
+    @staticmethod
+    def _without_private(manifest):
+        """What an import restores: an older archive's remote-access entries are verified but never extracted."""
+        def private(name):
+            parts = PurePosixPath(name).parts
+            return len(parts) > 1 and parts[0] == "runtime" and parts[1].casefold() in RUNTIME_PRIVATE
+        files = [row for row in manifest["files"] if not private(row["path"])]
+        return {**manifest, "files": files, "bytes": sum(row["size"] for row in files),
+            "runtime_entries": [entry for entry in manifest["runtime_entries"] if entry.casefold() not in RUNTIME_PRIVATE],
+            "directories": [directory for directory in manifest.get("directories", []) if not private(directory)],
+            "included_source_roots": {source: target for source, target in manifest.get("included_source_roots", {}).items()
+                if not private(target)}}
+
     def _extract_verified(self, path, stage=None):
         try:
             with zipfile.ZipFile(path) as archive:
                 manifest = self._manifest(archive)
+                restored = self._without_private(manifest)
+                kept = {row["path"] for row in restored["files"]}
                 if stage is not None:
-                    for directory in manifest.get("directories", []):
+                    for directory in restored["directories"]:
                         (stage / directory).mkdir(parents=True, exist_ok=True)
                 for row in manifest["files"]:
                     digest, count = hashlib.sha256(), 0
-                    destination = stage / row["path"] if stage is not None else None
+                    destination = stage / row["path"] if stage is not None and row["path"] in kept else None
                     if destination is not None:
                         destination.parent.mkdir(parents=True, exist_ok=True)
                     with ExitStack() as stack:
@@ -586,7 +654,7 @@ class BackupManager:
                                 outgoing.write(chunk)
                     if count != row["size"] or digest.hexdigest() != row["sha256"]:
                         raise BackupError("备份文件校验失败，原数据没有被修改。")
-                return manifest
+                return restored
         except (OSError, zipfile.BadZipFile, RuntimeError, EOFError) as exc:
             raise BackupError(f"备份包无法读取：{exc}") from exc
 
@@ -638,6 +706,8 @@ class BackupManager:
     def _remap(self, stage, manifest):
         replacements = self._replacements(manifest, self.skill_root, self.runtime_root, self.app_root)
         remap = self._text_mapper(replacements)
+        publication_documents, publication_revisions = [], {}
+        publication_stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
         for row in manifest["files"]:
             path = stage / row["path"]
             if path.suffix.casefold() in TEXT_SUFFIXES:
@@ -647,6 +717,18 @@ class BackupManager:
                 except UnicodeError:
                     continue
                 remapped = remap(text)
+                publication_document = row["path"].startswith("runtime/production/video-publications/") and path.suffix.casefold() == ".json"
+                if publication_document:
+                    # A portable restore changes local paths inside otherwise frozen
+                    # review snapshots. Verify the original before signing that rewrite.
+                    from workbench_video_publish import remap_publication_document
+                    try:
+                        original, mapped = _json(text), _json(remapped)
+                        mapped = remap_publication_document(original, mapped, publication_stamp, publication_revisions)
+                    except ValueError as exc:
+                        raise BackupError("视频发布快照无法通过恢复核对。") from exc
+                    if mapped != original:
+                        remapped = json.dumps(mapped, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n"
                 if remapped != text:
                     encoded = remapped.encode("utf-8")
                     path.write_bytes(encoded)
@@ -659,6 +741,9 @@ class BackupManager:
                                 path.unlink()
                             else:
                                 os.replace(path, renamed)
+                            path = renamed
+                if publication_document:
+                    publication_documents.append(path)
             elif _sqlite(path):
                 connection = sqlite3.connect(path)
                 try:
@@ -673,6 +758,20 @@ class BackupManager:
                     connection.commit()
                 finally:
                     connection.close()
+        if publication_documents:
+            from workbench_video_publish import remap_publication_revisions
+            for path in set(publication_documents):
+                before = path.read_bytes()
+                value = _json(before.decode("utf-8"))
+                previous = json.dumps(value, ensure_ascii=False, sort_keys=True)
+                remap_publication_revisions(value, publication_revisions)
+                if json.dumps(value, ensure_ascii=False, sort_keys=True) != previous:
+                    encoded = (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
+                    path.write_bytes(encoded)
+                    if path.parent.name == "backups" and re.fullmatch("[a-f0-9]{64}", path.stem):
+                        renamed = path.with_name(hashlib.sha256(encoded).hexdigest() + path.suffix)
+                        if renamed != path:
+                            os.replace(path, renamed)
         for target in set(manifest.get("external_files", {}).values()):
             relative = PurePosixPath(target)
             destination = stage / "runtime" / "restored-assets" / Path(*relative.parts[1:])
@@ -690,6 +789,12 @@ class BackupManager:
         expected = {"directions": (("selling_points", "directions", "video_links"), ("requests",)),
             "creation": (("scripts", "materials", "theme_links", "plans"), ("requests",)),
             "production": (("voices", "readings", "jobs"), ("defaults", "requests"))}
+        if (stage / "runtime").exists():
+            for incoming in (stage / "runtime").iterdir():
+                live = self.runtime_root / incoming.name
+                # A short (8.3) alias such as REMOTE~1 would otherwise replace a local-only folder.
+                if live.exists() and live.resolve().name.casefold() in RUNTIME_EXCLUDED | RUNTIME_PRIVATE:
+                    raise BackupError("备份清单包含不允许导入的目录。")
         for tree in (stage / "skill", stage / "runtime"):
             if not tree.exists():
                 tree.mkdir()
@@ -723,7 +828,7 @@ class BackupManager:
     def _apply(self, stage, rollback):
         moves = []
         try:
-            runtime_new = [path.name for path in (stage / "runtime").iterdir()]
+            runtime_new = [path.name for path in (stage / "runtime").iterdir() if path.name.casefold() not in RUNTIME_PRIVATE]
             selections = [(self.skill_root / relative, stage / "skill" / relative, rollback / "skill" / relative) for relative in SKILL_PATHS]
             if self.app_root:
                 selections.extend((self.app_root / relative, stage / "app" / relative, rollback / "app" / relative) for relative in APP_PATHS)
@@ -768,7 +873,7 @@ class BackupManager:
                 manifest = self._extract_verified(path, stage)
                 self._remap(stage, manifest)
                 self._validate(stage)
-                recovery = self._create_archive(recovery_directory, "pre-import", recovery_preferences)
+                recovery = self._create_archive(recovery_directory, "pre-import", recovery_preferences, business_locked=True)
                 self._apply(stage, temporary / "rollback")
                 completed = True
                 return {**self._summary(manifest, path), "recovery_path": recovery["path"],

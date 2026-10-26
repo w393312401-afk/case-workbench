@@ -15,7 +15,8 @@ import tempfile
 import threading
 import time
 
-from data_backup import BackupManager
+from data_backup import BackupError, BackupManager
+from task_activity import record_activity, safe_error
 
 
 DEFAULT_SETTINGS = {"enabled": False, "directory": "", "interval_days": 1, "time": "02:00", "keep": 14}
@@ -121,10 +122,16 @@ class DataTransfer:
         self.lock = threading.RLock()
         self.operation = threading.Lock()
         self.busy = False
+        self.operation_kind = None
+        self.started_at = None
+        self.progress = ""
+        self.manager.on_progress = self._progress
         self._imports = {}
         self._downloads = {}
         self._stop = threading.Event()
         self._thread = None
+        self.activity = None  # The server's task records; a stand-alone backup worker has none.
+        self._run, self._run_at = None, 0.0
         self.config = self._load()
         sources = self.config.get("extra_sources", []) if extra_sources is None or self.config.get("sources_restored") else extra_sources
         self.manager.extra_sources = tuple(Path(path).expanduser().resolve() for path in sources)
@@ -188,7 +195,8 @@ class DataTransfer:
                 error = worker_error.read_text(encoding="utf-8")[:2000].strip() or error
             return {"settings": dict(self.config["settings"]), "last_backup": history[-1] if history else None,
                     "last_error": error, "next_backup": self._next(datetime.now()),
-                    "scheduler": self.config.get("scheduler", {}), "backups": list(reversed(history[-50:])), "busy": self.busy}
+                    "scheduler": self.config.get("scheduler", {}), "backups": list(reversed(history[-50:])), "busy": self.busy,
+                    "operation": self.operation_kind, "started_at": self.started_at, "progress": self.progress}
 
     def _directory(self, value):
         if not isinstance(value, str) or not value.strip() or len(value) > 2048:
@@ -251,7 +259,32 @@ class DataTransfer:
             self._save()
         return {"ok": True}
 
-    def _begin(self):
+    def _progress(self, message):
+        with self.lock:
+            self.progress = str(message)[:500]
+        # Packing reports every file; the task log keeps one of those lines every few seconds.
+        if self._run and (not str(message).startswith("正在打包") or time.monotonic() - self._run_at >= 3):
+            self._run_at = time.monotonic()
+            record_activity(self, self._run, message=str(message)[:500])
+
+    def _start_run(self, title):
+        """Backups and exports appear in the task panel. A restore replaces the task records themselves, so it does not."""
+        token = secrets.token_hex(6)
+        self._run, self._run_at = f"data:{token}", 0.0
+        record_activity(self, self._run, kind="data", owner_id="data", source_id=token, title=title,
+                        status="running", phase=title, message=self.progress)
+
+    def _finish_run(self, error=None, message=""):
+        if self._run:
+            if error is not None:
+                message = str(error)[:300] if isinstance(error, (TransferError, BackupError)) else safe_error(error)
+            record_activity(self, self._run, status="failed" if error is not None else "completed",
+                            phase="未完成" if error is not None else "已完成", message=message)
+        self._run = None
+
+    def _begin(self, kind):
+        if kind not in {"backup", "export", "inspect", "restore"}:
+            raise TransferError("数据操作类型无效。")
         if self._stop.is_set():
             raise TransferError("工作台正在关闭，请重新打开后再操作总数据。", 409)
         if not self.operation.acquire(blocking=False):
@@ -261,24 +294,36 @@ class DataTransfer:
             raise TransferError("工作台正在关闭，请重新打开后再操作总数据。", 409)
         with self.lock:
             self.busy = True
+            self.operation_kind = kind
+            self.started_at = datetime.now().isoformat(timespec="seconds")
+            self.progress = {"export": "正在准备总数据导出", "backup": "正在准备总数据备份",
+                             "inspect": "正在读取备份包", "restore": "正在准备替换总数据"}[kind]
         try:
-            self._gate = self.maintenance()
-            self._gate.__enter__()
-        except Exception:
+            if kind != "inspect":
+                self._gate = self.maintenance()
+                self._gate.__enter__()
+        except BaseException:
             self._gate = None
             self._end()
             raise
 
     def _end(self):
-        if self._gate is not None:
-            self._gate.__exit__(None, None, None)
-            self._gate = None
-        with self.lock:
-            self.busy = False
-        self.operation.release()
+        gate, self._gate = self._gate, None
+        try:
+            if gate is not None:
+                gate.__exit__(None, None, None)
+        finally:
+            with self.lock:
+                self.busy = False
+                self.operation_kind = None
+                self.started_at = None
+                self.progress = ""
+                self._run = None
+            self.operation.release()
 
     def backup(self, *, automatic=False):
-        self._begin()
+        self._begin("backup")
+        self._start_run("自动备份" if automatic else "总数据备份")
         try:
             with self.lock:
                 settings = dict(self.config["settings"])
@@ -295,14 +340,16 @@ class DataTransfer:
                     self.config["last_auto_slot"] = automatic_slot.isoformat()
                 self._save()
                 self._prune(destination, settings["keep"])
-            return {"backup": archive, "status": self.status()}
+            self._finish_run(message=f"已保存 {archive.get('name', '备份文件')}（{archive.get('bytes', 0) / 1048576:.1f} MB）")
         except Exception as exc:
             with self.lock:
                 self.config["last_error"] = str(exc)
                 self._save()
+            self._finish_run(exc)
             raise
         finally:
             self._end()
+        return {"backup": archive, "status": self.status()}
 
     def _prune(self, directory, keep):
         if not keep:
@@ -326,14 +373,19 @@ class DataTransfer:
         if set(body) != {"preferences"}:
             raise TransferError("导出设置格式无效。")
         value = preferences(body["preferences"])
-        self._begin()
+        self._begin("export")
+        self._start_run("总数据导出")
         try:
             self.ensure_idle()
             self._cleanup_temporary()
             archive = self.manager.create_archive(self.root / "exports", kind="export", preferences=value)
             key = secrets.token_urlsafe(24)
             self._downloads[key] = (Path(archive["path"]), time.monotonic())
+            self._finish_run(message=f"导出文件已生成（{archive.get('bytes', 0) / 1048576:.1f} MB），24 小时内可在设置中下载")
             return {"archive": archive, "download_url": "/api/data/download/" + key}
+        except Exception as exc:
+            self._finish_run(exc)
+            raise
         finally:
             self._end()
 
@@ -344,7 +396,7 @@ class DataTransfer:
         return item[0]
 
     def inspect_upload(self, stream, length):
-        self._begin()
+        self._begin("inspect")
         path = None
         try:
             self._cleanup_temporary()
@@ -377,7 +429,7 @@ class DataTransfer:
         item = self._imports.get(body["import_id"])
         if not item or time.monotonic() - item[1] > 24 * 3600:
             raise TransferError("导入预览已过期，请重新选择备份包。")
-        self._begin()
+        self._begin("restore")
         try:
             self.ensure_idle()
             result = self.manager.restore_archive(item[0], self.root / "recovery", recovery_preferences=self.config.get("preferences", {}))

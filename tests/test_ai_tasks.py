@@ -15,8 +15,7 @@ from uuid import uuid4
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-CONFIG = json.loads((APP / "config.json").read_text(encoding="utf-8"))
-sys.path.insert(0, str(Path(CONFIG["skill_root"]) / "scripts"))
+sys.path.insert(0, str(APP / "scripts"))
 import ai_tasks
 from ai_tasks import AITaskError, AITaskManager
 from case_store import CaseStore
@@ -95,10 +94,10 @@ class TaskTests(unittest.TestCase):
             manager.shutdown()
         self.temp.cleanup()
 
-    def new_manager(self, bridge=None):
+    def new_manager(self, bridge=None, **options):
         bridge = bridge or FakeBridge()
         self.bridges.append(bridge)
-        manager = AITaskManager(self.store, self.runtime, self.lock, bridge=bridge)
+        manager = AITaskManager(self.store, self.runtime, self.lock, bridge=bridge, **options)
         self.managers.append(manager)
         return manager
 
@@ -142,6 +141,17 @@ class TaskTests(unittest.TestCase):
         self.assertNotIn("snapshot", result)
         self.assertNotIn("rounds", self.manager.list_tasks()[0])
         self.assertEqual(self.bridges[0].calls[0]["cwd"], str(self.skill))
+
+    def test_compact_list_keeps_explicit_topic_beyond_the_instruction_preview(self):
+        instruction = "请按交付格式整理，保留当前稿。\n" * 20 + "制作单：202H-S1 别再靠手腕猜刃角\n保持本轮主题。"
+        task = self.wait(self.manager.create(self.identifier, self.body(instruction=instruction))["task_id"])
+        before = self.path(task["task_id"]).read_bytes()
+        compact = self.manager.list_tasks()[0]
+        self.assertNotIn("rounds", compact)
+        self.assertLessEqual(len(compact["instruction"]), 160)
+        self.assertEqual(compact["context"]["writing_topic"], "202H-S1 别再靠手腕猜刃角")
+        self.assertEqual(compact["created_at"], task["created_at"])
+        self.assertEqual(self.path(task["task_id"]).read_bytes(), before)
 
     def test_all_actions_use_their_own_analysis_requirements(self):
         install_review_fixture(self.skill)
@@ -219,22 +229,16 @@ class TaskTests(unittest.TestCase):
             self.assertIn("snapshot.current.native_reference.entries[0].analysis", projection["omitted_fields"])
             self.assertIn("本次提示不是完整快照", prompt)
             self.assertIn("当前用户要求：\n" + instruction, prompt)
-            self.assertIn("用户明确的新切口、语言、载体和其他要求优先", prompt)
-            self.assertIn("以原稿正文为底稿作变体编辑", prompt)
-            self.assertIn("不把全文改成产品资料摘要", prompt)
-            self.assertIn("不用于统一降低语气", prompt)
-            self.assertIn("不用材质、驱动方式等规格术语整体替换原话", prompt)
-            self.assertIn("不把某条限制扩写成卖点、开头或变体主线", prompt)
-            self.assertIn("不心算", prompt)
+            # The original-reference and original-form rules live in the writing skill; the prompt points to them.
+            self.assertIn("按已加载写作参考“先理解这条内容怎样说话”使用", prompt)
+            self.assertIn("按写作参考“先理解这条内容怎样说话”中的“原稿形式是写稿底线”起稿", prompt)
+            self.assertNotIn("不把全文改成产品资料摘要", prompt)
         self.assertEqual(len(self.bridges[0].calls), 2)
         draft_prompt, review_prompt = (call["prompt"] for call in self.bridges[0].calls)
-        self.assertIn("先比较原文参照与初稿", review_prompt)
-        self.assertIn("已经自然且符合用户要求的句子原样保留", review_prompt)
+        self.assertIn("按已加载写作参考“成稿后的独立复核”逐条执行", review_prompt)
         self.assertNotIn("再直接修订初稿", review_prompt)
         # The delivering review keeps the writing rules and never loads the diagnostic review guide.
-        self.assertIn("评价力度不得低于初稿", review_prompt)
         self.assertIn("不是审稿诊断", review_prompt)
-        self.assertIn("保留画面留白和指代悬念", review_prompt)
         self.assertNotIn("审查判断与常见误判", review_prompt)
         self.assertNotIn("不强加新稿默认时长、整套发布模板或自动重写", review_prompt)
         self.assertNotIn("不是审稿诊断", draft_prompt)
@@ -492,7 +496,7 @@ class TaskTests(unittest.TestCase):
         for prompt in calls:
             self.assertNotIn("NATIVE_SCORING_FIXTURE_V1", prompt)
             self.assertNotIn("简明原生度评分按", prompt)
-        self.assertIn("原生度评分或相对初稿的修改清单", calls[1])
+        self.assertIn("按已加载写作参考“成稿后的独立复核”逐条执行", calls[1])
         self.manager.shutdown()
         restarted = self.new_manager()
         reloaded = restarted.get(done["task_id"])["rounds"][-1]
@@ -690,6 +694,54 @@ class TaskTests(unittest.TestCase):
         self.assertFalse(any(r.get("error") for r in resources))
         self.assertEqual({Path(r["path"]).name for r in resources}, {"SKILL.md", "202H.md"})
 
+    def test_grading_table_follows_each_matched_sku(self):
+        install_review_fixture(self.skill)
+        product_root = self.skill / "references" / "products"
+        for name in ("198H.md", "202H.md", "191H.md", "202H_universal_stone_holder.md"):
+            (product_root / name).write_text("# 产品资料\n", encoding="utf-8")
+        for sku in ("198H", "202H"):
+            (product_root / f"{sku}-selling-point-grading.md").write_text(f"# {sku} 卖点分级\n", encoding="utf-8")
+        (product_root / "source-map.json").write_text(json.dumps({"sku_to_reference": {
+            "198H": "198H.md", "202H": "202H.md", "191H": "191H.md", "202H-拓展配件": "202H_universal_stone_holder.md",
+        }}), encoding="utf-8")
+        refs = self.manager._resources({"product": "SHARPAL 198h Electric Knife Sharpener"})
+        grading = next(r for r in refs if Path(r["path"]).name == "198H-selling-point-grading.md")
+        self.assertEqual(grading["label"], "产品资料 · 198H 卖点分级表")
+        self.assertFalse(any("202H" in Path(r["path"]).name for r in refs))
+        both = self.manager._resources({"product": "198H + 202H，再加 198H"})
+        names = [Path(r["path"]).name for r in both]
+        self.assertEqual(names.count("198H-selling-point-grading.md"), 1)
+        self.assertIn("202H-selling-point-grading.md", names)
+        for product in ("SHARPAL 191H", "202H-拓展配件"):
+            with self.subTest(product=product):
+                refs = self.manager._resources({"product": product})
+                self.assertFalse(any(Path(r["path"]).name.endswith("-selling-point-grading.md") for r in refs))
+                self.assertFalse(any(r.get("error") for r in refs))
+
+    def test_editing_marker_list_is_a_trusted_resource_for_its_sku(self):
+        install_review_fixture(self.skill)
+        product_root = self.skill / "references" / "products"
+        (product_root / "202H.md").write_text("# 202H 产品资料\n", encoding="utf-8")
+        (product_root / "198H.md").write_text("# 198H 产品资料\n", encoding="utf-8")
+        (product_root / "source-map.json").write_text(json.dumps({"sku_to_reference": {"202H": "202H.md", "198H": "198H.md"}}),
+                                                      encoding="utf-8")
+        labels = self.skill.parent / "davinci-product-video-editing" / "references" / "sharpal-202h.md"
+        labels.parent.mkdir(parents=True, exist_ok=True)
+        labels.write_text("# 202H 标记\n开箱、组装、220\n", encoding="utf-8")
+        refs = self.manager._resources({"product": "SHARPAL 202H"})
+        marker = next(r for r in refs if Path(r["path"]) == labels)
+        self.assertEqual(marker["label"], "剪辑素材标记词 · 202H")
+        self.assertEqual(marker["sha256"], hashlib.sha256(labels.read_bytes()).hexdigest())
+        # The writing run cannot open the editing skill's folder, so the list's text travels in the prompt.
+        attached = ai_tasks._marker_lists(refs)
+        self.assertIn("剪辑素材标记词 · 202H", attached)
+        self.assertIn("开箱、组装、220", attached)
+        self.assertEqual(ai_tasks._marker_lists([{**marker, "exists": False}]), "")
+        # A SKU without its own marker list gets none, and the missing file is not reported as an error.
+        refs = self.manager._resources({"product": "SHARPAL 198H"})
+        self.assertFalse(any(Path(r["path"]).name.startswith("sharpal-") for r in refs))
+        self.assertFalse(any(r.get("error") for r in refs))
+
     def test_restart_during_review_preserves_draft_and_marks_review_interrupted(self):
         body = {**self.body("variants"), "skill_selection": "none"}
         done = self.wait(self.manager.create(self.identifier, body)["task_id"])
@@ -758,23 +810,40 @@ class TaskTests(unittest.TestCase):
             self.manager.continue_task(task["task_id"], {"request_id": uuid4().hex, "task_revision": 1, "instruction": "旧版本"})
         self.assertEqual(len(self.manager.get(task["task_id"])["rounds"]), 1)
 
-    def test_worker_is_serial_and_cancelled_queued_task_never_reaches_bridge(self):
+    def test_rounds_run_side_by_side(self):
         bridge = self.bridges[0]
         bridge.gate.clear()
         first = self.manager.create(self.identifier, self.body())
-        self.assertTrue(bridge.started.wait(2))
         second = self.manager.create(self.identifier, self.body())
+        deadline = time.monotonic() + 3
+        while bridge.inflight < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(bridge.inflight, 2)
+        status = self.manager.status()
+        self.assertEqual((status["running"], status["queued"]), (2, 0))
+        bridge.gate.set()
+        self.assertEqual(self.wait(first["task_id"])["status"], "completed")
+        self.assertEqual(self.wait(second["task_id"])["status"], "completed")
+        self.assertEqual(bridge.peak, 2)
+        self.assertEqual(self.manager.status()["running"], 0)
+
+    def test_parallel_limit_queues_and_cancelled_queued_round_never_reaches_bridge(self):
+        bridge = FakeBridge(blocked=True)
+        manager = self.new_manager(bridge, max_parallel=1)
+        first = manager.create(self.identifier, self.body())
+        self.assertTrue(bridge.started.wait(2))
+        second = manager.create(self.identifier, self.body())
         self.assertEqual(second["status"], "queued")
-        self.manager.cancel(second["task_id"])
-        third = self.manager.create(self.identifier, self.body())
-        self.assertEqual(self.manager.status()["queued"], 1)
+        manager.cancel(second["task_id"])
+        third = manager.create(self.identifier, self.body())
+        self.assertEqual(manager.status()["queued"], 1)
         self.assertEqual(len(bridge.calls), 1)
         bridge.gate.set()
-        self.wait(first["task_id"])
-        self.wait(third["task_id"])
+        self.wait(first["task_id"], manager)
+        self.wait(third["task_id"], manager)
         self.assertEqual(len(bridge.calls), 2)
         self.assertEqual(bridge.peak, 1)
-        self.assertEqual(self.manager.get(second["task_id"])["status"], "cancelled")
+        self.assertEqual(manager.get(second["task_id"])["status"], "cancelled")
 
     def test_cancel_keeps_case_busy_until_bridge_really_stops(self):
         bridge = self.bridges[0]
@@ -995,6 +1064,105 @@ class TaskTests(unittest.TestCase):
         ]})["deleted"], [second["task_id"]])
         self.assertEqual(self.manager.list_tasks(), [])
         self.assertEqual(self.records(), before)
+
+    def test_task_management_preserves_execution_text_and_case_with_durable_retry(self):
+        task = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        path = self.path(task["task_id"])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        before = self.records()
+        self.assertFalse(task["archived"])
+        self.assertEqual(task["management_state"], "pending_selection")
+        body = {"request_id": uuid4().hex, "items": [{"task_id": task["task_id"], "revision": task["revision"]}],
+                "archived": True, "management_state": "adopted"}
+        result = self.manager.manage_tasks(body)
+        self.assertEqual(result["failed"], [])
+        organised = result["updated"][0]
+        self.assertTrue(organised["archived"])
+        self.assertEqual(organised["management_state"], "adopted")
+        self.assertEqual(organised["status"], "completed")
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["rounds"], raw["rounds"])
+        self.assertEqual(persisted["snapshot"], raw["snapshot"])
+        self.assertEqual(persisted["progress"], raw["progress"])
+        self.assertEqual(self.records(), before)
+        self.assertEqual(self.manager.manage_tasks(body)["updated"][0]["revision"], organised["revision"])
+        restarted = self.new_manager()
+        self.assertEqual(restarted.manage_tasks(body)["updated"][0]["revision"], organised["revision"])
+        restored = restarted.manage_tasks({"request_id": uuid4().hex,
+                "items": [{"task_id": task["task_id"], "revision": organised["revision"]}], "archived": False})["updated"][0]
+        self.assertFalse(restored["archived"])
+        self.assertEqual(restored["management_state"], "adopted")
+        self.assertEqual(restored["rounds"], organised["rounds"])
+
+    def test_management_partial_success_rejects_stale_revisions_and_conflicting_request_ids(self):
+        first = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        second = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        body = {"request_id": uuid4().hex, "items": [
+            {"task_id": first["task_id"], "revision": first["revision"]},
+            {"task_id": second["task_id"], "revision": second["revision"] - 1}], "archived": True}
+        result = self.manager.manage_tasks(body)
+        self.assertEqual([item["task_id"] for item in result["updated"]], [first["task_id"]])
+        self.assertEqual(result["failed"][0]["status"], 409)
+        self.assertFalse(self.manager.get(second["task_id"])["archived"])
+        self.assertEqual(self.manager.manage_tasks(body), result)
+        with self.assertRaises(AITaskError) as error:
+            self.manager.manage_tasks({**body, "archived": False})
+        self.assertEqual(error.exception.status, 409)
+        with self.assertRaises(AITaskError) as error:
+            self.manager.continue_task(first["task_id"], {"request_id": body["request_id"],
+                        "task_revision": result["updated"][0]["revision"], "instruction": "继续"})
+        self.assertEqual(error.exception.status, 409)
+
+    def test_active_and_stopping_tasks_cannot_be_archived(self):
+        bridge = FakeBridge(blocked=True, ignore_cancel=True)
+        manager = self.new_manager(bridge)
+        task = manager.create(self.identifier, self.body())
+        self.assertTrue(bridge.started.wait(2))
+        current = manager.get(task["task_id"])
+        result = manager.manage_tasks({"request_id": uuid4().hex,
+                "items": [{"task_id": current["task_id"], "revision": current["revision"]}], "archived": True})
+        self.assertEqual(result["updated"], [])
+        self.assertEqual(result["failed"][0]["status"], 409)
+        stopping = manager.cancel(task["task_id"])
+        self.assertTrue(stopping["stopping"])
+        result = manager.manage_tasks({"request_id": uuid4().hex,
+                "items": [{"task_id": stopping["task_id"], "revision": stopping["revision"]}], "archived": True})
+        self.assertEqual(result["updated"], [])
+        self.assertIn("停止中", result["failed"][0]["error"])
+        bridge.gate.set()
+        self.wait(task["task_id"], manager)
+
+    def test_legacy_tasks_default_to_active_without_guessing_adoption(self):
+        task = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        path = self.path(task["task_id"])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw.pop("archived")
+        raw.pop("management_state")
+        path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        before = path.read_bytes()
+        loaded = self.manager.get(task["task_id"])
+        self.assertFalse(loaded["archived"])
+        self.assertEqual(loaded["management_state"], "pending_selection")
+        self.assertEqual(path.read_bytes(), before)
+        for patch in ({"archived": "yes"}, {"management_state": "completed"}, {"management_state": []}):
+            with self.assertRaises(AITaskError):
+                self.manager.manage_tasks({"request_id": uuid4().hex,
+                    "items": [{"task_id": task["task_id"], "revision": task["revision"]}], **patch})
+
+    def test_continuing_archived_task_reopens_it_and_marks_revision_without_losing_history(self):
+        task = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        archived = self.manager.manage_tasks({"request_id": uuid4().hex,
+            "items": [{"task_id": task["task_id"], "revision": task["revision"]}],
+            "archived": True, "management_state": "abandoned"})["updated"][0]
+        continued = self.manager.continue_task(task["task_id"], {"request_id": uuid4().hex,
+                "task_revision": archived["revision"], "instruction": "沿用第一轮，再核对一次。"})
+        self.assertFalse(continued["archived"])
+        self.assertEqual(continued["management_state"], "needs_revision")
+        self.assertEqual(continued["rounds"][0], task["rounds"][0])
+        done = self.wait(task["task_id"])
+        summary = self.manager.list_tasks()[0]
+        self.assertEqual(summary["latest_round_id"], done["rounds"][-1]["round_id"])
+        self.assertEqual(summary["latest_round_status"], "completed")
 
     def test_running_queued_and_stopping_tasks_cannot_be_deleted(self):
         bridge = self.bridges[0]

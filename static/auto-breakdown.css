@@ -1,0 +1,52 @@
+.auto-breakdown{font-size:var(--font-meta);color:var(--muted);line-height:1.7}
+.auto-breakdown-head strong{font-size:16px}
+.auto-breakdown-head{display:flex;justify-content:space-between;gap:8px;align-items:center;color:var(--ink)}
+.auto-breakdown-state{color:var(--accent-text)}
+.auto-breakdown.is-done .auto-breakdown-state{color:var(--success-ink)}
+.auto-breakdown.is-waiting .auto-breakdown-state{color:var(--warm-ink)}
+.auto-breakdown.is-failed{background:var(--surface-danger)}
+.auto-breakdown.is-failed .auto-breakdown-state{color:var(--danger-ink)}
+.auto-breakdown p{margin:6px 0 0;overflow-wrap:anywhere}
+.auto-breakdown small{display:block;margin-top:4px}
+.auto-breakdown-actions{margin-top:8px;display:flex;gap:8px}
+.case-insights h3{font-size:var(--font-meta);color:var(--ink);margin:10px 0 4px;font-weight:600}
+.case-insights ul{margin:4px 0 0;padding-left:16px}
+.case-insights li{margin:2px 0;overflow-wrap:anywhere}
+.case-insights li small{display:block;color:var(--muted-soft)}
+.case-insight-funnel{margin-top:6px;padding:8px 10px;border-radius:8px;background:var(--surface-alt);display:flex;flex-direction:column;gap:2px}
+.case-insight-funnel strong{color:var(--ink)}
+.case-insight-funnel.is-done{background:var(--surface-success)}
+.case-insight-funnel.is-traffic{background:var(--surface-tint)}
+.case-insight-funnel.is-failed{background:var(--surface-danger)}
+.case-insight-warn{color:var(--warm-ink)}
+.case-insight-muted{color:var(--muted-soft)}
+.case-insight-chips{display:flex;flex-wrap:wrap;gap:6px}
+.case-insight-chips span{background:var(--surface-alt);border-radius:5px;padding:2px 6px}
+.case-insight-tags{list-style:none;padding-left:0!important}
+.case-insight-tags li span{display:inline-block;min-width:64px;color:var(--muted-soft)}
+.perf-batch-collect{margin-left:auto}
+.auto-breakdown-run{margin-top:10px;display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+.auto-breakdown-run label{display:flex;flex-direction:column;gap:2px;min-width:0;flex:0 1 260px;margin:0}
+.auto-breakdown-run label span{color:var(--muted-soft)}
+.auto-breakdown-run select{width:100%;min-width:0}
+.auto-breakdown-run button{flex:0 0 auto}
+.auto-breakdown-live{margin-top:8px}
+.auto-breakdown-live pre{margin:4px 0 0;max-height:420px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--surface-alt);border-radius:8px;padding:8px 10px;font:inherit;color:var(--ink);line-height:1.6}
+/* 拆解概况：AI 拆解 + 拆解定位合成一张卡 */
+.breakdown-overview{padding:16px 20px}
+.breakdown-overview .auto-breakdown-head{justify-content:flex-start;flex-wrap:wrap;column-gap:10px;row-gap:2px}
+.breakdown-overview .auto-breakdown-head strong{font-size:15px}
+.breakdown-overview .auto-breakdown-state{font-weight:600}
+.breakdown-overview .auto-breakdown-meta{display:inline;margin:0 0 0 auto;color:var(--muted-soft)}
+.auto-breakdown-rerun{margin-top:6px}
+.auto-breakdown-rerun>summary{display:inline-flex;align-items:center;gap:4px;cursor:pointer;color:var(--accent-text);font-size:var(--font-meta);list-style:none}
+.auto-breakdown-rerun>summary::-webkit-details-marker{display:none}
+.auto-breakdown-rerun>summary::before{content:"";width:6px;height:6px;margin-right:3px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .15s}
+.auto-breakdown-rerun[open]>summary::before{transform:translateY(-2px) rotate(45deg)}
+.breakdown-overview .case-insights{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+.breakdown-overview .case-insights[hidden]{display:none}
+.breakdown-overview .case-insights .auto-breakdown-head strong{font-size:14px}
+.case-insight-empty{margin:0!important}
+.case-insight-empty strong{color:var(--ink);font-weight:600;margin-right:8px}
+
+.breakdown-overview{font-size:13px}.auto-breakdown-rerun>summary{cursor:pointer;font-size:12px;color:var(--muted-soft)}.case-insight-basis{font-size:12px;color:var(--muted-soft);margin:6px 0}.case-insight-basis summary{cursor:pointer}.case-insight-basis p{line-height:1.5;margin-top:6px}.case-insight-reasons{font-size:12px;line-height:1.5}.case-insight-comments small{display:inline;margin-left:6px}.auto-breakdown-meta{font-size:11px}.auto-breakdown-run{font-size:12px}

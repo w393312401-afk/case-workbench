@@ -195,6 +195,7 @@ function finishDelete(deletion, message, warning = false) {
   state.view = navigationViewForContent("archived");
   state.query = "";
   state.product = "";
+  state.libraryProduct = "";
   state.archiveCategory = "all";
   state.sourceType = "all";
   state.detailTab = "current";

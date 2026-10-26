@@ -1,5 +1,7 @@
 """Carousel search, image import and picking through the real UI in an isolated library."""
 import json
+from pathlib import Path
+import time
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -66,17 +68,29 @@ class CarouselBrowserTests(unittest.TestCase):
             "script": {"product": "202H", "direction_id": "202H-S2", "title": "送礼 · 图文",
                        "text": carousel_text(parse_carousels(CANDIDATE)[0]), "confirmed": True}}, source)["script"]
         self.carousel = self.app.create_carousel({"request_id": uuid4().hex,
-            "revision": self.app.production.public()["revision"], "carousel": {"script_id": script["id"]}})["carousel"]
+            "revision": self.app.production.public()["revision"], "carousel": {"script_id": script["id"]},
+            "requirements": {"mode": "photo_preserving"}})["carousel"]
 
-    def test_search_import_and_pick_each_slide_without_changing_script_or_source(self):
+    def test_historical_search_results_import_and_pick_each_slide_without_changing_script_or_source(self):
         source_bytes = self.source.read_bytes()
         script = self.app.creation.get_script(self.carousel["script_id"])
+        # The old AI still-export form is retired. Seed its completed historical
+        # result with fake clients, then exercise the supported history/pick UI.
+        skill = Path(self.app.edit_skill_dir).parent / "tiktok-photo-commerce"
+        (skill / "references").mkdir(parents=True, exist_ok=True)
+        (skill / "SKILL.md").write_text("---\nname: tiktok-photo-commerce\n---\n# 图文证据边界", encoding="utf-8")
+        self.app.start_still_search(self.carousel["id"], {
+            "request_id": uuid4().hex, "materials": ["蓝点折刀成品素材"], "model": "codex-default"})
+        deadline = time.monotonic() + 10
+        while self.app.edit_running() and time.monotonic() < deadline:
+            time.sleep(.02)
+        history = self.app.production.carousel(self.carousel["id"])["searches"]
+        self.assertEqual(history[-1]["status"], "completed", history[-1])
         page = self.open_page(f"#production/{self.carousel['id']}")
-        page.locator('#still-form input[name="material"]').first.wait_for()
-        page.locator('#still-form input[name="material"]').first.check()
-        page.locator('#still-form button[type="submit"]').click()
-        page.locator('#search-runs .script-status').get_by_text("已完成", exact=True).wait_for(state="attached", timeout=15000)
+        self.assertEqual(page.locator("#still-form").count(), 0)
         page.locator('[data-step="pick"]').click()
+        page.locator(".still-history > summary").click()
+        page.locator('#search-runs .script-status').get_by_text("已完成", exact=True).wait_for(state="attached", timeout=15000)
         page.locator('#search-runs .edit-gaps').get_by_text("第 3 张：收口要看到一排刀", exact=True).wait_for()
         page.locator('[data-step="pick"]').click()
         page.locator('[data-pick="1"]').wait_for(timeout=15000)
@@ -107,20 +121,38 @@ class CarouselBrowserTests(unittest.TestCase):
         page.locator('[data-pick="3"]').wait_for()
         self.assertIsNone(self.app.production.carousel(self.carousel["id"])["slides"][2]["base"])
 
-    def test_archived_carousel_can_be_found_and_restored_without_any_video_jobs(self):
+    def test_archived_carousel_lives_in_content_history_and_direct_detail_restores_it(self):
         page = self.open_page(f"#production/{self.carousel['id']}")
         page.route("**/api/production/eleven", lambda route: route.fulfill(status=200,
             content_type="application/json", body=json.dumps({"ok": True})))
+        page.locator('.production-more-actions > summary').click()
         page.locator('#carousel-archive').click()
-        page.get_by_role("button", name="恢复制作单", exact=True).wait_for()
+        page.locator('#carousel-archive', has_text="恢复制作单").wait_for(state="attached")
         page.locator('#navigate-up').click()
-        page.locator('#production-archived').wait_for()
-        self.assertEqual(page.locator('.production-card').count(), 0)
-        page.locator('#production-archived').check()
-        page.locator('.production-card').get_by_text("送礼 · 图文", exact=True).click()
+        page.locator('#content-flow-list').wait_for()
+        page.locator('#content-flow-status').wait_for(state='hidden')
+        self.assertEqual(page.locator(f'[data-content-id="carousel:{self.carousel["id"]}"]').count(), 0)
+        page.locator('[data-flow-view="all"]').click()
+        archived = page.locator(f'[data-content-id="carousel:{self.carousel["id"]}"]')
+        archived.get_by_text('已归档', exact=True).wait_for()
+        self.assertEqual(self.app.production.public()['jobs'], [])
+        self.assertTrue(self.app.production.carousel(self.carousel['id'])['archived'])
+
+        # Archived records keep their details and history, and restoration returns the same content row.
+        page.evaluate("id => { location.hash = '#production/' + id; }", self.carousel["id"])
+        page.locator('#carousel-archive', has_text="恢复制作单").wait_for(state="attached")
+        page.locator('.production-more-actions > summary').click()
         page.get_by_role("button", name="恢复制作单", exact=True).click()
-        page.get_by_role("button", name="归档", exact=True).wait_for()
+        page.locator('#carousel-archive', has_text="归档制作单").wait_for(state="attached")
         self.assertFalse(self.app.production.carousel(self.carousel["id"])["archived"])
+        self.assertEqual([item["id"] for item in self.app.production.public()["carousels"]], [self.carousel["id"]])
+        page.locator('#navigate-up').click()
+        page.locator('#content-flow-list').wait_for()
+        restored = page.locator(f'[data-content-id="carousel:{self.carousel["id"]}"]')
+        restored.wait_for()
+        self.assertNotIn('已归档', restored.inner_text())
+        self.assertEqual(page.locator('#production-queue, .scripts-tabs').count(), 0)
+
 
 
 if __name__ == "__main__":

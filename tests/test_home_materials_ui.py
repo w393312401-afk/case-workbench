@@ -23,22 +23,24 @@ class HomeMaterialUITests(unittest.TestCase):
         self.assertEqual(page.locator('.home-tabs [role=tab]').count(), 4)
         self.assertEqual(page.locator('.home-kpi, #home-weekly-section, #home-page [data-material-open]').count(), 0)
         self.assertIn('完整系统价值', page.locator('.home-case-list').inner_text())
-        page.locator('[data-home-tab=due]').focus()
+        self.assertEqual(page.locator('[data-home-tab]').first.get_attribute('data-home-tab'), 'tasks')
+        page.locator('[data-home-tab=tasks]').focus()
         page.keyboard.press('ArrowRight')
-        self.assertEqual(page.locator('[data-home-tab=tasks]').get_attribute('aria-selected'), 'true')
-        self.assertTrue(page.locator('#home-tasks-title-panel').is_visible())
+        self.assertEqual(page.locator('[data-home-tab=due]').get_attribute('aria-selected'), 'true')
+        self.assertTrue(page.locator('#home-due-title-panel').is_visible())
         page.keyboard.press('End')
         self.assertEqual(page.locator('[data-home-tab=cases]').get_attribute('aria-selected'), 'true')
         page.keyboard.press('Home')
-        self.assertEqual(page.locator('[data-home-tab=due]').get_attribute('aria-selected'), 'true')
+        self.assertEqual(page.locator('[data-home-tab=tasks]').get_attribute('aria-selected'), 'true')
         page.set_viewport_size({'width':390,'height':844})
-        for key in ('due', 'tasks', 'plans', 'cases'):
+        for key in ('tasks', 'due', 'plans', 'cases'):
             tab = page.locator(f'[data-home-tab={key}]')
             self.assertTrue(tab.is_visible())
             self.assertGreaterEqual(tab.bounding_box()['height'], 44)
             tab.click()
             self.assertEqual(tab.get_attribute('aria-selected'), 'true')
         self.assertFalse(page.evaluate('document.documentElement.scrollWidth > document.documentElement.clientWidth'))
+        self.server.app.product_catalog.change("add", "129N")
         page.evaluate("WorkbenchShell.registerProducts(['129N'])")
         page.locator('#global-product').select_option('129N')
         page.locator('.home-product').get_by_text('129N', exact=True).wait_for()
@@ -50,6 +52,9 @@ class HomeMaterialUITests(unittest.TestCase):
 
     def test_home_failed_work_read_can_retry_without_loading_trend_data(self):
         page = self.open_page(route='#/202H/home', ready='[data-home-tab]')
+        # The frame now precedes the reads. Inject the next-read failure only
+        # after the initial creation response has left the shared read pool.
+        page.wait_for_function("() => document.querySelector('[data-home-tab=plans] .home-tab-count').textContent === '0'")
         trend_reads=[]
         page.on('request',lambda request: trend_reads.append(request.url) if '/api/performance/summary' in request.url or '/api/performance/analytics' in request.url else None)
         page.route('**/api/creation?*',lambda route: route.fulfill(status=503,content_type='application/json',body=json.dumps({'error':'temporarily unavailable'})))
@@ -77,6 +82,7 @@ class HomeMaterialUITests(unittest.TestCase):
         basket=page.locator('#material-basket-dialog')
         basket.get_by_text('That’s a lot of wobble',exact=True).wait_for()
         basket.locator('[data-material-close]').click()
+        self.server.app.product_catalog.change("add", "129N")
         page.evaluate("WorkbenchShell.registerProducts(['129N'])")
         page.locator('#global-product').select_option('129N')
         basket_entry.click()
@@ -263,6 +269,7 @@ class HomeMaterialUITests(unittest.TestCase):
             self.assertEqual(status,200,result)
             saved.append(result['plan'])
         page=self.open_page(route='#/202H/home',ready='#home-plans-title')
+        page.locator('[data-home-tab=plans]').click()
         self.assertEqual(page.locator('[data-home-plan-write]').count(),1)
         page.evaluate('CaseAI.startFromDirection = async value => { window.chosenPlan = value; return true; }')
         page.locator('[data-home-plan-write]').click()
@@ -419,7 +426,7 @@ class HomeMaterialUITests(unittest.TestCase):
         basket=page.locator('#material-basket-dialog')
         basket.get_by_role('heading',name='还没有素材').wait_for()
         self.assertEqual(basket.locator('.material-empty-links a').count(),3)
-        basket.get_by_role('link',name='视频数据 · 摘录钩子').click()
+        basket.get_by_role('link',name='带货数据 · 摘录钩子').click()
         basket.wait_for(state='hidden')
         page.locator('.perf-tabs').wait_for()
 
@@ -428,7 +435,10 @@ class HomeMaterialUITests(unittest.TestCase):
         current['native_reference']={'language':'en','market':'US','duration_sec':12,'scene':'现场演示','speaker':'演示者','audience':'磨刀用户',
             'entries':[{'id':'phrase-1','channel':'speech','original':'Keep it right there.','meaning_zh':'保持在那里。','function':'动作提示','context':'当前演示','analysis':'短句','adaptation':'借用节奏','boundary':'不复制亲历','start_sec':1,'end_sec':3}]}
         self.store.append(self.identifier,{'kind':'editorial','text':'记录表达','current':current})
-        page=self.open_page(route=f'#case/{self.identifier}/script',ready='[data-native-material]')
+        # Expressions are browsed and excerpted in their dedicated library view.
+        page=self.open_page(route='#/202H/library?view=native',ready='#case-search')
+        page.locator('[data-native-mode=entries]').click()
+        page.locator('[data-native-material]').first.wait_for()
         button=page.locator('[data-native-material]').first
         self.assertEqual(button.inner_text(),'加入摘录篮')
         button.click()

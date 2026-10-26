@@ -69,11 +69,11 @@ class AIActivityTests(unittest.TestCase):
         def record(run_id, **fields):
             if fields.get("status") == "completed":
                 task = self.manager._read(fields["owner_id"])
-                observed.append((task["status"], bool(task["rounds"][-1]["output"]), self.manager._executing))
+                observed.append((task["status"], bool(task["rounds"][-1]["output"]), fields["owner_id"] in self.manager._executing))
             return original(run_id, **fields)
         with patch.object(self.activity, "record", side_effect=record):
             task = self.wait(self.manager.create(self.identifier, self.body("variants", "SECRET_INSTRUCTION"))["task_id"])
-        self.assertEqual(observed, [("completed", True, None)])
+        self.assertEqual(observed, [("completed", True, False)])
         run = self.activity.feed()["items"][0]
         logs = self.activity.logs(run["run_id"])["logs"]
         self.assertTrue({"queued", "draft", "review", "finished"}.issubset({row["phase"] for row in logs}))

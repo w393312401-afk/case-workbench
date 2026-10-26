@@ -35,7 +35,7 @@ class SidebarBrowserTests(unittest.TestCase):
         page.on("pageerror", lambda error: errors.append(str(error)))
         self.addCleanup(lambda: self.assertEqual(errors, [], "Browser JavaScript errors"))
         page.goto(self.base + "/" + route)
-        page.locator("#connection-text").get_by_text("已连接本地案例库").wait_for(state="attached")
+        page.locator("#connection-text").get_by_text("案例库同步").wait_for(state="attached")
         page.locator("#sidebar-toggle").wait_for(state="attached")
         return page
 
@@ -89,10 +89,11 @@ class SidebarBrowserTests(unittest.TestCase):
         page.locator("#case-search").wait_for()
         self.wait_collapsed(page, False)
         self.assertTrue(page.locator(".topbar #sidebar-toggle").is_visible())
+        self.assertEqual(page.locator("#sidebar-toggle:visible, #sidebar-menu:visible").count(), 1)
         self.assertTrue(page.locator("#workbench-sidebar").is_visible())
         self.assertTrue(page.locator("#sidebar-rail").is_hidden())
         self.assertEqual(page.locator(".workflow-nav .nav-item").all_inner_texts(), [
-            "工作概览", "用户声音", "卖点与方向", "内容创作", "视频数据", "案例库",
+            "工作概览", "用户声音", "卖点与方向", "内容创作", "带货数据", "案例库",
         ])
         workflow = page.locator(".workflow-nav").bounding_box()
         tools = page.locator(".sidebar-tools").bounding_box()
@@ -103,6 +104,9 @@ class SidebarBrowserTests(unittest.TestCase):
         self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "collapsed")
         self.assertTrue(page.locator("#sidebar-rail").is_visible())
         self.assertTrue(page.locator("#workbench-sidebar").is_hidden())
+        self.assertTrue(page.locator("#sidebar-toggle").is_hidden())
+        self.assertEqual(page.locator("#sidebar-toggle:visible, #sidebar-menu:visible").count(), 1)
+        self.assertEqual(page.evaluate("document.activeElement.id"), "sidebar-menu")
         rail_workflow = page.locator("#sidebar-rail nav").bounding_box()
         rail_tools = page.locator(".sidebar-rail-tools").bounding_box()
         self.assertGreater(rail_tools["y"], rail_workflow["y"] + rail_workflow["height"] + 20)
@@ -113,9 +117,12 @@ class SidebarBrowserTests(unittest.TestCase):
         self.rail_button(page, "library-nav").hover()
         self.wait_peek(page)
         self.assertEqual(page.locator("#sidebar-pin").inner_text().strip(), "固定")
+        self.assertEqual(page.locator("#sidebar-pin svg").count(), 0)
+        self.assertEqual(page.locator("#sidebar-toggle:visible, #sidebar-menu:visible").count(), 1)
         page.locator("#sidebar-pin").click()
         self.wait_collapsed(page, False)
         self.wait_peek(page, False)
+        self.assertEqual(page.locator("#sidebar-toggle:visible, #sidebar-menu:visible").count(), 1)
         self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "expanded")
         page.reload()
         page.locator("#case-search").wait_for()
@@ -129,13 +136,72 @@ class SidebarBrowserTests(unittest.TestCase):
         self.wait_collapsed(page)
         self.assertTrue(page.locator("#sidebar-rail").is_visible())
         self.assert_no_overflow(page)
-        page.locator("#sidebar-toggle").click()
+        self.rail_button(page, "library-nav").hover()
+        self.wait_peek(page)
+        page.locator("#sidebar-pin").click()
         self.wait_collapsed(page, False)
         page.reload()
         page.locator("#case-search").wait_for()
         self.wait_collapsed(page, False)
         self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "expanded")
         self.assert_no_overflow(page)
+
+    def test_hover_opens_from_rail_padding_row_gaps_and_blank_space(self):
+        page = self.open_page(preference="collapsed")
+        page.locator("#case-search").wait_for()
+        before_hash = page.evaluate("location.hash")
+        before_main = page.locator("main").bounding_box()
+        rail = page.locator("#sidebar-rail").bounding_box()
+        home = self.rail_button(page, "home-nav").bounding_box()
+        reviews = self.rail_button(page, "reviews-nav").bounding_box()
+        workflow = page.locator("#sidebar-rail nav").bounding_box()
+        tools = page.locator(".sidebar-rail-tools").bounding_box()
+        points = {
+            "left_padding": (rail["x"] + 2, reviews["y"] + reviews["height"] / 2),
+            "right_padding": (rail["x"] + rail["width"] - 2, reviews["y"] + reviews["height"] / 2),
+            "row_gap": (home["x"] + home["width"] / 2, (home["y"] + home["height"] + reviews["y"]) / 2),
+            "blank_space": (rail["x"] + rail["width"] / 2, (workflow["y"] + workflow["height"] + tools["y"]) / 2),
+        }
+        for name, point in points.items():
+            with self.subTest(hover_region=name):
+                page.mouse.move(1200, 100)
+                self.wait_peek(page, False)
+                page.mouse.move(*point)
+                self.wait_peek(page)
+                self.assertEqual(page.evaluate("location.hash"), before_hash)
+                self.assertEqual(page.locator("main").bounding_box(), before_main)
+
+        # Moving off a button into the adjacent rail gap must keep its pending opening.
+        page.mouse.move(1200, 100)
+        self.wait_peek(page, False)
+        page.mouse.move(home["x"] + home["width"] / 2, home["y"] + home["height"] / 2)
+        page.mouse.move(*points["row_gap"])
+        self.wait_peek(page)
+        self.assertEqual(page.evaluate("localStorage.getItem('workbench-sidebar-v1')"), "collapsed")
+
+    def test_menu_click_toggles_the_popup_and_keeps_it_closed_until_reopened(self):
+        page = self.open_page(preference="collapsed")
+        page.locator("#case-search").wait_for()
+        menu = page.locator("#sidebar-menu")
+        self.assertEqual(menu.get_attribute("aria-label"), "打开边栏")
+        menu.click()
+        self.wait_peek(page)
+        self.assertEqual(menu.get_attribute("aria-label"), "收起边栏")
+        self.assertEqual(menu.get_attribute("aria-expanded"), "true")
+        menu.click()
+        self.wait_peek(page, False)
+        page.wait_for_timeout(300)
+        self.assertFalse(page.locator("html").evaluate("node => node.classList.contains('sidebar-peek')"))
+        self.assertEqual(menu.get_attribute("aria-label"), "打开边栏")
+        self.assertEqual(menu.get_attribute("aria-expanded"), "false")
+        self.assertEqual(page.evaluate("document.activeElement.id"), "sidebar-menu")
+        menu.click()
+        self.wait_peek(page)
+        self.assertEqual(page.locator("#sidebar-toggle:visible, #sidebar-menu:visible").count(), 1)
+        self.assertEqual(page.locator("#sidebar-pin svg").count(), 0)
+        page.mouse.move(1200, 100)
+        self.wait_peek(page, False)
+        self.wait_collapsed(page)
 
     def test_hover_transfers_into_the_popup_without_navigation_or_content_reflow(self):
         page = self.open_page(preference="collapsed")
@@ -145,9 +211,10 @@ class SidebarBrowserTests(unittest.TestCase):
         trigger = self.rail_button(page, "reviews-nav")
         page.mouse.move(1200, 100)
         # A quick pass through the icon rail must cancel pending opening.
-        trigger.dispatch_event("pointerenter", {"pointerType": "mouse"})
-        trigger.dispatch_event("pointerleave", {"pointerType": "mouse"})
-        page.locator("#sidebar-rail").dispatch_event("pointerleave", {"pointerType": "mouse"})
+        trigger_box = trigger.bounding_box()
+        page.mouse.move(trigger_box["x"] + trigger_box["width"] / 2,
+                        trigger_box["y"] + trigger_box["height"] / 2)
+        page.mouse.move(1200, 100)
         page.wait_for_timeout(300)
         self.assertFalse(page.locator("html").evaluate("node => node.classList.contains('sidebar-peek')"))
         self.assertTrue(page.locator("#workbench-sidebar").is_hidden())
@@ -275,28 +342,31 @@ class SidebarBrowserTests(unittest.TestCase):
         page.locator("#sync-button").click()
         page.wait_for_function("() => !document.querySelector('#connection-status').open && !document.querySelector('#sync-button').disabled")
         self.assertEqual(len(sync_calls), 2)
-        self.assertEqual(page.locator("#connection-text").inner_text(), "已连接本地案例库")
+        self.assertEqual(page.locator("#connection-text").inner_text(), "案例库同步")
         self.assertTrue(page.locator("#error-banner").is_hidden())
         self.assertTrue(page.locator("#sync-button").is_hidden())
 
     def test_content_subpages_keep_the_content_creation_module_selected(self):
         page = self.open_page("#/202H/ai")
         page.locator("#ai-task-list").wait_for()
-        for route, ready in (("scripts", "#script-query"), ("production", ".production-main")):
+        for route, ready in (("scripts", "#content-flow-query"), ("production", "#content-flow-query")):
             with self.subTest(subpage=route):
                 page.goto(f"{self.base}/#/202H/{route}")
                 page.locator(ready).wait_for()
+                self.assert_route(page, "content")
                 self.assertEqual(page.locator(".workflow-nav .nav-item.active").inner_text().strip(), "内容创作")
                 self.assertEqual(page.locator("#ai-nav").get_attribute("aria-current"), "page")
                 page.locator("#sidebar-toggle").click()
                 self.wait_collapsed(page)
                 self.assertEqual(self.rail_button(page, "ai-nav").get_attribute("aria-current"), "page")
                 self.rail_button(page, "ai-nav").click()
-                page.locator("#ai-task-list").wait_for()
-                self.assert_route(page, "ai")
+                page.locator("#content-flow-list").wait_for()
+                self.assert_route(page, "content")
                 page.mouse.move(1200, 100)
                 self.wait_peek(page, False)
-                page.locator("#sidebar-toggle").click()
+                self.rail_button(page, "ai-nav").hover()
+                self.wait_peek(page)
+                page.locator("#sidebar-pin").click()
                 self.wait_collapsed(page, False)
 
     def test_rail_clicks_open_the_original_modules_and_material_basket(self):
@@ -365,7 +435,9 @@ class SidebarBrowserTests(unittest.TestCase):
     def test_product_selection_keyboard_focus_and_async_rail_updates(self):
         page = self.open_page(preference="collapsed")
         page.locator("#case-search").wait_for()
-        page.evaluate("WorkbenchShell.registerProducts(['129N'])")
+        status, _, data = self.request("POST", "/api/products/catalog", {"action": "add", "product": "129N"})
+        self.assertEqual(status, 200, data)
+        page.evaluate("WorkbenchShell.refreshProducts()")
         self.rail_button(page, "reviews-nav").hover()
         self.wait_peek(page)
         picker = page.locator("#global-product")
@@ -450,7 +522,9 @@ class SidebarBrowserTests(unittest.TestCase):
         self.assert_route(page, "reviews")
         tab = page.locator("#reviews-nav").bounding_box()
         self.assertGreater(tab["y"], 800)
-        page.evaluate("WorkbenchShell.registerProducts(['129N'])")
+        status, _, data = self.request("POST", "/api/products/catalog", {"action": "add", "product": "129N"})
+        self.assertEqual(status, 200, data)
+        page.evaluate("WorkbenchShell.refreshProducts()")
         page.locator("#global-product").select_option("129N")
         self.assert_route(page, "reviews", product="129N")
         page.locator("#library-nav").tap()

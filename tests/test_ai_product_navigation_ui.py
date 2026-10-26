@@ -17,11 +17,25 @@ class AIProductNavigationBrowserTests(unittest.TestCase):
     create_task = ai_fixture.AISelectionBrowserTests.create_task
     open_ai_list = ai_fixture.AISelectionBrowserTests.open_ai_list
 
+    def test_collaboration_history_returns_to_content_and_running_badge_keeps_the_same_sidebar_destination(self):
+        page = self.open_ai_list()
+        page.locator("#ai-task-list").wait_for()
+        self.assertEqual(page.locator("#content h1").inner_text(), "协作记录")
+        self.assertEqual(page.locator("#content .scripts-tabs").count(), 0)
+        self.assertEqual(page.locator("#navigate-up").get_attribute("href"), "#/202H/content")
+        self.assertEqual(page.locator("#production-settings-open, #content-production-settings").count(), 0)
+        page.evaluate("document.querySelector('#ai-active-count').hidden=false;document.querySelector('#ai-active-count').textContent='3'")
+        page.locator("#ai-nav").click()
+        page.locator("#content-flow-list").wait_for()
+        self.assertEqual(page.evaluate("location.hash"), "#/202H/content")
+
     def test_product_switch_restores_its_filters_and_clears_selection_without_poll_resets(self):
         task = self.create_task("临时产品导航测试")
         page = self.open_ai_list()
         page.locator(f'[data-ai-task-id="{task["task_id"]}"]').wait_for()
-        page.evaluate("WorkbenchShell.registerProducts(['129N'])")
+        status, _, result = self.request("POST", "/api/products/catalog", {"action": "add", "product": "129N"})
+        self.assertEqual(status, 200, result)
+        page.evaluate("WorkbenchShell.refreshProducts()")
         page.locator('[data-ai-filter="completed"]').click()
         page.locator('#ai-group-by').select_option('case')
         page.locator('#ai-select-toggle').click()

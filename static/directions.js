@@ -161,12 +161,34 @@ window.CaseDirections = (() => {
     if(!perf.matched_count)return `${perf.video_count} 条视频，销售数据未匹配`;
     return `${perf.matched_count} 条视频 · ${perf.orders} 单 · 点击 ${perf.clicks}${perf.ctor_pct!=null?` · CTOR ${perf.ctor_pct}%`:""}${perf.data_through?` · 截至 ${perf.data_through}`:""}`;
   }
+  // Point status sits beside S/A/B: 有销量 comes from sales, the rest is set by hand.
+  const pointStatusNames={testing:"在测",candidate:"待核候选",merged:"已并入"};
+  const pointStatusTips={selling:"主打它的视频有订单",testing:"已有方向或写过稿，还在测试",candidate:"还没核实或没有证明素材，写稿前先补证明",merged:"同一产品事实已并入其他编号，编号不复用"};
+  const pointStatus=point=>!point?"":point.status==="merged"?"merged":point.performance?.orders>0?"selling":point.status||"";
+  const parkedPoint=point=>["candidate","merged"].includes(pointStatus(point));
+  function pointStatusChip(point) {
+    const key=pointStatus(point);if(!key)return "";
+    const verified=key==="testing"&&point.tier!=="S";
+    if(verified)return "";
+    const label=key==="selling"?"有销量":key==="merged"?`已并入 ${point.merged_into||""}`.trim():verified?"已核":pointStatusNames[key];
+    return `<span class="dir-point-status is-${key}" title="${esc(verified?"已核实，可以用来回应顾虑":pointStatusTips[key])}">${esc(label)}</span>`;
+  }
   function variantLabel(variant,index) {
     return `${variant.baseline?"基准稿":variant.variant_type==="direction"?"方向定义":"执行变体 "+index}${variant.progression?` · ${variant.progression}`:" · 推进结构未标注"}`;
   }
+  // Direction notes are "标签：内容" lines; only 核心证明 and 不能说 change what gets written, the rest folds.
+  function notesMarkup(notes) {
+    const lines=String(notes||"").split(/\n+/).map(line=>line.trim()).filter(Boolean);
+    if(!lines.length)return "";
+    const key=lines.filter(line=>/^(核心证明|不能说)[：:]/.test(line)),rest=lines.filter(line=>!key.includes(line));
+    const keyMarkup=key.map(line=>{const [label,...body]=line.split(/[：:]/);return `<p class="dir-note dir-note-key"><strong>${esc(label)}</strong> ${esc(body.join("："))}</p>`;}).join("");
+    if(!key.length&&lines.length===1&&lines[0].length<=80)return `<p class="dir-note">${esc(lines[0])}</p>`;
+    return keyMarkup+(rest.length?`<details class="dir-notes-more"><summary>备注与依据 · ${rest.length} 条</summary>${rest.map(line=>`<p>${esc(line)}</p>`).join("")}</details>`:"");
+  }
   function messageMarkup(text) { return `<p class="context-note">${esc(text)}</p>`; }
   const statusTone={active:"good",testing:"",paused:"warn",archived:""};
-  const statusChip=status=>`<span class="dir-status${statusTone[status]?" is-"+statusTone[status]:""}">${esc(statusNames[status] || "已有案例")}</span>`;
+  // Only a paused or archived direction needs a label; 待测试/测试中 repeated the point status on almost every row.
+  const statusChip=status=>["paused","archived"].includes(status)?`<span class="dir-status${statusTone[status]?" is-"+statusTone[status]:""}" title="人工设置的方向状态">${esc(statusNames[status])}</span>`:"";
   const tierRank=code=>"SAB".indexOf(String(code)[0]),codeNo=code=>Number(String(code).slice(1))||0;
   // Selling-point codes inside a chain become small tags; hovering one shows the point it stands for.
   function chainText(text,points=[]) {
@@ -179,18 +201,19 @@ window.CaseDirections = (() => {
   // One selling point with the direction built on it (a point has at most one), or a direction whose point is gone.
   function pointRow(point,direction) {
     const href=direction?directionURL(direction.product,direction.direction_id):"";
-    const facts=direction?[`方向 ${direction.direction_id}`,`${(direction.variants||[]).length} 个变体`,direction.performance?.video_count?performanceText(direction.performance):""]:[point.evidence?"":"待补充证据"];
-    if(point?.evidence)facts.push(point.evidence);
-    const flags=[direction?.lead_tier&&direction.lead_tier!=="S"?`<span class="dir-flag" title="${esc(direction.notes||"方向应由 S 级卖点主打")}">${esc(direction.lead_tier)} 级主打</span>`:"",
+    const facts=direction?[`${(direction.variants||[]).length} 个变体`,direction.performance?.video_count?`${direction.performance.video_count} 条视频`:""]:[];
+    if(point&&!point.evidence)facts.push("待补充证据");
+    const evidence=point?.evidence?`<details class="dir-evidence"><summary>证据与边界</summary><p>${esc(point.evidence)}</p></details>`:"";
+    const flags=[pointStatusChip(point),direction?.lead_tier&&direction.lead_tier!=="S"?`<span class="dir-flag" title="${esc(direction.notes||"方向应由 S 级卖点主打")}">${esc(direction.lead_tier)} 级主打</span>`:"",
       (direction?.chain_issues||[]).length?`<span class="dir-flag" title="${esc(direction.chain_issues.join("；"))}">方向链待修改</span>`:"",
       point?.grading_mismatch?`<span class="dir-flag" title="与分级表写法不一致">分级表不一致</span>`:""].join("");
     const title=point?point.title:(direction.main_difference||direction.direction_id);
-    const menu=point?`<details class="dir-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-edit-point="${esc(point.id)}">编辑卖点</button>${point.grading_mismatch?`<button type="button" role="menuitem" data-adopt-grading="${esc(point.id)}">采用分级表写法</button>`:""}</div></details>`:"";
+    const menu=point?`<details class="dir-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" data-edit-point="${esc(point.id)}">编辑卖点</button>${!direction&&point.tier!=="S"&&point.status!=="merged"?`<button type="button" role="menuitem" data-use-point="${esc(point.id)}">用它建立方向（需写理由）</button>`:""}${point.grading_mismatch?`<button type="button" role="menuitem" data-adopt-grading="${esc(point.id)}">采用分级表写法</button>`:""}</div></details>`:"";
     return `<li class="dir-row${direction?" has-direction":""}"${point?` data-point-id="${esc(point.id)}"`:""}${direction?` data-direction-id="${esc(direction.direction_id)}"`:""}>
       <span class="dir-code tier-${esc(point?point.tier:(direction.direction_id.split("-").pop()||"?")[0])}">${esc(point?point.code:"—")}</span>
       <div class="dir-main">${direction?`<a class="dir-title direction-card-link" href="${esc(href)}">${esc(title)}</a>`:`<span class="dir-title">${esc(title)}</span>`}
-        <p class="dir-sub">${facts.filter(Boolean).map(esc).join(" · ")}</p>${flags?`<div class="dir-flags">${flags}</div>`:""}</div>
-      <div class="dir-side">${direction?statusChip(direction.status):`<button type="button" class="subtle dir-build" data-use-point="${esc(point.id)}">建立方向 ›</button>`}${menu}</div></li>`;
+        <div class="dir-sub">${facts.some(Boolean)?`<span>${facts.filter(Boolean).map(esc).join(" · ")}</span>`:""}${evidence}</div>${flags?`<div class="dir-flags">${flags}</div>`:""}</div>
+      <div class="dir-side">${direction?statusChip(direction.status):point?.status==="merged"||point?.tier!=="S"?"":`<button type="button" class="subtle dir-build" data-use-point="${esc(point.id)}">建立方向 ›</button>`}${menu}</div></li>`;
   }
   function decorateGroupWarnings(root,groups) {
     $$(".direction-group",root).forEach((node,index)=>{
@@ -219,19 +242,23 @@ window.CaseDirections = (() => {
     const count=filter=>allPoints.filter(filter).length;
     const segment=(name,options,value)=>`<div class="dir-segment" role="group">${options.map(([key,label,n])=>`<button type="button" data-${name}-filter="${key}" aria-pressed="${value===key}">${label}${n!=null?`<small>${n}</small>`:""}</button>`).join("")}</div>`;
     const reset=new URLSearchParams(params);reset.delete("direction");
+    const statusReset=new URLSearchParams(params);statusReset.delete("status");
     const libraryParams=new URLSearchParams({direction:"__unclassified__"});if(archive!=="active")libraryParams.set("archive",archive);
     const empty=!rows.length&&!orphanRows.length;
     $("#content").innerHTML=`<div class="page-heading dir-heading"><div><h1>卖点与方向</h1><p>${allPoints.length} 个卖点 · ${allDirections.length} 个方向。从 S 级卖点出发，串起顾虑和收口，每次换执行记为变体。</p></div><button type="button" class="secondary" id="new-selling-point">${icon("plus")}新增卖点</button></div>
       <form id="direction-filters" class="dir-filters"><label class="search">${icon("search")}<input name="q" value="${esc(query)}" placeholder="搜索卖点、顾虑、收口或方向编号" aria-label="搜索"></label>
         ${segment("tier",[["","全部",allPoints.length],["S","S",count(item=>item.tier==="S")],["A","A",count(item=>item.tier==="A")],["B","B",count(item=>item.tier==="B")]],tier)}
-        ${segment("status",[["","全部状态"],...Object.entries(statusNames).map(([key,label])=>[key,label])],status)}
-        <label class="dir-archive"><span>案例范围</span><select name="archive">${Object.entries({active:"使用中",archived:"已归档",all:"全部"}).map(([value,label])=>`<option value="${value}" ${value===archive?"selected":""}>${label}</option>`).join("")}</select></label>
+                <label class="dir-archive"><span>案例范围</span><select name="archive">${Object.entries({active:"使用中",archived:"已归档",all:"全部"}).map(([value,label])=>`<option value="${value}" ${value===archive?"selected":""}>${label}</option>`).join("")}</select></label>
         <input type="hidden" name="tier" value="${tier}"><input type="hidden" name="status" value="${status}">${direction?`<input type="hidden" name="direction" value="${esc(direction)}">`:""}</form>
-      ${direction?`<p class="dir-scope">只看方向 <strong>${esc(direction)}</strong> · <a href="${esc(pageURL("#directions"+(reset.size?"?"+reset:"")))}">看全部</a></p>`:""}
-      ${empty?`<section class="section-card empty direction-empty"><h3>${query||tier||status||direction?"当前筛选没有匹配的卖点":"当前产品还没有卖点"}</h3><p>${query||tier||status||direction?"换个关键词，或清除筛选。":"先新增一个明确的主打卖点，再从它建立测试方向。"}</p></section>`
-        :groups.map(([label,hint,list])=>`<section class="dir-group"><h2>${label}<small>${hint} · ${list.length}</small></h2><ul class="dir-list">${list.map(([point,item])=>pointRow(point,item)).join("")}</ul></section>`).join("")
+      ${direction?`<p class="dir-scope">只看方向 <strong>${esc(direction)}</strong> · <a href="${esc(pageURL("#directions"+(reset.size?"?"+reset:"")))}">看全部</a></p>`:""}${status?`<p class="dir-scope">只看${esc(statusNames[status])}的方向 · <a href="${esc(pageURL("#directions"+(statusReset.size?"?"+statusReset:"")))}">看全部</a></p>`:""}
+      ${product?'<div id="tk-candidates-slot"></div>':""}
+      ${empty?`<section class="section-card empty direction-empty"><h3>${query||tier||status||direction?"当前筛选没有匹配的卖点":"当前产品还没有卖点"}</h3><p>${query||tier||status||direction?"换个关键词，或清除筛选。":"先新增一个明确的主打卖点，再从它建立测试方向。"}</p>${query||tier||status||direction?"":`<button type="button" class="primary" data-empty-new-point>${icon("plus")}新增卖点</button>`}</section>`
+        :groups.map(([label,hint,list])=>{
+          const parked=list.filter(([point])=>parkedPoint(point)),main=list.filter(([point])=>!parkedPoint(point));
+          return `<section class="dir-group"><h2>${label}<small>${hint} · ${list.length}</small></h2>${main.length?`<ul class="dir-list">${main.map(([point,item])=>pointRow(point,item)).join("")}</ul>`:""}${parked.length?`<details class="dir-parked"${query||direction?" open":""}><summary>待核候选与已并入 · ${parked.length}</summary><ul class="dir-list">${parked.map(([point,item])=>pointRow(point,item)).join("")}</ul></details>`:""}</section>`;
+        }).join("")
         +(orphanRows.length?`<section class="dir-group"><h2>未关联卖点的方向<small>旧记录 · ${orphanRows.length}</small></h2><ul class="dir-list">${orphanRows.map(item=>pointRow(null,item)).join("")}</ul></section>`:"")}
-      <div class="direction-summary-notes">${leadTierLine(summary.lead_tier_counts)}<p>范围内未记录方向的案例 ${summary.unclassified_case_ids?.length || 0} 条${summary.unclassified_case_ids?.length?` · <a href="${esc(pageURL("#library?"+libraryParams))}">查看案例</a>`:""}。</p><details><summary>数据与复盘说明</summary><ul>${(summary.limitations || []).map(note=>`<li>${esc(note)}</li>`).join("")}</ul><p>关联视频去重计数；出单视频只表示其自身窗口内有售出记录，不累计不同窗口的出单量。</p></details></div>`;
+      <div class="direction-summary-notes"><details><summary>数据与复盘说明</summary>${leadTierLine(summary.lead_tier_counts)}<p>范围内未记录方向的案例 ${summary.unclassified_case_ids?.length || 0} 条${summary.unclassified_case_ids?.length?` · <a href="${esc(pageURL("#library?"+libraryParams))}">查看案例</a>`:""}。</p><ul>${(summary.limitations || []).map(note=>`<li>${esc(note)}</li>`).join("")}</ul><p>关联视频去重计数；出单视频只表示其自身窗口内有售出记录，不累计不同窗口的出单量。</p></details></div>`;
     const filterForm=$("#direction-filters");
     // Only reuse the complete data behind the currently mounted list. Opening the
     // page again, changing its data scope, or refreshing still reads fresh data.
@@ -260,23 +287,48 @@ window.CaseDirections = (() => {
     filterForm.addEventListener("keydown",event=>{if(event.key==="Enter"&&!event.isComposing){event.preventDefault();applyFilters();}});
     if(refocusFilter){const saved=refocusFilter,field=filterForm.elements[saved.name];refocusFilter=null;if(field?.focus){field.focus();if(field.setSelectionRange&&saved.start!=null)field.setSelectionRange(saved.start,saved.end);}}
     $("#new-selling-point").onclick=()=>openPointEditor();
+    window.TKCandidates?.mount($("#tk-candidates-slot"),product,catalog);
+    document.querySelector("[data-empty-new-point]")?.addEventListener("click",()=>openPointEditor());
     $$("[data-edit-point]").forEach(button=>button.onclick=()=>openPointEditor(button.dataset.editPoint));
     $$("[data-adopt-grading]").forEach(button=>button.onclick=()=>openPointEditor(button.dataset.adoptGrading,true));
     $$("[data-use-point]").forEach(button=>button.onclick=()=>openCreate(button.dataset.usePoint));
   }
+  let variantView={key:"",expanded:new Set()};
+  const variantSnapshot=variant=>Object.fromEntries(["progression","baseline","variant_type","main_difference","concern","closing","execution_change"].filter(key=>Object.hasOwn(variant,key)).map(key=>[key,variant[key]]));
+  const variantName=(variant,index)=>`${variant.baseline?"基准稿":"变体 "+(index+1)}${variant.execution_change?" · "+variant.execution_change:""}`;
+  const workflowURL=(kind,item)=>{
+    const id=encodeURIComponent(item.id||"");
+    if(kind==="tasks"||kind==="task")return pageURL("#ai/"+id);
+    if(kind==="scripts"||kind==="script")return pageURL("#content/"+id);
+    if(kind==="productions"||kind==="production")return pageURL("#production/"+id+(item.status==="approved"||item.label==="登记发布"?"?step="+((item.production_kind||item.kind)==="carousel"?"delivery":"publish"):""));
+    if(kind==="publications"||kind==="videos")return pageURL("#videos?video="+encodeURIComponent(item.video_id||item.id));
+    return "";
+  };
+  const associationMarkup=record=>record?.association?`<details class="dir-record-association"><summary>已核对关联${record.association.inherited_from?" · 沿用文案归属":""}</summary><p>${esc(record.association.evidence?.note||"")}</p>${record.association.inherited_from?`<a href="${esc(pageURL("#content/"+encodeURIComponent(record.association.inherited_from)))}">查看来源采用稿</a>`:""}</details>`:"";
+  const workflowRecords=records=>Object.entries({tasks:"写稿任务",scripts:"文案",productions:"制作单",publications:"发布登记",plans:"测试与安排",videos:"关联视频"}).filter(([key])=>records[key]?.length).map(([key,label])=>`<div class="dir-flow-record-group"><strong>${label} · ${records[key].length}</strong><ul>${records[key].map(item=>`<li>${key==="plans"?`<button type="button" class="subtle" data-progress-plan="${esc(item.id)}">${esc(item.title||"查看测试卡")}</button>`:`<a href="${esc(workflowURL(key,item))}">${esc(item.title||item.video_id||item.id)}</a>`}${key==="publications"?`<small>${esc(item.published_on||"")}${item.current===false?" · 历史登记":item.source_current===false?" · 制作版本已变化":""}</small>`:""}${associationMarkup(item)}</li>`).join("")}</ul></div>`).join("");
   function renderDetail(data,values,points=[]) {
     const d=data.direction,p=data.selling_point,group=data.group;
+    const progressAvailable=data.progress_available===true&&!window.PublicTextMode;
     const variants=d.variants || [], scripts=data.scripts || [],videos=data.videos || [],tasks=data.tasks || [],cases=data.cases || [],plans=data.plans || [];
     let relatedTouched=false;
-    const taskItems=items=>items.map(task=>`<a class="direction-related-item" href="${esc(pageURL("#ai/"+encodeURIComponent(task.task_id)))}"><strong>${esc(task.case_title || task.case_id || task.task_id)}</strong><span>${esc(taskStatusNames[task.status] || task.status || "状态未提供")} · ${esc(readableDate(task.updated_at))}</span></a>`).join("");
+    const variantKey=JSON.stringify([d.product,d.direction_id]);
+    if(variantView.key!==variantKey)variantView={key:variantKey,expanded:new Set()};
+    const finished=plan=>["done","cancelled"].includes(plan.status);
+    const pendingTests=plans.filter(plan=>plan.experiment&&!finished(plan));
+    const pendingPlans=plans.filter(plan=>!plan.experiment&&!finished(plan));
+    const pastPlans=plans.filter(plan=>!plan.experiment&&finished(plan));
+    const taskItems=items=>items.map(task=>`<a class="direction-related-item" href="${esc(pageURL("#ai/"+encodeURIComponent(task.task_id)))}"><strong>${esc(task.display_title || task.case_title || task.case_id || task.task_id)}</strong><span>${esc(taskStatusNames[task.status] || task.status || "状态未提供")} · ${esc(readableDate(task.updated_at))}</span></a>`).join("");
     const planNames={scale:"加码",execution:"换执行",stop:"停测"},planStatus={pending:"待处理",working:"进行中",done:"已完成",cancelled:"已取消"};
+    const planList=items=>`<ul class="dir-plans">${items.map(plan=>`<li><strong>${esc(planNames[plan.action]||plan.action)}</strong><span>${esc(planStatus[plan.status]||plan.status)}</span>${plan.note?`<small>${esc(plan.note)}</small>`:""}${window.FeedbackChain?.sourceLink(plan.source_review) || ''}</li>`).join("")}</ul>`;
     const related=[
-      ["scripts","文案版本",scripts,scripts.map(script=>script.script_id || script.id?`<a class="direction-related-item" href="${esc(pageURL("#scripts/"+(script.script_id || script.id)))}"><strong>${esc(script.title)}</strong><span>第 ${esc(script.version || 1)} 版 · ${esc({draft:"草稿",adopted:"已采纳",filmed:"已拍摄",published:"已发布",reviewed:"已复盘",archived:"已归档"}[script.status] || script.status || "")}</span></a>`:`<details class="direction-script"><summary><strong>${esc(script.script_version || "版本未标记")}</strong> ${esc(script.title || script.case_id)}</summary><pre>${esc(script.text || "未记录文案")}</pre><a href="${esc(pageURL("#case/"+script.case_id+"/script"))}">查看案例文案</a></details>`).join(""),"还没有关联的文案版本。"],
+      ["scripts","采用稿",scripts,scripts.map(script=>script.script_id || script.id?`<a class="direction-related-item" href="${esc(pageURL("#content/"+(script.script_id || script.id)))}"><strong>${esc(script.title)}</strong><span>第 ${esc(script.version || 1)} 版 · ${esc({draft:"草稿",adopted:"已采纳",filmed:"已拍摄",published:"已发布",reviewed:"已复盘",archived:"已归档"}[script.status] || script.status || "")}</span></a>`:`<details class="direction-script"><summary><strong>${esc(script.script_version || "版本未标记")}</strong> ${esc(script.title || script.case_id)}</summary><pre>${esc(script.text || "未记录文案")}</pre><a href="${esc(pageURL("#case/"+script.case_id+"/script"))}">查看案例文案</a></details>`).join(""),"还没有关联的采用稿。"],
       ["videos","关联视频",videos,videos.map(video=>`<a class="direction-related-item" href="${esc(pageURL("#videos?video="+encodeURIComponent(video.video_id)))}"><strong>${esc(video.title || video.video_id)}</strong><span>${esc(video.video_id)}</span></a>`).join(""),"还没有关联视频。"],
       ["tasks","AI 任务",tasks,taskItems(tasks),"还没有关联的 AI 协作任务。"],
       ["cases","关联案例",cases,cases.map(item=>`<a class="direction-related-item" href="${esc(pageURL("#case/"+item.case_id))}"><strong>${esc(item.current?.title || item.title || item.case_id)}</strong><span>${esc(item.case_id)}${item.archived?" · 已归档":""}</span></a>`).join(""),"方向已经独立保存，后续案例可以使用这个编号。"],
     ];
     const firstRelated=(related.find(([, ,list])=>list.length)||related[0])[0];
+    // Empty tabs stay in the page (tasks arrive later) but are hidden; the card hides when every tab is empty.
+    const relatedEmpty=([key,,list])=>!list.length&&!(key==="tasks"&&data.tasks_pending===true);
     const relatedMarkup=([key,,list,markup,emptyText])=>key==="tasks"&&data.tasks_pending===true?'<p class="context-note" role="status">正在读取 AI 任务…</p>':list.length?`<div class="direction-related-list">${markup}</div>`:`<p class="dir-empty">${esc(emptyText)}</p>`;
     const progressionSelect=(variant,index)=>`<label class="dir-progression"><span class="sr-only">推进结构</span><select data-variant-progression="${index}" aria-label="第 ${index+1} 条的推进结构"><option value="">推进结构未标注</option>${progressions.map(item=>`<option ${variant.progression===item?"selected":""}>${esc(item)}</option>`).join("")}${variant.progression&&!progressions.includes(variant.progression)?`<option selected>${esc(variant.progression)}</option>`:""}</select></label>`;
     $("#breadcrumb").innerHTML=`卖点与方向 <span>/</span> ${esc(d.direction_id)}`;
@@ -285,24 +337,43 @@ window.CaseDirections = (() => {
         <div class="dir-detail-actions"><button type="button" class="secondary" id="direction-edit">${icon("edit")}编辑方向</button><button type="button" class="primary" id="direction-write">${icon("edit")}用这个方向写稿</button></div></div>
       <div class="dir-layout"><div class="dir-primary">
         <section class="section-card dir-card" id="direction-definition"><h2>方向链</h2><div class="direction-chain dir-chain">${chainSteps(d,points)}</div>
-          ${(d.chain_issues||[]).length?`<p class="dir-note is-warn">方向链需要修改：${esc(d.chain_issues.join("；"))}</p>`:""}${d.notes?`<p class="dir-note">${esc(d.notes)}</p>`:""}</section>
-        <section class="section-card dir-card" id="direction-variants"><div class="dir-card-head"><h2>执行变体<small>${variants.length}</small></h2><button type="button" class="subtle" id="direction-add-variant">${icon("plus")}新增执行变体</button></div>
+          ${(d.chain_issues||[]).length?`<p class="dir-note is-warn">方向链需要修改：${esc(d.chain_issues.join("；"))}</p>`:""}${d.audience?`<p class="dir-note dir-audience"><strong>目标人群</strong> ${esc(d.audience)}</p>`:""}${notesMarkup(d.notes)}</section>
+        <section class="section-card dir-card" id="direction-variants"><div class="dir-card-head"><h2>执行变体<small>${variants.length}</small></h2><div class="dir-card-actions">${variants.length?'<button type="button" class="subtle" id="direction-variants-toggle">展开全部</button>':""}<button type="button" class="subtle" id="direction-add-variant">${icon("plus")}新增执行变体</button></div></div>
+          <p class="dir-progress-summary" id="direction-progress-summary" role="status">${progressAvailable?"正在核对写稿、制作、发布和测试记录…":window.PublicTextMode?"变体实际进展请在本机工作台查看。":"当前服务尚未提供变体进展，重启工作台后可查看。"}</p>
+          <p class="dir-note is-warn" id="direction-workflow-target-note" role="status" hidden></p>
           ${!variants.some(item=>item.baseline)&&variants.length?'<p class="dir-note is-warn">还没有基准稿。选一条设为基准，其他变体才有比较对象。</p>':""}
-          <div class="direction-variant-list">${variants.map((variant,index)=>`<div class="direction-definition dir-variant${variant.baseline?" is-baseline":""}"><div class="dir-variant-head"><strong>${variant.baseline?"基准稿":variant.variant_type==="direction"?"方向定义":"执行变体 "+(index+1)}</strong>${variant.baseline?'<span class="dir-badge">基准</span>':""}${progressionSelect(variant,index)}${variant.baseline?"":`<button type="button" class="subtle" data-variant-baseline="${index}">设为基准稿</button>`}</div>
-            <div class="dir-variant-chain">${chainSteps({concern:variant.concern,closing:variant.closing},points)}</div>${variant.execution_change?`<p class="dir-change">改动：${esc(variant.execution_change)}</p>`:""}${(variant.chain_issues||[]).length?`<p class="dir-note">${esc(variant.chain_issues.join("；"))}（已发布的记录保持原样）</p>`:""}</div>`).join("")}</div>
+          <div class="direction-variant-list">${variants.map((variant,index)=>`<div class="dir-variant-row"><details class="direction-definition dir-variant${variant.baseline?" is-baseline":""}" data-variant-index="${index}"${variantView.expanded.has(index)?" open":""}>
+            <summary><span class="dir-variant-summary-head"><strong>${variant.baseline?"基准稿":variant.variant_type==="direction"?"方向定义":"执行变体 "+(index+1)}</strong><span class="dir-variant-structure">${esc(variant.progression||"推进结构未标注")}</span>${(variant.chain_issues||[]).length?'<span class="dir-flag">方向链待核对</span>':""}</span><span class="dir-variant-summary-change">${esc(variant.execution_change?"改动："+variant.execution_change:variant.baseline?"比较基准 · 展开查看完整方向链":"尚未记录主要改动 · 展开查看方向链")}</span></summary>
+            <div class="dir-variant-body"><div class="dir-variant-head">${progressionSelect(variant,index)}${variant.baseline?"":`<button type="button" class="subtle" data-variant-baseline="${index}">设为基准稿</button>`}</div><div class="dir-variant-chain">${chainSteps({concern:variant.concern,closing:variant.closing},points)}</div>${variant.execution_change?`<p class="dir-change">改动：${esc(variant.execution_change)}</p>`:""}${variant.audience?`<p class="dir-change">目标人群：${esc(variant.audience)}</p>`:""}${(variant.chain_issues||[]).length?`<p class="dir-note">${esc(variant.chain_issues.join("；"))}（已发布的记录保持原样）</p>`:""}<div class="dir-flow-records" data-variant-records="${index}"></div></div></details><div class="dir-variant-progress" data-variant-progress="${index}"></div></div>`).join("")}</div>
+          <details id="direction-unassigned" hidden></details>
           ${!variants.length?messageMarkup("暂未追加执行变体。已有案例仍保留各自的完整方向链。"):""}
           ${(d.history||[]).length?`<details class="direction-history"><summary>旧定义 · ${d.history.length}</summary>${d.history.map(item=>`<div class="direction-definition"><small>${esc(readableDate(item.replaced_at))} 前</small><p class="direction-chain">${esc(directionChain(item))}</p></div>`).join("")}</details>`:""}</section>
-        <section class="section-card dir-card dir-related"><div class="dir-tabs" role="tablist" aria-label="关联内容">${related.map(([key,label,list])=>`<button type="button" role="tab" id="direction-${key}" aria-controls="direction-${key}-panel" aria-selected="${key===firstRelated}" data-related-tab="${key}">${label}<small>${key==="tasks"&&data.tasks_pending===true?"…":list.length}</small></button>`).join("")}</div>
+        ${experimentSection(plans)}
+        <section class="section-card dir-card dir-related"${related.every(relatedEmpty)?" hidden":""}><div class="dir-tabs" role="tablist" aria-label="关联内容">${related.map(([key,label,list])=>`<button type="button" role="tab" id="direction-${key}" aria-controls="direction-${key}-panel" aria-selected="${key===firstRelated}" data-related-tab="${key}"${relatedEmpty([key,label,list])?" hidden":""}>${label}<small>${key==="tasks"&&data.tasks_pending===true?"…":list.length}</small></button>`).join("")}</div>
           ${related.map(item=>`<div class="dir-related-panel" role="tabpanel" id="direction-${item[0]}-panel" aria-labelledby="direction-${item[0]}"${item[0]==="tasks"&&data.tasks_pending===true?' aria-busy="true"':""}${item[0]===firstRelated?"":" hidden"}>${relatedMarkup(item)}</div>`).join("")}</section>
         ${group?`<div class="direction-section-heading"><h2>案例执行与表现</h2><p class="context-note">每条案例保留自己的方向链、文案版本与统计窗口。</p></div>${groupCard(group)}`:""}
       </div><aside class="dir-aside">
-        <section class="dir-card dir-aside-card"><h2>主打卖点</h2>${p?`<p class="dir-aside-title"><span class="dir-code tier-${esc(p.tier)}">${esc(p.code)}</span>${esc(p.title)}</p>${p.rationale?`<p class="dir-aside-text">${esc(p.rationale)}</p>`:""}<dl class="dir-facts"><dt>证据</dt><dd>${esc(p.evidence || "待补充")}</dd></dl>`:'<p class="dir-aside-text">这个方向没有关联卖点。</p>'}</section>
+        <section class="dir-card dir-aside-card"><h2>主打卖点</h2>${p?`<p class="dir-aside-status"><span class="dir-code tier-${esc(p.tier)}">${esc(p.code)}</span>${pointStatusChip(p)||'<span class="dir-point-status">已核</span>'}</p>${p.rationale?`<details class="dir-point-rationale"><summary>分级理由</summary><p>${esc(p.rationale)}</p></details>`:""}${p.evidence?`<details class="dir-point-evidence"><summary>证据与边界</summary><p>${esc(p.evidence)}</p></details>`:'<p class="dir-aside-text">待补充证据</p>'}`:'<p class="dir-aside-text">这个方向没有关联卖点。</p>'}</section>
         <section class="dir-card dir-aside-card" id="direction-plans"><h2>下一轮安排</h2><div class="dir-plan-buttons">${[["scale","加码"],["execution","换执行"],["stop","停测"]].map(([action,label])=>`<button type="button" class="secondary compact" data-direction-plan="${action}">${label}</button>`).join("")}</div>
-          ${plans.length?`<ul class="dir-plans">${plans.map(plan=>`<li><strong>${esc(planNames[plan.action] || plan.action)}</strong><span>${esc(planStatus[plan.status] || plan.status)}</span>${plan.note?`<small>${esc(plan.note)}</small>`:""}</li>`).join("")}</ul>`:'<p class="dir-aside-text">选一个写下判断，会出现在「工作概览」的下一轮待写里。</p>'}</section>
-        <section class="dir-card dir-aside-card"><h2>记录</h2><dl class="dir-facts"><dt>产品</dt><dd>${esc(d.product)}</dd><dt>案例</dt><dd>${cases.length} 条</dd><dt>视频</dt><dd>${videos.length} 条</dd>${d.performance?.matched_count?`<dt>表现</dt><dd>${esc(performanceText(d.performance))}</dd>`:""}</dl>
+          ${pendingTests.length?`<button type="button" class="subtle dir-test-shortcut" data-show-tests>${pendingTests.length} 张测试卡待处理 · 查看测试卡 ›</button>`:""}${pendingPlans.length?planList(pendingPlans):!pendingTests.length?'<p class="dir-aside-text">暂无待处理安排。选一个写下判断，会出现在「工作概览」的下一轮待写里。</p>':""}${pastPlans.length?`<details class="dir-plan-history"><summary>已完成与取消的安排 · ${pastPlans.length}</summary>${planList(pastPlans)}</details>`:""}</section>
+        <section class="dir-card dir-aside-card"><h2>销量表现</h2>${d.performance?.matched_count?`<p class="dir-aside-text">${esc(performanceText(d.performance))}</p>`:'<p class="dir-aside-text">还没有关联到出单视频。</p>'}
           <details class="dir-aside-more"><summary>数据与复盘说明</summary><p>各案例保留各自文案版本、统计窗口与数据来源，不累计不同窗口的售出量。重复登记的视频也保留原始归属提示。</p></details></section>
       </aside></div>`;
+    // Next actions stay beside the definition even when the side column falls below a long history.
+    const nextPlans = $("#direction-plans"), definition = $("#direction-definition");
+    if (nextPlans && definition) { definition.after(nextPlans); nextPlans.classList.add('dir-next-action'); }
     if(group)decorateGroupWarnings($("#content"),[group]);
+    const variantDetails=$$("details.dir-variant"),allVariantsButton=$("#direction-variants-toggle");
+    const updateVariantToggle=()=>{if(allVariantsButton)allVariantsButton.textContent=variantDetails.every(item=>item.open)?"收起全部":"展开全部";};
+    variantDetails.forEach(item=>item.addEventListener("toggle",()=>{
+      if(!item.isConnected||variantView.key!==variantKey)return;
+      const index=Number(item.dataset.variantIndex);
+      if(item.open)variantView.expanded.add(index);else variantView.expanded.delete(index);
+      updateVariantToggle();
+    }));
+    if(allVariantsButton)allVariantsButton.onclick=()=>{const open=!variantDetails.every(item=>item.open);variantDetails.forEach(item=>item.open=open);updateVariantToggle();};
+    updateVariantToggle();
+    $$("[data-show-tests]").forEach(button=>button.onclick=()=>{const tests=$("#direction-tests");tests.focus({preventScroll:true});tests.scrollIntoView({block:"start",behavior:"smooth"});});
     $("#direction-add-variant").onclick=()=>openCreate(d.selling_point_id);
     $("#direction-edit").onclick=()=>openDirectionEditor(data);
     const saveMeta=async(values)=>{
@@ -312,14 +383,113 @@ window.CaseDirections = (() => {
     };
     $$("[data-variant-baseline]").forEach(button=>button.onclick=()=>saveMeta({index:Number(button.dataset.variantBaseline),baseline:true}));
     $$("[data-variant-progression]").forEach(select=>select.onchange=()=>{if(select.value)saveMeta({index:Number(select.dataset.variantProgression),progression:select.value});});
-    $("#direction-write").onclick=()=>window.CaseAI?.startFromDirection(d);
+    $("#direction-write").onclick=()=>{
+      if(p&&parkedPoint(p)&&!confirm(`${p.code} 还是${p.status==="merged"?"已并入其他编号的卖点":"待核候选"}，没有核实或缺证明素材。建议先拍到证明镜头再写稿。仍要现在写吗？`))return;
+      window.CaseAI?.startFromDirection(d);
+    };
     $$("[data-direction-plan]").forEach(button=>button.onclick=()=>openPlan(data,button.dataset.directionPlan));
+    $("#direction-test-create").onclick=()=>openPlan(data,"execution",null,true);
+    $$("[data-test-edit]").forEach(button=>button.onclick=()=>{
+      const plan=plans.find(item=>item.id===button.dataset.testEdit);
+      if(plan)void openPlan(data,plan.action,plan,true);
+    });
+    $$("[data-test-result]").forEach(button=>button.onclick=()=>loadExperimentResult(button));
     const selectRelated=key=>{
       $$("[data-related-tab]").forEach(item=>item.setAttribute("aria-selected",String(item.dataset.relatedTab===key)));
       $$(".dir-related-panel").forEach(panel=>panel.hidden=panel.id!==`direction-${key}-panel`);
     };
     $$("[data-related-tab]").forEach(tab=>tab.onclick=()=>{relatedTouched=true;selectRelated(tab.dataset.relatedTab);});
+    const openProgressPlan=id=>{
+      const plan=plans.find(item=>item.id===id);
+      if(plan)void openPlan(data,plan.action,plan,!!plan.experiment);
+      else toast("记录已变化，请刷新方向后再查看。",true);
+    };
+    const clearProgress=()=>{
+      $$("[data-variant-progress],[data-variant-records]").forEach(node=>node.replaceChildren());
+      $("#direction-unassigned").hidden=true;
+    };
+    let workflowTargetApplied=false;
+    const locateWorkflowTarget=progress=>{
+      if(workflowTargetApplied)return;
+      workflowTargetApplied=true;
+      const notices=[];
+      if(values.params.has("variant")){
+        const key=values.params.get("variant"),matches=progress.variants.filter(item=>key&&item.key===key);
+        if(matches.length!==1){
+          notices.push(matches.length?"当前方向有多个相同的执行变体，暂时无法唯一定位，请先核对变体。":"这条执行变体已调整或不再存在，请核对当前方向。未自动定位到其他变体。");
+        }else if(variants[matches[0].index]?.conflict){
+          notices.push("这条执行变体的方向链存在冲突，请先核对后再查看关联输出。");
+        }else{
+          const index=matches[0].index,details=variantDetails.find(item=>Number(item.dataset.variantIndex)===index);
+          if(details){
+            details.open=true;details.dataset.variantKey=key;variantView.expanded.add(index);updateVariantToggle();
+            details.querySelector(":scope > summary")?.focus({preventScroll:true});
+            details.closest(".dir-variant-row").scrollIntoView({block:"start",behavior:"smooth"});
+          }
+        }
+      }
+      if(values.params.has("plan")){
+        const id=values.params.get("plan"),matches=$$("[data-test-result]").filter(item=>id&&item.dataset.testResult===id);
+        if(matches.length!==1)notices.push("这张测试卡已调整或不在当前方向中，请核对现有测试卡。");
+        else{
+          const target=matches[0],history=target.closest("details.direction-tests-history");if(history)history.open=true;
+          target.focus({preventScroll:true});target.closest(".direction-test").scrollIntoView({block:"start",behavior:"smooth"});
+        }
+      }
+      const note=$("#direction-workflow-target-note");note.textContent=notices.join(" ");note.hidden=!notices.length;
+    };
     return {
+      loadingProgress(){
+        clearProgress();
+        $("#direction-progress-summary").hidden=false;$("#direction-progress-summary").textContent="正在核对写稿、制作、发布和测试记录…";
+      },
+      setProgress(progress){
+        if(progress.catalog_revision!==data.revision||progress.direction_id!==d.direction_id||progress.product!==d.product||progress.variants?.length!==variants.length)
+          throw new Error("方向定义已更新，请刷新方向后重新核对进展。");
+        const indexes=new Set(progress.variants.map(item=>item.index));
+        if(indexes.size!==variants.length||variants.some((_,index)=>!indexes.has(index)))throw new Error("变体进展不完整，请重新读取。");
+        const summary=progress.summary||{};
+        const counted=[[summary.variants_with_scripts,"有文案"],[summary.variants_in_production,"有制作单"],[summary.variants_with_videos,"有关联视频"],[summary.variants_published,"已登记发布"],[summary.variants_tested,"可比较"]].filter(([n])=>n);
+        const summaryNode=$("#direction-progress-summary");summaryNode.textContent=counted.length?"已关联记录："+counted.map(([n,label])=>`${n} 个变体${label}`).join(" · "):"";summaryNode.hidden=!counted.length;
+        for(const item of progress.variants){
+          const index=item.index,next=item.next_action||{},variant=variants[index],url=workflowURL(next.kind,next);
+          const action=variant.conflict?'<span class="dir-note is-warn">先核对变体方向链</span>':url?`<a class="secondary compact" data-variant-next="${index}" href="${esc(url)}">${esc(next.label)} ${icon("arrow")}</a>`:`<button type="button" class="secondary compact" data-variant-next="${index}">${esc(next.label||"写这一稿")}</button>`;
+          const untouched=Object.values(item.stages||{}).every(stage=>stage.status==="empty");
+          $(`[data-variant-progress="${index}"]`).innerHTML=untouched?`<div class="dir-flow-compact"><span>还没开始</span><div class="dir-flow-next">${action}</div></div>`:`<ol class="dir-flow" aria-label="变体 ${index+1} 的实际进展">${Object.entries({writing:"写稿",production:"制作",publishing:"发布",testing:"测试"}).map(([key,label])=>{
+            const stage=item.stages?.[key]||{status:"unknown",label:"尚未核对"};
+            const tone=["empty","working","done","attention","unknown"].includes(stage.status)?stage.status:"unknown";
+            return `<li class="is-${tone}"><span>${label}</span><small title="${esc(stage.history_label||stage.label)}">${esc(stage.label)}</small></li>`;
+          }).join("")}</ol><div class="dir-flow-next">${action}</div>`;
+          $(`[data-variant-records="${index}"]`).innerHTML=workflowRecords(item.records||{})+(!variant.conflict?`<div class="dir-flow-options"><button type="button" class="subtle" data-variant-write="${index}">再写一稿</button><button type="button" class="subtle" data-variant-test="${index}">为此变体建测试卡</button></div>`:"");
+          const button=$(`button[data-variant-next="${index}"]`);
+          if(button)button.onclick=()=>{
+            if(next.kind==="test"){
+              if(!next.id)void openPlan(data,"execution",null,true,{index,videoId:next.video_id});
+              else {
+                const plan=plans.find(row=>row.id===next.id),record=item.records.plans.find(row=>row.id===next.id);
+                if(plan&&record&&(record.comparison_status==="ready"||record.decision_recorded)){
+                  const target=$(`[data-test-result="${CSS.escape(next.id)}"]`);
+                  const history=target?.closest("details");if(history)history.open=true;
+                  target?.focus({preventScroll:true});target?.scrollIntoView({block:"center",behavior:"smooth"});if(target)void loadExperimentResult(target);
+                }else openProgressPlan(next.id);
+              }
+            }else window.CaseAI?.startFromDirection(d,{variantIndex:index});
+          };
+        }
+        const unassigned=$("#direction-unassigned");
+        unassigned.hidden=!summary.unassigned_count;
+        unassigned.innerHTML=summary.unassigned_count?`<summary>待关联到变体 · ${summary.unassigned_count} 条记录</summary><p class="context-note">这些记录属于当前方向，但来源还不能唯一对应到某条变体，暂不计入上方进度。测试卡可在编辑时选择所属变体。</p>${workflowRecords(progress.unassigned||{})}`:"";
+        $$("[data-progress-plan]").forEach(button=>button.onclick=()=>openProgressPlan(button.dataset.progressPlan));
+        $$("[data-variant-write]").forEach(button=>button.onclick=()=>window.CaseAI?.startFromDirection(d,{variantIndex:Number(button.dataset.variantWrite)}));
+        $$("[data-variant-test]").forEach(button=>button.onclick=()=>openPlan(data,"execution",null,true,{index:Number(button.dataset.variantTest)}));
+        locateWorkflowTarget(progress);
+      },
+      progressError(error,retry){
+        clearProgress();
+        const node=$("#direction-progress-summary");node.hidden=false;
+        node.innerHTML=`<span class="dir-note is-warn">${esc(error.message||"进展暂时读取失败，不能判断当前进度。")}</span> <button type="button" class="subtle" id="direction-progress-retry">${error.message?.includes("方向定义已更新")?"刷新方向":"重新读取"}</button>`;
+        $("#direction-progress-retry").onclick=error.message?.includes("方向定义已更新")?()=>void route(true):retry;
+      },
       loadingTasks(){
         $("#direction-tasks small").textContent="…";
         const panel=$("#direction-tasks-panel");panel.setAttribute("aria-busy","true");panel.innerHTML='<p class="context-note" role="status">正在读取 AI 任务…</p>';
@@ -328,6 +498,8 @@ window.CaseDirections = (() => {
         data.tasks=Array.isArray(items)?items:[];delete data.tasks_pending;
         related[2][2]=data.tasks;related[2][3]=taskItems(data.tasks);
         $("#direction-tasks small").textContent=String(data.tasks.length);
+        $("#direction-tasks").hidden=!data.tasks.length;
+        $(".dir-related").hidden=related.every(([,,list])=>!list.length);
         const panel=$("#direction-tasks-panel");panel.removeAttribute("aria-busy");panel.innerHTML=relatedMarkup(related[2]);
         if(!relatedTouched&&data.tasks.length&&!scripts.length&&!videos.length)selectRelated("tasks");
       },
@@ -338,25 +510,70 @@ window.CaseDirections = (() => {
       },
     };
   }
-  async function openPlan(data,action) {
+  const experimentMetrics={ctor_pct:"CTOR · 订单 / 点击",ctr_pct:"CTR · 点击 / 播放",gpm:"GPM · 每千次播放销售额",orders:"订单数",gmv:"销售额",clicks:"点击数",views:"播放数"};
+  const experimentDecisions={observe:"继续观察",scale:"加码",execution:"换执行",stop:"停测"};
+  function experimentSection(plans) {
+    const cards=plans.filter(plan=>plan.experiment);
+    const pastCards=cards.filter(plan=>["done","cancelled"].includes(plan.status)),currentCards=cards.filter(plan=>!["done","cancelled"].includes(plan.status));
+    const cardMarkup=plan=>{
+      const card=plan.experiment;
+      return `<article class="direction-test"><div class="dir-card-head"><strong>${esc(card.hypothesis)}</strong><button type="button" class="subtle" data-test-edit="${esc(plan.id)}">编辑与记录决定</button></div><dl class="direction-test-facts">${plan.variant_ref?`<dt>所属变体</dt><dd>${esc(variantName(plan.variant_ref.snapshot,plan.variant_ref.index))}</dd>`:""}<dt>主要改动</dt><dd>${esc(card.change)}</dd><dt>基准 → 测试</dt><dd>${esc(card.baseline_video_id||"待登记")} → ${esc(card.test_video_id||"待登记")}</dd><dt>观察指标</dt><dd>${esc(experimentMetrics[card.metric]||card.metric)}</dd><dt>共同比较窗</dt><dd>${card.window_start?`${esc(card.window_start)} 至 ${esc(card.window_end)}`:"待指定"}</dd><dt>当前决定</dt><dd>${esc(experimentDecisions[card.decision]||"继续观察")}${card.decision_note?` · ${esc(card.decision_note)}`:""}</dd></dl><div class="direction-test-actions"><button type="button" class="secondary compact" data-test-result="${esc(plan.id)}">查看同窗口结果</button><span class="context-note">人工计划状态 · ${esc({pending:"待处理",working:"进行中",done:"已完成",cancelled:"已取消"}[plan.status]||plan.status)}</span></div><div data-test-comparison role="status"></div>${(plan.experiment_history||[]).length>1?`<details class="direction-test-history"><summary>测试卡修改记录（${plan.experiment_history.length} 次）</summary>${[...plan.experiment_history].reverse().map(entry=>`<p><small>${esc(readableDate(entry.at))}</small><br>${esc(entry.experiment.hypothesis)} · ${esc(entry.experiment.change)}<br>${esc(experimentDecisions[entry.experiment.decision]||"继续观察")}${entry.experiment.decision_note?`：${esc(entry.experiment.decision_note)}`:""}</p>`).join("")}</details>`:""}</article>`;
+    };
+    return `<section class="section-card dir-card direction-tests" id="direction-tests" tabindex="-1"><div class="dir-card-head"><h2>方向测试卡<small>${cards.length}</small></h2><button type="button" class="secondary compact" id="direction-test-create">新建测试卡</button></div>${cards.length?'<p class="context-note">先记下假设与主要改动，再用同一账号、相同日历窗口的数据比较。决定由你记录。</p>':""}${currentCards.length?currentCards.map(cardMarkup).join(""):pastCards.length?'<p class="dir-empty">暂无待处理测试卡。</p>':""}${pastCards.length?`<details class="direction-tests-history"><summary>已完成与取消的测试 · ${pastCards.length}</summary>${pastCards.map(cardMarkup).join("")}</details>`:""}</section>`;
+  }
+  async function loadExperimentResult(button) {
+    const node=button.closest(".direction-test").querySelector("[data-test-comparison]");
+    button.disabled=true;node.textContent="正在核对窗口与数据完整性…";
+    try {
+      const result=await api(`/api/plans/${encodeURIComponent(button.dataset.testResult)}/comparison`);
+      if(!node.isConnected)return;
+      if(result.status!=="ready")node.innerHTML=`<p class="dir-note is-warn">尚不能比较</p><ul class="direction-test-issues">${(result.issues||["请补齐数据后重试"]).map(issue=>`<li>${esc(issue)}</li>`).join("")}</ul>`;
+      else {
+        const percentage=["ctr_pct","ctor_pct"].includes(result.metric), money=["gmv","gpm"].includes(result.metric);
+        const format=value=>`${money?"$":""}${Number(value).toLocaleString("zh-CN",{maximumFractionDigits:2})}${percentage?"%":""}`;
+        const delta=`${result.delta>0?"+":""}${Number(result.delta).toLocaleString("zh-CN",{maximumFractionDigits:2})}${percentage?" 个百分点":money?" 美元":""}`;
+        node.innerHTML=`<div class="direction-test-result"><p>${esc(result.window_start)} 至 ${esc(result.window_end)} · ${esc(result.baseline.account)}</p><div class="direction-test-values"><span>基准<strong>${esc(format(result.baseline.value))}</strong></span><span>测试<strong>${esc(format(result.test.value))}</strong></span><span>测试 − 基准<strong>${esc(delta)}</strong></span></div><p class="context-note">${esc(result.note)}</p><details><summary>计算依据</summary>${[["基准",result.baseline],["测试",result.test]].map(([label,side])=>`<p>${label} ${esc(side.video_id)}：${Object.entries(side.totals).map(([key,value])=>`${esc({views:"播放",clicks:"点击",orders:"订单",gmv:"销售额"}[key]||key)} ${esc(value)}`).join(" · ")}</p>`).join("")}<p class="context-note">比率以窗口内分子总和除以分母总和计算。</p></details></div>`;
+      }
+    } catch(error){if(node.isConnected)node.textContent=error.message||"暂时无法读取比较数据。";}
+    finally{button.disabled=false;}
+  }
+  async function openPlan(data,action,existing=null,testCard=false,variantContext=null) {
     const labels={scale:"加码",execution:"换执行",stop:"停测"}, d=data.direction;
     let dialog=$("#direction-plan-dialog");if(!dialog){dialog=document.createElement("dialog");dialog.id="direction-plan-dialog";document.body.append(dialog);}
-    dialog.innerHTML=`<form><div class="dialog-heading"><h2>${labels[action]} · ${esc(d.direction_id)}</h2><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div><div class="direction-wizard-body"><label class="field"><span>本轮观察与下一步要求</span><textarea name="note" rows="4" required maxlength="12000" placeholder="写下数据窗口、观察和这次决定的理由"></textarea></label><p class="context-note">保存到「工作概览」的下一轮安排，保留这次判断。</p><p class="direction-form-error" role="alert"></p></div><div class="dialog-footer"><span></span><div><button type="button" class="secondary" data-close>取消</button><button type="submit" class="primary">保存安排</button></div></div></form>`;
+    const card=existing?.experiment||{}, bound=existing?.variant_ref, variants=d.variants||[], options=(items,selected)=>Object.entries(items).map(([value,label])=>`<option value="${esc(value)}" ${value===selected?"selected":""}>${esc(label)}</option>`).join("");
+    const bindingField=bound?`<p class="context-note">所属变体：${esc(variantName(bound.snapshot,bound.index))}（保留创建时的关联）</p>`:`<label class="field"><span>所属变体</span><select name="variant_index"><option value="">暂不指定</option>${variants.map((variant,index)=>!variant.conflict?`<option value="${index}" ${variantContext?.index===index?"selected":""}>${esc(variantName(variant,index))}</option>`:"").join("")}</select><small>指定后，测试卡会出现在该变体的进度中。</small></label>`;
+    dialog.innerHTML=`<form><div class="dialog-heading"><h2>${testCard?existing?"编辑测试卡":"新建测试卡":labels[action]} · ${esc(d.direction_id)}</h2><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div><div class="direction-wizard-body">${testCard?`${bindingField}<label class="field"><span>要验证的假设</span><textarea name="hypothesis" rows="2" required maxlength="3000" placeholder="例如：先演示装夹稳定性，能减少顾虑并提高点击后的下单率">${esc(card.hypothesis||"")}</textarea></label><label class="field"><span>相对基准的主要改动</span><textarea name="change" rows="2" required maxlength="3000">${esc(card.change||((variantContext&&variants[variantContext.index]?.execution_change)||""))}</textarea></label><div class="direction-test-form-grid"><label class="field"><span>基准视频 ID（可后补）</span><input name="baseline_video_id" inputmode="numeric" pattern="[0-9]{6,25}" maxlength="25" value="${esc(card.baseline_video_id||"")}"></label><label class="field"><span>测试视频 ID（可后补）</span><input name="test_video_id" inputmode="numeric" pattern="[0-9]{6,25}" maxlength="25" value="${esc(card.test_video_id||variantContext?.videoId||"")}"></label><label class="field"><span>共同开始日期</span><input type="date" name="window_start" value="${esc(card.window_start||"")}"></label><label class="field"><span>共同结束日期</span><input type="date" name="window_end" value="${esc(card.window_end||"")}"></label></div><p class="context-note">两条视频使用同一日历起止日期；只有完整落在窗口里的报表才能比较，不能把周报按天摊算。</p><label class="field"><span>主要观察指标</span><select name="metric">${options(experimentMetrics,card.metric||"ctor_pct")}</select></label><div class="direction-test-form-grid"><label class="field"><span>本轮决定</span><select name="decision">${options(experimentDecisions,card.decision||"observe")}</select></label><label class="field"><span>人工计划状态</span><select name="status">${options({pending:"待处理",working:"进行中",done:"已完成",cancelled:"已取消"},existing?.status||"pending")}</select></label></div><label class="field"><span>决定依据（加码、换执行、停测时必填）</span><textarea name="decision_note" rows="3" maxlength="6000">${esc(card.decision_note||"")}</textarea></label>`:""}<label class="field"><span>本轮观察与下一步要求${testCard?"（可选）":""}</span><textarea name="note" rows="3" ${testCard?"":"required"} maxlength="12000" placeholder="写下数据窗口、观察和这次决定的理由">${esc(existing?.note||"")}</textarea></label><p class="context-note">保存到「工作概览」的下一轮安排，保留这次判断。</p><p class="direction-form-error" role="alert"></p></div><div class="dialog-footer"><span></span><div><button type="button" class="secondary" data-close>取消</button><button type="submit" class="primary">${testCard?"保存测试卡":"保存安排"}</button></div></div></form>`;
     dialog.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>requestClose(dialog));dialog.showModal();trackDraft(dialog);
-    let pending=false,requestId=crypto.randomUUID(),catalog;
-    try{catalog=await api("/api/creation?product="+encodeURIComponent(d.product));}catch(error){dialog.querySelector("[role=alert]").textContent=error.message;}
+    let pending=false,requestId=crypto.randomUUID(),catalog,requestBody=null,uncertain=false;
+    try{catalog=existing&&data.creation_revision?{revision:data.creation_revision}:await api("/api/creation?product="+encodeURIComponent(d.product));}catch(error){dialog.querySelector("[role=alert]").textContent=error.message;}
     dialog.querySelector("form").onsubmit=async event=>{
       event.preventDefault();if(pending)return;
       pending=true;if(activeDraft)activeDraft.pending=true;dialog.querySelectorAll("button").forEach(button=>button.disabled=true);
       try{
         if(!catalog)catalog=await api("/api/creation?product="+encodeURIComponent(d.product));
-        await api("/api/plans",{method:"POST",body:{revision:catalog.revision,request_id:requestId,plan:{product:d.product,direction_id:d.direction_id,action,status:"pending",note:dialog.querySelector("textarea").value.trim()}}});
+        if(!requestBody){
+          const values=Object.fromEntries(new FormData(dialog.querySelector("form")));
+          const plan={...(existing||{}),product:d.product,direction_id:d.direction_id,action,status:values.status||existing?.status||"pending",note:values.note.trim()};
+          if(testCard&&!bound&&values.variant_index!==""){
+            const index=Number(values.variant_index),variant=variants[index];
+            if(!Number.isInteger(index)||!variant||variant.conflict)throw new Error("请选择有效变体。");
+            plan.variant_ref={index,snapshot:variantSnapshot(variant)};
+          }
+          if(testCard)plan.experiment=Object.fromEntries(["hypothesis","change","baseline_video_id","test_video_id","metric","window_start","window_end","decision","decision_note"].map(key=>[key,values[key].trim()]));
+          requestBody={revision:catalog.revision,request_id:requestId,plan};
+        }
+        await api("/api/plans",{method:"POST",body:requestBody});
         dialog.close();toast("已保存到下一轮安排");void route();
-      }catch(error){dialog.querySelector("[role=alert]").textContent=error.message;if(error.status===409){try{catalog=await api("/api/creation?product="+encodeURIComponent(d.product));requestId=crypto.randomUUID();dialog.querySelector("[role=alert]").textContent+=" 已读取最新记录，输入保留，请核对后再次保存。";}catch{}}}
-      finally{pending=false;if(activeDraft)activeDraft.pending=false;dialog.querySelectorAll("button").forEach(button=>button.disabled=false);}
+      }catch(error){
+        uncertain=!error.status||error.status>=500;
+        dialog.querySelector("[role=alert]").textContent=error.message+(uncertain?" 保存结果尚未确认，请重试原提交。":"");
+        if(!uncertain){requestBody=null;requestId=crypto.randomUUID();}
+        if(error.status===409){try{catalog=await api("/api/creation?product="+encodeURIComponent(d.product));if(existing){const latest=catalog.plans.find(plan=>plan.id===existing.id);if(!latest)throw new Error("测试卡已不存在，请关闭并刷新。");existing=latest;dialog.querySelector("[role=alert]").textContent+=` 当前保存的假设：${latest.experiment?.hypothesis||"未填写"}；决定：${experimentDecisions[latest.experiment?.decision]||"继续观察"}；依据：${latest.experiment?.decision_note||"未填写"}。`;}dialog.querySelector("[role=alert]").textContent+=" 已读取最新记录，输入保留，请核对后再次保存。";}catch(readError){catalog=null;dialog.querySelector("[role=alert]").textContent+=" "+readError.message;}}
+      }
+      finally{pending=false;if(activeDraft)activeDraft.pending=false;dialog.querySelectorAll("button").forEach(button=>button.disabled=false);dialog.querySelectorAll("input,select,textarea").forEach(field=>field.disabled=uncertain);}
     };
   }
-  async function openCreate(preselected="") {
+  async function openCreate(preselected="",options={}) {
     const product=window.WorkbenchShell?.product() || routeValues().product;
     if(!product){toast("请先在左侧选择一个产品，再新建方向。",true);return;}
     let dialog=$("#direction-create-dialog");
@@ -367,16 +584,18 @@ window.CaseDirections = (() => {
     try {[catalog,materials]=await Promise.all([api(catalogURL(product)),api("/api/materials?product="+encodeURIComponent(product)).catch(()=>null)]);}catch(error){dialog.querySelector("[role=status]").textContent=error.message;return;}
     if(!dialog.open)return;
     const points=catalog.selling_points || [],directions=catalog.directions || [];
-    const draft={point_id:preselected,concern:"",closing:"",lead_reason:"",progression:"",progression_other:"",execution_change:""};let step=0,pending=false,requestId=crypto.randomUUID();
+    // Merged codes are kept for old records only; they are never offered as a lead or chain link.
+    const leads=points.filter(item=>item.status!=="merged"),chainPoints=leads;
+    const draft={point_id:preselected,concern:"",closing:"",lead_reason:"",progression:"",progression_other:"",execution_change:"",audience:"",...(options.prefill||{})};let step=0,pending=false,requestId=crypto.randomUUID();
     const point=()=>points.find(item=>item.id===draft.point_id);
     const read=name=>dialog.querySelector(`[name="${name}"]`)?.value.trim() ?? draft[name];
-    const collect=()=>{if(step===0){draft.point_id=dialog.querySelector('[name="lead_point"]:checked')?.value || "";draft.lead_reason=read("lead_reason");}if(step===1){draft.concern=read("concern");draft.progression=read("progression");draft.progression_other=read("progression_other");draft.execution_change=read("execution_change");}if(step===2)draft.closing=dialog.querySelector('[name="closing"]').value.trim();};
+    const collect=()=>{if(step===0){draft.point_id=dialog.querySelector('[name="lead_point"]:checked')?.value || "";draft.lead_reason=read("lead_reason");}if(step===1){draft.concern=read("concern");draft.progression=read("progression");draft.progression_other=read("progression_other");draft.execution_change=read("execution_change");draft.audience=read("audience");}if(step===2)draft.closing=dialog.querySelector('[name="closing"]').value.trim();};
     const progressionValue=()=>draft.progression==="其他"?(draft.progression_other?"其他："+draft.progression_other:""):draft.progression;
-    const choice=item=>`<label class="direction-point-choice"><input type="radio" name="lead_point" value="${esc(item.id)}" ${draft.point_id===item.id?"checked":""}><span><strong>${esc(item.code)} · ${esc(item.title)}</strong>${item.rationale?`<small>${esc(item.rationale)}</small>`:""}</span></label>`;
+    const choice=item=>`<label class="direction-point-choice"><input type="radio" name="lead_point" value="${esc(item.id)}" ${draft.point_id===item.id?"checked":""}><span><strong>${esc(item.code)} · ${esc(item.title)}</strong>${pointStatusChip(item)}${item.rationale?`<small>${esc(item.rationale)}</small>`:""}</span></label>`;
     function progressionFields(){
       const chosen=point(),existing=chosen&&directions.find(item=>item.direction_id===`${product}-${chosen.code}`);
       const used=new Set((existing?.variants || []).map(item=>item.progression).filter(Boolean));
-      return `<div class="direction-progression"><label class="field"><span>推进结构${existing?"":"（可选，基准稿）"}</span><select name="progression"><option value="">${existing?"请选择":"暂不标注"}</option>${progressions.map(item=>`<option value="${esc(item)}" ${used.has(item)?"disabled":""} ${draft.progression===item?"selected":""}>${esc(item)}${used.has(item)?"（已有）":""}</option>`).join("")}<option value="其他" ${draft.progression==="其他"?"selected":""}>其他</option></select></label><label class="field direction-progression-other"><span>其他结构说明</span><input name="progression_other" maxlength="60" value="${esc(draft.progression_other)}" placeholder="选“其他”时填写"></label>${existing?`<label class="field"><span>和基准稿比，推进上改了什么</span><textarea name="execution_change" rows="2" maxlength="4000" placeholder="例如：先给一排刀切纸的结果，再倒回讲以前用几样东西">${esc(draft.execution_change)}</textarea></label><p class="context-note">只换开头一句不算新变体；已用过的推进结构不能再选。</p>`:""}</div>`;
+      return `<div class="direction-progression"><label class="field"><span>推进结构${existing?"":"（可选，基准稿）"}</span><select name="progression"><option value="">${existing?"请选择":"暂不标注"}</option>${progressions.map(item=>`<option value="${esc(item)}" ${used.has(item)?"disabled":""} ${draft.progression===item?"selected":""}>${esc(item)}${used.has(item)?"（已有）":""}</option>`).join("")}<option value="其他" ${draft.progression==="其他"?"selected":""}>其他</option></select></label><label class="field"><span>目标人群（可选）</span><input name="audience" maxlength="2000" value="${esc(draft.audience)}" placeholder="例如：从 Lansky 换来的人；刀座一排钝刀的家庭厨师"></label><label class="field direction-progression-other"><span>其他结构说明</span><input name="progression_other" maxlength="60" value="${esc(draft.progression_other)}" placeholder="选“其他”时填写"></label>${existing?`<label class="field"><span>和基准稿比，推进上改了什么</span><textarea name="execution_change" rows="2" maxlength="4000" placeholder="例如：先给一排刀切纸的结果，再倒回讲以前用几样东西">${esc(draft.execution_change)}</textarea></label><p class="context-note">只换开头一句不算新变体；已用过的推进结构不能再选。</p>`:""}</div>`;
     }
     function render(){
       const chosen=point(),id=chosen?`${product}-${chosen.code}`:"选择主打后自动生成",existing=directions.find(item=>item.direction_id===id);
@@ -384,14 +603,18 @@ window.CaseDirections = (() => {
       const linkedThemes=(materials?.theme_links || []).filter(link=>link.selling_point_id===chosen?.id || link.direction_id===id || link.target_id===chosen?.id || link.target_id===id);
       const reviewConcerns=linkedThemes.map(link=>link.concern || link.source_quote || link.theme).filter(Boolean);
       const candidates=[...new Set(directions.flatMap(item=>[item,...(item.variants || [])]).map(item=>fieldText(item[step===1?"concern":"closing"]).trim()).filter(Boolean))];
-      dialog.innerHTML=`<form><div class="dialog-heading"><div><h2 id="direction-create-title">${existing?"新增执行变体":"新建方向"}</h2><p>${esc(product)} · 同主打卖点共用方向编号</p></div><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div><ol class="direction-wizard-steps">${["选择主打","回应顾虑","确定收口"].map((label,index)=>`<li aria-current="${step===index?"step":"false"}">${index+1} ${label}</li>`).join("")}</ol><div class="direction-wizard-body"><p class="direction-number">方向编号 <strong id="direction-generated-id">${esc(id)}</strong></p>${step===0?`<fieldset class="direction-lead-picker"><legend>哪个 S 级卖点主打？</legend>${points.length?points.filter(item=>item.tier==="S").map(choice).join("")+(points.some(item=>item.tier!=="S")?`<details class="direction-non-s" ${chosen&&chosen.tier!=="S"?"open":""}><summary>用 A / B 级卖点主打（需写理由）</summary>${points.filter(item=>item.tier!=="S").map(choice).join("")}</details>`:""):'<p class="context-note">这个产品还没有卖点，请先到卖点分级页新增。</p>'}</fieldset>${chosen&&chosen.tier!=="S"&&!existing?`<label class="field"><span>为什么用 ${esc(chosen.code)} 主打</span><textarea name="lead_reason" rows="2" maxlength="2000" placeholder="分级表要求每条内容由一个 S 主导；写明这次为什么例外">${esc(draft.lead_reason)}</textarea></label>`:""}`:`${step===1?progressionFields():""}<label class="field"><span>${step===1?"观众顾虑与回应顺序":"最后怎样收口？"}</span><textarea name="${step===1?"concern":"closing"}" rows="4" required maxlength="4000" placeholder="${step===1?"例如：装夹麻烦吗 → A3 一次装夹翻面继续 → 值不值":"例如：B3 3 年有限质保，或无购买收口"}">${esc(step===1?draft.concern:draft.closing)}</textarea></label>${step===1&&reviewConcerns.length?`<div class="direction-suggestions"><span>已关联评论顾虑 · 评论说法待核实</span>${reviewConcerns.map((text,index)=>`<button type="button" class="secondary" data-review-concern="${index}">${esc(text)}</button>`).join("")}</div>`:""}${candidates.length?`<div class="direction-suggestions"><span>点选已有表达</span>${candidates.map((text,index)=>`<button type="button" class="secondary" data-suggestion="${index}">${esc(text)}</button>`).join("")}</div>`:""}<div class="direction-suggestions"><span>点选卖点，追加到${step===1?"顾虑回应":"收口"}</span>${points.map((item,index)=>`<button type="button" class="secondary" data-chain-point="${index}">${esc(item.code)} · ${esc(item.title)}</button>`).join("")}</div>${step===2?`<div class="direction-chain-preview"><strong>完整方向链</strong><p>${esc([main,draft.concern,draft.closing].filter(Boolean).join(" → "))}</p></div>`:""}`}${existing?'<p class="context-note">这个主打卖点已有方向。本次顾虑与收口会作为执行变体保留。</p>':""}<p class="direction-form-error" role="alert"></p></div><div class="dialog-footer"><span>独立保存方向，后续再关联案例与视频。</span><div><button type="button" class="secondary" data-back>${step?"上一步":"取消"}</button><button type="submit" class="primary" ${!points.length?"disabled":""}>${step===2?"保存方向":"下一步"}</button></div></div></form>`;
+      dialog.innerHTML=`<form><div class="dialog-heading"><div><h2 id="direction-create-title">${existing?"新增执行变体":"新建方向"}</h2><p>${esc(product)} · 同主打卖点共用方向编号</p></div><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div><ol class="direction-wizard-steps">${["选择主打","回应顾虑","确定收口"].map((label,index)=>`<li aria-current="${step===index?"step":"false"}">${index+1} ${label}</li>`).join("")}</ol><div class="direction-wizard-body">${options.source?`<p class="direction-source-note">${esc(options.source)}</p>`:""}<p class="direction-number">方向编号 <strong id="direction-generated-id">${esc(id)}</strong></p>${step===0?`<fieldset class="direction-lead-picker"><legend>哪个 S 级卖点主打？</legend>${points.length?leads.filter(item=>item.tier==="S").map(choice).join("")+(leads.some(item=>item.tier!=="S")?`<details class="direction-non-s" ${chosen&&chosen.tier!=="S"?"open":""}><summary>用 A / B 级卖点主打（需写理由）</summary>${leads.filter(item=>item.tier!=="S").map(choice).join("")}</details>`:""):'<p class="context-note">这个产品还没有卖点，请先到卖点分级页新增。</p>'}</fieldset>${chosen&&chosen.tier!=="S"&&!existing?`<label class="field"><span>为什么用 ${esc(chosen.code)} 主打</span><textarea name="lead_reason" rows="2" maxlength="2000" placeholder="分级表要求每条内容由一个 S 主导；写明这次为什么例外">${esc(draft.lead_reason)}</textarea></label>`:""}`:`${step===1?progressionFields():""}<label class="field"><span>${step===1?"观众顾虑与回应顺序":"最后怎样收口？"}</span><textarea name="${step===1?"concern":"closing"}" rows="4" required maxlength="4000" placeholder="${step===1?"例如：装夹麻烦吗 → A3 一次装夹翻面继续 → 值不值":"例如：B3 3 年有限质保，或无购买收口"}">${esc(step===1?draft.concern:draft.closing)}</textarea></label>${step===1&&reviewConcerns.length?`<div class="direction-suggestions"><span>已关联评论顾虑 · 评论说法待核实</span>${reviewConcerns.map((text,index)=>`<button type="button" class="secondary" data-review-concern="${index}">${esc(text)}</button>`).join("")}</div>`:""}${candidates.length?`<div class="direction-suggestions"><span>点选已有表达</span>${candidates.map((text,index)=>`<button type="button" class="secondary" data-suggestion="${index}">${esc(text)}</button>`).join("")}</div>`:""}<div class="direction-suggestions"><span>点选卖点，追加到${step===1?"顾虑回应":"收口"}</span>${chainPoints.map((item,index)=>`<button type="button" class="secondary" data-chain-point="${index}">${esc(item.code)} · ${esc(item.title)}</button>`).join("")}</div>${step===2?`<div class="direction-chain-preview"><strong>完整方向链</strong><p>${esc([main,draft.concern,draft.closing].filter(Boolean).join(" → "))}</p></div>`:""}`}${existing?'<p class="context-note">这个主打卖点已有方向。本次顾虑与收口会作为执行变体保留。</p>':""}<p class="direction-form-error" role="alert"></p></div><div class="dialog-footer"><span>独立保存方向，后续再关联案例与视频。</span><div><button type="button" class="secondary" data-back>${step?"上一步":"取消"}</button><button type="submit" class="primary" ${!points.length?"disabled":""}>${step===2?"保存方向":"下一步"}</button></div></div></form>`;
       dialog.querySelector("[data-close]").onclick=()=>{if(!pending)requestClose(dialog);};
       dialog.querySelector("[data-back]").onclick=()=>{if(pending)return;collect();if(step){step--;render();}else requestClose(dialog);};
-      dialog.querySelectorAll('[name="lead_point"]').forEach(input=>input.onchange=()=>{draft.point_id=input.value;dialog.querySelector("#direction-generated-id").textContent=`${product}-${point().code}`;});
-      dialog.querySelectorAll("[data-review-concern]").forEach(button=>button.onclick=()=>{const textarea=dialog.querySelector("textarea");textarea.value=[textarea.value.trim(),reviewConcerns[Number(button.dataset.reviewConcern)]].filter(Boolean).join(" → ");textarea.dispatchEvent(new Event("input",{bubbles:true}));});
-      dialog.querySelectorAll("[data-suggestion]").forEach(button=>button.onclick=()=>{const textarea=dialog.querySelector("textarea");textarea.value=candidates[Number(button.dataset.suggestion)];textarea.dispatchEvent(new Event("input",{bubbles:true}));});
-      dialog.querySelectorAll("[data-chain-point]").forEach(button=>button.onclick=()=>{const textarea=dialog.querySelector("textarea"),item=points[Number(button.dataset.chainPoint)];textarea.value=[textarea.value.trim(),item.code+" "+item.title].filter(Boolean).join(" → ");textarea.dispatchEvent(new Event("input",{bubbles:true}));});
-      if(step===2)dialog.querySelector("textarea").oninput=event=>{draft.closing=event.target.value;dialog.querySelector(".direction-chain-preview p").textContent=[main,draft.concern,draft.closing].filter(Boolean).join(" → ");};
+      dialog.querySelectorAll('[name="lead_point"]').forEach(input=>input.onchange=()=>{
+        collect();draft.point_id=input.value;render();
+        dialog.querySelector('[name="lead_point"]:checked')?.focus({preventScroll:true});
+      });
+      const chainInput=()=>dialog.querySelector(`textarea[name="${step===1?"concern":"closing"}"]`);
+      dialog.querySelectorAll("[data-review-concern]").forEach(button=>button.onclick=()=>{const textarea=chainInput();textarea.value=[textarea.value.trim(),reviewConcerns[Number(button.dataset.reviewConcern)]].filter(Boolean).join(" → ");textarea.dispatchEvent(new Event("input",{bubbles:true}));});
+      dialog.querySelectorAll("[data-suggestion]").forEach(button=>button.onclick=()=>{const textarea=chainInput();textarea.value=candidates[Number(button.dataset.suggestion)];textarea.dispatchEvent(new Event("input",{bubbles:true}));});
+      dialog.querySelectorAll("[data-chain-point]").forEach(button=>button.onclick=()=>{const textarea=chainInput(),item=chainPoints[Number(button.dataset.chainPoint)];textarea.value=[textarea.value.trim(),item.code+" "+item.title].filter(Boolean).join(" → ");textarea.dispatchEvent(new Event("input",{bubbles:true}));});
+      if(step===2)chainInput().oninput=event=>{draft.closing=event.target.value;dialog.querySelector(".direction-chain-preview p").textContent=[main,draft.concern,draft.closing].filter(Boolean).join(" → ");};
       dialog.querySelector("form").onsubmit=async event=>{
         event.preventDefault();if(pending)return;collect();
         if(!point()){dialog.querySelector("[role=alert]").textContent="请选择一个主打卖点。";return;}
@@ -405,8 +628,8 @@ window.CaseDirections = (() => {
         if(step<2){step++;render();return;}
         pending=true;if(activeDraft)activeDraft.pending=true;dialog.querySelectorAll("button").forEach(button=>button.disabled=true);
         try {
-          const result=await api("/api/direction-catalog",{method:"POST",body:{revision:catalog.revision,request_id:requestId,operation:"add_variant",direction:{product,selling_point_id:point().id,main_difference:main,concern:draft.concern,closing:draft.closing,status:"testing",...(progressionValue()?{progression:progressionValue()}:{}),...(draft.execution_change?{execution_change:draft.execution_change}:{}),...(draft.lead_reason?{lead_reason:draft.lead_reason}:{})}}});
-          dialog.close();toast(result.existing?"执行变体已保存":"方向已保存");
+          const result=await api("/api/direction-catalog",{method:"POST",body:{revision:catalog.revision,request_id:requestId,operation:"add_variant",direction:{product,selling_point_id:point().id,main_difference:main,concern:draft.concern,closing:draft.closing,status:"testing",...(progressionValue()?{progression:progressionValue()}:{}),...(draft.execution_change?{execution_change:draft.execution_change}:{}),...(draft.lead_reason?{lead_reason:draft.lead_reason}:{}),...(draft.audience?{audience:draft.audience}:{})}}});
+          dialog.close();toast(result.existing?"执行变体已保存":"方向已保存");if(options.onSaved)await options.onSaved(result);
           const target=directionURL(product,result.direction.direction_id);if(location.hash===target)void route();else location.hash=target;
         }catch(error){dialog.querySelector("[role=alert]").textContent=error.message;}
         finally{pending=false;if(activeDraft)activeDraft.pending=false;dialog.querySelectorAll("button").forEach(button=>button.disabled=false);}
@@ -417,7 +640,7 @@ window.CaseDirections = (() => {
   function openDirectionEditor(data) {
     const direction=data.direction,requestId=crypto.randomUUID();
     let dialog=$("#direction-edit-dialog");if(!dialog){dialog=document.createElement("dialog");dialog.id="direction-edit-dialog";document.body.append(dialog);}
-    dialog.innerHTML=`<form><div class="dialog-heading"><div><h2>编辑方向</h2><p>${esc(direction.direction_id)} · ${esc(direction.main_difference)}</p></div><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div><div class="direction-wizard-body"><label class="field"><span>默认顾虑链</span><textarea name="concern" rows="3" required maxlength="4000">${esc(direction.concern || "")}</textarea></label><label class="field"><span>默认收口</span><textarea name="closing" rows="3" required maxlength="4000">${esc(direction.closing || "")}</textarea></label><label class="field"><span>方向状态</span><select name="status">${Object.entries(statusNames).map(([value,label])=>`<option value="${value}" ${direction.status===value?"selected":""}>${label}</option>`).join("")}</select></label><label class="field"><span>方向备注</span><textarea name="notes" rows="3" maxlength="4000">${esc(direction.notes || "")}</textarea></label><p class="context-note">直接改方向的默认定义。旧定义进入“旧定义”记录，不会变成执行变体；案例当时的执行记录不变。</p><p class="direction-form-error" role="alert"></p></div><div class="dialog-footer"><span></span><div><button type="button" class="secondary" data-close>取消</button><button type="submit" class="primary">保存定义</button></div></div></form>`;
+    dialog.innerHTML=`<form><div class="dialog-heading"><div><h2>编辑方向</h2><p>${esc(direction.direction_id)} · ${esc(direction.main_difference)}</p></div><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div><div class="direction-wizard-body"><label class="field"><span>默认顾虑链</span><textarea name="concern" rows="3" required maxlength="4000">${esc(direction.concern || "")}</textarea></label><label class="field"><span>默认收口</span><textarea name="closing" rows="3" required maxlength="4000">${esc(direction.closing || "")}</textarea></label><label class="field"><span>人工状态</span><select name="status">${Object.entries(statusNames).map(([value,label])=>`<option value="${value}" ${direction.status===value?"selected":""}>${label}</option>`).join("")}</select></label><label class="field"><span>目标人群</span><textarea name="audience" rows="2" maxlength="2000" placeholder="这条方向讲给谁听；卖点理由里不再写人群">${esc(direction.audience || "")}</textarea></label><label class="field"><span>方向备注</span><textarea name="notes" rows="3" maxlength="4000">${esc(direction.notes || "")}</textarea></label><p class="context-note">直接改方向的默认定义。旧定义进入“旧定义”记录，不会变成执行变体；案例当时的执行记录不变。</p><p class="direction-form-error" role="alert"></p></div><div class="dialog-footer"><span></span><div><button type="button" class="secondary" data-close>取消</button><button type="submit" class="primary">保存定义</button></div></div></form>`;
     dialog.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>requestClose(dialog));
     let pending=false;
     dialog.querySelector("form").onsubmit=async event=>{
@@ -440,15 +663,35 @@ window.CaseDirections = (() => {
     const prior=adoptGrading&&found.grading_row?{...found,title:found.grading_row.title,rationale:found.grading_row.rationale,evidence:found.grading_row.evidence}:found;
     delete prior.grading_row;delete prior.grading_mismatch;delete prior.performance;
     let dialog=$("#selling-point-dialog");if(!dialog){dialog=document.createElement("dialog");dialog.id="selling-point-dialog";document.body.append(dialog);}
-    dialog.innerHTML=`<form><div class="dialog-heading"><h2>${adoptGrading?"采用分级表写法":id?"编辑卖点":"新增卖点"}</h2><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div><div class="direction-wizard-body"><label class="field"><span>卖点编号</span><input name="code" pattern="[SAB][1-9][0-9]*" placeholder="例如 S1、A2、B3" required value="${esc(prior.code || "")}" ${id?"readonly":""}></label><label class="field"><span>卖点标题</span><input name="title" required maxlength="200" value="${esc(prior.title || "")}"></label><label class="field"><span>分级理由</span><textarea name="rationale" rows="3" maxlength="4000">${esc(prior.rationale || "")}</textarea></label><label class="field"><span>证据与边界</span><textarea name="evidence" rows="3" maxlength="4000">${esc(prior.evidence || "")}</textarea></label><p class="direction-form-error" role="alert"></p></div><div class="dialog-footer"><span>编号首字母对应 S / A / B 分级。</span><div><button type="button" class="secondary" data-close>取消</button><button type="submit" class="primary">保存卖点</button></div></div></form>`;
+    const others=(catalog.selling_points || []).filter(item=>item.id!==found.id).sort((a,b)=>tierRank(a.code)-tierRank(b.code)||codeNo(a.code)-codeNo(b.code));
+    const short=item=>`${item.code} ${String(item.title || "").slice(0,22)}`,sameFact=new Set(prior.same_fact_as || []);
+    const mergeOptions=others.filter(item=>item.status!=="merged").map(item=>`<option value="${esc(item.code)}" ${prior.merged_into===item.code?"selected":""}>${esc(short(item))}</option>`).join("");
+    const factChoices=others.map(item=>`<label class="point-fact-choice" title="${esc(item.title || "")}"><input type="checkbox" name="same_fact_as" value="${esc(item.code)}" ${sameFact.has(item.code)?"checked":""}><span>${esc(short(item))}</span></label>`).join("");
+    const former=(prior.former_codes || []).length?` · 曾用编号 ${esc(prior.former_codes.join("、"))}，不再复用`:"";
+    dialog.innerHTML=`<form><div class="dialog-heading"><h2>${adoptGrading?"采用分级表写法":id?"编辑卖点":"新增卖点"}</h2><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div><div class="direction-wizard-body"><label class="field"><span>卖点编号</span><input name="code" pattern="[SABsab][1-9][0-9]*" placeholder="例如 S1、A2、B3" required value="${esc(prior.code || "")}"><small>首字母就是 S / A / B 分级${id?"；改编号或升降级时，其他卖点和方向定义里的引用会跟着改，方向编号不变":""}${former}</small></label><label class="field"><span>卖点标题</span><input name="title" required maxlength="200" value="${esc(prior.title || "")}"></label><label class="field"><span>分级理由</span><textarea name="rationale" rows="3" maxlength="4000">${esc(prior.rationale || "")}</textarea></label><label class="field"><span>证据与边界</span><textarea name="evidence" rows="3" maxlength="4000">${esc(prior.evidence || "")}</textarea></label><label class="field"><span>状态</span><select name="status" required><option value="">请选择</option>${Object.entries({testing:"在测 / 已核",candidate:"待核候选",merged:"已并入"}).map(([value,label])=>`<option value="${value}" ${prior.status===value?"selected":""}>${label}</option>`).join("")}</select><small>有销量由销售数据自动显示，不用选。没核实、没证明素材的选待核候选。</small></label><label class="field" data-merge-field ${prior.status==="merged"?"":"hidden"}><span>并入哪个卖点</span><select name="merged_into"><option value="">请选择</option>${mergeOptions}</select></label><fieldset class="field point-fact-picker"><legend>和哪些卖点是同一产品事实（可选）</legend>${factChoices?`<div>${factChoices}</div>`:"<small>这个产品还没有其他卖点。</small>"}</fieldset><label class="field"><span>购买动机有什么不同</span><textarea name="motive_difference" rows="2" maxlength="2000" placeholder="新增 S 和已有卖点是同一产品事实时必填；只是换了一类人，就写成方向的目标人群">${esc(prior.motive_difference || "")}</textarea></label><p class="direction-form-error" role="alert"></p></div><div class="dialog-footer">${id&&!adoptGrading?`<button type="button" class="danger-outline" data-delete-point>删除卖点</button>`:"<span></span>"}<div><button type="button" class="secondary" data-close>取消</button><button type="submit" class="primary">保存卖点</button></div></div></form>`;
     dialog.querySelectorAll("[data-close]").forEach(button=>button.onclick=()=>requestClose(dialog));
-    let pending=false;dialog.querySelector("form").onsubmit=async event=>{
+    const form=dialog.querySelector("form"),alert=dialog.querySelector("[role=alert]"),mergeField=dialog.querySelector("[data-merge-field]");
+    form.elements.status.onchange=()=>{mergeField.hidden=form.elements.status.value!=="merged";if(mergeField.hidden)form.elements.merged_into.value="";};
+    let pending=false;
+    const busy=value=>{pending=value;if(activeDraft)activeDraft.pending=value;dialog.querySelectorAll("button").forEach(button=>button.disabled=value);};
+    const remove=dialog.querySelector("[data-delete-point]");
+    if(remove)remove.onclick=async()=>{
+      if(pending)return;
+      // First click asks in place; a second dialog on top of this one is avoided.
+      if(!remove.dataset.confirm){remove.dataset.confirm="1";remove.className="danger";remove.textContent=`确认删除 ${found.code}`;alert.textContent="删除后不能恢复；分级表文件不会改动，也不会再把它导回来。";return;}
+      busy(true);
+      try {await api("/api/selling-points",{method:"POST",body:{revision:catalog.revision,request_id:crypto.randomUUID(),operation:"delete",point:{id:found.id,product}}});dialog.close();toast(`已删除 ${found.code}`);void route();}
+      catch(error){alert.textContent=error.message;delete remove.dataset.confirm;remove.className="danger-outline";remove.textContent="删除卖点";}
+      finally{busy(false);}
+    };
+    form.onsubmit=async event=>{
       event.preventDefault();if(pending)return;
-      const values=Object.fromEntries(new FormData(event.currentTarget));for(const key of Object.keys(values))values[key]=String(values[key]).trim();
-      pending=true;if(activeDraft)activeDraft.pending=true;dialog.querySelectorAll("button").forEach(button=>button.disabled=true);
-      try {await api("/api/selling-points",{method:"POST",body:{revision:catalog.revision,request_id:requestId,point:{...prior,...values,product,tier:values.code[0]}}});dialog.close();toast("卖点已保存");void route();}
-      catch(error){dialog.querySelector("[role=alert]").textContent=error.message;}
-      finally{pending=false;if(activeDraft)activeDraft.pending=false;dialog.querySelectorAll("button").forEach(button=>button.disabled=false);}
+      const data=new FormData(event.currentTarget),values=Object.fromEntries(data);for(const key of Object.keys(values))values[key]=String(values[key]).trim();
+      values.code=values.code.toUpperCase();values.same_fact_as=data.getAll("same_fact_as").map(String);
+      busy(true);
+      try {await api("/api/selling-points",{method:"POST",body:{revision:catalog.revision,request_id:requestId,point:{...prior,...values,product,tier:values.code[0]}}});dialog.close();toast(found.code&&found.code!==values.code?`已改为 ${values.code}，引用已同步`:"卖点已保存");void route();}
+      catch(error){alert.textContent=error.message;}
+      finally{busy(false);}
     };dialog.showModal();trackDraft(dialog);
   }
   async function route(force=false) {
@@ -473,6 +716,18 @@ window.CaseDirections = (() => {
           (await api(catalogURL(values.product)).catch(()=>null))?.selling_points || [];
         if(sequence!==requestSequence||pageHash()!==values.hash)return;
         const detail=renderDetail(data,values,points);
+        if(data.progress_available===true&&!window.PublicTextMode){
+          const current=()=>sequence===requestSequence&&pageHash()===values.hash;
+          const loadProgress=async()=>{
+            if(!current())return;
+            detail.loadingProgress();
+            try{
+              const response=await api("/api/direction-progress/"+encodeURIComponent(data.direction.direction_id)+"?"+new URLSearchParams({product:data.direction.product}));
+              if(current())detail.setProgress(response);
+            }catch(error){if(current())detail.progressError(error,()=>void loadProgress());}
+          };
+          requestAnimationFrame(()=>setTimeout(()=>{if(current())void loadProgress();},0));
+        }
         if(data.tasks_pending===true){
           const current=()=>sequence===requestSequence&&pageHash()===values.hash;
           const loadTasks=async()=>{

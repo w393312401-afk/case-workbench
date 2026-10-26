@@ -191,6 +191,7 @@ class DirectionLoadingTests(unittest.TestCase):
         detailed = app.ai.get(identifier)
         rounds = detailed.pop("rounds")
         expected = {**detailed, "round_count": len(rounds),
+                    "latest_round_id": rounds[-1]["round_id"], "latest_round_status": rounds[-1]["status"],
                     "instruction": rounds[-1]["instruction"].strip()[:160],
                     "model": rounds[-1]["model"] or rounds[-1]["requested_model"],
                     "last_error": rounds[-1]["error"].strip()[:160]}

@@ -1,0 +1,32 @@
+.workbench-guest [data-guest-hidden="true"],
+.workbench-guest #public-text-banner,
+.workbench-guest #add-top,
+.workbench-guest #import-video-top,
+.workbench-guest #files-nav,
+.workbench-guest #task-activity-open,
+.workbench-guest #materials-nav,
+.workbench-guest [data-page="settings"],
+.workbench-guest [data-page="production"],
+.workbench-guest [data-copy],
+.workbench-guest [data-native-copy],
+.workbench-guest .ai-copy-round,
+.workbench-guest a[download],
+.workbench-guest .script-detail-actions,
+.workbench-guest #script-copy,
+.workbench-guest #script-production-choices,
+.workbench-guest #script-production-note,
+.workbench-guest #script-carousel-tables{display:none!important}
+.workbench-guest .ai-case-actions:has(> .ai-case-history[hidden]){display:none!important}
+.workbench-guest .detail-product > summary{cursor:default;pointer-events:none;border:none;background:none}
+.workbench-guest .detail-product > summary::after{display:none}
+.guest-media-gallery{margin-top:16px}
+.guest-media-gallery summary{cursor:pointer;font-weight:600}
+.guest-media-gallery figure{margin:16px 0 0}
+.guest-media-gallery img{display:block;max-width:100%;max-height:520px;object-fit:contain;border-radius:8px}
+.guest-media-gallery figcaption{margin-top:7px;color:var(--muted);font-size:12px}
+.guest-banner{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0;padding:11px 28px;border-bottom:1px solid var(--line);background:var(--surface-alt);color:var(--muted);font-size:12px;line-height:1.6}
+.guest-banner strong{font-size:12px;font-weight:500}
+.guest-login-link{flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;min-height:32px;padding:5px 12px;border:1px solid var(--line);border-radius:7px;background:var(--paper);color:var(--accent);text-decoration:none;font-weight:550}
+.guest-login-link:hover{background:var(--surface-tint)}
+.guest-login-link:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+@media(max-width:570px){.guest-banner{padding:10px 14px;gap:10px}.guest-banner strong{font-size:11px}.guest-login-link{padding:5px 10px}}

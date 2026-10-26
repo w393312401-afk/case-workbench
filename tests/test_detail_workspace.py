@@ -281,7 +281,9 @@ class DetailWorkspaceTests(unittest.TestCase):
         })
         before = self.store.read_case(self.identifier)
         page.reload()
-        badges.get_by_text("内容来源待确认", exact=True).wait_for()
+        page.locator(".detail-origin > summary").click()
+        page.locator(".detail-origin").get_by_text("内容来源待确认", exact=True).wait_for()
+        self.assertEqual(badges.get_by_text("内容来源待确认", exact=True).count(), 0)
         badges.get_by_text("含本土表达", exact=True).wait_for()
         self.assertEqual(badges.get_by_text("达人内容参考", exact=True).count(), 0)
         self.assertEqual(self.store.read_case(self.identifier), before)
@@ -300,7 +302,7 @@ class DetailWorkspaceTests(unittest.TestCase):
         page.locator(".detail-info").get_by_role("heading", name="可借鉴的表达", exact=True).wait_for()
         self.assertEqual(self.store.read_case(self.identifier), before)
 
-    def test_native_highlights_merge_without_losing_unique_notes(self):
+    def test_native_reference_is_not_shown_in_detail(self):
         current = copy.deepcopy(self.store.read_case(self.identifier)["current"])
         duplicate = "演示时先说具体用途，再说明操作。"
         unique = "这条总览判断并未出现在任何本土表达条目中。"
@@ -321,20 +323,14 @@ class DetailWorkspaceTests(unittest.TestCase):
         })
         before = self.store.read_case(self.identifier)
         page = self.open_page(tab="/script")
-        self.assertEqual(page.locator(".detail-info").get_by_role(
-            "heading", name="可借鉴的表达", exact=True).count(), 0)
-        notes = page.locator(".native-supplemental")
-        self.assertEqual(notes.count(), 1)
-        self.assertFalse(notes.evaluate("element => element.open"))
-        self.assertNotIn(duplicate, notes.text_content())
-        notes.locator("summary").click()
-        notes.get_by_text(unique, exact=True).wait_for()
-        page.locator(".native-entry").get_by_text(duplicate, exact=True).wait_for()
-        self.assertEqual(page.locator(".detail-info").get_by_role(
-            "heading", name="问题与适用边界", exact=True).count(), 1)
+        # 详情页不再显示本土表达块，文案区直接是时间轴文案；数据保持不变。
+        page.locator("#detail-section-transcript").wait_for()
+        self.assertEqual(page.locator(".native-entry").count(), 0)
+        self.assertEqual(page.locator("#detail-section-native").count(), 0)
+        page.locator(".detail-info").get_by_text(unique, exact=True).wait_for()
         self.assertEqual(self.store.read_case(self.identifier), before)
 
-        expected = ["本土表达与场景", "完整文案", "问题与适用边界", "原始拆解"]
+        expected = ["完整文案", "可借鉴的表达", "问题与适用边界", "原始拆解"]
         headings = page.locator(".detail-info:not([hidden]) section.section-card h2").all_text_contents()
         self.assertEqual([heading.strip() for heading in headings], expected)
 
@@ -346,7 +342,7 @@ class DetailWorkspaceTests(unittest.TestCase):
         before = self.store.read_case(self.identifier)
         page = self.open_page()
         self.assertEqual(page.locator('.detail-tabs [role="tab"]').evaluate_all(
-            "tabs => tabs.map(tab => tab.dataset.tab)"), ["current", "script", "data", "history"])
+            "tabs => tabs.map(tab => tab.dataset.tab)"), ["script", "current", "data", "history"])
         self.assertEqual(page.locator('.detail-tabs [aria-selected="true"]').inner_text(), "概要")
         player = page.locator("#case-player")
         player.evaluate("video => { window.__tabPlayer = video; video.muted = true; video.currentTime = 3; return video.play(); }")
@@ -358,6 +354,7 @@ class DetailWorkspaceTests(unittest.TestCase):
         self.assertTrue(page.locator("#detail-section-performance").is_visible())
         self.assertFalse(page.locator("#detail-section-transcript").is_visible())
         page.locator('#detail-tab-history').click()
+        page.locator(".history-item > summary").first.click()
         expanded = page.locator(".history-item details").first
         expanded.locator("summary").click()
         page.evaluate("window.__expandedHistory = document.querySelector('.history-item details')")
@@ -375,7 +372,7 @@ class DetailWorkspaceTests(unittest.TestCase):
 
     def test_legacy_analysis_link_opens_script_with_original_document_and_history(self):
         source = self.root / "original-analysis.md"
-        source.write_text("# 原拆解标题\n\n第一段原始判断。\n\n| 镜头 | 作用 |\n| --- | --- |\n| 开场 | 结果先行 |\n", encoding="utf-8")
+        source.write_text("# 原拆解标题\n\n## 2. 钩子 (Hook) 拆解\n\n第一段原始判断。\n\n## 6. 视觉节拍详解\n\n| 镜头 | 作用 |\n| --- | --- |\n| 开场 | 结果先行 |\n", encoding="utf-8")
         current = copy.deepcopy(self.store.read_case(self.identifier)["current"])
         current["source_case"] = {"library_id": "VSL-T3-001", "file_path": str(source),
                                    "tier": "T3", "transcript_status": "verified", "case_type": "video_analysis"}
@@ -385,13 +382,18 @@ class DetailWorkspaceTests(unittest.TestCase):
         page.wait_for_url(f"**/#/202H/case/{self.identifier}/script")
         self.assertEqual(page.locator('#detail-tab-script').get_attribute("aria-selected"), "true")
         page.locator("#detail-source-analysis .markdown-body").get_by_text("第一段原始判断。", exact=True).wait_for()
-        page.locator("#detail-source-analysis .source-raw summary").click()
-        self.assertIn("结果先行", page.locator(".source-raw pre").inner_text())
+        # Chapters fold; 6 starts closed, opens from its chip, and stays open across tabs and reloads.
+        beats = page.locator('details.source-chapter[data-chapter-key="6"]')
+        self.assertFalse(beats.evaluate("element => element.open"))
+        self.assertEqual(page.locator(".source-raw").count(), 0)
+        page.locator(".source-chapter-chip", has_text="6 视觉节拍详解").click()
+        beats.get_by_text("结果先行", exact=True).wait_for()
         page.get_by_role("tab", name="概要", exact=True).click()
         page.get_by_role("tab", name="文案与拆解", exact=True).click()
-        self.assertTrue(page.locator(".source-raw").evaluate("element => element.open"))
+        self.assertTrue(beats.evaluate("element => element.open"))
         page.reload()
         page.locator("#detail-source-analysis .markdown-body").get_by_text("第一段原始判断。", exact=True).wait_for()
+        self.assertTrue(beats.evaluate("element => element.open"))
         self.assertEqual(source.read_bytes(), before)
 
     def test_collaboration_completion_and_inline_sections_stay_with_the_case(self):
@@ -405,8 +407,9 @@ class DetailWorkspaceTests(unittest.TestCase):
         action_bounds = actions.bounding_box()
         main_bounds = page.locator(".detail-main").bounding_box()
         self.assertLessEqual(action_bounds["x"] + action_bounds["width"], main_bounds["x"])
-        self.assertEqual(page.locator(".detail-completion .is-ready").count(), 2)
-        self.assertEqual(page.locator(".detail-completion .is-missing").count(), 2)
+        self.assertEqual(page.locator(".detail-completion .is-ready").count(), 0)
+        self.assertGreaterEqual(page.locator(".detail-completion .is-missing").count(), 2)
+        page.locator(".detail-completion > summary").click()
         page.locator('[data-completion-section="direction"]').click()
         self.assertEqual(page.locator('#detail-tab-current').get_attribute("aria-selected"), "true")
         editor = page.locator('[data-inline-section="direction"] .case-inline-editor')
@@ -414,7 +417,7 @@ class DetailWorkspaceTests(unittest.TestCase):
         self.assertEqual(editor.get_attribute("data-edit-section"), "direction")
         editor.locator('[data-inline-cancel]').first.click()
         page.locator('#detail-tab-current').focus()
-        page.keyboard.press("ArrowRight")
+        page.keyboard.press("ArrowLeft")
         self.assertEqual(page.locator('#detail-tab-script').get_attribute("aria-selected"), "true")
         self.assertTrue(page.url.endswith("/script"))
         page.keyboard.press("End")

@@ -24,6 +24,7 @@ from codex_bridge import BridgeCancelled, BridgeError, BridgeUnavailable, _frien
 _WINDOWS = os.name == "nt"
 MAX_LINE_BYTES = 8 * 1024 * 1024
 MAX_ANSWER_BYTES = 4 * 1024 * 1024
+REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
 def _image_error(error):
@@ -71,16 +72,18 @@ class CodexImageBridge:
                 "error": "请先安装或启动 Codex，或配置 CODEX_EXECUTABLE。"}
 
     def run(self, prompt, *, cwd, images, cancel_event, on_progress, on_event=None,
-            timeout=1800, schema=None, read_only=False):
+            timeout=1800, schema=None, read_only=False, reasoning_effort=None):
         directory = Path(cwd).expanduser().resolve()
         if not directory.is_dir():
             raise BridgeError("图片任务目录不存在，请重新准备任务。")
         if not isinstance(prompt, str) or not prompt.strip():
             raise BridgeError("图片任务要求不能为空。")
+        if reasoning_effort is not None and (not isinstance(reasoning_effort, str) or reasoning_effort not in REASONING_EFFORTS):
+            raise BridgeError("图片任务推理强度无效。")
         if read_only:
-            prompt = ("这是独立的只读图片核对任务。仅检查已提供的图片并返回核对结果；"
+            prompt = ("这是独立的只读图片理解任务。仅查看已提供的图片，按下文要求完成视觉分析、提示词策划或核对，并返回指定结构化结果；"
                       "不得调用图片生成工具，不得编辑或重新生成图片，不得写入或修改图片文件。"
-                      "以下是本次核对要求：\n\n" + prompt)
+                      "以下是本次任务要求：\n\n" + prompt)
         if not isinstance(images, (list, tuple)):
             raise BridgeError("图片参考文件列表无效。")
         references = []
@@ -126,6 +129,9 @@ class CodexImageBridge:
             args = [executable, "-a", "never", "--no-daemon", "exec", "--json", "--ephemeral",
                     "-s", "read-only" if read_only else "workspace-write", "--skip-git-repo-check",
                     "-C", str(directory), "--output-last-message", str(answer_path)]
+            if reasoning_effort is not None:
+                # Per-call CLI configuration only; never change the selected model or the user's config file.
+                args.extend(["-c", "model_reasoning_effort=" + json.dumps(reasoning_effort)])
             if schema is not None:
                 schema_path = (private / "schema.json").resolve()
                 schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
@@ -141,6 +147,7 @@ class CodexImageBridge:
         process, threads = None, []
         last_error, eof = None, False
         receipt = {"source": "codex_cli", "read_only": bool(read_only), "model": None,
+                   "reasoning_effort_override": reasoning_effort,
                    "thread_id": None, "started_at": None, "finished_at": None, "pid": None,
                    "status": "prepared"}
 
@@ -232,7 +239,7 @@ class CodexImageBridge:
                 if event_type == "thread.started":
                     receipt["thread_id"] = event.get("thread_id")
                     emit({"type": "session", "thread_id": event.get("thread_id"),
-                          "model": None, "reasoning_effort": None, "skills": []})
+                          "model": None, "reasoning_effort": reasoning_effort, "skills": []})
                 elif event_type == "turn.started":
                     progress("Codex 正在处理图片要求。")
                 elif event_type == "turn.failed":

@@ -1,6 +1,7 @@
 """Carousel pickup and publication through isolated HTTP and a fake image engine."""
 from __future__ import annotations
 
+import copy
 import io
 import json
 import unittest
@@ -8,6 +9,7 @@ from uuid import uuid4
 import zipfile
 
 import test_production_carousel_images_ui as image_fixture
+from test_production_queue_ui import content_response
 
 
 class CarouselDeliveryBrowserTests(unittest.TestCase):
@@ -32,7 +34,7 @@ class CarouselDeliveryBrowserTests(unittest.TestCase):
         self.generate(page)
         for number in (1, 2, 3):
             self.approve(page, number)
-        page.locator('.page-heading .script-status').get_by_text("成图已确认", exact=True).wait_for()
+        page.locator('.page-heading .script-status').get_by_text("可领取", exact=True).wait_for()
 
     def prepare(self, page):
         # Confirming the whole group already packages it; pressing the button again reuses that package.
@@ -42,19 +44,60 @@ class CarouselDeliveryBrowserTests(unittest.TestCase):
         return self.detail()["deliveries"][-1]
 
     def publication_dialog(self, page, delivery_id, *, post_id="7664986913497009442"):
+        # Registration sits inline under the publish copy, like the video order's; extra fields fold under 都可不填.
         page.locator('[data-step="delivery"]').click()
-        page.locator(f'[data-publish-delivery="{delivery_id}"]').click()
-        modal = page.locator('.production-dialog[open]')
+        modal = page.locator('#carousel-publication-editor')
+        if modal.get_attribute('open') is None:
+            modal.locator(':scope > summary').click()
+        more = modal.locator('.video-publication-more')
+        if more.get_attribute('open') is None:
+            more.locator(':scope > summary').click()
+        modal.locator('[name="delivery_id"]').select_option(delivery_id)
+        previous_post = modal.locator('[name="post_id"]').input_value()
+        previous_date = modal.locator('[name="published_on"]').input_value()
         modal.locator('[name="post_id"]').fill(post_id)
-        modal.locator('[name="published_on"]').fill("2026-10-10")
+        # The fixture IDs were posted 2026-07-21 (UTC−8); the ID fills that in before the test sets its own date.
+        # A manually chosen date on an existing registration remains intentional during correction.
+        self.assertEqual(modal.locator('[name="published_on"]').input_value(),
+                         previous_date if previous_post and previous_date != "2026-07-21" else "2026-07-21")
+        modal.locator('[name="published_on"]').evaluate("node => { node.value = '2026-10-10'; }")
         modal.locator('[name="post_url"]').fill(f"https://www.tiktok.com/@fixture/photo/{post_id}")
         modal.locator('[name="account"]').fill("fixture")
         modal.locator('[name="note"]').fill("实际使用的图片包已逐张核对")
         return modal
 
-    def test_confirm_pickup_keep_old_pack_and_register_actual_published_package(self):
+    def test_registered_post_ids_copy_from_the_current_registration_and_the_history(self):
+        page = self.open_images()
+        page.route('**/api/direction-progress/202H-S2?product=202H', lambda route: route.fulfill(
+            json={'product': '202H', 'direction_id': '202H-S2', 'variants': []}))
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        page.locator('[data-step="delivery"]').click()
+        self.confirm_group(page)
+        original = self.prepare(page)
+        page.reload()
+        modal = self.publication_dialog(page, original["id"])
+        modal.get_by_role("button", name="保存发布登记", exact=True).click()
+        record = page.locator('#carousel-publication .publication-record')
+        record.get_by_text("已登记发布", exact=True).wait_for()
+        record.locator('[data-copy-id]').click()
+        page.get_by_text("图文 ID已复制").wait_for()
+        self.assertEqual(page.evaluate("navigator.clipboard.readText()"), "7664986913497009442")
+        # Binding a second post keeps the first in the history, which has its own copy button.
+        modal = self.publication_dialog(page, original["id"], post_id="7664986913497009450")
+        modal.get_by_role("button", name="保存修正并保留原登记", exact=True).click()
+        record.locator('[data-copy-id][data-copy-id="7664986913497009450"]').wait_for()
+        history = page.locator('#carousel-publication-history')
+        history.locator(':scope > summary').click()
+        old = history.locator('[data-publication-history] [data-copy-id="7664986913497009442"]')
+        old.click()
+        page.wait_for_function("() => navigator.clipboard.readText().then(text => text === '7664986913497009442')")
+        self.assertEqual(history.locator('[data-publication-history] dd span', has_text="7664986913497009442").count(), 1)
+
+    def test_confirm_pickup_replace_old_pack_and_preserve_the_original_publication_source(self):
         before = self.source.read_bytes()
         page = self.open_images()
+        page.route('**/api/direction-progress/202H-S2?product=202H', lambda route: route.fulfill(
+            json={'product': '202H', 'direction_id': '202H-S2', 'variants': []}))
         console_errors = []
         page.on('console', lambda message: console_errors.append(message.text) if message.type == 'error' else None)
         self.assertTrue(page.locator("#carousel-prepare-delivery").is_disabled())
@@ -62,6 +105,7 @@ class CarouselDeliveryBrowserTests(unittest.TestCase):
         page.locator('#carousel-delivery-panel').get_by_text("还有 3 张未工作台确认", exact=False).wait_for()
         self.confirm_group(page)
         original = self.prepare(page)
+        self.assertEqual(page.locator('#carousel-deliveries .delivery-package').count(), 1)
         with page.expect_download() as downloaded:
             page.locator(f'[data-download-delivery="{original["id"]}"]').click()
         self.assertEqual(downloaded.value.suggested_filename, original["filename"])
@@ -69,12 +113,19 @@ class CarouselDeliveryBrowserTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("zip", headers["Content-Type"])
         with zipfile.ZipFile(io.BytesIO(first_zip)) as archive:
-            names = archive.namelist()
             for slide in original["slides"]:
-                self.assertIn(slide["file"], names)
+                self.assertIn(slide["file"], archive.namelist())
         page.evaluate("window.__deliveryCopied = ''; window.copyText = text => { window.__deliveryCopied = text; return Promise.resolve(); }")
-        page.locator(f'[data-copy-delivery="{original["id"]}"]').click()
-        self.assertEqual(page.evaluate("window.__deliveryCopied"), original["caption_en"])
+        page.locator('#carousel-delivery-panel [data-copy-publish="text"]').click()
+        expected = "\n\n".join(text for text in (original["caption_zh"], original["caption_en"]) if text)
+        self.assertEqual(page.evaluate("window.__deliveryCopied"), expected)
+        page.reload()
+        modal = self.publication_dialog(page, original["id"])
+        modal.get_by_role("button", name="保存发布登记", exact=True).click()
+        page.locator('#carousel-publication .publication-record').get_by_text("已登记发布", exact=True).wait_for()
+        frozen_publication = copy.deepcopy(self.detail()["publication"])
+        self.assertEqual(frozen_publication["delivery_id"], original["id"])
+
         page.locator('[data-step="images"]').click()
         page.locator('[data-redo-slide="1"]').click()
         redo = page.locator('.production-dialog[open]')
@@ -85,51 +136,64 @@ class CarouselDeliveryBrowserTests(unittest.TestCase):
         self.approve(page, 1)
         latest = self.prepare(page)
         self.assertNotEqual(latest["id"], original["id"])
-        previous_card = page.locator(f'[data-delivery-id="{original["id"]}"]')
-        previous_card.get_by_text("历史版本 · 保留", exact=True).wait_for()
-        status, _, retained_zip = self.request("GET", f"/api/production/carousels/{self.carousel['id']}/deliveries/{original['id']}/download")
-        self.assertEqual(status, 200)
-        self.assertEqual(retained_zip, first_zip)
-        # Reading a package is now a real collection record. Reload the live
-        # version before registering the actual historical package.
+        self.assertEqual(page.locator('#carousel-deliveries .delivery-package').count(), 1)
+        self.assertEqual(page.locator(f'[data-delivery-id="{original["id"]}"]').count(), 0)
+        self.assertEqual([entry["id"] for entry in self.detail()["deliveries"]], [latest["id"]],
+                         "The backend catalog must contain just the latest package; hiding older cards is insufficient.")
+        self.assertFalse((self.app._carousel_dir(self.carousel["id"]) / original["zip_file"]).exists())
+        status, _, _ = self.request("GET", f"/api/production/carousels/{self.carousel['id']}/deliveries/{original['id']}/download")
+        self.assertEqual(status, 404)
+        with page.expect_download() as downloaded:
+            page.locator(f'[data-download-delivery="{latest["id"]}"]').click()
+        self.assertEqual(downloaded.value.suggested_filename, latest["filename"])
+        self.assertEqual(self.detail()["publication"], frozen_publication,
+                         "Replacing a local ZIP must not rebind an existing publication.")
+
         page.reload()
-        modal = self.publication_dialog(page, latest["id"])
-        modal.locator('[name="delivery_id"]').select_option(original["id"])
-        modal.get_by_role("button", name="保存发布登记", exact=True).click()
-        page.locator('#carousel-publication').get_by_role("heading", name="已登记发布", exact=True).wait_for()
-        data = self.request("GET", f"/api/production/carousels/{self.carousel['id']}")[2]
-        publication = data.get("publication") or data["carousel"]["publication"]
-        self.assertEqual(publication["delivery_id"], original["id"])
-        self.assertEqual(publication["post_id"], "7664986913497009442")
+        page.locator('[data-step="delivery"]').click()
+        page.locator('.publication-record').get_by_text("原发布来源（文件已清理）", exact=False).wait_for()
+        editor = page.locator('#carousel-publication-editor')
+        if editor.get_attribute('open') is None:
+            editor.locator(':scope > summary').click()
+        self.assertNotEqual(editor.locator('[name="delivery_id"]').input_value(), latest["id"],
+                            "Opening an old publication must not silently select the new package.")
+        more = editor.locator('.video-publication-more')
+        if more.get_attribute('open') is None:
+            more.locator(':scope > summary').click()
+        editor.locator('[name="note"]').fill("修正旧登记，来源保持原包")
+        with page.expect_response(lambda response: response.request.method == 'POST' and response.url.endswith('/publication')) as corrected:
+            editor.get_by_role("button", name="保存修正并保留原登记", exact=True).click()
+        self.assertEqual(corrected.value.status, 200, corrected.value.json())
+        page.locator('.publication-record').get_by_text("修正旧登记，来源保持原包", exact=True).wait_for()
+        self.assertEqual(self.detail()["publication"]["delivery_id"], original["id"])
+        self.assertEqual(self.detail()["publication"]["delivery_snapshot"], frozen_publication["delivery_snapshot"])
+        modal = self.publication_dialog(page, latest["id"], post_id="7664986913497009444")
+        modal.locator('[name="note"]').fill("实际发布使用最新成品包")
+        modal.get_by_role("button", name="保存修正并保留原登记", exact=True).click()
+        page.locator('.publication-record').get_by_text("实际发布使用最新成品包", exact=True).wait_for()
+        publication = self.detail()["publication"]
+        self.assertEqual(publication["delivery_id"], latest["id"])
+        self.assertEqual(publication["post_id"], "7664986913497009444")
         self.assertEqual(self.app.creation.get_script(self.carousel["script_id"])["status"], "published")
+        page.locator(f'[data-delivery-id="{latest["id"]}"]').get_by_text("用于当前发布登记", exact=True).wait_for()
         self.assertEqual(page.locator('#carousel-publication-performance .facts-grid').count(), 0)
-        page.locator(f'[data-delivery-id="{original["id"]}"]').get_by_text("用于当前发布登记", exact=True).wait_for()
         history = page.locator('#carousel-publication-history')
-        self.assertEqual(history.locator('[data-publication-history]').count(), 1)
+        self.assertEqual(history.locator('[data-publication-history]').count(), 3)
         self.assertIsNone(history.get_attribute('open'))
-        history_count = len(self.detail()["history"])
-        page.locator('#carousel-publication-edit').click()
-        modal = page.locator('.production-dialog[open]')
-        self.assertEqual(modal.locator('[name="delivery_id"]').input_value(), original["id"])
-        modal.locator('[name="post_id"]').fill("7664986913497009444")
-        modal.locator('[name="post_url"]').fill("https://www.tiktok.com/@fixture/photo/7664986913497009444")
-        modal.locator('[name="note"]').fill("补充说明：使用的是第一包")
-        modal.get_by_role("button", name="保存发布登记", exact=True).click()
-        page.locator('.publication-record').get_by_text("补充说明：使用的是第一包", exact=True).wait_for()
-        self.assertGreater(len(self.detail()["history"]), history_count)
-        self.assertEqual(len(self.detail()["publication_history"]), 2)
-        history.locator('summary').click()
+        history.locator(':scope > summary').click()
         entries = history.locator('[data-publication-history]')
-        self.assertEqual(entries.count(), 2)
         entries.nth(0).get_by_text("7664986913497009444", exact=True).wait_for()
-        entries.nth(1).get_by_text("7664986913497009442", exact=True).wait_for()
-        entries.nth(1).get_by_text("实际使用的图片包已逐张核对", exact=True).wait_for()
-        entries.nth(1).get_by_text(original["id"], exact=False).wait_for()
-        page.goto(f"http://127.0.0.1:{self.server.server_port}/#production")
-        row = page.locator(f'[data-production-id="{self.carousel["id"]}"]')
-        row.locator('.production-next-action').wait_for()
-        row.click()
-        page.locator('.publication-record').get_by_text("7664986913497009444", exact=True).wait_for()
+        entries.nth(1).get_by_text("修正旧登记，来源保持原包", exact=True).wait_for()
+        entries.nth(2).get_by_text("7664986913497009442", exact=True).wait_for()
+        entries.nth(2).get_by_text("实际使用的图片包已逐张核对", exact=True).wait_for()
+        entries.nth(2).locator(':scope > dl.publication-facts').get_by_text(original["id"], exact=False).wait_for()
+        self.assertEqual(self.detail()["publication_history"][0], frozen_publication)
+        page.goto(f"http://127.0.0.1:{self.server.server_port}/#/202H/content?view=all")
+        page.locator(f'[data-content-id="carousel:{self.carousel["id"]}"]').wait_for()
+        self.assertEqual(page.locator('#production-queue').count(), 0)
+        page.goto(f"http://127.0.0.1:{self.server.server_port}/#production/{self.carousel['id']}?step=delivery")
+        page.locator('.publication-record a[href="https://www.tiktok.com/@fixture/photo/7664986913497009444"]').wait_for()
+        self.assertEqual(page.locator('#carousel-deliveries .delivery-package').count(), 1)
         self.assertEqual(self.source.read_bytes(), before)
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 1081)
         self.assertEqual(console_errors, [])
@@ -140,7 +204,8 @@ class CarouselDeliveryBrowserTests(unittest.TestCase):
         delivery = self.prepare(page)
         modal = self.publication_dialog(page, delivery["id"], post_id="7664986913497009443")
         modal.locator('[name="post_id"]').fill("123")
-        self.assertFalse(modal.locator('[name="post_id"]').evaluate("input => input.checkValidity()"))
+        modal.get_by_role("button", name="保存发布登记", exact=True).click()
+        modal.locator('[data-publication-error]').get_by_text("6–25 位数字", exact=False).wait_for()
         modal.locator('[name="post_id"]').fill("7664986913497009443")
         fields = {name: modal.locator(f'[name="{name}"]').input_value() for name in
                   ("delivery_id", "post_id", "published_on", "post_url", "account", "note")}
@@ -150,14 +215,41 @@ class CarouselDeliveryBrowserTests(unittest.TestCase):
         with page.expect_response(lambda response: response.url.endswith('/publication')) as failed:
             modal.get_by_role("button", name="保存发布登记", exact=True).click()
         self.assertEqual(failed.value.status, 409)
-        modal.locator('[data-error]').get_by_text("本次输入已保留", exact=False).wait_for()
+        modal.locator('[data-publication-error]').get_by_text("本次输入已保留", exact=False).wait_for()
         self.assertEqual({name: modal.locator(f'[name="{name}"]').input_value() for name in fields}, fields)
         self.assertFalse(modal.locator('[name="post_id"]').is_disabled())
         self.assertLessEqual(modal.evaluate("el => el.scrollWidth - el.clientWidth"), 1)
-        modal.get_by_role("button", name="保存发布登记", exact=True).click()
-        page.locator('.publication-record').get_by_text("7664986913497009443", exact=True).wait_for()
+        with page.expect_response(lambda response: response.request.method == 'POST' and response.url.endswith('/publication')) as saved:
+            modal.get_by_role("button", name="保存发布登记", exact=True).click()
+        self.assertEqual(saved.value.status, 200, saved.value.json())
+        page.locator('.publication-record a[href="https://www.tiktok.com/@fixture/photo/7664986913497009443"]').wait_for()
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
         self.assertEqual(page.locator('#carousel-publication-performance .facts-grid').count(), 0)
+
+    def test_successful_package_shows_real_cleanup_warnings_and_clears_them_after_a_clean_retry(self):
+        page = self.open_images()
+        self.confirm_group(page)
+        calls = []
+        warning = "隔离测试：有一份旧领取副本仍被占用"
+
+        def prepare_with_warning(route):
+            status, _, result = self.request("POST", f"/api/production/carousels/{self.carousel['id']}/delivery",
+                                             route.request.post_data_json)
+            self.assertEqual(status, 200, result)
+            calls.append(result)
+            if len(calls) == 1:
+                result["cleanup_warnings"] = [warning]
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(result, ensure_ascii=False))
+
+        page.route(f"**/api/production/carousels/{self.carousel['id']}/delivery", prepare_with_warning)
+        package = self.prepare(page)
+        note = page.locator('[data-delivery-cleanup-warning]')
+        note.get_by_text(warning, exact=False).wait_for()
+        self.assertIn("清理未完成", note.inner_text())
+        self.assertEqual(page.locator(f'[data-download-delivery="{package["id"]}"]').count(), 1)
+        self.prepare(page)
+        note.wait_for(state="detached")
+        self.assertEqual(len(calls), 2)
 
     def test_unconfirmed_publication_retries_original_request_after_reopening(self):
         page = self.open_images(width=390)
@@ -180,28 +272,99 @@ class CarouselDeliveryBrowserTests(unittest.TestCase):
         fields = {name: modal.locator(f'[name="{name}"]').input_value() for name in
                   ("delivery_id", "post_id", "published_on", "post_url", "account", "note")}
         modal.get_by_role("button", name="保存发布登记", exact=True).click()
-        modal.locator('[data-error]').get_by_text("请直接重试原登记", exact=False).wait_for()
+        modal.locator('[data-publication-error]').get_by_text("请直接重试同一登记", exact=False).wait_for()
         self.assertEqual(len(self.detail()["publication_history"]), 1)
         for name in fields:
             self.assertTrue(modal.locator(f'[name="{name}"]').is_disabled())
-        self.assertFalse(modal.locator('[data-submit]').is_disabled())
-        modal.get_by_role("button", name="取消", exact=True).click()
-        page.locator(f'[data-publish-delivery="{delivery["id"]}"]').click()
-        modal = page.locator('.production-dialog[open]')
         self.assertEqual({name: modal.locator(f'[name="{name}"]').input_value() for name in fields}, fields)
-        self.assertTrue(modal.locator('[name="post_id"]').is_disabled())
-        modal.get_by_role("button", name="保存发布登记", exact=True).click()
-        page.locator('.publication-record').get_by_text("7664986913497009445", exact=True).wait_for()
+        self.assertFalse(modal.locator('[type="submit"]').is_disabled())
+        with page.expect_response(lambda response: response.request.method == 'POST' and response.url.endswith('/publication')) as retried:
+            modal.get_by_role("button", name="重试同一登记", exact=True).click()
+        self.assertEqual(retried.value.status, 200, retried.value.json())
+        page.locator('.publication-record a[href="https://www.tiktok.com/@fixture/photo/7664986913497009445"]').wait_for()
         self.assertEqual(len(sent), 2)
         self.assertEqual(sent[0], sent[1])
         self.assertEqual(len(self.detail()["publication_history"]), 1)
 
-    def test_unified_queue_keeps_video_review_separate_from_carousel_collection(self):
+    def test_collected_current_package_waits_for_registration_in_header_and_delivery_step(self):
+        page = self.open_images()
+        self.confirm_group(page)
+        delivery = self.prepare(page)
+        heading = page.locator('.page-heading .script-status')
+        step = page.locator('.production-steps [data-step="delivery"] small')
+        # A package nobody has downloaded still reads as ready to collect.
+        step.get_by_text("最新成品包可领取", exact=True).wait_for()
+        self.assertEqual(heading.inner_text(), "可领取")
+        self.assertEqual(page.locator('[data-next-state]').text_content(), "可领取")
+        with page.expect_download():
+            page.locator(f'[data-download-delivery="{delivery["id"]}"]').click()
+        page.locator(f'[data-delivery-state="{delivery["id"]}"]').get_by_text("已领取", exact=False).wait_for()
+        self.assertTrue(self.detail()["deliveries"][-1]["collected_at"])
+        self.assertFalse(self.detail().get("publication"))
+
+        # The header follows the pickup on the same page, and after a reload.
+        heading.get_by_text("已领取 · 待登记发布", exact=True).wait_for()
+        step.get_by_text("已领取 · 待登记", exact=True).wait_for()
+        # Header, the hidden 下一步 strip and the step bar all say the pack is out but no post is registered yet.
+        page.reload()
+        heading.get_by_text("已领取 · 待登记发布", exact=True).wait_for()
+        self.assertEqual(page.locator('[data-next-state]').text_content(), "已领取 · 待登记发布")
+        self.assertEqual(page.locator('[data-next-action]').text_content(), "下一步：登记发布 →")
+        self.assertEqual(page.locator('[data-next-note]').text_content(), "成品包已领取，发帖后登记帖子 ID")
+        self.assertEqual(step.inner_text(), "已领取 · 待登记")
+
+        # Registering the post supersedes the pickup state.
+        modal = self.publication_dialog(page, delivery["id"], post_id="7664986913497009446")
+        modal.get_by_role("button", name="保存发布登记", exact=True).click()
+        heading.get_by_text("已登记发布", exact=True).wait_for()
+        step.get_by_text("已登记发布", exact=True).wait_for()
+        self.assertEqual(page.locator('[data-next-state]').text_content(), "已登记发布")
+        # The receipt points at a package still listed above, so its sources render once, on that package card.
+        expect_count = page.locator('#carousel-publication .delivery-provenance').count()
+        self.assertEqual((expect_count, page.locator(f'[data-delivery-id="{delivery["id"]}"] .delivery-provenance').count()), (0, 1))
+        # Until the sales table knows the post, its empty state names a carousel, on one line.
+        performance = page.locator("#carousel-publication-performance")
+        performance.get_by_text("销售数据表未匹配到此图文", exact=True).wait_for()
+        self.assertEqual(performance.locator(".context-note").count(), 0)
+
+    def test_published_order_step_reads_checking_until_delivery_status_returns(self):
+        page = self.open_images()
+        self.confirm_group(page)
+        delivery = self.prepare(page)
+        status, _, result = self.request("POST", f"/api/production/carousels/{self.carousel['id']}/publication", {
+            "request_id": uuid4().hex, "revision": self.app.production.public()["revision"],
+            "delivery_id": delivery["id"], "post_id": "7664986913497009447", "published_on": "2026-10-10",
+            "account": "fixture"})
+        self.assertEqual(status, 200, result)
+        held, released = [], []
+
+        def delivery_read(route):
+            if released:
+                route.continue_()
+            else:
+                held.append(route)
+
+        page.route("**/api/production/deliveries?*", delivery_read)
+        page.reload()
+        step = page.locator('.production-steps [data-step="delivery"] small')
+        # The stored publication alone cannot tell current from old version; wait for the status read.
+        step.get_by_text("核对中", exact=True).wait_for()
+        page.evaluate('() => new Promise(resolve => setTimeout(resolve,100))')
+        self.assertEqual(step.inner_text(), "核对中")
+        self.assertEqual(page.locator('.page-heading .script-status').inner_text(), "领取状态核对中")
+        self.assertTrue(held)
+        released.append(True)
+        for route in held:
+            route.continue_()
+        step.get_by_text("已登记发布", exact=True).wait_for()
+        page.locator('.page-heading .script-status').get_by_text("已登记发布", exact=True).wait_for()
+
+    def test_content_list_includes_video_and_carousel_while_its_package_stays_in_details(self):
         page = self.open_images(width=390)
         page.route("**/api/production/eleven", lambda route: route.fulfill(status=200,
             content_type="application/json", body=json.dumps({"ok": True})))
         self.confirm_group(page)
-        self.prepare(page)
+        package = self.prepare(page)
         video_row = {"kind": "video", "id": "PRD-0123456789ab", "product": "202H", "title": "待人工审查的剪辑",
                      "direction_id": "202H-S1", "timeline_name": "Lab261011-202-1", "updated_at": "2026-10-10",
                      "status": "awaiting_review", "edit_id": "EDT-0123456789ab"}
@@ -217,20 +380,25 @@ class CarouselDeliveryBrowserTests(unittest.TestCase):
             content_type="application/json", body=json.dumps(catalog_data, ensure_ascii=False)))
         page.route("**/api/production/deliveries?*", lambda route: route.fulfill(status=200,
             content_type="application/json", body=json.dumps(delivery_data, ensure_ascii=False)))
-        page.goto(f"http://127.0.0.1:{self.server.server_port}/#production")
-        video = page.locator('[data-delivery-kind="video"]')
-        video.get_by_text("去审查", exact=True).wait_for()
-        video.get_by_text("待人工审查", exact=True).wait_for()
+        page.route('**/api/content?*', lambda route: route.fulfill(status=200, content_type='application/json',
+            body=json.dumps(content_response(self.app, catalog_data['jobs'], catalog_data['carousels'], route.request.url))))
+        page.goto(f'http://127.0.0.1:{self.server.server_port}/#/202H/content?view=all')
+        video = page.locator('[data-content-id="video:PRD-0123456789ab"]')
+        video.get_by_text('待人工审查', exact=True).wait_for()
         self.assertEqual(video.locator('[download]').count(), 0)
-        self.assertIn("PRD-0123456789ab", video.get_attribute("href"))
-        carousel = page.locator(f'[data-production-id="{self.carousel["id"]}"]')
-        self.assertEqual(carousel.count(), 1)
-        carousel.get_by_text("可领取", exact=True).wait_for()
-        carousel.get_by_text("领取成品", exact=True).wait_for()
-        self.assertEqual(page.locator("#production-queue .production-card").count(), 2)
-        page.locator("#production-status").select_option("ready")
-        self.assertEqual(page.locator("#production-queue .production-card").count(), 1)
-        self.assertEqual(page.locator('[data-production-kind="video"]').count(), 0)
+        self.assertIn('PRD-0123456789ab', video.locator('.flow-title').get_attribute('href'))
+        carousel = page.locator(f'[data-content-id="carousel:{self.carousel["id"]}"]')
+        carousel.wait_for()
+        self.assertEqual(page.locator('.flow-row').count(), 2)
+        self.assertEqual(page.locator('#production-queue, #production-type').count(), 0)
+        page.locator('#content-flow-filter-toggle').click()
+        page.locator('[data-filter-add]').click()
+        page.locator('[data-filter-field]').select_option('status')
+        self.assertEqual(page.locator('[data-filter-value="ready"], [data-filter-value="ready_to_package"]').count(), 0)
+        page.locator('[data-filter-cancel]').click()
+        page.goto(f"http://127.0.0.1:{self.server.server_port}/#production/{self.carousel['id']}?step=delivery")
+        page.locator(f'[data-download-delivery="{package["id"]}"]').wait_for()
+        self.assertEqual(self.detail()["deliveries"][-1]["id"], package["id"])
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 
 

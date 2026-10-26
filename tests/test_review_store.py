@@ -73,7 +73,7 @@ class ReviewStoreTests(unittest.TestCase):
         platforms = {p["platform"]: p["total"] for p in self.store.summary()["platforms"]}
         self.assertEqual(platforms, {"tiktok_video": 3, "tiktok_shop": 2, "amazon": 2, "reddit": 2, "facebook": 2})
 
-    def test_reviewer_names_are_never_stored(self):
+    def test_explicit_public_names_are_retained_but_private_ids_are_not(self):
         self.store.sync()
         connection = self.store.connect()
         try:
@@ -81,7 +81,10 @@ class ReviewStoreTests(unittest.TestCase):
         finally:
             connection.close()
         for name in SECRET_NAMES:
-            self.assertNotIn(name, dump)
+            self.assertIn(name, dump)
+        columns = self.store.search({"include_brand": True})["reviews"][0]
+        self.assertNotIn("uid", columns)
+        self.assertNotIn("avatar", columns)
 
     def test_roles_and_hidden_by_default(self):
         self.store.sync()
@@ -345,6 +348,18 @@ class DigestTests(unittest.TestCase):
         # one review is never listed twice
         ids = [item["id"] for name in ("buyer_limits", "viewer_doubts", "unanswered_questions", "buyer_results", "learning_curve") for item in digest[name]]
         self.assertEqual(len(ids), len(set(ids)))
+
+    def test_pushback_lists_viewers_who_say_a_point_is_not_needed(self):
+        video = "https://www.tiktok.com/@bushcraftedge/video/7654572167790611743"
+        write(self.store.sources, "tiktok_video", "pushback.json", [
+            {"cid": "P1", "videoWebUrl": video, "text": "Hot take: mirror edge is not all that great. Yea it's pretty, but you lessen your edge retention.",
+             "diggCount": 3, "createTimeISO": "2026-06-02T10:00:00.000Z", "uniqueId": "viewer_two"}])
+        self.store.sync()
+        quotes = self.quotes(self.store.digest(), "viewer_pushback")
+        self.assertTrue(any("mirror edge is not all that great" in quote for quote in quotes))
+        self.assertIn("Skill issue", quotes)  # "just learn the stone" is the same stance
+        self.assertNotIn("That is very wobbly", quotes)  # a doubt about the demo stays in viewer_doubts
+        self.assertIn("viewer_pushback", self.store.digest()["read_me"])
 
     def test_digest_carries_no_reviewer_names_and_says_it_is_unverified(self):
         text = json.dumps(self.store.digest(), ensure_ascii=False)

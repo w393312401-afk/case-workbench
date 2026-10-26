@@ -147,6 +147,7 @@ class ImageBridgeTests(unittest.TestCase):
         self.assertEqual(args[-1], "-")
         self.assertEqual(process.stdin.payload.decode("utf-8"), "中文要求\n保留字面 $() 和反引号。")
         self.assertFalse(any(value in args for value in ("--model", "-m", "--add-dir", "danger-full-access", "--oss")))
+        self.assertNotIn("-c", args)
         self.assertFalse(options["shell"])
         self.assertEqual(options["cwd"], str(self.cwd.resolve()))
         self.assertTrue(process.answer_path.is_absolute())
@@ -167,6 +168,26 @@ class ImageBridgeTests(unittest.TestCase):
         self.assertTrue(process.answer_path.is_file())
         self.assertIn("不得调用图片生成工具", process.stdin.payload.decode("utf-8"))
         self.assertIn("不得编辑或重新生成图片", process.stdin.payload.decode("utf-8"))
+
+    def test_reasoning_override_is_one_run_only_and_keeps_the_configured_model(self):
+        bridge = self.bridge()
+        self.run_bridge(bridge, read_only=True, reasoning_effort="low")
+        args, _, process = self.launches[-1]
+        self.assertEqual([args[index + 1] for index, value in enumerate(args) if value == "-c"],
+                         ['model_reasoning_effort="low"'])
+        self.assertNotIn("--model", args)
+        self.assertNotIn("-m", args)
+        self.assertEqual(args[args.index("-s") + 1], "read-only")
+        receipt = json.loads((process.answer_path.parent / "receipt.json").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["reasoning_effort_override"], "low")
+        self.run_bridge(bridge)
+        self.assertNotIn("-c", self.launches[-1][0])
+
+    def test_invalid_reasoning_override_never_launches_a_process(self):
+        for effort in ([], {}, True, 4, "LOW", "low\nmodel=x", 'low" --model other'):
+            with self.subTest(effort=effort), self.assertRaisesRegex(BridgeError, "推理强度"):
+                self.run_bridge(self.bridge(), reasoning_effort=effort)
+        self.assertEqual(self.launches, [])
 
     def test_read_only_generation_attempt_is_stopped_and_receipt_names_actual_process(self):
         def forbidden(process):

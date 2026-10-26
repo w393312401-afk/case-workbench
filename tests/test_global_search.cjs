@@ -205,7 +205,7 @@ test('clearing or closing the search invalidates requests even if the API ignore
     pending.resolve({ reviews: [{ id: 'late', text: 'late entry', product: '202H' }], total: 1 });
     await flush();
     assert.doesNotMatch(h.list.innerHTML, /late entry/);
-    if (action === 'clear') assert.match(h.status.textContent, /输入案例名称/);
+    if (action === 'clear') assert.match(h.status.textContent, /搜索内容或编号/);
   }
 });
 
@@ -355,7 +355,7 @@ test('scripts, tasks, production orders and selling points are searchable within
   await h.search('paper');
   const routes = h.list.options.map(node => node.href);
   assert.deepEqual(routes, [
-    '#/202H/directions?q=Paper+thin+edge&product=202H', '#/202H/scripts/SCR-aaaaaaaaaaaa', '#/202H/ai/AIT-aaaaaaaaaaaa',
+    '#/202H/directions?q=Paper+thin+edge&product=202H', '#/202H/content/SCR-aaaaaaaaaaaa', '#/202H/ai/AIT-aaaaaaaaaaaa',
     '#/202H/production/CAR-aaaaaaaaaaaa', '#/202H/production/PRD-aaaaaaaaaaaa',
   ]);
   assert.doesNotMatch(h.list.innerHTML, /other product|elsewhere/);
@@ -364,10 +364,49 @@ test('scripts, tasks, production orders and selling points are searchable within
   assert.ok(['/api/creation?product=202H', '/api/ai/tasks?product=202H', '/api/production?product=202H'].every(url => h.controls.requests.some(r => r.url === url)));
 });
 
+test('orders are found by DaVinci timeline name or ID and by registered post ID, opening that step', async () => {
+  const h = harness({
+    jobs: [{ id: 'PRD-aaaaaaaaaaaa', title: 'Voice order', product: '202H', timelines: [{ unique_id: 'uid-77', name: 'Zack261013-202-2' }],
+      current_publication: { post_id: '7561234567890123456' } }],
+    carousels: [{ id: 'CAR-aaaaaaaaaaaa', title: 'Photo order', product: '202H', publication: { post_id: '7569999999999999999' } }],
+    scripts: [{ id: 'SCR-aaaaaaaaaaaa', title: 'Registered script', product: '202H', video_id: '7561234567890123456' }],
+  });
+  await h.search('zack261013-202-2');
+  assert.deepEqual(h.list.options.map(node => node.href), ['#/202H/production/PRD-aaaaaaaaaaaa?step=timeline']);
+  assert.match(h.list.innerHTML, /时间线 <mark>Zack261013-202-2<\/mark>/);
+  await h.search('uid-77');
+  assert.deepEqual(h.list.options.map(node => node.href), ['#/202H/production/PRD-aaaaaaaaaaaa?step=timeline']);
+  await h.search('7561234567890123456');
+  const routes = h.list.options.map(node => node.href);
+  assert.ok(routes.includes('#/202H/production/PRD-aaaaaaaaaaaa?step=publish'));
+  assert.ok(routes.includes('#/202H/content/SCR-aaaaaaaaaaaa'));
+  await h.search('7569999999999999999');
+  assert.deepEqual(h.list.options.map(node => node.href), ['#/202H/production/CAR-aaaaaaaaaaaa?step=delivery']);
+  assert.match(h.list.innerHTML, /图文 ID <mark>7569999999999999999<\/mark>/);
+});
+
+test('video search uses the shared display name while keeping old titles and timeline navigation searchable', async () => {
+  const h = harness({jobs: [{id: 'PRD-aaaaaaaaaaaa', product: '202H', title: '202H-S2 变体 B',
+    display_title: 'Zack261021-202-4｜一箱配齐精修路径',
+    timelines: [{unique_id: 'uid-4', name: 'Zack261021-202-4'}]}]});
+  await h.search('精修路径');
+  assert.match(h.list.innerHTML, /Zack261021-202-4｜一箱配齐/);
+  assert.doesNotMatch(h.list.innerHTML, /202H-S2 变体 B/);
+  assert.deepEqual(h.list.options.map(node => node.href), ['#/202H/production/PRD-aaaaaaaaaaaa']);
+  await h.search('变体 B');
+  assert.match(h.list.innerHTML, /Zack261021-202-4｜一箱配齐精修路径/);
+  await h.search('Zack261021-202-4');
+  assert.deepEqual(h.list.options.map(node => node.href), ['#/202H/production/PRD-aaaaaaaaaaaa?step=timeline']);
+});
+
 test('empty search offers pages and actions; an action runs instead of navigating', async () => {
   const h = harness();
   assert.match(h.list.innerHTML, /工作概览/);
-  assert.match(h.list.innerHTML, /<button type="button" class="global-search-result"[^>]*>.*开始写稿/);
+  assert.match(h.list.innerHTML, /内容列表/);
+  assert.match(h.list.innerHTML, /协作记录/);
+  assert.doesNotMatch(h.list.innerHTML, /内容创作 · 制作单|href="[^\"]*\/production"/);
+  assert.doesNotMatch(h.list.innerHTML, /脚本版本|\/scripts(?:["?\/]|$)/);
+  assert.match(h.list.innerHTML, /<button type="button" class="global-search-result is-command"[^>]*>.*开始写稿/);
   let started = 0;
   h.window.CaseAI = { startBlank() { started += 1; } };
   await h.search('写稿');
@@ -378,4 +417,14 @@ test('empty search offers pages and actions; an action runs instead of navigatin
   assert.equal(started, 1);
   assert.equal(h.dialog.open, false);
   assert.equal(h.location.hash, '#/202H/home');
+});
+
+test('adopted script body search opens the matching content detail', async () => {
+  const h = harness({scripts:[{id:'SCR-body',title:'A title',text:'Unique frozen words',product:'202H',version:3}]});
+  await h.search('frozen words');
+  assert.deepEqual(h.list.options.map(node => node.href),['#/202H/content/SCR-body']);
+  assert.match(h.list.innerHTML,/采用稿/);
+  assert.match(h.list.innerHTML,/第 3 版/);
+  h.input.emit('keydown',{key:'Enter'});
+  assert.equal(h.location.hash,'#/202H/content/SCR-body');
 });

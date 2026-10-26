@@ -295,10 +295,9 @@ class ReviewPageTests(unittest.TestCase):
         page = self.open_page(route="#videos", ready=".perf-tabs")
         page.locator(".perf-tabs [data-perf-tab=list]").click()
         page.locator(".perf-table").wait_for()
-        page.select_option("#perf-range", "all")
         page.locator(f'[data-video-row="{performance.LINKED}"] td.perf-title').click()  # comments are shown in the details drawer
         link = page.locator("#perf-video-drawer .perf-reviews")
-        self.assertEqual(link.locator("a").inner_text(), "3 条")
+        self.assertEqual(link.locator("a").inner_text(), "评论库已收录 3 条")
         self.assertIn("1 个没人回复", link.inner_text())
         link.locator("a").click()
         page.locator(".rev-video-bar").wait_for()

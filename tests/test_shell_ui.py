@@ -40,7 +40,7 @@ class ShellBrowserTests(unittest.TestCase):
         page.on("pageerror", lambda error: errors.append(str(error)))
         self.addCleanup(lambda: self.assertEqual(errors, [], "Browser JavaScript errors"))
         page.goto(self.base + "/" + route)
-        page.locator("#connection-text").get_by_text("已连接本地案例库").wait_for(state="attached")
+        page.locator("#connection-text").get_by_text("案例库同步").wait_for(state="attached")
         return page
 
     def assert_route(self, page, name, *, product="202H", tail="", **query):
@@ -100,12 +100,13 @@ class ShellBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator('[name="title"]').input_value(), "完整系统价值")
         page.locator("[data-inline-cancel]").first.click()
 
-    def test_empty_product_context_survives_every_page_without_falling_back(self):
+    def test_empty_global_product_context_keeps_modules_scoped_while_library_is_independent(self):
         page = self.open_page("#/999X/library")
         page.locator("#case-search").wait_for()
-        self.assertEqual(page.locator(".case-card").count(), 0)
+        self.assertEqual(page.locator(".case-card").count(), 1)
+        self.assertEqual(page.locator("#library-product-filter").input_value(), "")
         for name, ready in [("reviews", "#rev-page"), ("directions", "#direction-filters"),
-                            ("videos", ".perf-tabs"), ("ai", "#ai-task-list"), ("settings", ".settings-page"),
+                            ("videos", ".perf-tabs"), ("content", "#content-flow-list"), ("settings", ".settings-page"),
                             ("library", "#case-search")]:
             page.locator(f'[data-page="{name}"]').click()
             page.locator(ready).first.wait_for()
@@ -119,7 +120,8 @@ class ShellBrowserTests(unittest.TestCase):
         page.reload()
         page.locator("#case-search").wait_for()
         self.assert_route(page, "library", product="999X")
-        self.assertEqual(page.locator(".case-card").count(), 0)
+        self.assertEqual(page.locator(".case-card").count(), 1)
+        self.assertEqual(page.locator("#library-product-filter").input_value(), "")
         page.locator("#global-product").select_option("202H")
         page.locator(f'.case-card[href="#case/{self.identifier}"]').wait_for()
         self.assert_route(page, "library")

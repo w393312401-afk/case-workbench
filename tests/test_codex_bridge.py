@@ -189,9 +189,54 @@ class CodexBridgeTests(unittest.TestCase):
         self.assertNotIn("Do not store", "".join(self.progress))
         self.assertIsNotNone(process.returncode)
 
+    def test_relative_materials_have_absolute_source_context_outside_writable_scratch(self):
+        source = Path(self.cwd) / "案例 资料"
+        source.mkdir()
+        materials = {
+            "sheets/contact.jpg": b"contact-sheet",
+            "frames/frame-01.jpg": b"source-frame",
+            "refs/case.json": b'{"title":"case"}',
+            "SKILL.md": "只读技能资料".encode("utf-8"),
+        }
+        for relative, content in materials.items():
+            target = source / relative
+            target.parent.mkdir(exist_ok=True)
+            target.write_bytes(content)
+
+        def inspect_context(process, message):
+            start = next(item["params"] for item in process.received if item.get("method") == "thread/start")
+            instructions = start["developerInstructions"]
+            root_line = next(line for line in instructions.splitlines() if line.startswith("本轮只读资料根目录（绝对路径）："))
+            supplied_source = Path(json.loads(root_line.split("：", 1)[1]))
+            self.assertTrue(supplied_source.is_absolute())
+            self.assertEqual(supplied_source, source.resolve())
+            self.assertIn("均相对于上述资料根目录", instructions)
+            self.assertIn("读取时请拼接成资料根目录下的绝对路径", instructions)
+            self.assertIn("不得将资料根目录设为可写目录", instructions)
+            scratch = Path(start["cwd"])
+            self.assertNotEqual(scratch, supplied_source)
+            self.assertEqual(start["sandbox"], "workspace-write")
+            self.assertNotIn("config", start)
+            for relative, content in materials.items():
+                self.assertFalse((scratch / relative).exists())
+                self.assertEqual((supplied_source / relative).read_bytes(), content)
+            (scratch / "observation.txt").write_text("temporary observation", encoding="utf-8")
+            success(process, message)
+
+        bridge, process, _ = self.runner(inspect_context)
+        prompt = "读取 sheets/contact.jpg、frames/frame-01.jpg、refs/case.json 和 SKILL.md 后写逐张表。"
+        self.assertEqual(bridge.run(prompt, cwd=source / ".." / source.name,
+                                    on_progress=self.progress.append, cancel_event=self.cancel),
+                         "# 完成\n已整理案例。")
+        turn = next(item["params"] for item in process.received if item.get("method") == "turn/start")
+        self.assertEqual(turn["input"], [{"type": "text", "text": prompt}])
+        for relative, content in materials.items():
+            self.assertEqual((source / relative).read_bytes(), content)
+        self.assertFalse((source / "observation.txt").exists())
+
     def test_registered_video_requires_completed_image_view(self):
         bridge, _, _ = self.runner()
-        with self.assertRaisesRegex(BridgeError, "未实际打开画面"):
+        with self.assertRaisesRegex(BridgeError, "没有拿到原片画面"):
             bridge.run("基于已有视频写变体", cwd=self.cwd, on_progress=self.progress.append,
                        cancel_event=self.cancel, require_image_view=True)
 
@@ -204,6 +249,34 @@ class CodexBridgeTests(unittest.TestCase):
         bridge, _, _ = self.runner(viewed)
         self.assertEqual(bridge.run("基于已有视频写变体", cwd=self.cwd, on_progress=self.progress.append,
                                     cancel_event=self.cancel, require_image_view=True), "已查看画面并完成变体。")
+
+    def test_registered_video_frames_are_attached_without_model_image_view(self):
+        written = []
+
+        def frame_writer(video_path, folder, cancel_event):
+            target = Path(folder) / "frame-01.jpg"
+            target.write_bytes(b"jpeg-bytes")
+            written.append((video_path, target))
+            return [("画面 1（约 1.0 秒）", str(target))]
+
+        process = FakeProcess(success)
+        bridge = CodexBridge(timeout=2, startup_timeout=1, popen_factory=lambda arguments, **options: process,
+                             frame_writer=frame_writer)
+        self.assertEqual(bridge.run("基于已有视频写变体", cwd=self.cwd, on_progress=self.progress.append,
+                                    cancel_event=self.cancel, require_image_view=True, video_path="original.mp4"),
+                         "# 完成\n已整理案例。")
+        self.assertEqual(written[0][0], "original.mp4")
+        turn = next(item["params"] for item in process.received if item.get("method") == "turn/start")
+        images = [item for item in turn["input"] if item["type"] == "localImage"]
+        self.assertEqual(images, [{"type": "localImage", "path": str(written[0][1])}])
+        self.assertIn("正在从原片抽取画面。", self.progress)
+
+    def test_registered_video_without_frames_still_needs_image_view(self):
+        bridge = CodexBridge(timeout=2, startup_timeout=1, popen_factory=lambda arguments, **options: FakeProcess(success),
+                             frame_writer=lambda *args: [])
+        with self.assertRaisesRegex(BridgeError, "ffmpeg"):
+            bridge.run("基于已有视频写变体", cwd=self.cwd, on_progress=self.progress.append,
+                       cancel_event=self.cancel, require_image_view=True, video_path="missing.mp4")
 
     def test_completed_turn_items_are_authoritative_and_not_duplicated(self):
         def scenario(process, message):

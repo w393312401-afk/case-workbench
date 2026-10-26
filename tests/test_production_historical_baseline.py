@@ -16,8 +16,7 @@ import zipfile
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-CONFIG = json.loads((APP / "config.json").read_text(encoding="utf-8"))
-sys.path.insert(0, str(Path(CONFIG["skill_root"]) / "scripts"))
+sys.path.insert(0, str(APP / "scripts"))
 from elevenlabs_client import VoiceError
 from production_historical_baseline import restore_historical_baseline
 from production_validation import validate_edit

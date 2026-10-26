@@ -1,12 +1,6 @@
 {
-  "skill_root": "C:/Users/video/Desktop/skill/product-video-script-review",
-  "runtime_root": "C:/Users/video/.agent-runtime/product-video-script-review",
+  "skill_root": ".local/case-library",
+  "runtime_root": ".local/runtime",
   "port": 8767,
-  "image_generation": {
-    "provider": "cockpit",
-    "parameters_file": "C:/Users/video/Desktop/Cockpit_Codex_已验证请求参数.json"
-  },
-  "performance_sources": [
-    "C:/Users/video/Desktop/26年tk自制视频销售数据"
-  ]
+  "performance_sources": []
 }

@@ -24,6 +24,8 @@ from zoneinfo import ZoneInfo
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from app_config import load_config
 SUPPORT = ROOT / "deployment" / "text-only"
 SITE = ROOT / "deployment" / "site"
 LOCAL_PATH = re.compile(r"(?i)(?:(?<![A-Za-z0-9])[a-z]:[\\/]|file://|\\\\[^\\/\s]+[\\/])[^\s<>\"`\r\n]*")
@@ -101,13 +103,13 @@ def video_details(videos):
     """
     sys.path.insert(0, str(ROOT))
     from performance_store import PerformanceStore
-    config = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+    config = load_config(ROOT)
     database = Path(config["runtime_root"]) / "performance" / "performance.sqlite"
     connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     series = {}
     try:
-        PerformanceStore._facts(None, connection)
+        PerformanceStore(config["runtime_root"])._facts(connection)
         for row in connection.execute("SELECT video_id, start, end, views, clicks, orders, items, gmv FROM facts ORDER BY video_id, start"):
             value = dict(row)
             identifier = value.pop("video_id")
@@ -134,13 +136,13 @@ def export(base):
             return json.load(response)
 
     paths = {
-        "state": "/api/state", "review_summary": "/api/reviews/summary",
+        "state": "/api/state", "product_catalog": "/api/products", "review_summary": "/api/reviews/summary",
         "review_picks": "/api/reviews/picks", "review_edits": "/api/reviews/tag-edits",
         "performance_summary": "/api/performance/summary",
         "analytics": "/api/performance/analytics", "videos": "/api/performance/videos",
         "direction_catalog": "/api/direction-catalog", "directions": "/api/directions",
         "directions_all": "/api/directions?archive=all", "creation": "/api/creation",
-        "materials": "/api/materials", "tasks": "/api/ai/tasks",
+        "materials": "/api/materials", "tasks": "/api/ai/tasks", "review_followups": "/api/review-followups",
     }
     with ThreadPoolExecutor(max_workers=4) as executor:
         responses = dict(zip(paths, executor.map(get, paths.values())))
@@ -180,12 +182,14 @@ def export(base):
     with ThreadPoolExecutor(max_workers=4) as executor:
         for (kind, identifier, _), result in zip(requests, executor.map(get, [r[2] for r in requests])):
             full[kind][identifier] = result.get("video") if kind == "videos" else result.get("task") if kind == "tasks" else result
-    if get("/api/state")["digest"] != responses["state"]["digest"] or get("/api/creation")["revision"] != responses["creation"]["revision"]:
+    if (get("/api/state")["digest"] != responses["state"]["digest"] or get("/api/products") != responses["product_catalog"]
+            or get("/api/creation")["revision"] != responses["creation"]["revision"]
+            or get("/api/review-followups")["revision"] != responses["review_followups"]["revision"]):
         raise RuntimeError("导出期间本机内容有更新，请重新导出完整快照。")
     exported_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
     bundle = clean({
         "meta": {"exported_at": exported_at, "mode": "read-only-text", "schema": 1},
-        "state": responses["state"], "cases": full["cases"],
+        "state": responses["state"], "cases": full["cases"], "product_catalog": responses["product_catalog"],
         "reviews": {"summary": responses["review_summary"], "items": reviews,
                     "picks": responses["review_picks"]["picks"],
                     "tag_edits": responses["review_edits"]["edits"], "videos": video_context},
@@ -193,7 +197,7 @@ def export(base):
                         "videos": videos, "details": full["videos"]},
         "direction_catalog": responses["direction_catalog"], "directions": responses["directions"],
         "directions_all": responses["directions_all"], "direction_details": full["direction_details"],
-        "creation": responses["creation"], "materials": responses["materials"], "scripts": full["scripts"],
+        "creation": responses["creation"], "materials": responses["materials"], "scripts": full["scripts"], "review_followups": responses["review_followups"],
         "ai": {"status": {"available": False, "connected": False, "queued": 0, "running": 0,
                           "message": "文字浏览版，AI 创作请在本机使用。"},
                "options": {"models": [], "skills": [], "models_error": "文字浏览版"},
@@ -202,7 +206,7 @@ def export(base):
     build_site(bundle)
 
 
-def build_site(bundle):
+def build_site(bundle, builder=None):
     """Finish a fresh build before replacing the previous upload directory."""
     parent = SITE.parent.resolve()
     if SITE.is_symlink() or (SITE.exists() and SITE.resolve().parent != parent):
@@ -212,7 +216,7 @@ def build_site(bundle):
     names = ("site", "text-snapshot.json", "export-report.json", "case-workbench-text.zip")
     saved, installed = [], []
     try:
-        _build_site(bundle, temporary / "site", temporary)
+        (builder or _build_site)(bundle, temporary / "site", temporary)
         try:
             for name in names:
                 if (parent / name).exists():
@@ -271,10 +275,13 @@ def _build_site(bundle, site, output):
     (site / "app.js").write_text(app, encoding="utf-8")
     page = (site / "index.html").read_text(encoding="utf-8")
     page = page.replace('<link rel="stylesheet" href="/activity.css">', "").replace('<script src="/activity.js" defer></script>', "")
+    # The public snapshot keeps the existing read-only creation records; scheduling stays local.
+    page = page.replace('<link rel="stylesheet" href="/content-flow.css"><script src="/content-flow.js" defer></script>', "")
+    page = page.replace('id="ai-nav" data-page="content"', 'id="ai-nav" data-page="ai"')
     page = page.replace('<link rel="icon" type="image/svg+xml" href="/favicon.svg">', "")
     page = page.replace("<head>", '<head>\n  <meta name="public-exported-at" content="' + exported_at + '">\n  <script src="/public-mode.js"></script>', 1)
     page = page.replace("</head>", '  <link rel="stylesheet" href="/public-mode.css">\n</head>', 1)
-    page = page.replace("案例工作台 · 视频参考库", "案例工作台 · 文字浏览版")
+    page = page.replace("<title>TK工作台</title>", "<title>TK工作台 · 文字浏览版</title>")
     (site / "index.html").write_text(page, encoding="utf-8")
     text = json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))
     if any(LOCAL_PATH.search(item) or SECRET.search(item) for item in strings(bundle)):
@@ -288,10 +295,15 @@ def _build_site(bundle, site, output):
     product_rows = [*bundle["state"].get("cases", []), *bundle["performance"].get("videos", []),
                     *bundle["direction_catalog"].get("selling_points", []), *bundle["direction_catalog"].get("directions", []),
                     *bundle["creation"].get("scripts", []), *bundle["creation"].get("materials", [])]
-    products = sorted({value for value in [*(row.get("product") for row in product_rows),
-                       *bundle["reviews"].get("summary", {}).get("products", [])]
-                       if isinstance(value, str) and value.strip()})
-    save_json(site / "public-data.json", {"meta": bundle["meta"], "state": bundle["state"], "products": products, "cases": {}, "split": True})
+    catalog = bundle.get("product_catalog")
+    if not isinstance(catalog, dict) or not isinstance(catalog.get("products"), list):
+        # Older saved bundles predate the authoritative product list. Only
+        # those bundles need discovery; an explicitly empty catalog stays empty.
+        catalog = {"products": sorted({value for value in [*(row.get("product") for row in product_rows),
+                   *bundle["reviews"].get("summary", {}).get("products", [])]
+                   if isinstance(value, str) and value.strip()}), "removed": [], "deleted": []}
+    save_json(site / "public-data.json", {"meta": bundle["meta"], "state": bundle["state"],
+              "products": catalog["products"], "product_catalog": catalog, "cases": {}, "split": True})
     save_json(site / "data" / "reviews.json", {"reviews": bundle["reviews"]})
     save_json(site / "data" / "performance.json", {"performance": {key: bundle["performance"][key] for key in ("summary", "analytics", "videos")}})
     shards = [{} for _ in range(32)]
@@ -302,7 +314,7 @@ def _build_site(bundle, site, output):
     for identifier, case in bundle["cases"].items():
         save_json(site / "data" / f"case-{identifier}.json", {"cases": {identifier: case}})
     save_json(site / "data" / "ai.json", {"ai": bundle["ai"]})
-    save_json(site / "data" / "creation.json", {key: bundle[key] for key in ("creation", "materials", "scripts")})
+    save_json(site / "data" / "creation.json", {**{key: bundle[key] for key in ("creation", "materials", "scripts")}, "review_followups": bundle.get("review_followups", {"entries": [], "revision": "public"})})
     save_json(site / "data" / "direction-catalog.json", {key: bundle[key] for key in ("direction_catalog", "direction_details")})
     save_json(site / "data" / "directions.json", {key: bundle[key] for key in ("directions", "directions_all")})
     (site / "_routes.json").write_text(json.dumps({"version": 1, "include": ["/*"], "exclude": []}), encoding="utf-8")
@@ -333,12 +345,35 @@ def _build_site(bundle, site, output):
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
+# fly retired the public text site on 2026-10-15: it had no login and carried sales, GMV, scripts
+# and AI history. While RETIRED is True every export publishes only a notice page, no data.
+RETIRED = True
+RETIRED_PAGE = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>已停用</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f6f4;color:#222}main{max-width:420px;padding:24px;text-align:center}</style></head><body><main><h1>此页面已停用</h1><p>内容已下线。</p></main></body></html>"""
+RETIRED_WORKER = """const PAGE = %s;
+export default { async fetch() { return new Response(PAGE, { status: 410, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-robots-tag": "noindex, nofollow" } }); } };
+"""
+
+
+def _build_retired(bundle, site, output):
+    site.mkdir(parents=True, exist_ok=True)
+    (site / "index.html").write_text(RETIRED_PAGE, encoding="utf-8")
+    (site / "_worker.js").write_text(RETIRED_WORKER % json.dumps(RETIRED_PAGE, ensure_ascii=False), encoding="utf-8")
+    (site / "_headers").write_text("/*\n  X-Robots-Tag: noindex, nofollow\n  Cache-Control: no-store\n", encoding="utf-8")
+    (output / "text-snapshot.json").write_text(json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
+    (output / "export-report.json").write_text(json.dumps({"retired": True}), encoding="utf-8")
+    with zipfile.ZipFile(output / "case-workbench-text.zip", "w") as archive:
+        for path in sorted(site.iterdir()):
+            archive.write(path, path.name)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="http://127.0.0.1:8767")
     parser.add_argument("--package-only", action="store_true")
     args = parser.parse_args()
-    if args.package_only:
+    if RETIRED:
+        build_site({"meta": {"retired": True}, "state": {}}, builder=_build_retired)
+    elif args.package_only:
         build_site(json.loads((ROOT / "deployment" / "text-snapshot.json").read_text(encoding="utf-8")))
     else:
         export(args.base)

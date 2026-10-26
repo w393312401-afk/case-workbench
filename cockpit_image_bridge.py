@@ -1,7 +1,9 @@
 """Direct image edits through the user's local Cockpit gateway.
 
-Credentials stay in Cockpit's configuration. A request is sent once; cancelling
-or losing the response never retries a potentially completed generation.
+Credentials stay in Cockpit's configuration. A dropped connection, rate limit, gateway
+error or unreadable image is retried a few times with a pause (the user asked for this;
+a dropped request may still have been billed). Cancelling, timing out, a refused key or
+a rejected request is never retried, and a late result is never saved after cancelling.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import socket
 import threading
 import time
@@ -23,7 +26,51 @@ from codex_bridge import BridgeCancelled, BridgeError
 
 MAX_IMAGE_BYTES = 30 * 1024 * 1024
 MAX_RESPONSE_BYTES = 48 * 1024 * 1024
+MAX_ERROR_BYTES = 64 * 1024
 FORMATS = {"PNG": ("image/png", ".png"), "JPEG": ("image/jpeg", ".jpg"), "WEBP": ("image/webp", ".webp")}
+RETRY_DELAYS = (4, 12)  # pause before the 2nd and the 3rd attempt
+RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
+# Match the carousel's five workers; the gateway has its own account-level limits.
+MAX_PARALLEL = 5
+
+
+class _Retryable(BridgeError):
+    """A failure worth another attempt: the request may simply not have got through."""
+
+
+def _known_channel_error(raw):
+    """Recognize a bounded set of channel failures; never return upstream text."""
+    if not isinstance(raw, bytes) or len(raw) > MAX_ERROR_BYTES:
+        return None
+    try:
+        response = json.loads(raw)
+    except (ValueError, TypeError, RecursionError):
+        return None
+    if not isinstance(response, dict) or not isinstance(response.get("error"), dict):
+        return None
+
+    def messages(value, depth=0):
+        if depth > 4:
+            return
+        if isinstance(value, dict):
+            for field in ("message", "detail", "code", "type", "error"):
+                yield from messages(value.get(field), depth + 1)
+        elif isinstance(value, str):
+            message = re.sub(r"^Error #\d{1,3}:\s*", "", value.strip())
+            yield message
+            try:
+                nested = json.loads(message)
+            except (ValueError, TypeError, RecursionError):
+                return
+            yield from messages(nested, depth + 1)
+
+    for message in messages(response["error"]):
+        if message == "auth_unavailable" or message.startswith("auth_unavailable:"):
+            return "Cockpit 账号池不可用，请在 Cockpit 中检查账号池诊断。已停止自动重试。"
+        if re.fullmatch(r"The '[A-Za-z0-9][A-Za-z0-9._-]{0,79}' model is not supported "
+                        r"when using Codex with a ChatGPT account\.", message):
+            return "Cockpit 图片编排模型不受当前 ChatGPT 账号支持，请在 Cockpit 中调整“生图主模型”。已停止自动重试。"
+    return None
 
 
 def read_cockpit_key(path=None):
@@ -44,16 +91,25 @@ def read_cockpit_key(path=None):
         return ""
 
 
+CUTOUT_SIZES = ("1024x1536", "1536x1024", "2048x2048", "1152x2048", "2048x1152")
+CUTOUT_QUALITIES = ("low", "medium", "high")
+
+
 class CockpitImageBridge:
     direct_image_edit = True
+    # Transparent-background cutouts give the subject lock a fine mask; the caller aligns and verifies it.
+    supports_cutout = True
     generation_source = "cockpit_image_edit"
     source = "cockpit_image_edit"
 
-    def __init__(self, *, parameters_file=None, auth_config=None, key_provider=None, transport=None):
+    def __init__(self, *, parameters_file=None, auth_config=None, key_provider=None, transport=None,
+                 retry_delays=RETRY_DELAYS, max_parallel=MAX_PARALLEL):
         self.parameters_file = Path(parameters_file or Path.home() / "Desktop" / "Cockpit_Codex_已验证请求参数.json")
         self.auth_config = auth_config
         self.key_provider = key_provider or (lambda: read_cockpit_key(self.auth_config))
         self.transport = transport
+        self.retry_delays = tuple(retry_delays)
+        self._slots = threading.BoundedSemaphore(max_parallel)
 
     def _settings(self):
         try:
@@ -115,6 +171,40 @@ class CockpitImageBridge:
             raise BridgeError("图生图参考图片无法读取或过大，请重新选择底图。") from None
 
     @staticmethod
+    def _mask(path, directory, primary):
+        """Native Cockpit accepts PNG mask data URLs: alpha 0 edits, alpha 255 protects.
+
+        This is guidance to the image model. The caller still owns deterministic
+        restoration and verification of protected source pixels in the final image.
+        """
+        try:
+            if not isinstance(path, (str, os.PathLike)):
+                raise ValueError()
+            path = Path(path)
+            path = (path if path.is_absolute() else directory / path).resolve()
+            if (not path.is_relative_to(directory) or not path.is_file() or
+                    path.suffix.lower() != ".png" or path.stat().st_size > MAX_IMAGE_BYTES):
+                raise ValueError()
+            with Image.open(primary) as original:
+                size = original.size
+            with Image.open(path) as mask:
+                mask.load()
+                if mask.format != "PNG" or mask.mode != "RGBA" or mask.size != size:
+                    raise ValueError()
+                # Both editable and protected pixels must exist. Intermediate alpha
+                # values may describe an outer transition, but do not lock those pixels.
+                if mask.getchannel("A").getextrema() != (0, 255):
+                    raise ValueError()
+                buffer = io.BytesIO()
+                mask.save(buffer, format="PNG")
+                raw = buffer.getvalue()
+                if len(raw) > MAX_IMAGE_BYTES:
+                    raise ValueError()
+            return {"image_url": "data:image/png;base64," + base64.b64encode(raw).decode("ascii")}
+        except (OSError, TypeError, ValueError, Image.DecompressionBombError):
+            raise BridgeError("编辑蒙版须是本次任务目录内、与第一张参考图等大的 RGBA PNG，并同时包含透明可改区和不透明保护区。") from None
+
+    @staticmethod
     def _close(connection):
         try:
             sock = connection.sock
@@ -160,11 +250,13 @@ class CockpitImageBridge:
                 if cancel_event.is_set():
                     raise BridgeCancelled("本次图生图已停止。")
                 if time.monotonic() >= deadline:
-                    raise BridgeError("图生图等待超时，本次没有自动重复请求，请查看结果后重试。")
+                    raise BridgeError("图生图等待超时，没有再自动重试，请查看结果后重试。")
                 try:
                     ok, result = results.get(timeout=.1)
                     if not ok:
-                        raise BridgeError("Cockpit 图生图连接中断，本次没有自动重复请求。") from None
+                        if isinstance(result, BridgeCancelled):
+                            raise result
+                        raise _Retryable("Cockpit 图生图连接中断。") from None
                     return result
                 except queue.Empty:
                     continue
@@ -180,7 +272,7 @@ class CockpitImageBridge:
         elif isinstance(value.get("url"), str) and value["url"].startswith("data:image/") and "," in value["url"]:
             encoded = value["url"].split(",", 1)[1]
         else:
-            raise BridgeError("Cockpit 未返回可保存的图片，本次没有自动重复请求。")
+            raise _Retryable("Cockpit 未返回可保存的图片。")
         try:
             raw = base64.b64decode(encoded, validate=True)
             if not raw or len(raw) > MAX_IMAGE_BYTES:
@@ -192,10 +284,46 @@ class CockpitImageBridge:
                 image.load()
             return raw, suffix
         except (ValueError, KeyError, OSError, Image.DecompressionBombError):
-            raise BridgeError("Cockpit 返回的图片无法读取或过大，请查看任务结果。") from None
+            raise _Retryable("Cockpit 返回的图片无法读取或过大。") from None
+
+    def _attempt(self, url, headers, payload, deadline, cancel_event):
+        """One request, holding a gateway slot; returns the image or says whether trying again could help."""
+        while not self._slots.acquire(timeout=.2):
+            if cancel_event.is_set():
+                raise BridgeCancelled("本次图生图已停止。")
+            if time.monotonic() >= deadline:
+                raise BridgeError("图生图排队等待超时，请稍后再试。")
+        try:
+            status, _, raw = self._request(url, headers, payload, max(.01, deadline - time.monotonic()), cancel_event)
+        finally:
+            self._slots.release()
+        if cancel_event.is_set():
+            raise BridgeCancelled("本次图生图已停止。")
+        if status in {401, 403}:
+            raise BridgeError("Cockpit 拒绝了本机访问密钥，请检查渠道授权。")
+        if status < 200 or status >= 300:
+            channel_error = _known_channel_error(raw)
+            if channel_error:
+                raise BridgeError(channel_error)
+        if status == 429:
+            raise _Retryable("Cockpit 图生图额度或请求频率受限。")
+        if status in RETRY_STATUSES:
+            raise _Retryable(f"Cockpit 图生图暂时出错（HTTP {status}）。")
+        if status < 200 or status >= 300:
+            raise BridgeError(f"Cockpit 图生图请求未完成（HTTP {status}），请查看渠道状态。")
+        if not isinstance(raw, bytes) or len(raw) > MAX_RESPONSE_BYTES:
+            raise _Retryable("Cockpit 图片响应过大或不完整。")
+        try:
+            response = json.loads(raw)
+            image_value = response["data"][0]
+            if not isinstance(image_value, dict):
+                raise ValueError()
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise _Retryable("Cockpit 未返回完整图片。") from None
+        return self._image_bytes(image_value)
 
     def run(self, prompt, *, cwd, images, cancel_event, on_progress, on_event=None,
-            timeout=1800, schema=None, read_only=False):
+            timeout=1800, schema=None, read_only=False, mask=None, cutout=None):
         if read_only:
             raise BridgeError("当前图生图渠道仅返回图片，请直接查看并选用成图。")
         directory = Path(cwd).resolve()
@@ -214,9 +342,23 @@ class CockpitImageBridge:
             snapshot = json.loads((directory / "input.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             snapshot = {}
-        if snapshot.get("aspect") == "9:16" and "1152x2048" in sizes:
+        if snapshot.get("aspect") == "3:4":
+            # tested_values records earlier experiments, not a provider allowlist.
+            # Match the prepared 3:4 canvas instead of the template's 2:3 size.
+            body["size"] = "1536x2048"
+        elif snapshot.get("aspect") == "9:16" and "1152x2048" in sizes:
             body["size"] = "1152x2048"
         body.update(prompt=prompt, images=[self._reference(path, directory) for path in images], n=1, stream=False)
+        if mask is not None:
+            body["mask"] = self._mask(mask, directory, images[0])
+        if snapshot.get("workflow", (snapshot.get("requirements") or {}).get("workflow")) == "subject_locked":
+            body["output_format"] = "png"
+        if cutout is not None:
+            # A cutout asks for a real alpha channel at a size close to the crop's own shape.
+            if (not isinstance(cutout, dict) or cutout.get("size") not in CUTOUT_SIZES or
+                    cutout.get("quality", "high") not in CUTOUT_QUALITIES or mask is not None):
+                raise BridgeError("抠图参数无效。")
+            body.update(background="transparent", output_format="png", size=cutout["size"], quality=cutout.get("quality", "high"))
         if body.get("output_format") == "png":
             body.pop("output_compression", None)
         def progress(message):
@@ -225,28 +367,23 @@ class CockpitImageBridge:
             except Exception:
                 pass
 
-        progress("正在通过 Cockpit 生成图片。")
-        status, _, raw = self._request(url, {"Authorization": "Bearer " + key, "Content-Type": "application/json",
-                                           "Accept": "application/json"},
-                                       json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout, cancel_event)
-        if cancel_event.is_set():
-            raise BridgeCancelled("本次图生图已停止。")
-        if status in {401, 403}:
-            raise BridgeError("Cockpit 拒绝了本机访问密钥，请检查渠道授权。")
-        if status == 429:
-            raise BridgeError("Cockpit 图生图额度或请求频率受限，请稍后重试。")
-        if status < 200 or status >= 300:
-            raise BridgeError(f"Cockpit 图生图请求未完成（HTTP {status}），请查看渠道状态。")
-        if not isinstance(raw, bytes) or len(raw) > MAX_RESPONSE_BYTES:
-            raise BridgeError("Cockpit 图片响应过大或不完整。")
-        try:
-            response = json.loads(raw)
-            image_value = response["data"][0]
-            if not isinstance(image_value, dict):
-                raise ValueError()
-        except (ValueError, KeyError, IndexError, TypeError):
-            raise BridgeError("Cockpit 未返回完整图片，本次没有自动重复请求。") from None
-        image_bytes, suffix = self._image_bytes(image_value)
+        headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json", "Accept": "application/json"}
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        deadline, attempts = time.monotonic() + timeout, len(self.retry_delays) + 1
+        for attempt in range(1, attempts + 1):
+            progress("正在通过 Cockpit 生成图片。" if attempt == 1 else f"正在通过 Cockpit 重新生成（第 {attempt}/{attempts} 次）。")
+            try:
+                image_bytes, suffix = self._attempt(url, headers, payload, deadline, cancel_event)
+                break
+            except _Retryable as error:
+                if attempt == attempts:
+                    raise BridgeError(f"{error}已自动重试 {attempts - 1} 次仍未成功，请稍后再试。") from None
+                delay = self.retry_delays[attempt - 1]
+                if time.monotonic() + delay >= deadline:
+                    raise BridgeError(f"{error}剩余等待时间不够再试一次，请稍后再试。") from None
+                progress(f"{error}{delay} 秒后自动重试（第 {attempt + 1}/{attempts} 次）。")
+                if cancel_event.wait(delay):
+                    raise BridgeCancelled("本次图生图已停止。") from None
         target = directory / ("render" + suffix)
         temporary = target.with_suffix(suffix + ".tmp")
         if cancel_event.is_set():

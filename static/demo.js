@@ -39,20 +39,32 @@
     summaryWeeks.push({ week, videos: rows.length, views: rows.reduce((s, r) => s + r[2], 0), items: rows.reduce((s, r) => s + r[6], 0),
       gmv: rows.reduce((s, r) => s + r[7], 0), posted: videos.filter((v) => v[3] >= week && v[3] <= day(-7 * w + 6)).length, complete: w !== 5 });
   }
-  const statuses = [["focus", "重点复制"], ["follow", "跟进"], ["watch", "观察"], ["pending", "待数据"], ["incomplete", "数据不全"], ["drop", "放弃"]];
+  const statuses = ["focus", "follow", "watch", "pending", "incomplete", "drop"];
+  // Illustrative human classifications are independent of generated sales figures.
+  const reviewSamples = [
+    {key:"pending",label:"待复盘"},{key:"unclassified",label:"待分类"},
+    {key:"high",label:"高参考价值"},{key:"medium",label:"中等参考价值"},
+    {key:"weak",label:"弱参考价值"},{key:"none",label:"无参考价值"},
+  ];
   const videoList = videos.map(([video_id, account, prod, posted_on], i) => {
     const monday0 = new Date(posted_on); monday0.setDate(monday0.getDate() - ((monday0.getDay() + 6) % 7));
     const end = new Date(monday0); end.setDate(end.getDate() + 13);
     const window_end = iso(end), later = window_end > iso(today);
-    const [status, status_label] = later ? statuses[3] : statuses[i % statuses.length];
+    const status = later ? statuses[3] : statuses[i % statuses.length];
+    const status_label = status === "pending" ? "待数据" : status === "incomplete" ? "数据不全" : "窗口数据已覆盖";
+    const review_status = {...reviewSamples[later ? 0 : i % reviewSamples.length]};
     const rowsOf = weekly.filter((r) => r[0] === i), sum = (k) => rowsOf.reduce((total, r) => total + r[k], 0);
     const views = sum(2), clicks = sum(4), orders = sum(5), gmv = +sum(7).toFixed(2), windowViews = later ? null : Math.round(views * 0.6);
-    return { video_id, account, product: prod, posted_on, posted_at: `${posted_on}T12:00:00`, window_end, status, status_label, views, impressions: sum(3), clicks, orders, items: sum(6), gmv,
+    return { video_id, account, product: prod, posted_on, posted_at: `${posted_on}T12:00:00`, window_end, status, status_label, review_status, views, impressions: sum(3), clicks, orders, items: sum(6), gmv,
       window_views: windowViews, ctr_pct: views ? +(clicks * 100 / views).toFixed(2) : null, ctor_pct: clicks ? +(orders * 100 / clicks).toFixed(2) : null, gpm: views ? +(gmv * 1000 / views).toFixed(2) : null,
       this_week_gmv: rowsOf.find((r) => r[1] === day(-7))?.[7] || 0, first_data: rowsOf[0]?.[1] || null, last_data: day(-1),
       review_comments: i === 1 ? 3 : i === 4 ? 12 : 0, review_open: i === 1 ? 1 : 0, case_id: i === 6 ? "PVR-000000000001" : null,
       headline: pad(titles[i % titles.length], "：这是一个特别长的视频标题，用来检查换行、截断和窄屏下的排版是否还能看清楚"),
-      title: titles[i % titles.length] };
+      title: titles[i % titles.length],
+      // Fields the sales page shows since 2026-10-15: late starters, views without orders, and gaps in the window.
+      flags: status === "watch" && i % 4 === 2 ? [{ key: "late", label: "后起" }] : status === "follow" && i % 4 === 1 ? [{ key: "no_orders", label: "有播放没出单" }] : [],
+      missing_window: status === "incomplete" ? [day(-7 * Math.floor(i / 3) + 3), day(-7 * Math.floor(i / 3) + 5), 3] : null,
+      reference: status === "incomplete" ? { key: "follow", label: "已覆盖期成交", orders } : null };
   });
 
   // ---- cases, tasks, plans ---------------------------------------------
@@ -218,7 +230,7 @@ This paper cut? Thirty seconds ago, this knife was useless. Here's the trick: a 
     if (method === "GET") {
       if (path === "/api/performance/summary")
         return json({ coverage: { first: summaryWeeks[0].week, last: day(-1), gaps: [] }, weeks: summaryWeeks, imports: { files: 12, last: day(-1) }, totals_range: null, sources: [],
-          rule: { thresholds: [[10000, "重点复制"], [3000, "跟进"], [1000, "观察"], [0, "放弃"]], window: "发布当周 + 下一周（周一至周日）的播放量" } });
+          rule: { thresholds: [], window: "发布当周 + 下一周（周一至周日）的播放量" } });
       if (path === "/api/performance/analytics") return json({ videos, weekly, monthly: [], months: {}, shop_daily: [] });
       if (path === "/api/performance/videos") return json({ videos: videoList });
       if (path === "/api/ai/tasks") return json({ tasks });

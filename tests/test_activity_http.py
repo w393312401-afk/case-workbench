@@ -21,13 +21,18 @@ class ActivityHTTPTests(unittest.TestCase):
         status,logs=self.request("GET","/api/activity/"+quote("ai:task:round",safe="")+"/logs")
         self.assertEqual(status,200)
         self.assertEqual(len(logs["logs"]),2)
+        status,tail=self.request("GET","/api/activity/"+quote("ai:task:round",safe="")+"/logs?tail=1&limit=1")
+        self.assertEqual((status,[row["message"] for row in tail["logs"]],tail["has_earlier"]),(200,["候选已保存。"],True))
+        status,filtered=self.request("GET","/api/activity?filter=attention&kind=ai&q=%E4%BB%BB%E5%8A%A1")
+        self.assertEqual((status,filtered["items"]),(200,[]))
         body={"browser_id":"browser-0123456789","event_ids":[event]}
         self.assertEqual(self.request("POST","/api/activity/notify-claim",body,authenticated=False)[0],403)
         self.assertEqual(self.request("POST","/api/activity/notify-claim",body)[1]["claimed"],[event])
         self.assertEqual(self.request("POST","/api/activity/notify-claim",body)[1]["claimed"],[])
         self.assertEqual(self.request("POST","/api/activity/read",{"event_ids":[event]})[0],200)
         self.assertEqual(self.request("GET","/api/activity")[1]["counts"]["unread"],0)
-        for url in ("/api/activity?after=-1","/api/activity?limit=0","/api/activity?product=a&product=b","/api/activity?unknown=1"):
+        for url in ("/api/activity?after=-1","/api/activity?limit=0","/api/activity?product=a&product=b","/api/activity?unknown=1","/api/activity?kind=unknown",
+                    "/api/activity/"+quote("ai:task:round",safe="")+"/logs?tail=yes"):
             self.assertEqual(self.request("GET",url)[0],400,url)
         self.assertEqual(self.request("GET","/api/activity",headers={"Origin":"https://example.com"})[0],403)
 

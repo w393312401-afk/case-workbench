@@ -19,12 +19,33 @@ test('home calendar week handles Sunday and crossing year without using export d
   assert.equal(home.currentWeek(new Date(2027,0,1)).start,'2026-12-28');
   assert.equal(home.currentWeek(new Date(2027,0,1)).end,'2027-01-03');
 });
-test('home due videos use both natural week and current product',()=>{
+test('cases ask references only for script and breakdown, and a known video counts as published',()=>{
+  const {context}=harness();vm.runInContext(read('home.js'),context);
+  const home=context.window.WorkbenchHome, base={transcript:{text:'Words'},highlights:['hook']};
+  const labels=(current,published)=>home.missingCase({current:{...base,...current}},published).map(([label])=>label).join(',');
+  assert.equal(labels({content_origin:'overseas_creator'}),'');
+  assert.equal(labels({source_case:{tier:'A'}}),'');
+  assert.equal(labels({content_origin:'self_produced',metrics:{video_id:'7001'}}),'方向,发布');
+  assert.equal(labels({content_origin:'self_produced',metrics:{video_id:'7001'},test_direction:{direction_id:'202H-S1'}},new Set(['7001'])),'');
+  assert.equal(labels({}),'方向,发布');
+});
+test('home due videos retain overdue windows and respect current product',()=>{
   const {context,setProduct}=harness();vm.runInContext(read('home.js'),context);
   const videos=[{video_id:'1',product:'202H',window_end:'2026-10-11'},{video_id:'2',product:'129N',window_end:'2026-10-11'},{video_id:'3',product:'202H',window_end:'2026-09-27'}];
   const week={start:'2026-10-05',end:'2026-10-11'};
-  assert.equal(context.window.WorkbenchHome.dueVideos(videos,week).map(v=>v.video_id).join(','),'1');
-  setProduct('');assert.equal(context.window.WorkbenchHome.dueVideos(videos,week).length,2);
+  assert.equal(context.window.WorkbenchHome.dueVideos(videos,week).map(v=>v.video_id).join(','),'3,1');
+  setProduct('');assert.equal(context.window.WorkbenchHome.dueVideos(videos,week).length,3);
+});
+
+test('home sends new posts ending next week and missing dates to the observation queue',async()=>{
+  const {context}=harness(), root={innerHTML:'',querySelectorAll:()=>[],querySelector:()=>null}, breadcrumb={innerHTML:''};
+  context.$=selector=>({'#home-page':root,'#breadcrumb':breadcrumb}[selector] || null);
+  context.window.WorkbenchShell.parse=()=>({page:'home'});
+  const videos=[{video_id:'new',product:'202H',posted_on:'2099-01-01',window_end:'2099-01-11'},{video_id:'missing-date',product:'202H'},{video_id:'other',product:'129N'}];
+  let mounted=[];context.window.ReviewFollowups={ready:()=>[],mount:(_host,options)=>{mounted=options.videos;}};
+  context.api=async path=>path.includes('/performance/videos')?{videos}:{scripts:[],tasks:[],entries:[],items:[],counts:{}};
+  vm.runInContext(read('home.js'),context);await context.window.WorkbenchHome.route();
+  assert.deepEqual(Array.from(mounted,video=>video.video_id),['new','missing-date']);
 });
 test('home loads only work data and keeps unavailable categories distinct from empty ones',async()=>{
   const {context}=harness();
@@ -34,7 +55,7 @@ test('home loads only work data and keeps unavailable categories distinct from e
   context.api=async path=>{requests.push(path);if(path.startsWith('/api/creation'))throw Error('offline');return path.includes('videos')?{videos:[]}:{tasks:[]};};
   vm.runInContext(read('home.js'),context);
   await context.window.WorkbenchHome.route();
-  assert.deepEqual(requests,['/api/performance/videos','/api/ai/tasks','/api/creation?product=202H']);
+  assert.deepEqual(requests,['/api/performance/videos?projection=home&product=202H','/api/ai/tasks','/api/creation?product=202H','/api/review-followups?product=202H','/api/content?view=attention&page_size=8&product=202H']);
   assert.ok(root.innerHTML.includes('<h1>工作概览</h1>'));
   assert.ok(root.innerHTML.includes('待写计划暂时无法读取。'));
   assert.ok(root.innerHTML.includes('data-home-retry'));
@@ -45,6 +66,29 @@ test('home loads only work data and keeps unavailable categories distinct from e
   assert.ok(root.innerHTML.includes('#videos?tab=board'));
 });
 
+test('home lists posted videos that are not on the publish calendar yet and opens the publish step',async()=>{
+  const {context}=harness();
+  const root={innerHTML:'',querySelectorAll:()=>[],querySelector:()=>null}, breadcrumb={innerHTML:''};
+  context.$=selector=>({'#home-page':root,'#breadcrumb':breadcrumb}[selector] || null);
+  context.window.WorkbenchShell.parse=()=>({page:'home'});
+  const row={id:'video:PRD-111111111111',kind:'video',title:'Zack 202',product:'202H',direction_id:'202H-S1',published_on:'2026-10-22',next_hash:'#production/PRD-111111111111?step=publish'};
+  const photo={...row,id:'carousel:CAR-111111111111',kind:'carousel',title:'Zack 202 图文',next_hash:'#production/CAR-111111111111?step=delivery'};
+  context.api=async path=>path.startsWith('/api/content')?{items:[],counts:{attention:0,publish:0},calendar_pending:{total:3,items:[row,photo]}}:path.includes('videos')?{videos:[]}:{tasks:[]};
+  vm.runInContext(read('home.js'),context);
+  await context.window.WorkbenchHome.route();
+  assert.ok(root.innerHTML.includes('3 条已发布、还没上传到发布日历'));
+  assert.ok(root.innerHTML.includes('#production/PRD-111111111111?step=publish'));
+  assert.ok(root.innerHTML.includes('发布于 2026-10-22'));
+  assert.ok(root.innerHTML.includes('#production/CAR-111111111111?step=delivery'));
+  assert.ok(root.innerHTML.includes('图文制作单'));
+  assert.ok(root.innerHTML.includes('另有 1 条'));
+  assert.ok(!root.innerHTML.includes('现在没有等你处理的内容'));
+  // Without any, the overview stays as before.
+  context.api=async path=>path.startsWith('/api/content')?{items:[],counts:{attention:0,publish:0},calendar_pending:{total:0,items:[]}}:path.includes('videos')?{videos:[]}:{tasks:[]};
+  await context.window.WorkbenchHome.route();
+  assert.ok(!root.innerHTML.includes('发布日历'));
+});
+
 test('a late home response cannot overwrite another product or page',async()=>{
   const {context,setProduct}=harness();
   const root={innerHTML:'untouched',querySelectorAll:()=>[],querySelector:()=>null}, breadcrumb={innerHTML:''}, pending=[];
@@ -52,12 +96,29 @@ test('a late home response cannot overwrite another product or page',async()=>{
   let page='home';context.window.WorkbenchShell.parse=()=>({page});
   context.api=()=>new Promise(resolve=>pending.push(resolve));
   vm.runInContext(read('home.js'),context);
+  // The frame shows at once; what matters is that answers arriving after a switch change nothing.
   const oldProduct=context.window.WorkbenchHome.route();
+  let frame=root.innerHTML;assert.ok(frame.includes('正在读取'));
   setProduct('129N');pending.splice(0).forEach(resolve=>resolve({}));await oldProduct;
-  assert.equal(root.innerHTML,'untouched');
+  assert.equal(root.innerHTML,frame);
   const oldPage=context.window.WorkbenchHome.route();
+  frame=root.innerHTML;
   page='videos';pending.splice(0).forEach(resolve=>resolve({}));await oldPage;
-  assert.equal(root.innerHTML,'untouched');
+  assert.equal(root.innerHTML,frame);
+});
+
+test('a product-scoped home read still recognizes publications in the full sales library',async()=>{
+  const {context}=harness();
+  const root={innerHTML:'',querySelectorAll:()=>[],querySelector:()=>null}, breadcrumb={innerHTML:''}, requests=[];
+  context.$=selector=>({'#home-page':root,'#breadcrumb':breadcrumb}[selector] || null);
+  context.window.WorkbenchShell.parse=()=>({page:'home'});
+  context.state.signature='loaded';
+  context.state.cases=[{case_id:'one',product:'202H',current:{transcript:{text:'Ready'},highlights:['Hook'],test_direction:{direction_id:'202H-S1'},metrics:{video_id:'other-product-video'}}}];
+  context.api=async path=>{requests.push(path);return path.includes('/performance/videos')?{videos:[],published_video_ids:['other-product-video']}:{scripts:[],tasks:[]};};
+  vm.runInContext(read('home.js'),context);
+  await context.window.WorkbenchHome.route();
+  assert.match(root.innerHTML,/data-home-tab="cases">待补案例<span class="home-tab-count">0</);
+  assert.equal(requests[0],'/api/performance/videos?projection=home&product=202H');
 });
 test('material basket scopes server items and exports sources plus unverified boundary',async()=>{
   const {context,setProduct}=harness();

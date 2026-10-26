@@ -12,8 +12,8 @@ Platforms (the sub-folder name decides the parser):
   reddit        Apify "Reddit scraper" comments
   facebook      Apify "Facebook comments scraper" dataset
 
-Privacy: reviewer names, ids and avatars are read only to decide a role (buyer,
-viewer, brand account) and are never stored.
+Public reviewer names and handles are retained when the source supplies them.
+Private user IDs and avatars are not part of the normalized library.
 
 What people do to the library is not derived from the sources, so it lives in its
 own file (`reviews/state.json`, see ReviewState) and is applied again on every
@@ -34,13 +34,14 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import review_taxonomy
+import plugin_comments
 from review_taxonomy import (BRAND_ACCOUNTS, BRAND_PROFILE, COMPETITOR, DEFECT, NATURE, OBJECTION, PLATFORM_LABELS, RESULT, ROLE_LABELS, TOPIC, TOPIC_RULES,
                              classify, competitors, excerpt, zh_groups)
 
 PRODUCT = "202H"
-# Bump when the tables change shape. The database is derived from the sources, so a new version just drops it
-# and the next sync rebuilds it.
-DB_VERSION = 2
+# Bump when the tables change shape. Known versions migrate in place; other
+# versions rebuild the derived database from its sources on the next sync.
+DB_VERSION = 3
 # A review counts as new in the page for this many days after the sync that first saw it.
 NEW_DAYS = 14
 # How many quotes the basket for a script can hold.
@@ -62,12 +63,14 @@ DIGEST_CHARS = 9000
 # Topics where a buyer's complaint is about the hardware or what it can sharpen: the claims a script is most likely to overstate.
 DIGEST_HARDWARE = ("clamp", "pivot", "stability", "edge_reach", "small_blade", "blade_fit", "angle", "stones", "build", "accessories")
 # What viewers ask about when they want information rather than tease: these questions come first.
+DIGEST_PUSHBACK = ("mirror", "strop", "handsharp")
 DIGEST_ASKED_ABOUT = ("blade_fit", "small_blade", "accessories", "stones", "angle", "clamp", "price", "shipping", "support", "instructions", "learning", "case", "edge_reach")
 DIGEST_NOTES = {
     "说明": "评论者说的话均未核实，评论者不一定是买家（who 写明身份，试用买家有利益关系）；quote 是按规则截出的相关句子，不是全文；id 是评论编号，引用时写编号；"
             "标签由规则自动打，可能有误判，各栏只是候选，不是结论。",
     "buyer_limits": "买家写到的缺陷和限制：稿里的功能、适配、稳定性承诺先对照这里。",
     "viewer_doubts": "观众对演示可信度、稳定性、AI 声音的较真。",
+    "viewer_pushback": "观众觉得某个卖点用不上、没必要（如日常用刀不需要镜面、学会磨刀石就行）。可以先认同这类说法再写创作者自己的理由，不要写成反驳或辩论。",
     "unanswered_questions": "TikTok 观众的提问，库里没有任何回复（含修辞性质疑）；能用真实画面回答的可作选题。",
     "buyer_results": "买家怎么描述结果和使用场景，只作语言参照。",
     "learning_curve": "买家写到的上手节奏和学习曲线。",
@@ -81,7 +84,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     likes INTEGER, is_reply INTEGER NOT NULL DEFAULT 0, parent_id TEXT, sku TEXT,
     verified INTEGER, incentivized INTEGER, media_count INTEGER NOT NULL DEFAULT 0,
     relevant INTEGER NOT NULL DEFAULT 1, source_ref TEXT, context TEXT, url TEXT, source_file TEXT,
-    first_seen TEXT
+    first_seen TEXT, author_name TEXT NOT NULL DEFAULT '', author_handle TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS review_tags (
     review_id TEXT NOT NULL, kind TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY (review_id, kind, tag)
@@ -269,7 +272,11 @@ def _tiktok_video(item):
     url = item.get("videoWebUrl") or item.get("submittedVideoUrl") or ""
     video = re.search(r"/video/(\d+)", url)
     parent = item.get("repliesToId")
-    return {"native": item["cid"], "role": "brand_account" if handle in BRAND_ACCOUNTS else "viewer",
+    video_author = _clean(item.get("videoAuthor")).lstrip("@")
+    return {"native": item["cid"], "role": "brand_account" if handle in BRAND_ACCOUNTS or (handle and handle == video_author.lower()) else "viewer",
+            "author_name": _clean(item.get("nickname") or item.get("authorName")), "author_handle": _clean(item.get("uniqueId")).lstrip("@"),
+            "created_at": str(item.get("createTimeISO") or ""), "video_author": video_author,
+            "product": _clean(item["product"]) if "product" in item else PRODUCT,
             "posted_on": _date(item.get("createTimeISO")), "rating": None, "title": None, "text": _clean(item.get("text")),
             "likes": _int(item.get("diggCount")), "is_reply": 1 if parent else 0, "parent_native": parent or None,
             "sku": None, "verified": None, "incentivized": None, "media_count": 0, "relevant": 1,
@@ -283,6 +290,7 @@ def _amazon(item):
     verified = bool(item.get("isVerified"))
     variant = re.sub(r"^Set name:\s*", "", _clean(item.get("variant"))) or None
     return {"native": item["reviewId"], "role": "incentivized_buyer" if vine else ("verified_buyer" if verified else "unverified_buyer"),
+            "author_name": _clean(item.get("userName")), "author_handle": "", "product": _clean(item.get("productModel")) or PRODUCT,
             "posted_on": _date(item.get("date")), "rating": _int(item.get("ratingScore")), "title": _clean(item.get("reviewTitle")) or None,
             "text": _clean(item.get("reviewDescription")), "likes": _int(item.get("reviewReaction")), "is_reply": 0, "parent_native": None,
             "sku": variant, "verified": 1 if verified else 0, "incentivized": 1 if vine else 0,
@@ -297,6 +305,7 @@ def _tiktok_shop(item):
     verified = bool(item.get("is_verified_purchase"))
     product = str(item.get("product_id") or "")
     return {"native": str(item["review_id"]), "role": "incentivized_buyer" if incentivized else ("verified_buyer" if verified else "unverified_buyer"),
+            "author_name": _clean(item.get("reviewer_name")), "author_handle": "", "product": _clean(item.get("productModel")) or PRODUCT,
             "posted_on": _date(item.get("review_time")), "rating": _int(item.get("review_rating")), "title": None,
             "text": _clean(item.get("review_text")), "likes": None, "is_reply": 0, "parent_native": None,
             "sku": re.sub(r"^Item:\s*", "", _clean(item.get("sku_specification"))) or None, "verified": 1 if verified else 0,
@@ -311,6 +320,7 @@ def _reddit(item):
     body = _clean(item.get("body"))
     community = re.sub(r"^r/", "", str(item.get("parsedCommunityName") or item.get("communityName") or "")).strip()
     return {"native": str(item.get("id") or item.get("parsedId")), "role": "peer", "posted_on": _date(item.get("createdAt")),
+            "author_name": "", "author_handle": _clean(item.get("username")), "product": _clean(item.get("productModel")) or PRODUCT,
             "rating": None, "title": None, "text": body, "likes": None, "is_reply": 0, "parent_native": None, "sku": None,
             "verified": None, "incentivized": None, "media_count": 0,
             "relevant": 1 if re.search(r"sharpal|\b202h?\b", body, re.I) else 0,
@@ -321,7 +331,10 @@ def _facebook(item):
     native = item.get("id") or item.get("commentId")
     if not native:
         return None
+    author = item.get("author") if isinstance(item.get("author"), dict) else {}
     return {"native": str(native), "role": "brand_account" if BRAND_PROFILE.search(str(item.get("profileName") or "")) else "viewer",
+            "author_name": _clean(item.get("profileName") or author.get("name")),
+            "author_handle": "", "product": _clean(item.get("productModel")) or PRODUCT,
             "posted_on": _date(item.get("date")), "rating": None, "title": None, "text": _clean(item.get("text")),
             "likes": _int(item.get("likesCount")), "is_reply": 1 if (_int(item.get("threadingDepth")) or 0) > 0 else 0, "parent_native": None,
             "sku": None, "verified": None, "incentivized": None, "media_count": len(item.get("attachments") or []), "relevant": 1,
@@ -376,7 +389,23 @@ class ReviewStore:
         connection = sqlite3.connect(self.database, isolation_level=None, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.create_function("product_key", 1, _product_key, deterministic=True)
-        if connection.execute("PRAGMA user_version").fetchone()[0] != DB_VERSION:
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version == 2:
+            # Preserve the existing rows and manual links while the next sync
+            # restores public names from the original exports.
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(reviews)")}
+                for column in ("author_name", "author_handle"):
+                    if column not in columns:
+                        connection.execute(f"ALTER TABLE reviews ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+                connection.execute(f"PRAGMA user_version = {DB_VERSION}")
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                connection.close()
+                raise
+        elif version != DB_VERSION:
             # A new file, or an older shape of the derived database: drop it, the next sync rebuilds it from the sources.
             connection.execute("BEGIN IMMEDIATE")
             for name in ("review_fts", "review_tags", "reviews", "imports", "meta"):
@@ -404,6 +433,78 @@ class ReviewStore:
     def _signature(self, files):
         listing = "|".join(f"{platform}:{path}:{_modified(path)}" for platform, path in files)
         return hashlib.sha1(f"{listing}|{CODE_SIGNATURE}".encode()).hexdigest()
+
+    def revision(self):
+        """Cheap read-only polling marker; never opens or rebuilds the library."""
+        values = []
+        for path in (self.database, Path(str(self.database) + "-wal"), self.state.path):
+            try:
+                stat = path.stat()
+                values.append((str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, getattr(stat, "st_ino", None)))
+            except OSError:
+                values.append((str(path), None))
+        return hashlib.sha256(json.dumps(values).encode()).hexdigest()
+
+    def _source_records(self, files):
+        merged, imports, failed = {}, [], []
+        plugin_path = self.sources / "tiktok_video" / plugin_comments.SOURCE_NAME
+        for platform, path in files:
+            try:
+                records, skipped = read_source(path, platform)
+            except ReviewError as error:
+                failed.append({"file": path.name, "error": str(error)})
+                continue
+            for record in records:
+                identifier = review_id(platform, record["native"])
+                previous = merged.get(identifier)
+                chosen_path = path
+                if previous:
+                    # Plugin intake stores only supplied or already established
+                    # fields. Prefer that merged capture over older exports,
+                    # independently of the filename's alphabetical position.
+                    if previous[1] == plugin_path and path != plugin_path:
+                        fallback, record, chosen_path = record, dict(previous[2]), previous[1]
+                    else:
+                        fallback = previous[2]
+                        record = dict(record)
+                    for field in ("author_name", "author_handle"):
+                        if not record.get(field):
+                            record[field] = fallback.get(field) or ""
+                    if chosen_path == plugin_path:
+                        for field in ("likes", "created_at", "posted_on", "parent_native", "video_author"):
+                            if record.get(field) in (None, ""):
+                                record[field] = fallback.get(field)
+                if platform == "tiktok_video":
+                    # A later source may supply the author or parent missing from
+                    # an old plugin cache; derived identity must follow that merge.
+                    handle = (record.get("author_handle") or "").lower()
+                    record["is_reply"] = 1 if record.get("parent_native") else 0
+                    record["role"] = "brand_account" if handle in BRAND_ACCOUNTS or (
+                        handle and handle == (record.get("video_author") or "").lower()) else "viewer"
+                merged[identifier] = (platform, chosen_path, record)
+            imports.append((path.relative_to(self.sources).as_posix(), platform, len(records), skipped, _modified(path)))
+        return merged, imports, failed
+
+    def ingest_comments(self, videos, products):
+        """Persist partial plugin captures, then rebuild the same user-voice library.
+
+        products must be the workbench's authoritative video-id -> product map.
+        Counts describe comments; ignored_ids identifies videos absent from that
+        map. An explicitly mapped empty product means unassociated, not 202H.
+        """
+        with self.lock:
+            merged, _, failed = self._source_records(self.source_files())
+            if failed:
+                raise ReviewError("评论来源文件无法读取；请先修复后再推送，原始资料未改动。")
+            existing = [record for platform, _, record in merged.values() if platform == "tiktok_video"]
+            try:
+                result = plugin_comments.ingest(self.sources / "tiktok_video" / plugin_comments.SOURCE_NAME, videos, products, existing)
+            except plugin_comments.CommentIntakeError as error:
+                raise ReviewError(str(error)) from None
+        # sync takes the same lock. The durable sources remain the recovery
+        # point if a rebuild is interrupted, and retries do not duplicate ids.
+        self.sync()
+        return result
 
     def _state(self):
         """The hand-made records. A file that cannot be read gives an empty record and a message for the page (state_error),
@@ -446,16 +547,7 @@ class ReviewStore:
                 if row and row[0] == signature and not force:
                     return {"changed": False, "reviews": self._count(connection), "files": len(files), "failed": [], "added": 0,
                             "missing_sources": [str(self.sources)] if missing else [], "state_error": self.state_error}
-                merged, imports, failed = {}, [], []
-                for platform, path in files:
-                    try:
-                        records, skipped = read_source(path, platform)
-                    except ReviewError as error:
-                        failed.append({"file": path.name, "error": str(error)})
-                        continue
-                    for record in records:
-                        merged[review_id(platform, record["native"])] = (platform, path, record)
-                    imports.append((path.relative_to(self.sources).as_posix(), platform, len(records), skipped, _modified(path)))
+                merged, imports, failed = self._source_records(files)
                 state = self._state()
                 # The first sync with the records on only notes what is already there: none of it is "new". An unreadable
                 # records file is treated the same way, so a damaged file cannot make everything look new.
@@ -480,11 +572,12 @@ class ReviewStore:
                         nature, topics, language = classify(record["text"], title=record["title"] or "", rating=record["rating"],
                                                             role=record["role"], is_reply=bool(record["is_reply"]))
                         cursor = connection.execute(
-                            "INSERT INTO reviews (id, platform, product, role, posted_on, rating, title, text, language, likes, is_reply, parent_id, sku, verified, incentivized, media_count, relevant, source_ref, context, url, source_file, first_seen) "
-                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            (identifier, platform, PRODUCT, record["role"], record["posted_on"], record["rating"], record["title"], record["text"], language,
+                            "INSERT INTO reviews (id, platform, product, role, posted_on, rating, title, text, language, likes, is_reply, parent_id, sku, verified, incentivized, media_count, relevant, source_ref, context, url, source_file, first_seen, author_name, author_handle) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (identifier, platform, record.get("product", PRODUCT), record["role"], record["posted_on"], record["rating"], record["title"], record["text"], language,
                              record["likes"], record["is_reply"], parent, record["sku"], record["verified"], record["incentivized"], record["media_count"],
-                             record["relevant"], record["source_ref"], record["context"], record["url"], path.name, seen.get(identifier) or None))
+                             record["relevant"], record["source_ref"], record["context"], record["url"], path.name, seen.get(identifier) or None,
+                             record.get("author_name") or "", record.get("author_handle") or ""))
                         named = competitors(f"{record['title'] or ''} {record['text']}")
                         connection.executemany("INSERT OR IGNORE INTO review_tags VALUES (?,?,?)",
                                                [(identifier, "nature", t) for t in sorted(nature)] + [(identifier, "topic", t) for t in sorted(topics)]
@@ -888,26 +981,40 @@ class ReviewStore:
     # ---- digest for writing and review tasks -----------------------------------------------
     def covers(self, product):
         """True when this library holds reviews for the product a case names (a code like 202H, not part of a longer one)."""
-        named = re.search(r"(?<![A-Za-z0-9])" + re.escape(PRODUCT) + r"(?![A-Za-z0-9])", str(product or ""), re.I)
-        return bool(named) and (self.sources.is_dir() or self.database.is_file())
+        product = _product_key(product)
+        if not product:
+            return False
+        with self.lock:
+            if self.database.is_file():
+                connection = sqlite3.connect(self.database.resolve().as_uri() + "?mode=ro", uri=True)
+                connection.create_function("product_key", 1, _product_key, deterministic=True)
+                try:
+                    return connection.execute("SELECT 1 FROM reviews WHERE product_key(product)=? LIMIT 1", (product,)).fetchone() is not None
+                finally:
+                    connection.close()
+            merged, _, _ = self._source_records(self.source_files())
+            return any(_product_key(record.get("product", PRODUCT)) == product for _, _, record in merged.values())
 
-    def digest(self, max_chars=DIGEST_CHARS):
+    def digest(self, max_chars=DIGEST_CHARS, *, product=PRODUCT):
         """The library read for a writer or reviewer (see _digest); None when there is nothing to read yet."""
         with self.lock:
             if not self.database.is_file():
                 return None
             connection = self.connect()
             try:
-                return self._digest(connection, max_chars)
+                return self._digest(connection, max_chars, product=product)
             finally:
                 connection.close()
 
-    def _digest(self, connection, max_chars=DIGEST_CHARS):
+    def _digest(self, connection, max_chars=DIGEST_CHARS, *, product=PRODUCT):
         """A short, fixed-shape reading of the library: what viewers doubt, what buyers say is limited, which questions
         nobody answered, how buyers describe results and getting started. Quotes are cut to the sentence a rule matched.
-        Reviewer names are not in the library, so none can leak here."""
-        base = "r.relevant = 1 AND r.role != 'brand_account' AND LENGTH(r.text) > 0"
-        visible = connection.execute(f"SELECT COUNT(*) FROM reviews r WHERE {base}").fetchone()[0]
+        The compact AI reading deliberately omits reviewer names."""
+        connection.create_function("product_key", 1, _product_key, deterministic=True)
+        product = _product_key(product)
+        base = "r.relevant = 1 AND r.role != 'brand_account' AND LENGTH(r.text) > 0 AND product_key(r.product) = ?"
+        parameters = (product,)
+        visible = connection.execute(f"SELECT COUNT(*) FROM reviews r WHERE {base}", parameters).fetchone()[0]
         if not visible:
             return None
         buyers = "r.role IN ('verified_buyer','unverified_buyer','incentivized_buyer')"
@@ -921,6 +1028,10 @@ class ReviewStore:
             ("viewer_doubts", f"r.role IN ('viewer','peer') AND {_tagged('topic', ('proof', 'ai_voice', 'stability'))} AND {_tagged('nature', ('objection', 'question', 'defect'))} "
                               f"AND NOT {_tagged('nature', ('compare',))} AND NOT {_tagged('topic', ('handsharp',))}",
              by_likes, 6, (OBJECTION, *(TOPIC_RULES[t] for t in ("proof", "ai_voice", "stability"))), 200),
+            # viewers saying a selling point is not needed (no mirror edge for daily use, just learn the stone): a stance a script can agree with
+            ("viewer_pushback", f"r.role IN ('viewer','peer') AND {_tagged('topic', DIGEST_PUSHBACK)} AND {_tagged('nature', ('objection',))} "
+                                f"AND NOT {_tagged('topic', ('proof', 'ai_voice', 'stability'))}",
+             by_likes, 5, (OBJECTION, *(TOPIC_RULES[t] for t in DIGEST_PUSHBACK)), 200),
             ("unanswered_questions", f"r.platform = 'tiktok_video' AND r.is_reply = 0 AND {_tagged('nature', ('question',))} AND {unanswered}",
              f"CASE WHEN {_tagged('topic', DIGEST_ASKED_ABOUT)} THEN 0 ELSE 1 END, {by_likes}", 8, (), 160),
             ("buyer_results", f"{buyers} AND (r.rating IS NULL OR r.rating >= 4) AND ({_tagged('nature', ('result',))} OR {_tagged('topic', ('many_knives', 'repair', 'mirror'))})",
@@ -929,17 +1040,21 @@ class ReviewStore:
              f"{trial_last}, LENGTH(r.text) DESC, r.id", 3, (TOPIC_RULES["learning"],), 260),
         )
         picks = self._state()["picks"]
-        picked = sorted((i for i in picks if isinstance(picks[i], dict)), key=lambda i: str(picks[i].get("added") or ""), reverse=True)[:8]
+        picked = sorted((i for i in picks if isinstance(picks[i], dict)), key=lambda i: str(picks[i].get("added") or ""), reverse=True)
+        picked_rows = {r["id"]: r for r in connection.execute(
+            f"SELECT r.* FROM reviews r WHERE r.id IN ({','.join('?' * len(picked))}) AND product_key(r.product) = ?",
+            picked + list(parameters))} if picked else {}
+        picked = [identifier for identifier in picked if identifier in picked_rows][:8]
         digest, used = {}, set(picked)
-        sources = {PLATFORM_LABELS[r[0]]: r[1] for r in connection.execute(f"SELECT r.platform, COUNT(*) FROM reviews r WHERE {base} GROUP BY r.platform ORDER BY 2 DESC, 1")}
+        sources = {PLATFORM_LABELS[r[0]]: r[1] for r in connection.execute(f"SELECT r.platform, COUNT(*) FROM reviews r WHERE {base} GROUP BY r.platform ORDER BY 2 DESC, 1", parameters)}
         meta = {r[0]: r[1] for r in connection.execute("SELECT key, value FROM meta")}
-        digest.update(product=PRODUCT, synced_at=meta.get("synced_at"), reviews=visible, sources=sources,
+        digest.update(product=product, synced_at=meta.get("synced_at"), reviews=visible, sources=sources,
                       coverage={PLATFORM_LABELS[p]: note for p, note in self.coverage().items() if PLATFORM_LABELS.get(p) in sources},
                       topics={TOPIC[r[0]]: r[1] for r in connection.execute(
-                          f"SELECT t.tag, COUNT(*) AS n FROM review_tags t JOIN reviews r ON r.id = t.review_id WHERE t.kind = 'topic' AND {base} GROUP BY t.tag ORDER BY n DESC, t.tag LIMIT 10")})
+                          f"SELECT t.tag, COUNT(*) AS n FROM review_tags t JOIN reviews r ON r.id = t.review_id WHERE t.kind = 'topic' AND {base} GROUP BY t.tag ORDER BY n DESC, t.tag LIMIT 10", parameters)})
         for name, where, order, limit, patterns, width in buckets:
             items, seen = [], set()
-            for row in connection.execute(f"SELECT r.* FROM reviews r WHERE {base} AND {where} ORDER BY {order} LIMIT {limit * 4}"):
+            for row in connection.execute(f"SELECT r.* FROM reviews r WHERE {base} AND {where} ORDER BY {order} LIMIT {limit * 4}", parameters):
                 quote = excerpt(row["text"], *patterns, limit=width)
                 key = re.sub(r"\W+", "", quote.lower())
                 if row["id"] in used or key in seen:
@@ -956,7 +1071,7 @@ class ReviewStore:
                     break
             digest[name] = items
         if picked:
-            by_id = {r["id"]: r for r in connection.execute(f"SELECT * FROM reviews WHERE id IN ({','.join('?' * len(picked))})", picked)}
+            by_id = picked_rows
             digest["user_picks"] = [{"id": i, "source": PLATFORM_LABELS[by_id[i]["platform"]], "who": ROLE_LABELS[by_id[i]["role"]], "date": by_id[i]["posted_on"],
                                      "quote": excerpt(by_id[i]["text"], limit=260), "note": str(picks[i].get("note") or "")} for i in picked if i in by_id]
         digest["read_me"] = DIGEST_NOTES

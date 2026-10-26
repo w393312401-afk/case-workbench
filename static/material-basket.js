@@ -4,6 +4,11 @@
 window.MaterialBasket = (() => {
   const kinds = { review: "用户评论", expression: "案例表达", hook: "视频钩子" };
   const sourceLabel = item => ({tiktok_video:"TikTok 视频评论",tiktok_shop:"TikTok Shop 评价",amazon:"亚马逊评价",reddit:"Reddit 讨论",facebook:"Facebook 评论"}[item.source_label] || item.source_label || item.source_id);
+  const authorLabel = item => {
+    if (item.type !== 'review') return '';
+    const name = String(item.author_name || '').trim(), handle = String(item.author_handle || '').trim().replace(/^@+/, '');
+    return [name, handle ? `@${handle}` : ''].filter(Boolean).join(' · ') || '评论者未记录';
+  };
   // data is what the dialog shows; deferred holds a newer read that arrived while a note had focus.
   const basket = { data: null, deferred: null, stale: false, request: 0, busy: false, error: "", drafts: new Map(), excluded: new Set(), undo: null, filter: { type: "", query: "" } };
   // The note text and item version each textarea started from; a draft keeps that version until it is saved.
@@ -32,7 +37,7 @@ window.MaterialBasket = (() => {
   const filtering = () => Boolean(basket.filter.type || basket.filter.query.trim());
   // Controls whose focus survives a row being rebuilt; a note textarea is never rebuilt while it has focus.
   const focusKeys = ["data-material-save", "data-material-remove", "data-material-theme", "data-material-select", "data-theme-remove", "data-material-filter", "data-material-all", "data-material-undo", "data-material-clear", "data-material-copy", "data-material-write", "data-material-retry", "data-material-close"];
-  let pointerAt = 0, backdropDown = false, undoTimer = 0;
+  let pointerAt = 0, pointerSave = false, backdropDown = false, undoTimer = 0;
   // Undo outlives closing the basket for this long, so a quick close is not the end of it.
   const UNDO_MS = 60000;
   function offerUndo(message, run) {
@@ -62,7 +67,7 @@ window.MaterialBasket = (() => {
   function shown(item) {
     const query = basket.filter.query.trim().toLocaleLowerCase();
     if (basket.filter.type && item.type !== basket.filter.type) return false;
-    return !query || [item.text, noteOf(item), sourceLabel(item), item.source_id].some(value => String(value || "").toLocaleLowerCase().includes(query));
+    return !query || [item.text, noteOf(item), sourceLabel(item), authorLabel(item), item.source_id].some(value => String(value || "").toLocaleLowerCase().includes(query));
   }
   function updateFooter(modal) {
     const items = selection(), block = writeBlock(items), size = contextSize(items), limit = basket.data?.limits?.prompt_chars;
@@ -96,6 +101,11 @@ window.MaterialBasket = (() => {
       node.hidden = !draft;
       node.textContent = draft?.conflictAt ? "备注冲突，未保存" : "未保存";
     });
+    modal.querySelectorAll("[data-material-save]").forEach(button => {
+      const draft = basket.drafts.get(button.dataset.materialSave);
+      button.hidden = !draft && document.activeElement !== button;
+      button.textContent = draft?.conflictAt ? "核对后覆盖保存" : "保存备注";
+    });
     if (modal.querySelector("#material-selection-count")) updateFooter(modal);
   }
   function dialog() { return document.querySelector("#material-basket-dialog"); }
@@ -125,7 +135,7 @@ window.MaterialBasket = (() => {
       if (!rows.length) continue;
       lines.push(`## ${name}`);
       for (const item of rows) {
-        lines.push(`- ${item.text || "（原内容暂不可用）"}`, `  - 来源：${sourceLabel(item)}｜编号 ${item.source_id}${item.source_url ? `｜${item.source_url}` : ""}`);
+        lines.push(`- ${item.text || "（原内容暂不可用）"}`, `  - 来源：${sourceLabel(item)}${authorLabel(item) ? `｜${authorLabel(item)}` : ""}｜编号 ${item.source_id}${item.source_url ? `｜${item.source_url}` : ""}`);
         if (item.note) lines.push(`  - 备注：${item.note}`);
         if (item.unverified) lines.push("  - 真实性：未经核实，不作为产品事实或亲历证明。");
       }
@@ -135,11 +145,11 @@ window.MaterialBasket = (() => {
   }
   // The frame is built once per opening; renders then patch it, so scrolling, focus and unchanged rows survive.
   function frame() {
-    return `<div class="dialog-heading"><div><span class="eyebrow">WRITING MATERIALS</span><h2 id="material-basket-title">摘录篮 <small data-material-total></small></h2><p data-material-scope></p></div><button type="button" class="icon-button" data-material-close aria-label="关闭摘录篮">${icon("close")}</button></div><div class="material-basket-body"><p class="material-note">勾选这次要带入写稿的素材。备注离开输入框后自动保存；评论、参考表达与钩子会保留来源。</p><div id="material-basket-error" class="data-warning" role="alert" hidden><span data-material-error></span> <button type="button" class="subtle" data-material-retry>重新读取</button></div><div data-material-undo-host></div><div data-material-toolbar></div><div class="material-list"></div></div><div class="dialog-footer material-basket-footer"><span id="material-selection-count" aria-live="polite" aria-atomic="true"></span><div><button type="button" class="subtle" data-material-clear>清空当前产品</button><button type="button" class="secondary" data-material-copy>${icon("copy")}复制所选</button><button type="button" class="primary" data-material-write>带入写稿</button></div></div>`;
+    return `<div class="dialog-heading"><div><h2 id="material-basket-title">摘录篮 <small data-material-total></small></h2><p data-material-scope></p></div><button type="button" class="icon-button" data-material-close aria-label="关闭摘录篮">${icon("close")}</button></div><div class="material-basket-body"><details class="material-note"><summary>摘录与备注说明</summary><p>勾选本次写稿素材。备注离开输入框后自动保存；评论、参考表达与钩子保留来源，未经核实内容不能当作商品事实。</p></details><div id="material-basket-error" class="data-warning" role="alert" hidden><span data-material-error></span> <button type="button" class="subtle" data-material-retry>重新读取</button></div><div data-material-undo-host></div><div data-material-toolbar></div><div class="material-list"></div></div><div class="dialog-footer material-basket-footer"><span id="material-selection-count" aria-live="polite" aria-atomic="true"></span><div><button type="button" class="subtle" data-material-clear>清空当前产品</button><button type="button" class="secondary" data-material-copy>${icon("copy")}复制所选</button><button type="button" class="primary" data-material-write>带入写稿</button></div></div>`;
   }
   function row(item) {
     const links = linksOf(item), draft = basket.drafts.get(item.id), quote = esc(excerpt(item));
-    return `<article class="material-item" data-material-id="${esc(item.id)}"><div class="material-item-heading"><label><input type="checkbox" data-material-select="${esc(item.id)}" aria-label="带入写稿：${esc(kinds[item.type] || item.type)} · ${quote}" ${basket.excluded.has(item.id) ? "" : "checked"}> <span>${esc(kinds[item.type] || item.type)}</span></label><button type="button" class="subtle" data-material-remove="${esc(item.id)}" aria-label="移出摘录篮：${quote}">移出摘录篮</button></div><blockquote>${esc(item.text || "原内容暂不可用，请检查来源。")}</blockquote><div class="material-source"><a href="${esc(sourceURL(item))}" ${/^https?:/i.test(sourceURL(item)) ? 'target="_blank" rel="noopener noreferrer"' : ""}>${esc(sourceLabel(item))}</a>${item.unverified ? '<span>未经核实</span>' : ""}</div><label class="material-note-field"><span>写稿备注<span class="material-unsaved" data-material-unsaved="${esc(item.id)}" ${draft ? "" : "hidden"}>${draft?.conflictAt ? "备注冲突，未保存" : "未保存"}</span></span><textarea data-material-note="${esc(item.id)}" rows="2"${maxLength("note")} placeholder="记下用途、画面或使用边界">${esc(noteOf(item))}</textarea></label><div class="material-item-actions"><button type="button" class="subtle" data-material-save="${esc(item.id)}" aria-label="保存备注：${quote}">保存备注</button>${item.type === "review" ? `<button type="button" class="subtle" data-material-theme="${esc(item.source_id)}" aria-label="关联卖点或顾虑：${quote}">关联卖点或顾虑</button>` : ""}</div>${links.length ? `<div class="material-themes">${links.map(link => `<span>${esc(themeLabel(link))}<button type="button" class="material-theme-remove" data-theme-remove="${esc(link.id)}" aria-label="删除主题关联：${esc(themeLabel(link))}">×</button></span>`).join("")}</div>` : ""}</article>`;
+    return `<article class="material-item" data-material-id="${esc(item.id)}"><div class="material-item-heading"><label><input type="checkbox" data-material-select="${esc(item.id)}" aria-label="带入写稿：${esc(kinds[item.type] || item.type)} · ${quote}" ${basket.excluded.has(item.id) ? "" : "checked"}> <span>${esc(kinds[item.type] || item.type)}</span></label><button type="button" class="subtle" data-material-remove="${esc(item.id)}" aria-label="移出摘录篮：${quote}">移出摘录篮</button></div>${String(item.text || "").length > 240 || String(item.text || "").split("\n").length > 4 ? `<details class="material-full"><summary><span class="material-quote-summary">${esc(String(item.text || "").replace(/\s+/g," ").slice(0,240))}…</span><span>展开原文</span></summary><blockquote>${esc(item.text)}</blockquote></details>` : `<blockquote class="material-excerpt">${esc(item.text || "原内容暂不可用，请检查来源。")}</blockquote>`}<div class="material-source"><a href="${esc(sourceURL(item))}" ${/^https?:/i.test(sourceURL(item)) ? 'target="_blank" rel="noopener noreferrer"' : ""}>${esc(sourceLabel(item))}</a>${authorLabel(item) ? `<span data-material-author>${esc(authorLabel(item))}</span>` : ""}${item.unverified ? '<span>未经核实</span>' : ""}</div><label class="material-note-field"><span>写稿备注<span class="material-unsaved" data-material-unsaved="${esc(item.id)}" ${draft ? "" : "hidden"}>${draft?.conflictAt ? "备注冲突，未保存" : "未保存"}</span></span><textarea data-material-note="${esc(item.id)}" rows="1"${maxLength("note")} placeholder="记下用途、画面或使用边界">${esc(noteOf(item))}</textarea></label><div class="material-item-actions"><button type="button" class="subtle" data-material-save="${esc(item.id)}" aria-label="保存备注：${quote}" ${draft ? "" : "hidden"}>${draft?.conflictAt ? "核对后覆盖保存" : "保存备注"}</button>${item.type === "review" ? `<button type="button" class="subtle" data-material-theme="${esc(item.source_id)}" aria-label="关联卖点或顾虑：${quote}">关联卖点或顾虑</button>` : ""}</div>${links.length ? `<div class="material-themes">${links.map(link => `<span>${esc(themeLabel(link))}<button type="button" class="material-theme-remove" data-theme-remove="${esc(link.id)}" aria-label="删除主题关联：${esc(themeLabel(link))}">×</button></span>`).join("")}</div>` : ""}</article>`;
   }
   // Everything a row shows; a row is rebuilt only when this changes.
   function rowSignature(item) {
@@ -152,7 +162,7 @@ window.MaterialBasket = (() => {
       const state = basket.data ? `empty:${product()}` : "loading";
       if (list.dataset.state !== state) {
         list.dataset.state = state;
-        list.innerHTML = !basket.data ? '<p role="status">正在读取素材…</p>' : `<div class="empty"><h3>还没有素材</h3><p>可以从这三处加入：</p><div class="material-empty-links"><a href="${esc(pageURL("#reviews"))}">用户声音 · 摘录评论</a><a href="${esc(pageURL("#library?view=native"))}">案例库 · 加入原生表达</a><a href="${esc(pageURL("#videos?tab=list"))}">视频数据 · 摘录钩子</a></div></div>`;
+        list.innerHTML = !basket.data ? '<p role="status">正在读取素材…</p>' : `<div class="empty"><h3>还没有素材</h3><p>可以从这三处加入：</p><div class="material-empty-links"><a href="${esc(pageURL("#reviews"))}">用户声音 · 摘录评论</a><a href="${esc(pageURL("#library?view=native"))}">案例库 · 加入原生表达</a><a href="${esc(pageURL("#videos?tab=list"))}">带货数据 · 摘录钩子</a></div></div>`;
       }
       return;
     }
@@ -183,7 +193,7 @@ window.MaterialBasket = (() => {
     const signature = JSON.stringify([rows.length, types]);
     if (host.dataset.signature === signature) return;
     host.dataset.signature = signature;
-    host.innerHTML = rows.length ? `<div class="material-toolbar"><div class="material-filters" role="group" aria-label="按类型筛选"><button type="button" class="subtle" data-material-filter="" aria-pressed="${!basket.filter.type}">全部 ${rows.length}</button>${types.map(([type, count]) => `<button type="button" class="subtle" data-material-filter="${type}" aria-pressed="${basket.filter.type === type}">${kinds[type]} ${count}</button>`).join("")}</div><input type="search" class="material-search" data-material-search value="${esc(basket.filter.query)}" placeholder="搜索原文、备注或来源" aria-label="搜索素材"><div class="material-bulk" title="只作用于当前显示的素材"><button type="button" class="subtle" data-material-all="1">全选</button><button type="button" class="subtle" data-material-all="0">全不选</button></div></div><p class="material-nomatch" data-material-nomatch hidden>没有符合筛选的素材。</p>` : "";
+    host.innerHTML = rows.length ? `<div class="material-toolbar"><div class="material-filters" ${types.length > 1 ? "" : "hidden"} role="group" aria-label="按类型筛选"><button type="button" class="subtle" data-material-filter="" aria-pressed="${!basket.filter.type}">全部 ${rows.length}</button>${types.map(([type, count]) => `<button type="button" class="subtle" data-material-filter="${type}" aria-pressed="${basket.filter.type === type}">${kinds[type]} ${count}</button>`).join("")}</div><input type="search" class="material-search" data-material-search value="${esc(basket.filter.query)}" placeholder="搜索原文、备注或来源" aria-label="搜索素材"><div class="material-bulk" title="只作用于当前显示的素材"><button type="button" class="subtle" data-material-all="1">全选</button><button type="button" class="subtle" data-material-all="0">全不选</button></div></div><p class="material-nomatch" data-material-nomatch hidden>没有符合筛选的素材。</p>` : "";
   }
   function patchUndo(modal) {
     const host = modal.querySelector("[data-material-undo-host]"), message = basket.undo?.message || "";
@@ -246,11 +256,11 @@ window.MaterialBasket = (() => {
     if (basket.deferred) { apply(basket.deferred); basket.stale = true; }
     if (basket.stale) render();
   }
-  async function refresh() {
+  async function refresh(fresh = false) {
     const seq = ++basket.request;
     try {
       // Read all products so a shell switch never transfers another product's selection.
-      const data = await api("/api/materials");
+      const data = await api("/api/materials", fresh ? {cache:"no-store"} : {});
       if (seq !== basket.request) return latest();
       basket.error = "";
       accept(data);
@@ -452,7 +462,8 @@ window.MaterialBasket = (() => {
     initialize();
     const modal = dialog();
     if (!modal.open) {
-      if (dockable()) { modal.show(); document.documentElement.classList.add("basket-docked"); }
+      // One docked panel at a time: the basket takes the place of a docked task panel.
+      if (dockable()) { window.TaskActivity?.undock?.(); modal.show(); document.documentElement.classList.add("basket-docked"); }
       else modal.showModal();
     }
     render();
@@ -512,6 +523,7 @@ window.MaterialBasket = (() => {
     // Leaving for another page closes the basket rather than leaving it open over that page.
     else if (event.target.closest?.('a[href^="#"]')) close();
     // A rerender during a click could replace the button under the pointer, so deferred data waits for it.
+    pointerSave = false;
     setTimeout(flush);
   }
   function onChange(event) {
@@ -529,17 +541,20 @@ window.MaterialBasket = (() => {
   let themeSequence = 0;
   async function openTheme(review) {
     const seq = ++themeSequence;
+    const parent = dialog(), reopenBasket = Boolean(parent?.open), originHash = location.hash;
+    if (reopenBasket) parent.close();
     let modal = document.querySelector("#material-theme-dialog");
     if (!modal) { modal = document.createElement("dialog"); modal.id = "material-theme-dialog"; modal.setAttribute("aria-labelledby", "material-theme-title"); document.body.append(modal); }
     const requestedProduct = review.product || product();
-    modal.innerHTML = `<div class="dialog-heading"><h2 id="material-theme-title">关联评论主题</h2><button type="button" class="icon-button" data-theme-close aria-label="关闭主题关联">${icon("close")}</button></div><div class="material-theme-body"><blockquote>${esc(review.text || "")}</blockquote><p role="status">正在读取卖点和方向…</p></div>`;
+    modal.innerHTML = `<div class="dialog-heading"><h2 id="material-theme-title">关联评论主题</h2><button type="button" class="icon-button" data-theme-close aria-label="关闭主题关联">${icon("close")}</button></div><div class="material-theme-body"><details class="material-theme-quote"><summary>${esc(String(review.text || "").replace(/\s+/g," ").slice(0,180))}${String(review.text || "").length > 180 ? "…" : ""} · 查看全文</summary><blockquote>${esc(review.text || "")}</blockquote></details><p role="status">正在读取卖点和方向…</p></div>`;
     modal.querySelector("[data-theme-close]").onclick = () => modal.close();
+    modal.addEventListener("close", () => { if (reopenBasket && !parent.open && seq === themeSequence && location.hash === originHash) { void open(); } }, {once:true});
     if (!modal.open) modal.showModal();
     try {
       const [catalog] = await Promise.all([api(`/api/direction-catalog?product=${encodeURIComponent(requestedProduct)}`), refresh()]);
       if (!modal.open || seq !== themeSequence) return;
       const points = catalog.selling_points || [], directions = catalog.directions || [];
-      modal.querySelector(".material-theme-body").innerHTML = `<blockquote>${esc(review.text || "")}</blockquote><p class="context-note">评论主题可以启发表达；这项关联不把评论升级为已核实产品事实。</p><div class="material-theme-existing" data-theme-existing hidden></div><form id="material-theme-form"><label class="field"><span>用途</span><select name="role"><option value="selling_point">产品卖点</option><option value="concern">方向顾虑</option></select></label><label class="field"><span>关联到</span><select name="target" required></select></label><label class="field"><span>备注</span><textarea name="note" rows="2"${maxLength("note")}></textarea></label><p class="data-warning" data-theme-error role="alert" hidden></p><div class="material-theme-actions"><button type="submit" class="primary">保存主题关联</button></div></form>`;
+      modal.querySelector(".material-theme-body").innerHTML = `<details class="material-theme-quote"><summary>${esc(String(review.text || "").replace(/\s+/g," ").slice(0,180))}${String(review.text || "").length > 180 ? "…" : ""} · 查看全文</summary><blockquote>${esc(review.text || "")}</blockquote></details><p class="context-note">评论主题可以启发表达；这项关联不把评论升级为已核实产品事实。</p><div class="material-theme-existing" data-theme-existing hidden></div><form id="material-theme-form"><label class="field"><span>用途</span><select name="role"><option value="selling_point">产品卖点</option><option value="concern">方向顾虑</option></select></label><label class="field"><span>关联到</span><select name="target" required></select></label><label class="field"><span>备注</span><textarea name="note" rows="2"${maxLength("note")}></textarea></label><p class="data-warning" data-theme-error role="alert" hidden></p><div class="material-theme-actions"><button type="submit" class="primary">保存主题关联</button></div></form>`;
       const form = modal.querySelector("form"), role = form.elements.role, target = form.elements.target;
       const choices = () => {
         const rows = role.value === "concern" ? directions.map(item => [item.direction_id, `${item.direction_id} · ${item.concern || item.main_difference}`]) : points.map(item => [item.id, `${item.code} · ${item.title}`]);
@@ -602,7 +617,7 @@ window.MaterialBasket = (() => {
     modal.addEventListener("close", () => { basket.filter = { type: "", query: "" }; modal.innerHTML = ""; document.documentElement.classList.remove("basket-docked"); warnConflicts(); });
     // A docked basket is not modal, so Esc only closes it while focus is inside; elsewhere Esc keeps its page meaning.
     modal.addEventListener("keydown", event => { if (event.key === "Escape" && !modal.matches(":modal")) { event.preventDefault(); close(); } });
-    modal.addEventListener("pointerdown", event => { pointerAt = event.timeStamp; backdropDown = event.target === modal && outside(event); }, true);
+    modal.addEventListener("pointerdown", event => { pointerAt = event.timeStamp; pointerSave = Boolean(event.target.closest?.("[data-material-save]")); backdropDown = event.target === modal && outside(event); }, true);
     modal.addEventListener("click", onClick);
     modal.addEventListener("change", onChange);
     modal.addEventListener("input", onInput);
@@ -610,7 +625,8 @@ window.MaterialBasket = (() => {
       const field = event.target.closest?.("[data-material-note]");
       if (field) {
         keepDraft(field);
-        if (basket.drafts.has(field.dataset.materialNote)) void saveNote(field.dataset.materialNote).catch(() => {});
+        // A deliberate save click owns this draft; blurring into that same button must not race it.
+        if (basket.drafts.has(field.dataset.materialNote) && !(pointerSave && event.relatedTarget?.matches?.("[data-material-save]"))) void saveNote(field.dataset.materialNote).catch(() => {});
       }
       // A rerender now could replace a button between its mousedown and click; those wait for the click handler.
       if (!event.relatedTarget || !modal.contains(event.relatedTarget)) setTimeout(flush);

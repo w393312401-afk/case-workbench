@@ -1,0 +1,46 @@
+.workflow-links{margin:0 0 22px;padding:18px 22px}.workflow-links>.section-title-row{margin-bottom:8px}.workflow-links h2{font-size:16px;margin:0}.workflow-group{margin-top:14px}.workflow-group h3{font-size:12px;font-weight:500;color:var(--muted);margin:0 0 8px}.workflow-link-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:8px}.workflow-link{display:grid;gap:5px;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:9px;text-decoration:none;color:var(--ink);overflow-wrap:anywhere}.workflow-link:hover{border-color:var(--accent);background:var(--surface-alt)}.workflow-link:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.workflow-link strong{font-size:13px;font-weight:600}.workflow-link small{font-size:12px;color:var(--muted);line-height:1.5}.workflow-note{margin:12px 0 0}.workflow-links>.section-title-row>button{flex-shrink:0;min-height:36px}@media(max-width:720px){.workflow-links{padding:16px}.workflow-links>.section-title-row{align-items:center;gap:8px}.workflow-link-grid{grid-template-columns:1fr}}
+/* Compact rows: the group name sits on the left, its links sit side by side, and each link opens with a
+   coloured tag for its kind, so a script, an order and a direction no longer look alike. */
+.workflow-links .workflow-group{display:grid;grid-template-columns:104px minmax(0,1fr);gap:12px;align-items:start;margin:0;padding:10px 0;border-top:1px solid var(--line)}
+.workflow-links>.section-title-row+.workflow-group{border-top:0;padding-top:4px}
+.workflow-links .workflow-group h3{margin:0;padding-top:7px;font-size:12px;line-height:1.4}
+.workflow-links .workflow-link-grid{display:flex;flex-wrap:wrap;gap:6px}
+.workflow-links .workflow-link{--kind:var(--muted-soft);display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;max-width:100%;padding:6px 11px 6px 8px;border-radius:8px;border-left:3px solid var(--kind);line-height:1.4}
+.workflow-links .workflow-link::before{content:"关联";flex:none;font-size:11px;font-weight:600;padding:1px 6px;border-radius:5px;color:var(--kind);background:color-mix(in srgb,var(--kind) 14%,transparent)}
+.workflow-links .workflow-link strong{font-size:13px}
+.workflow-links .workflow-link small{font-size:12px;line-height:1.4}
+.workflow-links .workflow-link:hover{border-left-color:var(--kind)}
+.workflow-link[data-workflow-kind="direction"]{--kind:var(--accent)}.workflow-link[data-workflow-kind="direction"]::before{content:"方向"}
+.workflow-link[data-workflow-kind="variant"]{--kind:var(--teal)}.workflow-link[data-workflow-kind="variant"]::before{content:"变体"}
+.workflow-link[data-workflow-kind="case"]{--kind:var(--muted)}.workflow-link[data-workflow-kind="case"]::before{content:"案例"}
+.workflow-link[data-workflow-kind="review"]{--kind:var(--muted)}.workflow-link[data-workflow-kind="review"]::before{content:"复盘"}
+.workflow-link[data-workflow-kind="plan"]{--kind:var(--muted)}.workflow-link[data-workflow-kind="plan"]::before{content:"计划"}
+.workflow-link[data-workflow-kind="task"]{--kind:var(--warn)}.workflow-link[data-workflow-kind="task"]::before{content:"写稿"}
+.workflow-link[data-workflow-kind="script"]{--kind:var(--success)}.workflow-link[data-workflow-kind="script"]::before{content:"脚本"}
+.workflow-link[data-workflow-kind="production"],.workflow-link[data-workflow-kind="video"]{--kind:var(--pink)}.workflow-link[data-workflow-kind="production"]::before,.workflow-link[data-workflow-kind="video"]::before{content:"视频"}
+.workflow-link[data-workflow-kind="carousel"]{--kind:var(--pink)}.workflow-link[data-workflow-kind="carousel"]::before{content:"图文"}
+.workflow-link[data-workflow-kind="table"]{--kind:var(--pink)}.workflow-link[data-workflow-kind="table"]::before{content:"逐张表"}
+.workflow-link[data-workflow-kind="publication"]{--kind:var(--red)}.workflow-link[data-workflow-kind="publication"]::before{content:"发布"}
+.workflow-links .workflow-note{margin-top:8px;padding:8px 12px}
+@media(max-width:720px){.workflow-links .workflow-group{grid-template-columns:1fr;gap:6px}.workflow-links .workflow-group h3{padding-top:0}.workflow-links .workflow-link{width:100%}}
+/* Hints are one quiet line, not a grey box. */
+.workflow-links .workflow-note{margin:6px 0 0;padding:0;background:none;border:0;font-size:12px;color:var(--muted)}
+/* Order pages: the links fold into one summary line; the kinds present show as small tags. */
+.workflow-links.workflow-links-folded{padding:0;margin-bottom:16px}
+.workflow-fold>summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px 10px;padding:12px 18px;cursor:pointer;list-style:none}
+.workflow-fold>summary::-webkit-details-marker{display:none}
+.workflow-fold>summary::before{content:'▸';color:var(--muted);font-size:12px}.workflow-fold[open]>summary::before{content:'▾'}
+.workflow-fold-title{font-size:14px;font-weight:600}
+.workflow-fold-kinds{display:flex;flex-wrap:wrap;gap:4px}
+.workflow-fold>summary small{margin-left:auto;font-size:12px;color:var(--muted)}
+.workflow-kind{--kind:var(--muted);font-size:11px;font-weight:600;padding:1px 6px;border-radius:5px;color:var(--kind);background:color-mix(in srgb,var(--kind) 14%,transparent)}
+.workflow-kind[data-workflow-kind="direction"]{--kind:var(--accent)}.workflow-kind[data-workflow-kind="variant"]{--kind:var(--teal)}.workflow-kind[data-workflow-kind="task"]{--kind:var(--warn)}.workflow-kind[data-workflow-kind="script"]{--kind:var(--success)}
+.workflow-kind[data-workflow-kind="production"],.workflow-kind[data-workflow-kind="video"],.workflow-kind[data-workflow-kind="carousel"],.workflow-kind[data-workflow-kind="table"]{--kind:var(--pink)}.workflow-kind[data-workflow-kind="publication"]{--kind:var(--red)}
+.workflow-fold[open]{padding:0 18px 14px}.workflow-fold[open]>summary{margin:0 -18px 4px;border-bottom:1px solid var(--line)}
+.workflow-fold-tools{display:flex;justify-content:flex-end;margin-top:6px}
+@media(max-width:720px){.workflow-fold>summary small{margin-left:0}}
+.workflow-fold>summary+.workflow-group{border-top:0;padding-top:4px}
+.workflow-alert{padding:8px 14px;margin:0;border-bottom:1px solid var(--line);font-size:12px;line-height:1.5;background:var(--surface-warm);color:var(--warm-ink)}
+.workflow-fold>summary .workflow-fold-attention{color:var(--warm-ink);font-weight:600}
+.workflow-fold-alert{margin:0 -18px 6px;padding:8px 18px}
+.workflow-fold-alert+.workflow-group{border-top:0;padding-top:4px}

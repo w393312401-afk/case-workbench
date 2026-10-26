@@ -201,13 +201,14 @@ class _JobFiles:
 class CodexStillsBridge(CodexBridge):
     TASK_NAME = "找底图"
     SERVER_NAME = "pvr_stills_resolve"
+    READ_ONLY_ANALYSIS = False
     TASK_RULES = "\n只使用本次指定的达芬奇 MCP 和任务目录文件工具。只读取既有项目；除切换查看时间线、播放头和导出本目录静帧外，不修改项目。实际查看静帧后再挑候选；没有合格画面就保存空候选清单并说明缺口。不联网、不生图、不操作界面，不恢复或创建其他任务。"
 
     def __init__(self, executable=None, *, timeout=STILLS_TIMEOUT, startup_timeout=45, popen_factory=None):
         super().__init__(executable, timeout=timeout, startup_timeout=startup_timeout, popen_factory=popen_factory)
 
     def _writable_roots(self, directory, settings):
-        return [directory]
+        return [] if self.READ_ONLY_ANALYSIS else [directory]
 
     def _file_tools(self, settings):
         return _file_specs(settings["files"])
@@ -299,8 +300,11 @@ class CodexStillsBridge(CodexBridge):
         if any(not Path(skill["path"]).is_relative_to(directory) for skill in selected):
             raise BridgeError("本次找底图只使用任务目录内的技能副本。")
         skill_text = self._skill_text(selected)
+        sandbox_mode = "read-only" if self.READ_ONLY_ANALYSIS else "workspace-write"
+        sandbox_policy = ({"type": "readOnly", "networkAccess": False} if self.READ_ONLY_ANALYSIS else
+                          {"type": "workspaceWrite", "writableRoots": writable_roots, "networkAccess": False, "excludeSlashTmp": True, "excludeTmpdirEnvVar": True})
         base = {"features": {**{name: False for name in DISABLED_FEATURES}, **{name: True for name in ENABLED_FEATURES}}, "web_search": "disabled",
-                "sandbox_mode": "workspace-write", "approval_policy": "never",
+                "sandbox_mode": sandbox_mode, "approval_policy": "never",
                 "sandbox_workspace_write": {"writable_roots": writable_roots, "network_access": False, "exclude_slash_tmp": True, "exclude_tmpdir_env_var": True}}
         sessions, guards = [], []
         def progress(value):
@@ -313,12 +317,13 @@ class CodexStillsBridge(CodexBridge):
             config = probe.request("config/read", {"cwd": str(directory), "includeLayers": False}).get("config")
             if not isinstance(config, dict) or not isinstance(config.get("mcp_servers", {}), dict):
                 raise BridgeError("无法核实本机工具配置，未启动找底图。")
-            server_name = self.SERVER_NAME
-            if server_name in config.get("mcp_servers", {}):
+            server_name = None if self.READ_ONLY_ANALYSIS else self.SERVER_NAME
+            if server_name is not None and server_name in config.get("mcp_servers", {}):
                 server_name += "_" + uuid4().hex[:12]
             servers = {name: {"enabled": False} for name in config.get("mcp_servers", {})}
-            servers[server_name] = {"command": settings["command"], "args": settings["args"], "cwd": str(directory), "enabled": True,
-                "enabled_tools": settings["tools"], "default_tools_approval_mode": "approve", "startup_timeout_sec": self.startup_timeout, "tool_timeout_sec": settings["timeout"]}
+            if server_name is not None:
+                servers[server_name] = {"command": settings["command"], "args": settings["args"], "cwd": str(directory), "enabled": True,
+                    "enabled_tools": settings["tools"], "default_tools_approval_mode": "approve", "startup_timeout_sec": self.startup_timeout, "tool_timeout_sec": settings["timeout"]}
             probe.close()
             overrides = {**base, "mcp_servers": servers}
             remaining = deadline - time.monotonic()
@@ -330,21 +335,21 @@ class CodexStillsBridge(CodexBridge):
             session.request("initialize", {"clientInfo": {"name": "product_video_case_workbench", "title": "视频案例工作台", "version": "1.0"}, "capabilities": {"experimentalApi": True}})
             session.send({"method": "initialized"})
             effective = session.request("config/read", {"cwd": str(directory), "includeLayers": False}).get("config") or {}
-            effective_servers = effective.get("mcp_servers")
+            effective_servers = effective.get("mcp_servers", {})
             if (not isinstance(effective_servers, dict) or any(value.get("enabled", True) is not False for name, value in effective_servers.items() if name != server_name) or
-                    any((effective_servers.get(server_name) or {}).get(key) != value for key, value in servers[server_name].items())):
+                    (server_name is not None and any((effective_servers.get(server_name) or {}).get(key) != value for key, value in servers[server_name].items()))):
                 raise BridgeError("本次工具隔离配置未生效，未启动找底图。")
             if any((effective.get("features") or {}).get(name) is not False for name in DISABLED_FEATURES) or effective.get("web_search") != "disabled":
                 raise BridgeError("本次工具隔离配置未生效，未启动找底图。")
             if any((effective.get("features") or {}).get(name) is not True for name in ENABLED_FEATURES):
                 raise BridgeError("Codex 选图所需的工具运行或看图功能未启用，未启动找底图。")
-            if (effective.get("sandbox_mode") != "workspace-write" or effective.get("approval_policy") != "never"
+            if (effective.get("sandbox_mode") != sandbox_mode or effective.get("approval_policy") != "never"
                     or effective.get("sandbox_workspace_write") != base["sandbox_workspace_write"]):
                 raise BridgeError("本次文件范围或权限配置未生效，未启动找底图。")
             thread_config = copy.deepcopy(overrides)
             if reasoning_effort is not None:
                 thread_config["model_reasoning_effort"] = reasoning_effort
-            params = {"cwd": str(directory), "ephemeral": True, "sandbox": "workspace-write", "approvalPolicy": "never", "config": thread_config,
+            params = {"cwd": str(directory), "ephemeral": True, "sandbox": sandbox_mode, "approvalPolicy": "never", "config": thread_config,
                       "dynamicTools": self._file_tools(settings),
                       "developerInstructions": settings["rules"] + self.TASK_RULES + skill_text}
             if model is not None:
@@ -359,7 +364,7 @@ class CodexStillsBridge(CodexBridge):
             session.emit(session.session_info)
             session.reject_request = self._file_handler(session, directory, settings)
             turn = {"threadId": session.thread_id, "cwd": str(directory), "approvalPolicy": "never",
-                    "sandboxPolicy": {"type": "workspaceWrite", "writableRoots": writable_roots, "networkAccess": False, "excludeSlashTmp": True, "excludeTmpdirEnvVar": True},
+                    "sandboxPolicy": sandbox_policy,
                     "input": [{"type": "text", "text": prompt}, *({"type": "skill", **skill} for skill in selected)]}
             if actual_model is not None or model is not None:
                 turn["model"] = session.session_info["model"] or model

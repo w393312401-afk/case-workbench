@@ -73,7 +73,7 @@ function harness(options = {}) {
   const serverCases = structuredClone(options.cases || []);
   const state = {
     view: 'all', navigation: { ...serverNavigation }, cases: structuredClone(serverCases), routeKind: '',
-    query: '', product: '', archiveCategory: 'all', sourceType: 'all',
+    query: '', product: '', libraryProduct: '', archiveCategory: 'all', sourceType: 'all',
     sort: 'updated', sortDir: 'desc', selection: new Set(),
   };
   const context = vm.createContext({
@@ -130,10 +130,9 @@ function harness(options = {}) {
     },
     libraryHash: () => '#library', renderDetail() {},
   });
-  vm.runInContext(['group', 'sourceType', 'productFilterGroup', 'shortTitle', 'numeric', 'moveCaseToView'].map(appFunction).join('\n'), context);
+  vm.runInContext(['group', 'sourceType', 'productFilterGroup', 'shortTitle', 'numeric', 'moveCaseToView', 'inNavigation', 'libraryProductMatches', 'scopedCases'].map(appFunction).join('\n'), context);
   vm.runInContext(navigationSource, context, { filename: 'navigation.js' });
   vm.runInContext(librarySource, context, { filename: 'library.js' });
-  vm.runInContext('function scopedCases() { return state.cases.filter(item => navigationMatches(item, state.view)); }', context);
   const api = vm.runInContext(`({
     initializeNavigation, normalizeNavigation, navigationDefaults, navigationMatches,
     navigationContent, navigationLabel, navigationDescription, isNavigationView,
@@ -291,7 +290,7 @@ test('saved product and keyword scope combines with current library filters', ()
   h.state.query = 'absent';
   assert.deepEqual(ids(h.api.filteredCases()), []);
   h.state.query = '';
-  h.state.product = 'SHARPAL 129N';
+  h.state.libraryProduct = 'SHARPAL 129N';
   assert.deepEqual(ids(h.api.filteredCases()), []);
 });
 

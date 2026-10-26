@@ -6,9 +6,11 @@ $ErrorActionPreference = 'Stop'
 $taskName = 'CaseWorkbenchTextPublicSync'
 $workspace = Split-Path -Parent $PSScriptRoot
 $syncScript = Join-Path $PSScriptRoot 'sync_text_site.py'
-$config = Get-Content -LiteralPath (Join-Path $workspace 'config.json') -Raw | ConvertFrom-Json
+$pythonExe = (Get-Command python.exe -ErrorAction Stop).Source
+$configJson = & $pythonExe -X utf8 -c "import json,sys; sys.path.insert(0, sys.argv[1]); from app_config import load_config; print(json.dumps(load_config(sys.argv[1])))" $workspace
+if ($LASTEXITCODE -ne 0) { throw '无法加载工作台配置。' }
+$config = $configJson | ConvertFrom-Json
 $runtime = Join-Path $config.runtime_root 'text-public-sync'
-$pythonExe = (Get-Command python.exe).Source
 $pythonWindowless = Join-Path (Split-Path -Parent $pythonExe) 'pythonw.exe'
 $nodeExe = (Get-Command node.exe).Source
 $syncArguments = '-X utf8 "' + $syncScript + '" --node "' + $nodeExe + '"'

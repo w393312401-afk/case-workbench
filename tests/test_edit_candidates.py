@@ -288,6 +288,8 @@ class PreparingRunner(Runner):
 
 class NotingEditor(Editor):
     def run(self, prompt, *, cwd, **options):
+        if not options.get("profile", {}).get("mcp"):
+            return "只读候选建议：请主剪辑结合各组候选完成镜头匹配。"
         path = Path(cwd, "candidates.json")
         listed = json.loads(path.read_text(encoding="utf-8"))["candidates"] if path.is_file() else []
         Path(cwd, "visual-notes.json").write_text(json.dumps(

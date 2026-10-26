@@ -59,6 +59,7 @@ class CarouselFinishedBrowserTests(unittest.TestCase):
         carousel_fixture.CarouselBrowserTests.setUp(self)
         self.reviewer = ReadOnlyReviewer()
         self.app.image_generator = self.reviewer
+        self.app.image_reviewer = self.reviewer
         self.app.carousel_finished_root = self.root / "图文成品"
         self.folder = self.make_finished("ui-finished")
         self.addCleanup(self.app.stop_images)
@@ -147,7 +148,7 @@ class CarouselFinishedBrowserTests(unittest.TestCase):
         self.assertEqual(self.detail()["generations"], [])
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 
-    def test_old_failed_review_does_not_block_candidate_selection_or_show_reports(self):
+    def test_old_failed_review_is_visible_and_does_not_block_candidate_selection(self):
         page = self.open_page(f"#production/{self.carousel['id']}")
         self.import_ui(page, self.folder)
         old = self.detail()["slides"][0]["outputs"][0]["id"]
@@ -161,7 +162,9 @@ class CarouselFinishedBrowserTests(unittest.TestCase):
         page.locator('[data-step="images"]').click()
         card = page.locator(f'[data-output-id="{new["id"]}"]')
         self.assertFalse(card.locator('[data-approve-output]').is_disabled())
-        self.assertEqual(card.inner_text(), '确认选用')
+        self.assertEqual(card.locator('[data-review-check]').count(), 4)
+        self.assertIn('未完成', card.locator('.image-review-heading').inner_text())
+        self.assertIn('旧自动核对信息', card.locator('[data-review-check="text"]').get_attribute('title'))
         self.confirm_ui(page, new["id"])
         self.assertEqual(self.detail()["slides"][0]["output_id"], new["id"])
         self.confirm_ui(page, old)
@@ -192,29 +195,70 @@ class CarouselFinishedBrowserTests(unittest.TestCase):
                                  hashlib.sha256((self.folder / "PNG" / f"{number:02}.png").read_bytes()).hexdigest())
             self.assertEqual(archive.namelist(), [f"{number:02}.png" for number in (1, 2, 3)])
         page.locator(".delivery-package-state").get_by_text("已领取", exact=False).wait_for()
-        page.locator(".delivery-publication-state").get_by_text("未发布", exact=True).wait_for()
+        page.locator("#carousel-publication-editor > summary").get_by_text("登记发布图文 ID", exact=True).wait_for()
         self.assertIsNone(self.detail().get("publication"))
 
-    def test_caption_style_is_layout_only_and_does_not_change_generation_requirements(self):
+    def test_caption_style_and_overlay_only_apply_to_every_mode_and_stay_absent_unless_chosen(self):
+        self.app.save_carousel_requirements(self.carousel['id'], {'request_id': uuid4().hex,
+            'revision': self.app.production.public()['revision'], 'requirements': {
+                'workflow': 'subject_locked', 'hands_authorized': True, 'authorized_hand_slides': [1],
+                'hand_look': 'historical hand request'}})
         page = self.open_page(f"#production/{self.carousel['id']}")
         field = page.locator('[data-caption-style="image"]')
-        self.assertTrue(field.is_hidden())
         page.locator('#carousel-requirements-toggle > summary').click()
-        page.locator('[name="image_mode"]').select_option("layout_only")
         self.assertTrue(field.is_visible())
+        self.assertEqual(page.locator('[name="image_caption_style"]').input_value(), "")
+        page.locator('[name="image_mode"]').select_option("layout_only")
         page.locator('[name="image_caption_style"]').select_option("rugged")
         page.locator('[name="image_caption_area"]').select_option("top")
-        page.locator('#carousel-image-form').get_by_text("普通文字或粗犷花字排版可复用已有画面，无需生图。", exact=False).wait_for()
+        page.locator('#carousel-image-form').get_by_text("文字与花字排版可复用已有画面，无需生图。", exact=False).wait_for()
         page.locator('#carousel-save-requirements').click()
-        page.wait_for_function("() => document.querySelector('[name=\"image_caption_style\"]')?.value === 'rugged' && document.querySelector('[data-caption-style=\"image\"]')?.hidden === false")
+        page.wait_for_function("() => document.querySelector('[name=\"image_caption_style\"]')?.value === 'rugged' && !document.querySelector('#carousel-save-requirements')?.disabled")
         self.assertEqual(self.detail()["requirements"]["caption_style"], "rugged")
+        self.assertNotIn("overlay_only", self.detail()["requirements"])
+        self.assertEqual(self.detail()["requirements"]["mode"], "layout_only")
+        self.assertEqual(self.detail()["requirements"]["workflow"], "review_first")
+        self.assertEqual(self.detail()["requirements"]["editable_regions"], ["text"])
+        self.assertFalse(self.detail()["requirements"]["hands_authorized"])
+        self.assertNotIn("authorized_hand_slides", self.detail()["requirements"])
+        self.assertNotIn("hand_look", self.detail()["requirements"])
         page.locator('[name="image_mode"]').select_option("generated_visual")
-        self.assertTrue(field.is_hidden())
+        self.assertTrue(field.is_visible())
+        page.locator('[name="image_overlay_only"]').check()
         page.locator('#carousel-save-requirements').click()
         page.wait_for_function("() => document.querySelector('[name=\"image_mode\"]')?.value === 'generated_visual' && !document.querySelector('#carousel-save-requirements')?.disabled")
+        saved = self.detail()["requirements"]
+        self.assertEqual((saved["caption_style"], saved["overlay_only"]), ("rugged", True))
+        page.locator('[name="image_caption_style"]').select_option("")
+        page.locator('[name="image_overlay_only"]').uncheck()
+        page.locator('#carousel-save-requirements').click()
+        page.wait_for_function("() => document.querySelector('[name=\"image_caption_style\"]')?.value === '' && !document.querySelector('#carousel-save-requirements')?.disabled")
         self.assertNotIn("caption_style", self.detail()["requirements"])
+        self.assertNotIn("overlay_only", self.detail()["requirements"])
         self.assertEqual(self.reviewer.calls, [])
         self.assertEqual(self.detail()["generations"], [])
+
+    def test_new_order_shows_layered_defaults_and_needs_pictures_before_layout(self):
+        item = self.app.create_carousel({'request_id': uuid4().hex,
+            'revision': self.app.production.public()['revision'],
+            'carousel': {'script_id': self.carousel['script_id']}})['carousel']
+        before = [(row['title_lines'], row['body'], row.get('title_zh')) for row in item['slides']]
+        page = self.open_page(f"#production/{item['id']}")
+        self.assertEqual(page.locator('[name="image_mode"]').input_value(), 'layout_only')
+        self.assertEqual(page.locator('[name="image_caption_style"]').input_value(), 'yellow_impact')
+        self.assertEqual(page.locator('[name="image_caption_layer"]').input_value(), 'behind_subject')
+        self.assertTrue(page.locator('[name="image_overlay_only"]').is_checked())
+        page.locator('#carousel-autopilot-panel .production-hint > summary').click()
+        self.assertIn('只在底图上加英文花字', page.locator('#carousel-autopilot-panel').inner_text())
+        # Layered layout now runs by itself, so an order it cannot make yet is refused rather than parked as "waiting".
+        with page.expect_response(lambda response: '/autopilot' in response.url and response.request.method == 'POST') as answer:
+            page.locator('[data-autopilot-start]').click()
+        self.assertIn(answer.value.status, {409, 503})
+        saved = self.app.production.carousel(item['id'])
+        self.assertEqual(saved.get('autopilot_runs', []), [])
+        self.assertEqual(saved['generations'], [])
+        self.assertEqual(self.reviewer.calls, [])
+        self.assertEqual([(row['title_lines'], row['body'], row.get('title_zh')) for row in saved['slides']], before)
 
     def test_confirmation_conflict_requires_manual_retry_and_keeps_image_available(self):
         page = self.open_page(f"#production/{self.carousel['id']}")

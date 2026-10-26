@@ -158,6 +158,39 @@ class DataTransferAPITests(unittest.TestCase):
         finally:
             self.server.data_maintenance = False
 
+    def test_export_and_backup_keep_pages_and_business_reads_available(self):
+        transfer = self.server.app.data_transfer
+        for operation in ("export", "backup"):
+            with self.subTest(operation=operation):
+                transfer.operation_kind = operation
+                self.server.data_maintenance = True
+                try:
+                    for path in ("/", "/app.js", "/production.js", "/production.css", "/api/state", "/api/data/status"):
+                        self.assertEqual(self.request("GET", path)[0], 200, path)
+                    status, _, value = self.request("POST", "/api/sync", {})
+                    self.assertEqual(status, 409)
+                    self.assertTrue(value["maintenance"])
+                    self.assertEqual(value["operation"], operation)
+                finally:
+                    self.server.data_maintenance = False
+                    transfer.operation_kind = None
+
+    def test_restore_keeps_shell_open_and_blocks_only_business_reads(self):
+        transfer = self.server.app.data_transfer
+        transfer.operation_kind = "restore"
+        self.server.data_maintenance = True
+        try:
+            for path in ("/", "/app.js", "/production.js", "/production.css", "/api/data/status", "/api/service/status"):
+                self.assertEqual(self.request("GET", path)[0], 200, path)
+            status, _, value = self.request("GET", "/api/state")
+            self.assertEqual(status, 409)
+            self.assertTrue(value["maintenance"])
+            self.assertEqual(value["operation"], "restore")
+        finally:
+            self.server.data_maintenance = False
+            transfer.operation_kind = None
+        self.assertEqual(self.request("GET", "/api/state")[0], 200)
+
 
 if __name__ == "__main__":
     unittest.main()

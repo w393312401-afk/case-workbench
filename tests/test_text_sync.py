@@ -73,7 +73,10 @@ class TextSyncTests(unittest.TestCase):
         self.case = self.skill / "cases" / "PVR-111111111111" / "original.json"
         self.write(self.case, json.dumps({"case_id": "PVR-111111111111", "current": {"source_case": {"file_path": str(self.source)}}}))
         self.write(self.root / "config.json", json.dumps({"skill_root": str(self.skill), "runtime_root": str(self.runtime),
-                                                        "performance_sources": [str(self.root / "sales-sources")]}))
+                                                        "performance_sources": [str(self.root / "sales-sources")],
+                                                        "text_public_sync": {"account_id": "1" * 32,
+                                                                             "project": "case-workbench-text",
+                                                                             "auth_profile": "case-workbench-text-sync"}}))
         self.write(self.root / "static" / "app.js", "initial source")
         self.write(self.root / "deployment" / "text-only" / "_worker.js", "initial worker")
         self.write(self.root / "deployment" / "export_text_site.py", "# test exporter")
@@ -189,6 +192,21 @@ class TextSyncTests(unittest.TestCase):
         self.assertTrue(service.step())
         self.assertEqual(self.publisher.deploys, 2)
 
+    def test_product_catalog_changes_are_watched_without_scanning_other_evidence(self):
+        before = self.scanner.take()
+        catalog = self.runtime / "evidence" / "product-catalog.json"
+        self.write(catalog, json.dumps({"added": [], "removed": ["202H"], "deleted": []}))
+        self.write(self.runtime / "evidence" / "unrelated.json", "private evidence")
+        self.write(self.runtime / "evidence" / "nested" / "product-catalog.json", "unrelated nested file")
+        after = self.scanner.take()
+        expected = {str(catalog.absolute())}
+        self.assertEqual(SYNC.changed_files(before, after, business_only=True), expected)
+        self.write(catalog, json.dumps({"added": [], "removed": [], "deleted": ["202H", "198H"]}))
+        changed = self.scanner.take()
+        self.assertEqual(SYNC.changed_files(after, changed, business_only=True), expected)
+        catalog.unlink()
+        self.assertEqual(SYNC.changed_files(changed, self.scanner.take(), business_only=True), expected)
+
     def test_scanner_covers_business_files_and_ignores_generated_media(self):
         before = self.scanner.take()
         entries = [self.runtime / "directions" / "catalog.json",
@@ -263,7 +281,7 @@ class TextSyncTests(unittest.TestCase):
         self.assertFalse(options["shell"])
         self.assertEqual(options["env"]["CLOUDFLARE_AUTH_USE_KEYRING"], "true")
         self.assertEqual(options["env"]["CLOUDFLARE_SEND_METRICS"], "false")
-        self.assertEqual(options["env"]["CLOUDFLARE_ACCOUNT_ID"], SYNC.ACCOUNT_ID)
+        self.assertEqual(options["env"]["CLOUDFLARE_ACCOUNT_ID"], "1" * 32)
         self.assertEqual(options["env"]["XDG_CONFIG_HOME"], str(self.runtime / "text-public-sync" / "cloudflare-auth"))
 
     def test_deploy_auth_directory_uses_configured_external_runtime_only(self):
@@ -306,6 +324,27 @@ class TextSyncTests(unittest.TestCase):
                 publisher._run(["mock"], "export")
         self.assertEqual(timeout.exception.code, "export_timeout")
         self.assertNotIn(secret, str(timeout.exception))
+
+    def test_fresh_clone_cannot_publish_without_destination(self):
+        self.write(self.root / "config.json", json.dumps({"runtime_root": str(self.runtime)}))
+        publisher = SYNC.Publisher(self.root, FakePublisher.base)
+        with patch.dict(SYNC.os.environ, {}, clear=True), patch.object(SYNC.subprocess, "run") as run:
+            with self.assertRaises(SYNC.StageFailure) as error:
+                publisher.deploy()
+        self.assertEqual(error.exception.code, "configuration")
+        run.assert_not_called()
+
+    def test_private_override_and_environment_choose_installation_destination(self):
+        override = {"runtime_root": "private-runtime", "text_public_sync": {
+            "account_id": "2" * 32, "project": "private-fixture", "auth_profile": "fixture-profile"}}
+        self.write(self.root / "config.local.json", json.dumps(override))
+        with patch.dict(SYNC.os.environ, {}, clear=True):
+            self.assertEqual(SYNC.publish_settings(self.root)["project"], "private-fixture")
+            config = SYNC.load_config(self.root)
+            self.assertEqual(config["runtime_root"], str((self.root / "private-runtime").resolve()))
+            self.assertIn(str((self.root / "config.local.json").absolute()), self.scanner.take())
+        with patch.dict(SYNC.os.environ, {"CASE_WORKBENCH_TEXT_PROJECT": "environment-fixture"}, clear=True):
+            self.assertEqual(SYNC.publish_settings(self.root)["project"], "environment-fixture")
 
     def test_once_can_read_status_without_initializing_live_backends(self):
         service = self.service()

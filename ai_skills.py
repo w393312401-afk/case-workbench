@@ -52,6 +52,7 @@ AUDIT_REFERENCES = (
 SCORING_REFERENCES = ((AUDIT, "references/native-scoring.md", "原生度文本评分规范", None),)
 RETROSPECTIVE_REFERENCES = COMMON_NATIVE + (
     (ANALYSIS, "references/case-analysis.md", "案例分析与复盘", None),
+    (REVIEW, "sources/video-cases/case_template.md", "案例拆解唯一八章结构", None),
     (ANALYSIS, "references/feedback-boundaries.md", "反馈分类与规则边界", None),
 ) + MEDIA_OBSERVE + TEST_DIRECTIONS
 
@@ -293,20 +294,11 @@ class SkillRuntime:
             selected = "、".join("$" + skill["name"] for skill in result["skills"])
             result["instructions"] = f"本轮明确调用 {selected}；完整 SKILL.md 由运行器通过原生 skill 输入提交。相关参考的实际内容附在本轮提示中。" + common
             if action == "variants":
-                result["instructions"] += (
-                    "已有可读取的原片视频且任务依赖原片时，先实际看相关画面；借鉴口播节奏或反应时核对音轨。再辨认口播、屏显文字、画面和原声分别承担什么，并确认本轮目标输出。"
-                    "用户只说做变体时保留原片表达载体；只有用户要求口播时才将屏显转为口播。"
-                    "遵守指定的共同主题、时长与素材，保留画面留白和指代悬念；不把整个片长乘读速当必须填满的词量。"
-                    "按写作参考“交付”的格式给每条稿：配音用口播、对应中文、开头画面与屏显、意群表、补拍清单与结尾 CTA；完整逐镜头画面适配与剪辑交接文件只在用户要求时另行交付；不强加营销模板、购物引导、默认时长或固定段数。"
-                )
+                # Writing rules live in the writing skill's references; this only points to them.
+                result["instructions"] += "起稿、自检与交付按已附写作参考执行，交付格式见其“交付”。"
                 if stage == "review":
                     result["instructions"] += (
-                        "本调用是变体的独立复核，并直接交付修订后的完整候选：按写作参考“成稿后的独立复核”执行，"
-                        "不是审稿诊断，不输出完整问题清单、审查报告、原生度评分或相对初稿的修改清单。只修能指出具体原因的问题；"
-                        "主观评价、赞叹、直接推荐、指物和口语推进属于说话姿态，不因缺少效果证据删除或降级，"
-                        "只有亲历、数值、比较、寿命、经济回报等具体声称按事实边界修正。"
-                        "用户要求更有能量、更强语气或更像推荐时，修订稿的评价力度不得低于初稿。"
-                        "同批候选若只换开头而用户未要求只测钩子，应直接修出中段或证明路径差异；不能仅在说明中承认重合。"
+                        "本调用是变体的独立复核，并直接交付修订后的完整候选：按写作参考“成稿后的独立复核”执行，不是审稿诊断。"
                     )
             elif action == "review":
                 result["instructions"] += (

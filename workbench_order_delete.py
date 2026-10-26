@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+from contextlib import nullcontext
 
 from elevenlabs_client import VoiceError
 from production_operations import TERMINAL
@@ -56,19 +57,34 @@ class OrderDeleteMixin:
                 record = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if isinstance(record, dict) and record.get("job_id") == job["id"] and record.get("state") in TERMINAL:
+            if isinstance(record, dict) and record.get("job_id") == job["id"] and (
+                    record.get("state") in TERMINAL or self._abandoned_build(record)):
                 files.append(path)
+        footprint = getattr(self, "video_publication_footprint", None)
+        if footprint:
+            publication_folders, publication_files = footprint(job["id"])
+            folders.extend(publication_folders)
+            files.extend(publication_files)
         return folders, files
+
+    def _abandoned_build(self, record):
+        """A build that ended before the worker journaled anything and is not waiting now: DaVinci was never touched."""
+        live = getattr(self, "_timeline_building", {}).get(record.get("job_id")) or {}
+        return (record.get("kind") == "timeline" and record.get("request_id") != live.get("request_id") and
+                isinstance(record.get("operation_key"), str) and
+                not self._production_operations().recovery_file(record).exists())
 
     def _job_blockers(self, job):
         with self.lock:
             self._edits()
             if job["id"] in self._voicing():
                 return "这张制作单正在生成配音，请等它结束。"
+            if job["id"] in getattr(self, "_timeline_building", {}):
+                return "这张制作单的建时间线正在排队或进行，请等它结束或先取消排队。"
             for edit in job.get("edits", []):
                 if edit.get("status") == "running" or edit["id"] in self._edit_live or edit["id"] in self._edit_pending:
                     return "这张制作单还有 AI 剪辑在运行或结果尚未保存，请等它结束。"
-        if self._production_operations().public(job["id"]):
+        if [item for item in self._production_operations().public(job["id"]) if item["kind"] != "timeline" or item.get("has_journal")]:
             return "这张制作单还有未完成的配音或建线操作，请先在制作单里处理（恢复或确认失败）后再删除。"
         return ""
 
@@ -84,7 +100,9 @@ class OrderDeleteMixin:
 
     # -- shared ----------------------------------------------------------------------------------------------------
     def delete_job_order(self, identifier, body):
-        return self._delete_order("job", identifier, body)
+        guard = getattr(self, "_video_publication_job_guard", None)
+        with guard(identifier) if guard else nullcontext():
+            return self._delete_order("job", identifier, body)
 
     def delete_carousel_order(self, identifier, body):
         return self._delete_order("carousel", identifier, body)
@@ -101,7 +119,8 @@ class OrderDeleteMixin:
             self._validate_edit_request(body)
             prior = self.production.replay(store_kind, {**body, f"{kind}_id": identifier})
             if prior:
-                return {**prior, "warnings": []}
+                warnings = self.purge_video_publication(identifier) if kind == "job" and hasattr(self, "purge_video_publication") else []
+                return {**prior, "warnings": warnings}
         if kind == "job":
             record = self.production.job(identifier)
         else:
@@ -131,6 +150,10 @@ class OrderDeleteMixin:
             if kind == "job":
                 summary.update(takes=len(record.get("takes", [])), edits=len(record.get("edits", [])),
                                timelines=len(record.get("timelines", [])))
+                if hasattr(self, "_video_publications"):
+                    publications = self._video_publications().read()["jobs"].get(identifier, {})
+                    summary.update(published=bool(publications.get("publication")),
+                                   publications=len(publications.get("history", [])) + bool(publications.get("publication")))
             else:
                 summary.update(slides=len(record.get("slides", [])), deliveries=len(record.get("deliveries", [])),
                                published=bool(record.get("publication")),
@@ -156,6 +179,10 @@ class OrderDeleteMixin:
                 pass
             except OSError as exc:
                 warnings.append(f"记录已删除，但有文件没有清理干净：{exc}")
+        if kind == "job" and hasattr(self, "purge_video_publication"):
+            warnings.extend(self.purge_video_publication(identifier))
+        if kind == "job" and hasattr(self, "delete_prepublish_reviews"):
+            self.delete_prepublish_reviews(identifier)
         try:
             activity = getattr(self, "activity", None)
             if activity is not None:

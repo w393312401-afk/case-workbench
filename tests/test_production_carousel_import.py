@@ -12,8 +12,7 @@ from uuid import uuid4
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-CONFIG = json.loads((APP / "config.json").read_text(encoding="utf-8"))
-sys.path.insert(0, str(Path(CONFIG["skill_root"]) / "scripts"))
+sys.path.insert(0, str(APP / "scripts"))
 from PIL import Image
 from elevenlabs_client import VoiceError
 from production_store import ProductionStore, carousel_input_signature
@@ -121,8 +120,9 @@ class FinishedImportTests(unittest.TestCase):
         self.assertEqual(len(self.current()["slides"][0]["outputs"]), 1)
 
     def test_import_does_not_create_generation_requirements(self):
+        before = copy.deepcopy(self.current()["requirements"])
         result = self.import_images()
-        self.assertNotIn("requirements", self.current())
+        self.assertEqual(self.current()["requirements"], before)
         for output in result["outputs"]:
             slide = next(row for row in self.current()["slides"] if row["number"] == output["slide"])
             self.assertEqual(output["input_signature"], carousel_input_signature(self.current(), slide, output["aspect"]))

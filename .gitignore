@@ -4,6 +4,19 @@
 !/*.py
 !/*.pyw
 !/config.json
+!/README.md
+!/LICENSE
+!/CONTRIBUTING.md
+!/SECURITY.md
+!/requirements*.txt
+!/docs/
+!/scripts/
+!/sources/
+!/sources/video-cases/
+!/sources/video-cases/case_template.md
+!/sources/README.md
+!/examples/
+!/.github/
 !/使用说明.md
 !/static/
 !/tests/
@@ -19,6 +32,20 @@ node_modules/
 .dev.vars*
 *.log
 *.new
+config.local.json
+.venv/
+.local/
+*.sqlite*
+*.db
+*.pem
+*.key
+
+# Only the source template is publishable; case documents remain private.
+/sources/*
+!/sources/README.md
+!/sources/video-cases/
+/sources/video-cases/*
+!/sources/video-cases/case_template.md
 
 # Generated exports, snapshots, and deployment screenshots.
 /deployment/site/

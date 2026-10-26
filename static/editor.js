@@ -624,7 +624,16 @@ async function saveEditor(event) {
       { method: "POST", body: payload },
     );
     if (state.editor !== editor) return;
-    let navigationWarning = "";
+    let navigationWarning = "", autoNote = "";
+    // 从视频数据「收为案例」新建的案例：保存后在后台下载原视频并拆解。
+    if (editor.autoBreakdown && !editor.item && result.case?.case_id && window.CaseAutoBreakdown) {
+      try {
+        await window.CaseAutoBreakdown.start(result.case.case_id, editor.autoBreakdown);
+        autoNote = "已保存，正在后台下载原视频并拆解，进度见视频下方。";
+      } catch (error) {
+        autoNote = `案例已保存，但自动下载拆解没有开始：${error.message}`;
+      }
+    }
     const target = categoryView(payload.current.category);
     if (
       editor.item &&
@@ -658,10 +667,11 @@ async function saveEditor(event) {
     toast(
       navigationWarning ||
         result.warning ||
+        autoNote ||
         (result.unchanged
           ? "没有变更，记录保持原样"
           : "已保存到本地案例库，阅读目录已同步"),
-      !!(navigationWarning || result.warning),
+      !!(navigationWarning || result.warning || autoNote.startsWith("案例已保存，但")),
     );
   } catch (error) {
     const duplicate = error.message.match(

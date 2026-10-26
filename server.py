@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+from datetime import datetime
 import socket
 import sqlite3
 import subprocess
@@ -38,8 +39,10 @@ def code_signature():
 
 
 CODE_AT_START = code_signature()
-DEFAULT_CONFIG = json.loads((APP_ROOT / "config.json").read_text(encoding="utf-8"))
+from app_config import load_config
+DEFAULT_CONFIG = load_config(APP_ROOT)
 sys.path.insert(0, str(APP_ROOT))
+sys.path.insert(0, str(APP_ROOT / "scripts"))
 sys.path.insert(0, str(Path(DEFAULT_CONFIG["skill_root"]) / "scripts"))
 from case_store import CaseStore, StoreError, add_schema, current_schema, current_sources, encode
 from render_case_library import render_library
@@ -47,12 +50,27 @@ from validate_case_structure import DEFAULT_TEMPLATE, validate_case_structure
 from case_deletion import DeletionManager, DeletionError
 from managed_video import ManagedVideoFiles, VideoFileError
 from ai_tasks import AITaskManager, AITaskError
-from performance_store import PerformanceStore, product_short
+from performance_store import DEFAULT_SHOP, PerformanceStore, SHOPS, product_short
 from sales_data import SalesDataResolver
+from public_stats import PublicStatsError, PublicStatsStore, export_workbook
+from variant_parse import parse_variants, same_lines, variant_script
+from tk_candidates import CandidateError, CandidateStore, candidate_instruction, voiceover
 from review_store import ReviewError, ReviewStore
-from direction_store import DirectionError, DirectionStore, product_key
+from direction_store import DirectionError, DirectionStore, fingerprint, product_key
+from case_products import ProductCatalog, ProductLabels
+from direction_progress import build_direction_progress
 from creation_store import CreationError, CreationStore
+from content_management import ContentManagementStore
+from campaign_store import CampaignStore
+from content_views import ContentViewsStore
+from workbench_content import ContentWorkbenchMixin, _parse_content_filter
+from review_followups import ReviewFollowupStore
+from review_policy import review_today
+from workbench_feedback import FeedbackWorkbenchMixin
+from review_experiences import ReviewExperienceStore
+from workbench_experiences import ReviewExperiencesWorkbenchMixin
 from workbench_creation import CreationWorkbenchMixin
+from workbench_tk_candidates import TKCandidateWorkbenchMixin
 from production_store import ProductionStore
 from elevenlabs_client import ElevenLabsClient, VoiceError
 from workbench_production import ProductionWorkbenchMixin
@@ -67,13 +85,24 @@ from workbench_carousel_images import CarouselImagesMixin
 from workbench_carousel_import import CarouselFinishedImportMixin
 from workbench_carousel_delivery import CarouselDeliveryMixin
 from workbench_carousel_publish import CarouselPublishMixin
+from workbench_video_publish import VideoPublishMixin, VideoPublicationStore
+from workbench_prepublish import PrepublishWorkbenchMixin
+from workbench_video_carousel import VideoCarouselMixin
+from workbench_carousel_autopilot import CarouselAutopilotMixin
+from workbench_carousel_group import CarouselGroupMixin
+from workbench_carousel_cutout import CarouselCutoutMixin
+from codex_image_bridge import CodexImageBridge
 from cockpit_image_bridge import CockpitImageBridge
 from codex_stills_bridge import CodexStillsBridge
 from codex_edit_bridge import CodexEditBridge
 from data_transfer import DataTransfer, TransferError, pick_directory
 from data_backup import BackupError, MAX_BYTES
 from data_lease import ServerLease
-from task_activity import ActivityStore, ActivityError, reconcile_activity
+from task_activity import ActivityStore, ActivityError, reconcile_activity, refresh_activity_projection
+from case_auto_breakdown import AutoBreakdown
+from case_breakdown_runner import CaseBreakdownRunner, transcribe_case
+from case_insights import tag_stats
+from remote_accounts import RemoteAccounts, RemoteAccountError
 
 EXTENSIONS = {
     "video": {".mp4", ".webm", ".mov", ".m4v"},
@@ -86,9 +115,41 @@ EXTENSIONS = {
 
 
 class ApiError(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, **details):
         super().__init__(message)
         self.status = status
+        self.details = details
+
+
+# POSTs from the TK 看板 browser extension: checked by origin and pairing key instead of the page token.
+EXTENSION_PATHS = {"/api/public-stats/ping", "/api/public-stats/push", "/api/public-stats/products", "/api/public-stats/product-brief",
+                   "/api/public-stats/direction-candidates", "/api/public-stats/reference-status", "/api/public-stats/direction-produce",
+                   "/api/public-stats/comments"}
+STATIC_REFERENCE = re.compile(r'((?:src|href)="/)([A-Za-z0-9_.-]+\.(?:js|css|svg))(")')
+HOME_VIDEO_FIELDS = (
+    "video_id", "product", "headline", "title", "account", "posted_on", "window_end",
+    "status", "status_label", "missing_window", "reference", "flags", "window_views", "orders", "views",
+    "last_data", "observation_coverage_complete", "observation_missing_days", "review_context", "registered", "registered_on", "registration_only",
+    "review_status",
+)
+
+
+def static_signature():
+    """Change marker for every page asset, so the versioned index follows any js/css/svg edit."""
+    folder = APP_ROOT / "static"
+    return tuple((path.name, file_key(path)) for path in sorted(folder.iterdir()) if path.suffix in {".js", ".css", ".svg"})
+
+
+def versioned_index(raw):
+    """Stamp each page asset with a content hash: the browser keeps ?v= files and stops revalidating them
+    one by one, which over the public tunnel cost a round trip per file on every page open."""
+    def stamp(match):
+        try:
+            digest = hashlib.sha256((APP_ROOT / "static" / match[2]).read_bytes()).hexdigest()[:12]
+        except OSError:
+            return match[0]
+        return f"{match[1]}{match[2]}?v={digest}{match[3]}"
+    return STATIC_REFERENCE.sub(stamp, raw.decode("utf-8")).encode("utf-8")
 
 
 def file_key(path):
@@ -132,11 +193,58 @@ class CachedCaseStore(CaseStore):
         self._case_cache = {}
         self._cache_lock = threading.RLock()
         self._index_context = threading.local()
+        # Unified product names (case_products.py); set by the workbench. Records and index.json keep the original names.
+        self.product_labels = None
+        self._raw_reads = threading.local()
+        self._labelled_index = None
+        self._raw_products = {}
 
     @property
     def index_key(self):
         snapshot = getattr(self._index_context, "snapshot", None)
-        return snapshot[0] if snapshot is not None else self._index_key
+        key = snapshot[0] if snapshot is not None else self._index_key
+        return (key, self.product_labels.key()) if self.product_labels is not None else key
+
+    @contextmanager
+    def _raw(self):
+        depth = getattr(self._raw_reads, "depth", 0)
+        self._raw_reads.depth = depth + 1
+        try:
+            yield
+        finally:
+            self._raw_reads.depth = depth
+
+    def _labelling(self):
+        return self.product_labels is not None and not getattr(self._raw_reads, "depth", 0)
+
+    def build_index(self):
+        # The persisted index must describe the records exactly as stored.
+        with self._raw():
+            return super().build_index()
+
+    def direction_summary(self, *args, **kwargs):
+        # Test-direction groups show each observation's original product name ("原产品名").
+        with self._raw():
+            return super().direction_summary(*args, **kwargs)
+
+    def raw_product(self, identifier):
+        return self._raw_products.get(identifier)
+
+    def _label_index(self, index):
+        if not self._labelling():
+            return index
+        key = (id(index), self.product_labels.key())
+        cached = self._labelled_index
+        if cached is not None and cached[0] == key and cached[1] is index:
+            return cached[2]
+        labelled = dict(index)
+        labelled["cases"] = []
+        for entry in index["cases"]:
+            self._raw_products[entry["case_id"]] = entry.get("product")
+            product = self.product_labels.label(entry["case_id"], entry.get("product"))
+            labelled["cases"].append(entry if product == entry.get("product") else {**entry, "product": product})
+        self._labelled_index = (key, index, labelled)
+        return labelled
 
     @contextmanager
     def index_snapshot(self):
@@ -148,14 +256,14 @@ class CachedCaseStore(CaseStore):
         """
         previous = getattr(self._index_context, "snapshot", None)
         if previous is None:
-            with self._cache_lock:
+            with self._cache_lock, self._raw():
                 index = self.read_index()
                 snapshot = (self._index_key, index)
         else:
             snapshot = previous
         self._index_context.snapshot = snapshot
         try:
-            yield snapshot[1]
+            yield self._label_index(snapshot[1])
         finally:
             if previous is None:
                 del self._index_context.snapshot
@@ -201,19 +309,20 @@ class CachedCaseStore(CaseStore):
     def read_index(self):
         snapshot = getattr(self._index_context, "snapshot", None)
         if snapshot is not None:
-            return snapshot[1]
+            return self._label_index(snapshot[1])
         with self._cache_lock:
             key = self.fingerprint()
             cached = self._index_cache
             if cached is not None and cached[0] == key:
                 self._index_key = key
-                return cached[1]
-            index = super().read_index()
+                return self._label_index(cached[1])
+            with self._raw():
+                index = super().read_index()
             # The key was taken before reading, so a change made during the read forces a re-check next time.
             self._index_cache, self._index_key = (key, index), key
             known = {case["case_id"] for case in index["cases"]}
             self._case_cache = {identifier: value for identifier, value in self._case_cache.items() if identifier in known}
-            return index
+            return self._label_index(index)
 
     def read_case(self, identifier):
         # Retain the store's identifier/path/link checks on cache hits. Scan every event so
@@ -228,7 +337,11 @@ class CachedCaseStore(CaseStore):
             else:
                 case = cached[1]
             # Existing consumers may edit their returned current snapshot before saving.
-            return copy.deepcopy(case)
+            case = copy.deepcopy(case)
+        if self._labelling():
+            self._raw_products[identifier] = case.get("product")
+            case["product"] = self.product_labels.label(identifier, case.get("product"))
+        return case
 
 
 def revision(case):
@@ -257,10 +370,46 @@ def review_request(query):
     return filters, numbers("limit", 50), numbers("offset", 0), one("sort", "likes")
 
 
-class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, CarouselWorkbenchMixin, CarouselTableMixin, CarouselStillsMixin, CarouselClipsMixin, OrderDeleteMixin, CarouselImagesMixin, CarouselFinishedImportMixin, CarouselDeliveryMixin, CarouselPublishMixin):
+def job_fill_instruction(job):
+    """The 写稿 request that fills a 制作单's script information around its own, unchangeable spoken lines."""
+    count = len(job["lines"])
+    lines = [
+        f"按写稿技能的口播稿交付格式，为下面这张制作单的口播写出完整交付：开头画面、开头屏显、口播（配音用）代码块、读法（需要时）、"
+        f"对应中文、意群表（# | 口播 | 画面要证明什么 | 素材标签 | 证据，结尾 CTA 行注明）、补拍清单、3 行发布文案，以及发布前核对。只写这 1 条，不出多稿。",
+        f"这条口播已经进了制作单，可能已经配音、剪辑：口播（配音用）代码块必须逐字照抄下面 {count} 句，一句一行，不增删、不改写、不调顺序；"
+        "意群表也正好 {count} 行，和这些句子一一对应。觉得哪句有事实或合规风险，写进发布前核对，不要改句子。".replace("{count}", str(count)),
+        "", f"制作单：{job.get('title') or job['id']}", "口播（逐字保留）：",
+    ]
+    lines += [f"{number}. {line['spoken']}" + (f"（{line['zh']}）" if line.get("zh") else "") for number, line in enumerate(job["lines"], 1)]
+    have = [f"{number}. {line['proof']}" for number, line in enumerate(job["lines"], 1) if line.get("proof")]
+    if have:
+        lines += ["已有的画面要求（可沿用或补强）：", *have]
+    return "\n".join(lines)[:19000]
+
+
+def job_fill_result(job, task):
+    """What a finished fill round puts on the job: the 意群表 by row, the script markdown, and which rows it reworded.
+    A round that failed, or wrote a different number of lines, leaves the job as it was with the reason."""
+    if task["status"] != "completed":
+        return {"error": "写稿任务没有完成（" + {"failed": "失败", "cancelled": "已取消", "interrupted": "被中断"}.get(task["status"], task["status"]) + "），可以再点一次补全。"}
+    turn = next((entry for entry in reversed(task["rounds"]) if entry["status"] == "completed" and (entry.get("output") or "").strip()), None)
+    output = turn["output"] if turn else ""
+    spoken = [line["spoken"] for line in job["lines"]]
+    variants = [entry for entry in parse_variants(output) if len(entry["lines"]) == len(spoken)] if output else []
+    chosen = next((entry for entry in variants if same_lines([line["spoken"] for line in entry["lines"]], spoken)), None) or (variants[0] if variants else None)
+    if not chosen:
+        return {"error": f"写稿结果里没有正好 {len(spoken)} 句的口播和意群表，没有写回；可以到协作任务里查看这一轮，或再点一次补全。"}
+    changed = [number for number, (mine, theirs) in enumerate(zip(spoken, chosen["lines"]), 1) if not same_lines([mine], [theirs["spoken"]])]
+    return {"lines": [{key: line.get(key) or "" for key in ("proof", "tags", "evidence", "zh")} for line in chosen["lines"]],
+            "markdown": variant_script(output, chosen["index"]), "changed": changed}
+
+
+class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, FeedbackWorkbenchMixin, ContentWorkbenchMixin, CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, CarouselWorkbenchMixin, CarouselTableMixin, CarouselStillsMixin, CarouselClipsMixin, OrderDeleteMixin, CarouselImagesMixin, CarouselFinishedImportMixin, CarouselDeliveryMixin, CarouselPublishMixin, VideoPublishMixin, PrepublishWorkbenchMixin, VideoCarouselMixin, CarouselAutopilotMixin, CarouselGroupMixin, CarouselCutoutMixin):
     def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=()):
         self.store = CachedCaseStore(skill_root)
         self.runtime = Path(runtime_root).resolve()
+        self.store.product_labels = ProductLabels(self.runtime / "evidence" / "case-products.json")
+        self.product_catalog = ProductCatalog(self.runtime / "evidence" / "product-catalog.json", product_key)
         self.library = self.runtime / "library"
         self.lock = threading.RLock()
         self.token = secrets.token_urlsafe(32)
@@ -276,15 +425,33 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
         self.video_files = ManagedVideoFiles(self.runtime)
         self.reviews = ReviewStore(self.runtime)
         self.performance = PerformanceStore(self.runtime, performance_sources)
+        self.public_stats = PublicStatsStore(self.runtime)
+        self.tk_candidates = CandidateStore(self.runtime)
+        self.public_exports = self.runtime / "performance" / "public-exports"
+        self.performance.public = self.public_stats
         self.sales = SalesDataResolver(self.performance)
         self.directions = DirectionStore(self.runtime, self.store.root, self.lock)
         self.creation = CreationStore(self.runtime, self.lock)
+        self.content_management = ContentManagementStore(self.runtime, self.lock)
+        self.content_views = ContentViewsStore(self.runtime, self.lock, filter_validator=_parse_content_filter)
+        self.campaigns = CampaignStore(self.runtime, self.lock)
+        self.review_followups = ReviewFollowupStore(self.runtime, self.lock)
+        self.review_experiences = ReviewExperienceStore(self.runtime, self.lock)
         self.production = ProductionStore(self.runtime, self.lock)
+        self.reconcile_tk_candidates()
         self.activity = ActivityStore(self.runtime)
+        # 收为案例后自动取原视频并拆解；拆解步骤可替换（见 case_auto_breakdown.py）。
+        self.auto_breakdown = AutoBreakdown(self, analyzer=CaseBreakdownRunner())
+        # Cases left at 「视频已关联，拆解待接入」 (or cut off by the restart) are broken down without a click.
+        resume = threading.Timer(8, self.auto_breakdown.resume_pending)
+        resume.daemon = True
+        resume.start()
         self.voices = ElevenLabsClient()
         self.resolve = ResolveBridge()
         self.ai = AITaskManager(self.store, self.runtime, self.lock, bridge=ai_bridge,
                                 review_digest=self.review_digest, sales_resolver=self.sales, activity=self.activity)
+        self.ai.on_finished = self._ai_round_finished
+        self.ai.draft_media = self.draft_media
         # Editing uses the selected local client with a task-specific restricted tool profile.
         self.editor = getattr(self.ai.bridge, "claude", None)
         codex = getattr(self.ai.bridge, "codex", None)
@@ -297,13 +464,16 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
         image_config = DEFAULT_CONFIG.get("image_generation") or {}
         self.image_generator = CockpitImageBridge(parameters_file=image_config.get("parameters_file"),
                                                    auth_config=image_config.get("auth_config"))
+        self.image_reviewer = CodexImageBridge()
         self.recover_edit_results()
         self.production.interrupt_running()
+        self.delivery_retention = self.prune_all_carousel_deliveries()
         reconcile_activity(self)
         self.data_transfer = DataTransfer(self.store.root, self.runtime, APP_ROOT,
             locks=(self.lock, self.reviews.lock, self.performance.lock, self.activity.lock),
             validator=self.validate_imported_data, ensure_idle=self.ensure_data_idle,
             on_restore=self.reload_imported_data, extra_sources=performance_sources)
+        self.data_transfer.activity = self.activity
         self.performance.sources = list(self.data_transfer.manager.extra_sources)
 
     @staticmethod
@@ -313,15 +483,21 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
         store.read_index()
         DirectionStore(runtime, skill).read()
         CreationStore(runtime).read()
+        ContentManagementStore(runtime).public()
+        ContentViewsStore(runtime, filter_validator=_parse_content_filter).read()
+        ReviewFollowupStore(runtime).read()
+        ReviewExperienceStore(runtime).read()
         ProductionStore(runtime).read()
+        VideoPublicationStore(Path(runtime) / "production").validate()
 
     def ensure_data_idle(self):
         with self.lock:
             tasks = self.ai.list_tasks()
             if any(task.get("busy") or task.get("stopping") or task.get("status") in {"queued", "running", "stopping"} for task in tasks):
                 raise TransferError("AI 协作正在运行，请结束后再导入、导出或备份。", 409)
-            if getattr(self, "_voicing_jobs", set()) or self.edit_running() or self.image_running():
-                raise TransferError("配音、剪辑或图文制作正在运行，请完成后再操作总数据。", 409)
+            if (getattr(self, "_voicing_jobs", set()) or getattr(self, "_timeline_building", {}) or self.edit_running() or
+                    self.image_running() or self.autopilot_running() or self.carousel_table_running()):
+                raise TransferError("配音、建时间线、剪辑或图文制作正在运行，请完成后再操作总数据。", 409)
 
     def reload_imported_data(self):
         with self.lock:
@@ -332,6 +508,13 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
             self.store._index_key = self.store._index_cache = None
             self.store._case_cache.clear()
             self.creation.version += 1
+            self.creation.clear_cache()
+            self.review_experiences.clear_cache()
+            self.production.clear_cache()
+            self.ai.clear_cache()
+            operations_reader = getattr(self, "_operations_reader", None)
+            if operations_reader is not None:
+                operations_reader.clear_cache()
             self.ai._locations.clear()
             self.ai._live.clear()
             self.ai._live_saved.clear()
@@ -421,7 +604,392 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
         if not self.reviews.covers(product):
             return None
         self.reviews.sync()  # the same cheap check the review pages run: rebuilds only when a source file changed
-        return self.reviews.digest()
+        return self.reviews.digest(product=product)
+
+    def push_public_stats(self, body):
+        """Public page counts from the TK 看板 extension, kept for videos in the sales data or the case library."""
+        if set(body) - {"videos", "extension_version"}:
+            raise ApiError(400, "推送内容格式错误。")
+        links = self.video_case_links()
+        try:
+            return self.public_stats.record(body.get("videos"),
+                lambda ids: self.performance.known_video_ids(ids) | {video_id for video_id in ids if video_id in links})
+        except PublicStatsError as exc:
+            raise ApiError(400, str(exc))
+
+    def push_public_comments(self, body):
+        """Import actual comments with the product associated with their video."""
+        if set(body) - {"videos", "extension_version"}:
+            raise ApiError(400, "评论推送内容格式错误。")
+        videos = body.get("videos")
+        if not isinstance(videos, list) or not 0 < len(videos) <= 200:
+            raise ApiError(400, "评论推送需提供 1 至 200 条视频。")
+        ids = {str(video.get("id", "")) for video in videos if isinstance(video, dict)
+               and re.fullmatch(r"\d{6,25}", str(video.get("id", "")))}
+        candidates = {identifier: set() for identifier in ids}
+
+        def associate(identifier, value):
+            normalized = product_key(value) if isinstance(value, str) and value.strip() else ""
+            if identifier in candidates and normalized:
+                candidates[identifier].add(normalized)
+
+        for identifier, video in self.performance.video_brief(ids).items():
+            associate(identifier, video.get("product"))
+        for entry in self.store.read_index()["cases"]:
+            current = entry.get("current") or {}
+            identifier = str((current.get("metrics") or {}).get("video_id") or "")
+            associate(identifier, entry.get("product") or current.get("product"))
+        if any(not products for products in candidates.values()):
+            for video in self.performance.creators().get("videos", []):
+                if video[0] in candidates:
+                    for product in video[5]:
+                        associate(video[0], product)
+        # Explicit product selection can resolve a multi-product report. Other
+        # comments stay unassigned and visible under all products, never under 202H by default.
+        requested = {str(video.get("id", "")): product_key(video.get("product"))
+                     for video in videos if isinstance(video, dict) and isinstance(video.get("product"), str)}
+        available = {product_key(value) for value in self.products()["products"]} if requested else set()
+        products = {identifier: next(iter(values)) for identifier, values in candidates.items() if len(values) == 1}
+        for identifier, values in candidates.items():
+            if len(values) > 1 and requested.get(identifier) in values:
+                products[identifier] = requested[identifier]
+            elif not values and requested.get(identifier) in available:
+                products[identifier] = requested[identifier]
+            elif identifier not in products:
+                products[identifier] = ""
+        try:
+            return self.reviews.ingest_comments(videos, products)
+        except ReviewError as exc:
+            raise ApiError(400, str(exc)) from None
+
+    def extension_products(self, body):
+        """Product names the TK 看板 extension offers in its script-direction picker."""
+        if body:
+            raise ApiError(400, "请求格式错误。")
+        return {"products": self.products()["products"]}
+
+    def extension_product_brief(self, body):
+        """What the extension's script-direction AI reads about one product: selling points, directions, a few cases and
+        the review digest. Kept short on purpose: it all goes into one prompt."""
+        product = body.get("product")
+        if set(body) - {"product"} or not isinstance(product, str) or not product.strip() or len(product) > 200:
+            raise ApiError(400, "请选择产品。")
+        product = product.strip()
+        if product not in self.products()["products"]:
+            raise ApiError(404, "工作台里没有这个产品。")
+        key = product_key(product)
+        clip = lambda value, limit: str(value or "").strip()[:limit]
+        with self.lock, self.store.index_snapshot():
+            cases = self.store.read_index()["cases"]
+            catalog = self.directions.public(self.synced_directions(cases), key)
+        points = [{"code": item["code"], "tier": item["tier"], "title": clip(item.get("title"), 300),
+                   "rationale": clip(item.get("rationale"), 300), "evidence": clip(item.get("evidence"), 200),
+                   "status": item.get("status")}
+                  for item in catalog["selling_points"] if item.get("status") != "merged"][:24]
+        directions = [{"direction_id": item["direction_id"], "main": clip(item.get("main_difference"), 200),
+                       "concern": clip(item.get("concern"), 300), "closing": clip(item.get("closing"), 200),
+                       "audience": clip(item.get("audience"), 160), "variant_count": len(item.get("variants") or []),
+                       "status": item.get("status")}
+                      for item in catalog["directions"] if item.get("status") != "archived"][:12]
+        chosen = [case for case in cases if product_key(case.get("product")) == key and not case.get("archived")
+                  and case.get("current")][-6:]
+        examples = [{"title": clip(case["current"].get("title") or case.get("title"), 120),
+                     "category": clip(case["current"].get("category"), 40),
+                     "conclusion": clip(case["current"].get("conclusion"), 240),
+                     "highlights": [clip(item, 120) for item in (case["current"].get("highlights") or [])[:3]],
+                     "opening": clip(((case["current"].get("transcript") or {}).get("text") or "").split("\n")[0], 200)}
+                    for case in reversed(chosen)]
+        reviews = None
+        if self.reviews.covers(product):
+            try:
+                reviews = self.review_digest(product)
+            except (OSError, sqlite3.Error, ReviewError):
+                reviews = None
+        return {"product": product, "selling_points": points, "directions": directions, "cases": examples,
+                "combos": self.direction_combos(key),
+                "reviews": json.dumps(reviews, ensure_ascii=False)[:2500] if reviews else ""}
+
+    def _auto_produce_tk_candidate(self, item):
+        """Finish a newly saved card; replays never reopen archived/deleted work."""
+        if (item["status"] in {"dismissed", "writing"} or item.get("job_id")
+                or item.get("writing_task_id") or item.get("direction_error")):
+            return item
+        try:
+            self.produce_candidate(item["candidate_id"])
+            return self.tk_candidates.remember_production_error(item["candidate_id"])
+        except (ApiError, CandidateError, CreationError, VoiceError) as exc:
+            if exc.status >= 500:
+                raise
+            return self.tk_candidates.remember_production_error(item["candidate_id"], str(exc))
+
+    def extension_save_candidates(self, body, *, auto_produce=True):
+        """Save new TK cards, register their directions and create associated orders."""
+        if set(body) - {"product", "reference", "directions", "ask", "extension_version"}:
+            raise ApiError(400, "保存内容格式错误。")
+        product = body.get("product")
+        if not isinstance(product, str) or not product.strip() or len(product) > 200:
+            raise ApiError(400, "请选择产品。")
+        if product.strip() not in self.products()["products"]:
+            raise ApiError(404, "工作台里没有这个产品。")
+        with self.lock:
+            result = self.tk_candidates.add(product.strip(), body.get("reference"), body.get("directions"), ask=body.get("ask") or "")
+            candidates = []
+            for saved in result["candidates"]:
+                item = self._associate_tk_candidate(saved["candidate_id"])
+                if auto_produce:
+                    item = self._auto_produce_tk_candidate(item)
+                candidates.append(self.tk_candidates.brief(item))
+            result["candidates"] = candidates
+            return result
+
+    def extension_reference_status(self, body):
+        """What one reference video led to: its saved candidates, and for adopted ones the direction's own figures
+        (every video linked to that direction, not only ones shot from this candidate)."""
+        if set(body) - {"video_id"}:
+            raise ApiError(400, "请求格式错误。")
+        items = self.tk_candidates.for_reference(str(body.get("video_id") or ""))
+        directions = []
+        for product in sorted({item["product"] for item in items if item.get("direction_id")}):
+            wanted = {item["direction_id"] for item in items if item.get("direction_id") and item["product"] == product}
+            for entity in self.direction_catalog(product)["directions"]:
+                if entity["direction_id"] in wanted:
+                    perf = entity.get("performance") or {}
+                    directions.append({"product": product, "direction_id": entity["direction_id"], "status": entity.get("status"),
+                                       "video_count": perf.get("video_count", 0), "matched_count": perf.get("matched_count", 0),
+                                       "orders": perf.get("orders", 0), "gmv": perf.get("gmv", 0), "data_through": perf.get("data_through")})
+        return {"candidates": [self.tk_candidates.brief(item) for item in items], "directions": directions}
+
+    def tk_candidate_list(self, product, status):
+        return {"candidates": self.tk_candidates.list(product, status), "counts": self.tk_candidates.counts(product)}
+
+    def tk_candidate_status(self, body):
+        if set(body) - {"candidate_id", "status", "direction_id"} or not isinstance(body.get("candidate_id"), str):
+            raise ApiError(400, "请求格式错误。")
+        exists = lambda product, identifier: any(item["direction_id"] == identifier for item in self.direction_catalog(product)["directions"])
+        with self.lock:
+            item = self.tk_candidates.set_status(body["candidate_id"], body.get("status"), body.get("direction_id") or "",
+                                                 direction_exists=exists)
+            if item["status"] != "dismissed":
+                item = self._associate_tk_candidate(item["candidate_id"])
+            return {"candidate": item}
+
+    def tk_candidate_produce(self, body):
+        if set(body) - {"candidate_id"} or not isinstance(body.get("candidate_id"), str):
+            raise ApiError(400, "请求格式错误。")
+        return self.produce_candidate(body["candidate_id"])
+
+    def extension_produce_candidate(self, body):
+        """One card from the extension, saved as a candidate and turned straight into a video 制作单."""
+        if set(body) - {"product", "reference", "direction", "ask", "extension_version"}:
+            raise ApiError(400, "请求格式错误。")
+        saved = self.extension_save_candidates({key: body[key] for key in ("product", "reference", "ask", "extension_version") if key in body}
+                                               | {"directions": [body.get("direction")]}, auto_produce=False)
+        return self.produce_candidate(saved["candidates"][0]["candidate_id"])
+
+    def produce_candidate(self, identifier):
+        """A candidate goes straight to a video 制作单, its 口播 and 中文 exactly as the card wrote them: no direction
+        wizard and no 写稿 rewrite. The card's 开头画面 and 开头屏显 come along as the job's script information; the
+        意群表's 画面要求 and the rest are left for the job page, where 「AI 补全脚本信息」 fills them around these
+        unchanged lines. Direction membership and exact execution provenance are registered automatically.
+        Asking again returns the same 制作单 while it is live."""
+        with self.lock:
+            item = self._associate_tk_candidate(identifier)
+            if item.get("job_id"):
+                try:
+                    job = self.production.job(item["job_id"])
+                    if not job.get("archived"):
+                        if product_key(job["product"]) != product_key(item["product"]):
+                            raise ApiError(409, "候选与原制作单的产品不同，未打开其他产品的制作单。")
+                        if item.get("script_id") and job.get("script_id") != item["script_id"]:
+                            raise ApiError(409, "候选保存的脚本与原制作单采用稿不同，请先核对原关联。")
+                        return {"candidate": self.tk_candidates.brief(item), "script_id": item.get("script_id", ""),
+                                "job": {"id": job["id"], "product": job["product"]}, "reused": True}
+                except VoiceError as exc:
+                    if exc.status != 404:
+                        raise
+            spoken, chinese = voiceover(item["direction"])
+            if not spoken:
+                raise ApiError(400, "这条方向没有英文口播，不能直接建制作单。")
+            direction = item["direction"]
+            wanted = item.get("direction_id") if not item.get("direction_error") else ""
+            title = " ".join(part for part in (direction["code"], direction["name"]) if part) or "TK 看板方向"
+            # Resume after a partial save using the exact already-adopted version.
+            # A linked archived/deleted order is an explicit new-production path.
+            script_id = item.get("script_id") if not item.get("job_id") else ""
+            if script_id:
+                script = self.creation.get_script(script_id)
+                if product_key(script["product"]) != product_key(item["product"]):
+                    raise ApiError(409, "候选与已保存脚本的产品不同，未另建制作单。")
+            else:
+                request_id = "tkc-script-" + fingerprint([identifier, item.get("job_id") or "initial"])[:32]
+                prior = self.creation.read()["requests"].get(request_id)
+                if prior:
+                    script_id = prior["result"]["script"]["id"]
+                    recovered = self.creation.get_script(script_id)
+                    if (product_key(recovered["product"]) != product_key(item["product"])
+                            or recovered["text"] != "\n".join(spoken)
+                            or recovered.get("translation_zh", "") != "\n".join(chinese)):
+                        raise ApiError(409, "这条候选的已保存脚本与原文不一致，未重复建稿。")
+                else:
+                    saved = self.save_script({"request_id": request_id, "revision": self.creation.public()["revision"],
+                                              "script": {"product": item["product"], "title": title[:500], "text": "\n".join(spoken),
+                                                         "translation_zh": "\n".join(chinese), "direction_id": wanted or "",
+                                                         "confirmed": True}})
+                    script_id = saved["script"]["id"]
+                self.tk_candidates.link(identifier, script_id=script_id)
+            matches = [row for row in self.production.records()["jobs"]
+                       if not row.get("archived") and row.get("script_id") == script_id]
+            if len(matches) > 1:
+                raise ApiError(409, "这条脚本已有多张制作单，无法唯一恢复；请从内容列表打开原制作单。")
+            reused = bool(matches)
+            if matches:
+                job = self.production.job(matches[0]["id"])
+            else:
+                created = self.create_production_job({"request_id": "tkc-" + uuid4().hex, "revision": self.production.public()["revision"],
+                                                      "job": {"script_id": script_id}})
+                job = created["job"]
+            hook = {"hook_visual": direction.get("hook_visual") or "", "hook_text": (direction.get("hook_text") or {}).get("en") or "",
+                    "hook_text_zh": (direction.get("hook_text") or {}).get("zh") or ""}
+            missing_hook = {key: value[:300] if key != "hook_visual" else value[:1000]
+                            for key, value in hook.items() if value and not (job.get("supplement") or {}).get(key)}
+            if missing_hook:
+                self.production.mutate("job_lines", {"request_id": "tkc-" + uuid4().hex, "revision": self.production.public()["revision"],
+                                                     "job_id": job["id"], "supplement": {**(job.get("supplement") or {}), **missing_hook},
+                                                     "lines": [{"number": line["number"]} for line in job["lines"]]})
+            item = self.tk_candidates.link(identifier, job_id=job["id"])
+            item = self._associate_tk_candidate(identifier)
+            return {"candidate": self.tk_candidates.brief(item), "script_id": script_id,
+                    "job": {"id": job["id"], "product": job["product"]}, "reused": reused}
+
+    def _adopt_candidate_round(self, item, task):
+        """Adopt the completed 写稿 round's first voiced script, with its 意群表, and create the 制作单 from it."""
+        turn = next((entry for entry in reversed(task["rounds"]) if entry["status"] == "completed" and (entry.get("output") or "").strip()), None)
+        variants = parse_variants(turn["output"]) if turn else []
+        chosen = next((entry for entry in variants if entry["lines"]), None)
+        if not chosen:
+            raise ApiError(409, "写稿结果里没有可配音的口播；请到协作任务里查看这一轮，手动指定口播后建制作单。")
+        identifier = item["candidate_id"]
+        script_id = item.get("script_id") or ""
+        if script_id:
+            try:
+                self.creation.get_script(script_id)
+            except CreationError:
+                script_id = ""
+        if not script_id:
+            spoken = [line["spoken"] for line in chosen["lines"]]
+            chinese = [line.get("zh") or "" for line in chosen["lines"]]
+            title = " ".join(part for part in (item["direction"]["code"], item["direction"]["name"]) if part) or "TK 看板方向"
+            saved = self.save_script({"request_id": "tkc-" + uuid4().hex, "revision": self.creation.public()["revision"],
+                                      "script": {"product": item["product"], "title": title[:500], "text": "\n".join(spoken),
+                                                 "translation_zh": "\n".join(chinese) if all(chinese) else "",
+                                                 "direction_id": item.get("writing_direction_id", ""),
+                                                 "confirmed": True},
+                                      "source": {"task_id": task["task_id"], "round_id": turn["round_id"],
+                                                 "task_revision": task["revision"], "variant_index": chosen["index"]}})
+            script_id = saved["script"]["id"]
+            self.tk_candidates.link(identifier, script_id=script_id)
+        created = self.create_production_job({"request_id": "tkc-" + uuid4().hex, "revision": self.production.public()["revision"],
+                                              "job": {"script_id": script_id, "variant_index": chosen["index"]}})
+        item = self.tk_candidates.link(identifier, job_id=created["job"]["id"])
+        item = self._associate_tk_candidate(identifier)
+        return {"candidate": self.tk_candidates.brief(item), "script_id": script_id,
+                "job": {"id": created["job"]["id"], "product": created["job"]["product"]}, "reused": False}
+
+    def _candidate_round_finished(self, task_id):
+        """Called when any AI round ends: a candidate waiting on this round gets its 制作单 without another click."""
+        try:
+            waiting = [item for item in self.tk_candidates.list() if item.get("writing_task_id") == task_id and not item.get("job_id")]
+            for item in waiting:
+                self.produce_candidate(item["candidate_id"])
+        except Exception as exc:  # the candidate keeps its task; asking again retries the adoption
+            print(f"TK 候选自动建制作单未完成：{exc}", file=sys.stderr)
+
+    def _ai_round_finished(self, task_id):
+        self._candidate_round_finished(task_id)
+        self._job_fill_finished(task_id)
+
+    def fill_production_job(self, identifier, body):
+        """「补全脚本信息」 on a 制作单: one 写稿 round, with the writing skill, writes the full delivery around the job's
+        own spoken lines (开头画面、屏显、读法、对应中文、意群表的画面要求/素材标签/证据、补拍清单、发布文案、发布前核对).
+        The spoken lines stay as they are, since the job may already be voiced and cut; the result is applied row by row."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "补全参数格式无效。")
+        with self.lock:
+            job = self.production.job(identifier)
+            if job.get("archived"):
+                raise VoiceError(409, "已归档的制作单不能补全。")
+            fill = job.get("ai_fill") or {}
+            if fill.get("status") == "running":
+                try:
+                    task = self.ai.get(fill["task_id"])
+                except AITaskError:
+                    task = None
+                if task and task["status"] in ("queued", "running"):
+                    return {"job": job, "fill": fill}
+                if task:
+                    self._job_fill_finished(task["task_id"])
+                    return {"job": self.production.job(identifier), "fill": self.production.job(identifier).get("ai_fill")}
+            wanted = job.get("direction_id") or ""
+            known = any(entry["direction_id"] == wanted and entry.get("status") != "archived"
+                        for entry in self.direction_catalog(job["product"])["directions"]) if wanted else False
+            task = self.create_ai_task({"request_id": "fill-" + uuid4().hex, "action": "variants", "product": job["product"],
+                                        **({"direction_id": wanted} if known else {}), "instruction": job_fill_instruction(job)})
+            saved = self.production.mutate("job_fill_start", {"request_id": "fill-" + uuid4().hex, "job_id": identifier,
+                                                              "task_id": task["task_id"]})
+            return {"job": saved["job"], "fill": saved["job"]["ai_fill"]}
+
+    def _job_fill_finished(self, task_id):
+        """When a fill round ends, its result goes onto the 制作单 that asked for it."""
+        try:
+            waiting = [job for job in self.production.public()["jobs"]
+                       if (job.get("ai_fill") or {}).get("task_id") == task_id and job["ai_fill"].get("status") == "running"]
+            if not waiting:
+                return
+            task = self.ai.get(task_id)
+            if task["status"] in ("queued", "running"):
+                return
+            for job in waiting:
+                self.production.mutate("job_fill_finish", {"request_id": "fill-" + uuid4().hex, "job_id": job["id"],
+                                                           "task_id": task_id, **job_fill_result(job, task)})
+        except Exception as exc:  # the job keeps its running mark; asking again settles it
+            print(f"制作单 AI 补全未写回：{exc}", file=sys.stderr)
+
+    def direction_combos(self, product):
+        """The grading file's "每个 S 各带一套组合" table: per lead point, who it is for, the concern chain and the proof.
+        Paused rows are left out."""
+        path = self.store.root / "references" / "products" / f"{product}-selling-point-grading.md"
+        try:
+            content = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            return []
+        rows, in_section = [], False
+        for line in content.splitlines():
+            if line.startswith("## "):
+                in_section = "各带一套组合" in line
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")] if in_section and line.strip().startswith("|") else []
+            if len(cells) != 4 or set(cells[0]) <= set("-: ") or cells[0] == "测试方向" or "暂停" in cells[0]:
+                continue
+            rows.append({"direction": cells[0][:120], "audience": cells[1][:300], "chain": cells[2][:400], "proof": cells[3][:200]})
+        return rows[:16]
+
+    def export_public_views(self, body):
+        """An .xlsx of the listed videos with the export's and the public page's views side by side,
+        kept outside the sales data folder so it is never imported as an export."""
+        ids = body.get("video_ids")
+        if (set(body) != {"video_ids"} or not isinstance(ids, list) or not 0 < len(ids) <= 5000
+                or not all(isinstance(v, str) and re.fullmatch(r"\d{6,25}", v) for v in ids)):
+            raise ApiError(400, "导出的视频列表无效。")
+        by_id = {video["video_id"]: video for video in self.performance.videos()}
+        videos = self.annotate_review_status([by_id[v] for v in dict.fromkeys(ids) if v in by_id])
+        if not videos:
+            raise ApiError(404, "销售数据表里没有这些视频。")
+        public = self.public_stats.latest(video["video_id"] for video in videos)
+        export_id = f"{datetime.now():%Y%m%d-%H%M%S}-{secrets.token_hex(3)}"
+        target = export_workbook(videos, public, self.public_exports / f"公开播放-{export_id}.xlsx")
+        return {"name": target.name, "path": str(target), "rows": len(videos),
+                "with_public": sum(1 for video in videos if (public.get(video["video_id"]) or {}).get("views") is not None),
+                "download_url": f"/api/performance/public-export/{export_id}"}
 
     def video_case_links(self):
         """TikTok video ID -> case ID, from each case's current snapshot."""
@@ -432,6 +1000,16 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
             video_id = str(((entry.get("current") or {}).get("metrics") or {}).get("video_id") or "").strip()
             if video_id:
                 links[video_id] = entry["case_id"]
+        return links
+
+    def carousel_post_links(self):
+        """TikTok photo post ID -> photo production ID, from every post a production has been registered with."""
+        links = {}
+        for item in self.production.public()["carousels"]:
+            for record in (*item.get("publication_history", []), item.get("publication")):
+                post = str((record or {}).get("post_id") or "").strip()
+                if post:
+                    links[post] = item["id"]
         return links
 
     def products(self):
@@ -470,16 +1048,23 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
             cases = self.store.read_index()["cases"]
             grading = tuple(sorted((str(path), file_key(path)) for path in
                 (self.store.root / "references" / "products").glob("*-selling-point-grading.md")))
-            key = (self.store.index_key, file_key(self.directions.path), file_key(self.creation.path),
+            try:
+                creation_revision = self.creation.current_revision()
+            except CreationError:
+                creation_revision = file_key(self.creation.path)
+            key = (self.store.index_key, self.product_catalog.key(), file_key(self.directions.path), creation_revision,
                    database_signature(self.performance.database), database_signature(self.reviews.database), grading)
             if self.products_cache is not None and self.products_cache[0] == key:
                 return self.products_cache[1]
             values = {product_key(case.get("product")) for case in cases}
             for store, groups, error in ((self.directions, ("selling_points", "directions", "video_links"), DirectionError),
-                                        (self.creation, ("scripts", "materials", "theme_links", "plans"), CreationError)):
+                                        (self.creation, ("scripts", "materials", "theme_links", "plans", "variant_links"), CreationError)):
                 try:
+                    if store is self.creation:
+                        values.update(store.product_inventory())
+                        continue
                     catalog = store.read()
-                    values.update(product_key(item.get("product")) for group in groups for item in catalog[group])
+                    values.update(product_key(item.get("product")) for group in groups for item in catalog.get(group, []))
                 except error:
                     # A broken optional catalog must not hide products from other modules.
                     pass
@@ -488,9 +1073,41 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
                 "SELECT products FROM daily WHERE products != '' UNION SELECT products FROM periods WHERE products != ''", self.performance.lock))
             values.update(product_key(value) for value in distinct(self.reviews.database,
                 "SELECT DISTINCT product FROM reviews WHERE product != ''", self.reviews.lock))
-            result = {"products": sorted(values - {"", "all"})}
+            listed, removed = self.product_catalog.apply(values)
+            result = {"products": listed, "removed": removed, "deleted": sorted(set(self.product_catalog.read()["deleted"]))}
             self.products_cache = (key, result)
             return result
+
+    def change_product_catalog(self, body):
+        action, name = body.get("action"), body.get("product")
+        try:
+            known = self.products()["products"] if action in {"remove", "restore", "delete"} and isinstance(name, str) and len(name) > 120 else ()
+            product = self.product_catalog.change(action, name, known_products=known)
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from None
+        with self.lock:
+            self.products_cache = None
+        if action == "delete_hidden":
+            return {"deleted_count": len(product), "deleted_products": product, **self.products()}
+        return {"product": product, **self.products()}
+
+    def set_case_product(self, identifier, product):
+        """Manual product pick for one case (empty = back to the automatic name)."""
+        # Product discovery can import review sources; do it before taking the
+        # workbench lock. Only exact existing identifiers bypass the new-name cap.
+        existing_long = isinstance(product, str) and len(product.strip()) > 120 and product.strip() in self.products()["products"]
+        with self.lock:
+            self.store.read_case(identifier)
+            try:
+                if existing_long:
+                    catalog = self.product_catalog.read()
+                    existing_long = product.strip() not in set(catalog["removed"]) | set(catalog["deleted"])
+                self.store.product_labels.set(identifier, product, allow_existing=existing_long)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from None
+            self.state_cache = None
+            self.products_cache = None
+            return {"case": self.detail(identifier)}
 
     def synced_directions(self, cases):
         """Reuse read-only migration results until records, catalog or grading files change."""
@@ -506,6 +1123,9 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
         return catalog
 
     def import_performance_uploads(self, body):
+        shop = body.get("shop")
+        if shop is not None and shop not in SHOPS:
+            raise ApiError(400, "店铺无效。")
         paths = body.get("paths")
         if not isinstance(paths, list) or not paths or len(paths) > 100:
             raise ApiError(400, "请选择要导入的后台导出表格。")
@@ -515,13 +1135,20 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
             if not staged.is_relative_to(self.video_files.imports) or staged.suffix.lower() != ".xlsx" or not staged.is_file():
                 raise ApiError(400, "导入文件已失效，请重新选择。")
             kept.append(self.performance.keep_upload(staged, staged.name))
-        return self.performance.import_paths(kept, skip_unchanged=False)
+        # A file picked in the page has no folder to say which shop it is from; the page says so, else it is the local shop's.
+        return self.performance.import_paths(kept, skip_unchanged=False, shop=shop or DEFAULT_SHOP)
 
-    def detail(self, identifier, sales_data=None, direction_catalog=None):
+    def detail(self, identifier, sales_data=None, direction_catalog=None, review_status_snapshot=None):
         case = self.store.read_case(identifier)
         result = copy.deepcopy(case)
         result["revision"] = revision(case)
+        result["product_raw"] = self.store.raw_product(identifier) or case.get("product")
+        result["product_manual"] = bool(self.store.product_labels and self.store.product_labels.is_manual(identifier))
         result["sales_data"] = copy.deepcopy(sales_data) if sales_data is not None else self.sales.resolve_case(case)
+        sales_video = result["sales_data"].get("video") if isinstance(result["sales_data"], dict) else None
+        if isinstance(sales_video, dict) and sales_video.get("video_id"):
+            sales_video.setdefault("product", case.get("product"))
+            result["sales_data"]["video"] = self.annotate_review_status([sales_video], review_status_snapshot)[0]
         result["assets"] = self.asset_info(case.get("current", {}).get("assets", {}) if case.get("current") else {}, identifier)
         result["paths"] = {"record": str(self.store.folder(identifier)), "reading": str(self.library / identifier / "case.md")}
         catalog = direction_catalog if direction_catalog is not None else self.directions.read()
@@ -557,11 +1184,11 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
         return summary
 
     def direction_catalog(self, product=None):
-        with self.lock:
+        with self.lock, self.store.index_snapshot():
             cases = self.store.read_index()["cases"]
             data = self.synced_directions(cases)
             result = self.directions.public(data, product)
-            independent_scripts = self.creation.public(product)["scripts"]
+            independent_scripts = self.creation_catalog(product, include_usage=False)["scripts"]
             direction_videos = {}
             for direction in result["directions"]:
                 selected = [case for case in cases if product_key(case.get("product")) == direction["product"] and
@@ -570,7 +1197,8 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
                 videos = {video for video in videos if not (link := self.directions.find_link(data, direction["product"], video))
                           or link["direction_id"] == direction["direction_id"]}
                 videos.update(link["video_id"] for link in data["video_links"] if link["product"] == direction["product"] and link["direction_id"] == direction["direction_id"])
-                scripts = [script for script in independent_scripts if script["product"] == direction["product"] and script.get("direction_id") == direction["direction_id"]]
+                scripts = [script for script in independent_scripts if script["product"] == direction["product"] and
+                           (script.get("direction_id") or (script.get("variant_link") or {}).get("direction_id")) == direction["direction_id"]]
                 videos.update(script["video_id"] for script in scripts if script.get("video_id"))
                 direction.update(case_count=len(selected), video_count=len(videos), script_count=len(scripts))
                 direction_videos[(direction["product"], direction["direction_id"])] = videos
@@ -636,7 +1264,8 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
                         "text": case["current"]["transcript"]["text"]}
                        for case in selected if (case.get("current") or {}).get("transcript")]
             creation = self.creation_catalog(product)
-            independent = [script for script in creation["scripts"] if script.get("direction_id") == identifier]
+            independent = [script for script in creation["scripts"] if
+                           (script.get("direction_id") or (script.get("variant_link") or {}).get("direction_id")) == identifier]
             scripts.extend(independent)
             videos.update(script["video_id"] for script in independent if script.get("video_id"))
             brief = self.performance.video_brief(videos)
@@ -644,7 +1273,7 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
             # never reassign the task, and there is no second task-file read.
             defer_tasks = view == "page" and not include_tasks
             tasks = [] if defer_tasks else self.ai.list_tasks(product=product, direction_id=identifier)
-            result = {"revision": catalog["revision"], "direction": entity,
+            result = {"revision": catalog["revision"], "direction": entity, "progress_available": True,
                     "selling_point": next((point for point in catalog["selling_points"] if point["id"] == entity.get("selling_point_id")), None),
                     "selling_points": catalog["selling_points"],
                     "group": group, "cases": cases, "scripts": scripts, "tasks": tasks,
@@ -656,6 +1285,68 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
             if defer_tasks:
                 result["tasks_pending"] = True
             return result
+
+    def direction_progress(self, identifier, product=None):
+        """Load optional execution evidence separately from the direction first paint."""
+        with self.lock, self.store.index_snapshot():
+            cases = self.store.read_index()["cases"]
+            raw = self.synced_directions(cases)
+            catalog = self.directions.public(raw, product)
+            matches = [row for row in catalog["directions"] if row["direction_id"] == identifier]
+            if not matches:
+                raise ApiError(404, "这条方向不存在。")
+            if len(matches) != 1:
+                raise ApiError(400, "多个产品使用此方向编号，请先选择产品。")
+            direction = matches[0]
+            product = direction["product"]
+            creation = self.creation.read()
+            production = self.production.records()
+            publications = self._video_publications().read()
+            tasks = self.ai.list_tasks(product=product, direction_id=identifier)
+            videos = {link["video_id"] for link in catalog["video_links"]
+                      if link["product"] == product and link["direction_id"] == identifier}
+            for case in cases:
+                current = case.get("current") or {}
+                if (product_key(case.get("product")) == product and
+                        (current.get("test_direction") or {}).get("direction_id") == identifier):
+                    video = str((current.get("metrics") or {}).get("video_id") or "")
+                    link = self.directions.find_link(raw, product, video) if video else None
+                    if video and (not link or link["direction_id"] == identifier):
+                        videos.add(video)
+            video_cache = {}
+            def read_video(video):
+                if video not in video_cache:
+                    video_cache[video] = self.performance.video(video)
+                return video_cache[video]
+            variant_links, link_sources, link_counts = [], {}, {}
+            for link in creation.get("variant_links", []):
+                key = (link.get("kind"), link.get("record_id"))
+                link_counts[key] = link_counts.get(key, 0) + 1
+            for link in creation.get("variant_links", []):
+                if link.get("kind") != "video":
+                    variant_links.append(link)
+                    continue
+                if product_key(link.get("product")) != product or link.get("direction_id") != identifier:
+                    continue
+                video = link.get("record_id")
+                if video not in link_sources:
+                    try:
+                        record, _ = self._variant_link_source("video", video, product, creation)
+                    except CreationError as exc:
+                        if exc.status not in {400, 404, 409}:
+                            raise
+                        record = None
+                    link_sources[video] = record
+                record = link_sources[video]
+                if record and (not record.get("direction_id") or record["direction_id"] == identifier):
+                    # Keep a valid-but-ambiguous record visible as unassigned,
+                    # even when its duplicate belongs to another direction.
+                    variant_links.append({**link, "variant_ref": {}} if
+                                         link_counts[(link.get("kind"), video)] > 1 else link)
+            return build_direction_progress(direction, catalog_revision=catalog["revision"], tasks=tasks,
+                scripts=creation["scripts"], plans=creation["plans"], production=production,
+                video_publications=publications, videos=sorted(videos), read_video=read_video,
+                variant_links=variant_links)
 
     def save_direction_catalog(self, kind, body):
         with self.lock:
@@ -677,7 +1368,12 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
                             assigned = (current.get("test_direction") or {}).get("direction_id")
                             if assigned and assigned != body["direction_id"]:
                                 raise ApiError(409, "视频关联案例的方向不同。请先解除视频关联，在案例修改方向后再绑定。")
-            result = self.directions.mutate(kind, body)
+            references = []
+            if kind == "point" and body.get("operation") == "delete":
+                # Comment themes live in the creation store; the catalog cannot see them on its own.
+                references = [(link["selling_point_id"], f"评论主题「{link.get('theme', '')[:40]}」关联了它")
+                              for link in self.creation.public().get("theme_links", []) if link.get("selling_point_id")]
+            result = self.directions.mutate(kind, body, references)
             self.state_cache = None
             result["catalog"] = self.direction_catalog()
             return result
@@ -713,7 +1409,7 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
         return result
 
     def state(self):
-        with self.lock:
+        with self.lock, self.store.index_snapshot():
             # Read records afresh: changes from the existing intake tools appear without restarting.
             index = self.store.read_index()
             direction_catalog = self.synced_directions(index["cases"])
@@ -721,18 +1417,29 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
             self.requests = {key: value for key, value in self.requests.items()
                 if not value[1].get("case") or value[1]["case"]["case_id"] in known}
             # Everything the snapshot reads besides the verified records: navigation, template, assets, sources.
-            watched = [self.runtime / "navigation-assignments.json", DEFAULT_TEMPLATE, self.directions.path, self.creation.path]
+            watched = [self.runtime / "navigation-assignments.json", DEFAULT_TEMPLATE, self.directions.path]
             for entry in index["cases"]:
                 current = entry.get("current") or {}
                 watched.extend(Path(raw) for raw in (current.get("assets") or {}).values())
                 if current.get("source_case"):
                     watched.append(Path(current["source_case"]["file_path"]))
             sales_signature = self.performance.signature()
-            key = (self.store.index_key, tuple((str(path), file_key(path)) for path in watched), sales_signature)
+            # Public pushes can affect videos without a case, so they also need
+            # their own revision in the polling response and its digest.
+            public_stats_signature = self.public_stats.signature()
+            public_stats_revision = hashlib.sha256(json.dumps(public_stats_signature).encode()).hexdigest()
+            reviews_revision = self.reviews.revision()
+            creation_revision = self.creation.current_revision()
+            followup_revision = self.review_followups.current_revision()
+            publication_signature = file_key(self._video_publications().path)
+            review_day = review_today().isoformat()
+            key = (self.store.index_key, tuple((str(path), file_key(path)) for path in watched), sales_signature, public_stats_signature, creation_revision,
+                   followup_revision, publication_signature, review_day, reviews_revision)
             if self.state_cache is not None and self.state_cache[0] == key:
                 return self.state_cache[1]
             sales = self.sales.resolve_cases(index["cases"])
-            cases = [self.detail(entry["case_id"], sales[entry["case_id"]], direction_catalog) for entry in index["cases"]]
+            review_status_snapshot = self.review_status_snapshot()
+            cases = [self.detail(entry["case_id"], sales[entry["case_id"]], direction_catalog, review_status_snapshot) for entry in index["cases"]]
             signature = hashlib.sha256("".join(item["revision"] + json.dumps(item["assets"], sort_keys=True)
                                              + item.get("source_analysis", {}).get("digest", "")
                                              + json.dumps(item["sales_data"], sort_keys=True, ensure_ascii=False)
@@ -752,10 +1459,12 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
             paths = {"records": str(self.store.root / "cases"), "evidence": str(self.runtime / "evidence"), "library": str(self.library), "directions": str(self.directions.root), "creation": str(self.creation.root)}
             # Lets the polling page ask "anything new since this digest?" and get a tiny reply instead of every case.
             direction_revision = self.directions.revision(direction_catalog)
-            creation_revision = self.creation.revision(self.creation.read())
-            signature = hashlib.sha256((signature + direction_revision + creation_revision).encode()).hexdigest()
-            digest = hashlib.sha256(json.dumps([navigation, summaries, paths, direction_revision, creation_revision], sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+            signature = hashlib.sha256((signature + direction_revision + creation_revision + followup_revision
+                                        + json.dumps(publication_signature) + review_day + public_stats_revision + reviews_revision).encode()).hexdigest()
+            digest = hashlib.sha256(json.dumps([navigation, summaries, paths, direction_revision, creation_revision,
+                                               followup_revision, publication_signature, review_day, public_stats_revision, reviews_revision], sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
             snapshot = {"app": "video-case-workbench", "token": self.token, "signature": signature, "digest": digest,
+                        "public_stats_revision": public_stats_revision, "reviews_revision": reviews_revision,
                         "navigation": navigation, "cases": summaries, "paths": paths}
             self.state_cache = (key, snapshot)
             return snapshot
@@ -1167,6 +1876,9 @@ class Workbench(CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkben
 class Handler(BaseHTTPRequestHandler):
     server_version = "CaseWorkbench/1.0"
     protocol_version = "HTTP/1.1"
+    # The authenticated proxy reuses connections. Flush small header/body writes
+    # promptly instead of waiting for Nagle plus the peer's delayed ACK.
+    disable_nagle_algorithm = True
 
     @property
     def app(self):
@@ -1217,36 +1929,64 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin and origin not in {f"http://{host}" for host in hosts}:
             raise ApiError(403, "请在本地工作台中操作。")
-        if self.headers.get("Sec-Fetch-Site") == "cross-site":
+        # Opening the local app from another tab/app is a cross-site document
+        # navigation in Chrome. Admit only the landing document; API requests,
+        # embedded frames, other resources and writes retain the cross-site guard.
+        landing_navigation = (self.command in {"GET", "HEAD"}
+                              and self.headers.get("Sec-Fetch-Mode") == "navigate"
+                              and self.headers.get("Sec-Fetch-Dest") == "document"
+                              and urlparse(self.path).path in {"/", "/index.html"})
+        if self.headers.get("Sec-Fetch-Site") == "cross-site" and not landing_navigation:
             raise ApiError(403, "不接受跨站请求。")
         if write and not secrets.compare_digest(self.headers.get("X-Workbench-Token", ""), self.app.token):
             raise ApiError(403, "页面连接已过期，请刷新后重试。")
+
+    def extension_guard(self):
+        """The TK 看板 extension posts from its own origin with the pairing key shown in settings."""
+        port = self.server.server_port
+        if self.headers.get("Host") not in {f"127.0.0.1:{port}", f"localhost:{port}"}:
+            raise ApiError(403, "仅允许通过本机地址访问。")
+        if not (self.headers.get("Origin") or "").startswith("chrome-extension://"):
+            raise ApiError(403, "只接受 TK 看板插件的推送。")
+        if not self.app.public_stats.check_key(self.headers.get("X-TKL-Key", "")):
+            raise ApiError(403, "连接码不对，请在工作台「设置 → TK 看板插件」复制最新连接码。")
 
     def dispatch(self):
         post_admitted = False
         post_body_unread = self.command == "POST"
         try:
-            self.guard(self.command == "POST")
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
+            if self.command == "POST" and path in EXTENSION_PATHS:
+                self.extension_guard()
+            else:
+                self.guard(self.command == "POST")
             query = parse_qs(parsed.query)
+            if path == "/api/remote-account" and (self.client_address[0] not in {"127.0.0.1", "::1"}
+                    or any(self.headers.get(name) for name in ("Forwarded", "X-Forwarded-For", "CF-Connecting-IP"))):
+                raise ApiError(403, "账号密码只能在运行工作台的电脑上设置。")
             if self.command == "POST" and path not in {"/api/service/shutdown", "/api/service/restart"}:
                 self.server.begin_write()
                 post_admitted = True
             if self.command in {"GET", "HEAD"}:
-                if self.server.data_maintenance and path not in {"/api/data/status", "/api/service/status"}:
-                    raise ApiError(409, "总数据正在导入，请稍后刷新。")
+                if (self.server.data_maintenance and self.server.transfer_operation() == "restore"
+                        and path.startswith("/api/") and path not in {"/api/data/status", "/api/service/status"}):
+                    raise self.server.transfer_busy_error()
                 if path == "/api/data/status":
                     return self.output(200, self.app.data_transfer.status())
+                if path == "/api/remote-account":
+                    with self.app.lock:
+                        return self.output(200, RemoteAccounts(self.app.runtime).metadata())
                 if path == "/api/activity":
-                    accepted = {"after", "limit", "before", "product", "filter", "owner_id", "source_id"}
+                    accepted = {"after", "limit", "before", "product", "filter", "owner_id", "source_id", "kind", "q", "group", "since"}
                     activity_query = parse_qs(parsed.query, keep_blank_values=True)
                     if activity_query.keys() - accepted or any(len(values) != 1 for values in activity_query.values()):
                         raise ApiError(400, "运行记录筛选参数无效。")
+                    refresh_activity_projection(self.app)
                     return self.output(200, self.app.activity.feed(**{key: values[0] for key, values in activity_query.items()}))
                 activity_logs = re.fullmatch(r"/api/activity/([A-Za-z0-9_:.\-]{1,300})/logs", path)
                 if activity_logs:
-                    if query.keys() - {"after_seq", "limit"} or any(len(values) != 1 for values in query.values()):
+                    if query.keys() - {"after_seq", "limit", "before_seq", "tail"} or any(len(values) != 1 for values in query.values()):
                         raise ApiError(400, "运行日志分页参数无效。")
                     return self.output(200, self.app.activity.logs(activity_logs.group(1), **{key: values[0] for key, values in query.items()}))
                 download = re.fullmatch(r"/api/data/download/([A-Za-z0-9_-]{32})", path)
@@ -1257,6 +1997,14 @@ class Handler(BaseHTTPRequestHandler):
                         "token": self.app.token, "shutdown_supported": True, "shutting_down": self.server.shutting_down,
                         "code_stale": code_signature() > CODE_AT_START,
                         "paths": {"records": str(self.app.store.root / "cases"), "library": str(self.app.library)}})
+                if path == "/api/settings/paths":
+                    # Settings can be opened directly, before the case catalogue has loaded.
+                    return self.output(200, {"paths": {
+                        "records": str(self.app.store.root / "cases"),
+                        "directions": str(self.app.directions.root),
+                        "creation": str(self.app.creation.root),
+                        "evidence": str(self.app.runtime / "evidence"),
+                        "library": str(self.app.library)}})
                 if path == "/api/state":
                     snapshot = self.app.state()
                     if query.get("since", [None])[0] == snapshot["digest"]:
@@ -1271,10 +2019,50 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.claude_login_state())
                 if path == "/api/creation":
                     return self.output(200, self.app.creation_catalog(query.get("product", [None])[0]))
+                if path == "/api/content":
+                    return self.output(200, self.app.content_catalog(query))
+                if path == "/api/content/views":
+                    return self.output(200, self.app.content_views_catalog(query))
+                if path == "/api/campaigns":
+                    if query:
+                        raise ApiError(400, "活动日历不接受查询参数。")
+                    return self.output(200, self.app.campaigns.public())
+                if path == "/api/content/calendar":
+                    return self.output(200, self.app.content_calendar(query))
+                if path == "/api/review-followups":
+                    return self.output(200, self.app.review_followups.public(query.get("product", [None])[0]))
+                if path == "/api/review-experiences":
+                    return self.output(200, self.app.review_experience_catalog(query))
+                if path == "/api/feedback-chain":
+                    return self.output(200, self.app.feedback_chain(query.get("video_id", [""])[0], query.get("product", [None])[0], query.get("window_end", [None])[0]))
+                comparison = re.fullmatch(r"/api/plans/(PLN-[0-9a-f]{12})/comparison", path)
+                if comparison:
+                    from experiment_cards import compare_experiment
+                    plan = next((item for item in self.app.creation.public()["plans"] if item["id"] == comparison[1]), None)
+                    if not plan:
+                        raise ApiError(404, "测试卡不存在。")
+                    with self.app.performance.lock:
+                        comparison_result = compare_experiment(plan, self.app.performance.video)
+                    return self.output(200, comparison_result)
                 if path == "/api/materials":
                     return self.output(200, self.app.material_catalog(query.get("product", [None])[0]))
                 if path == "/api/production":
                     return self.output(200, self.app.production_catalog(query.get("product", [None])[0]))
+                publication_download = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication/(VPU-[0-9a-f]{12})/download", path)
+                if publication_download:
+                    return self.file(self.app.video_publication_file(*publication_download.groups()), download=True)
+                video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication", path)
+                if video_publication:
+                    return self.output(200, self.app.video_publication_detail(video_publication[1]))
+                prepublish_sheet = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/prepublish/(PPR-[0-9a-f]{12})/sheets/((?:opening|detail\d{2}|shots\d{1,2})\.jpg)", path)
+                if prepublish_sheet:
+                    return self.file(self.app.prepublish_sheet(*prepublish_sheet.groups()))
+                prepublish = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/prepublish", path)
+                if prepublish:
+                    return self.output(200, self.app.prepublish_reviews(prepublish[1]))
+                video_carousel = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/video-carousel", path)
+                if video_carousel:
+                    return self.output(200, self.app.video_carousel_status(video_carousel[1]))
                 if path == "/api/production/deliveries":
                     return self.output(200, self.app.production_deliveries(query.get("product", [None])[0]))
                 if path == "/api/production/eleven":
@@ -1297,6 +2085,11 @@ class Handler(BaseHTTPRequestHandler):
                     if len(task_id) != 1 or len(round_id) != 1 or not re.fullmatch(r"AIT-[0-9a-f]{12}", task_id[0]) or not re.fullmatch(r"AIR-[0-9a-f]{12}", round_id[0]):
                         raise ApiError(400, "候选轮次参数无效。")
                     return self.output(200, self.app.carousel_variants(task_id[0], round_id[0]))
+                if path == "/api/production/carousel-tables":
+                    script_id = query.get("script_id", [""])
+                    if len(script_id) != 1 or not re.fullmatch(r"SCR-[0-9a-f]{12}", script_id[0]):
+                        raise ApiError(400, "脚本版本参数无效。")
+                    return self.output(200, self.app.carousel_tables(script_id[0]))
                 table_read = re.fullmatch(r"/api/production/carousel-tables/(TBL-[0-9a-f]{12})", path)
                 if table_read:
                     return self.output(200, {"table": self.app.carousel_table(table_read.group(1))})
@@ -1351,9 +2144,19 @@ class Handler(BaseHTTPRequestHandler):
                 audio_match = re.fullmatch(r"/api/production/audio/(PRD-[0-9a-f]{12})/(TAK-[0-9a-f]{12})/(mp3|wav)", path)
                 if audio_match:
                     return self.file(self.app.production_audio(*audio_match.groups()), download="download" in query)
+                if path == "/api/variant-links/source":
+                    selected = [query.get(key, []) for key in ("kind", "id", "product")]
+                    if any(len(values) != 1 for values in selected):
+                        raise ApiError(400, "历史记录类型、编号与产品须各填写一次。")
+                    return self.output(200, self.app.variant_link_source(*(values[0] for values in selected)))
                 script_match = re.fullmatch(r"/api/scripts/(SCR-[0-9a-f]{12})", path)
                 if script_match:
                     return self.output(200, self.app.script_detail(script_match.group(1)))
+                if path.startswith("/api/direction-progress/"):
+                    selected = query.get("product", [None])
+                    if len(selected) != 1:
+                        raise ApiError(400, "方向产品筛选只能出现一次。")
+                    return self.output(200, self.app.direction_progress(path.removeprefix("/api/direction-progress/"), selected[0]))
                 if path == "/api/direction-catalog" or path.startswith("/api/direction-catalog/"):
                     selected = query.get("product", [None])
                     if len(selected) != 1:
@@ -1368,6 +2171,10 @@ class Handler(BaseHTTPRequestHandler):
                         raise ApiError(400, "方向详情任务显示范围须是单个 0 或 1。")
                     return self.output(200, self.app.direction_detail(path.removeprefix("/api/direction-catalog/"), selected[0],
                         view=views[0], include_tasks=include_tasks[0] == "1"))
+                if path == "/api/tk-candidates":
+                    if query.keys() - {"product", "status"} or any(len(values) != 1 for values in query.values()):
+                        raise ApiError(400, "候选方向筛选格式无效。")
+                    return self.output(200, self.app.tk_candidate_list(query.get("product", [None])[0], query.get("status", [None])[0]))
                 if path == "/api/directions":
                     values = {}
                     for key, default in (("product", None), ("direction_id", None), ("archive", "active")):
@@ -1397,24 +2204,72 @@ class Handler(BaseHTTPRequestHandler):
                 ai_match = re.fullmatch(r"/api/ai/tasks/(AIT-[0-9a-f]{12})", path)
                 if ai_match:
                     return self.output(200, {"task": self.app.ai.get(ai_match.group(1))})
+                shops = query.get("shop", [DEFAULT_SHOP])
+                if path.startswith("/api/performance/") and (len(shops) != 1 or (shops[0] not in SHOPS and shops[0] != "all")):
+                    raise ApiError(400, "店铺无效。")
+                # "all" reads every shop together, for the places that look a video up wherever it was posted.
+                shop = None if shops[0] == "all" else shops[0]
                 if path == "/api/performance/summary":
-                    return self.output(200, self.app.performance.summary())
+                    return self.output(200, self.app.performance.summary(shop))
+                if path == "/api/public-stats/link":
+                    return self.output(200, {"key": self.app.public_stats.link_key(),
+                                             "address": f"http://127.0.0.1:{self.server.server_port}"})
                 if path == "/api/performance/analytics":
-                    return self.output(200, self.app.performance.analytics())
+                    return self.output(200, self.app.performance.analytics(shop))
+                if path == "/api/performance/creators":
+                    return self.output(200, self.app.performance.creators(self.app.video_case_links(), shop))
+                if path == "/api/performance/photos":
+                    return self.output(200, self.app.performance.photos(shop))
+                if path == "/api/performance/photo-items":
+                    return self.output(200, {**self.app.performance.photo_items(shop), "productions": self.app.carousel_post_links()})
                 if path == "/api/performance/videos":
-                    videos = self.app.performance.videos(self.app.video_case_links())
+                    projection = query.get("projection", ["full"])
+                    if len(projection) != 1 or projection[0] not in {"full", "home"}:
+                        raise ApiError(400, "视频列表显示范围无效。")
+                    if projection[0] == "home":
+                        selected = query.get("product", [""])
+                        if len(selected) != 1:
+                            raise ApiError(400, "视频产品筛选只能出现一次。")
+                        product = "" if selected[0].strip() == "all" else product_key(selected[0])
+                        # Home needs every matching video's publication/window status,
+                        # but no case mapping, comment aggregation or sales-table columns.
+                        videos = self.app.review_videos()
+                        return self.output(200, {"published_video_ids": [video["video_id"] for video in videos], "videos": [
+                            {key: video[key] for key in HOME_VIDEO_FIELDS if key in video}
+                            for video in videos
+                            if not product or product_key(video.get("product")).lower() == product.lower()
+                        ]})
+                    videos = self.app.annotate_review_status(self.app.performance.videos(self.app.video_case_links(), shop))
                     commented = self.app.reviews.video_counts()
                     for video in videos:
                         found = commented.get(video["video_id"])
                         if found:
                             video["review_comments"], video["review_open"] = found["comments"], found["open_questions"]
                     return self.output(200, {"videos": videos})
+                public_export = re.fullmatch(r"/api/performance/public-export/(\d{8}-\d{6}-[0-9a-f]{6})", path)
+                if public_export:
+                    target = self.app.public_exports / f"公开播放-{public_export.group(1)}.xlsx"
+                    if not target.is_file():
+                        raise ApiError(404, "导出文件不存在，请重新导出。")
+                    return self.file(target, download=True)
                 video_match = re.fullmatch(r"/api/performance/videos/(\d{6,25})", path)
                 if video_match:
                     video = self.app.performance.video(video_match.group(1), self.app.video_case_links())
                     if not video:
                         raise ApiError(404, "后台数据里没有这条视频。")
-                    return self.output(200, {"video": video})
+                    comments = self.app.reviews.video_counts().get(video["video_id"])
+                    if comments:
+                        video["review_comments"], video["review_open"] = comments["comments"], comments["open_questions"]
+                    return self.output(200, {"video": self.app.annotate_review_status([video])[0]})
+                if path == "/api/reviews/opportunities":
+                    from review_opportunities import opportunity_catalog
+                    try:
+                        limit, offset = int(query.get("limit", ["20"])[0]), int(query.get("offset", ["0"])[0])
+                    except ValueError:
+                        raise ApiError(400, "选题分页参数无效。")
+                    if not 1 <= limit <= 100 or offset < 0:
+                        raise ApiError(400, "选题分页参数无效。")
+                    return self.output(200, opportunity_catalog(self.app, query.get("product", [None])[0], limit=limit, offset=offset))
                 if path == "/api/reviews/summary":
                     self.app.reviews.sync()  # cheap: rebuilds only when a source file changed
                     summary = self.app.reviews.summary()
@@ -1448,6 +2303,19 @@ class Handler(BaseHTTPRequestHandler):
                     if len(option) != 1 or option[0] not in {"true", "false"}:
                         raise ApiError(400, "来源删除选项无效。")
                     return self.output(200, self.app.deletion_preview(preview_match.group(1), option[0] == "true"))
+                insights_read = re.fullmatch(r"/api/cases/(PVR-[0-9a-f]{12})/insights", path)
+                if insights_read:
+                    try:
+                        return self.output(200, {"insights": self.app.auto_breakdown.insights(insights_read.group(1))})
+                    except StoreError as exc:
+                        raise ApiError(404, str(exc))
+                if path == "/api/case-tags/stats":
+                    product = (query.get("product") or [""])[0]
+                    return self.output(200, {"stats": tag_stats(self.app.store, self.app.auto_breakdown.tags.read(),
+                                                                self.app.auto_breakdown._videos(), product), "product": product})
+                auto_read = re.fullmatch(r"/api/cases/(PVR-[0-9a-f]{12})/auto-breakdown", path)
+                if auto_read:
+                    return self.output(200, {"job": self.app.auto_breakdown.status(auto_read.group(1))})
                 if path.startswith("/api/cases/"):
                     return self.output(200, self.app.detail(path.split("/")[-1]))
                 if path.startswith("/media/"):
@@ -1461,14 +2329,20 @@ class Handler(BaseHTTPRequestHandler):
                         return self.file(self.app.thumbnail_path(parts[1], events[0]))
                     file = self.app.asset_path(parts[1], parts[2], query.get("event", [None])[0])
                     return self.file(file, download="download" in query)
-                files = {"/": "index.html", "/app.js": "app.js", "/navigation.js": "navigation.js", "/library.js": "library.js", "/bulk.js": "bulk.js", "/detail.js": "detail.js", "/transcript-sync.js": "transcript-sync.js", "/delete.js": "delete.js", "/directions.js": "directions.js", "/editor.js": "editor.js", "/native.js": "native.js", "/ai.js": "ai.js", "/performance.js": "performance.js", "/perf-dashboard.js": "perf-dashboard.js", "/reviews.js": "reviews.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
+                files = {"/": "index.html", "/app.js": "app.js", "/navigation.js": "navigation.js", "/library.js": "library.js", "/bulk.js": "bulk.js", "/detail.js": "detail.js", "/transcript-sync.js": "transcript-sync.js", "/delete.js": "delete.js", "/directions.js": "directions.js", "/editor.js": "editor.js", "/native.js": "native.js", "/ai.js": "ai.js", "/performance.js": "performance.js", "/perf-dashboard.js": "perf-dashboard.js", "/perf-date-picker.js": "perf-date-picker.js", "/perf-creators.js": "perf-creators.js", "/reviews.js": "reviews.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
                 files.update({"/" + name: name for name in ("shell.js", "shell.css", "settings.js", "settings.css", "global-search.js", "global-search.css", "navigation.css", "library.css", "detail.css", "inline-editor.js", "inline-editor.css", "direction-picker.js", "direction-picker.css", "home.js", "home.css", "material-basket.js", "material-basket.css", "scripts.js", "scripts.css", "production.js", "production.css", "writing.css", "reviews-layout.css", "demo.js")})
+                files.update({"/" + name: name for name in ("review-followups.js", "review-opportunities.js", "review-opportunities.css", "video-publication.js", "video-publication.css", "copy-id.js", "drawer-resize.js", "campaigns.js", "campaigns.css", "prepublish-review.js", "prepublish-review.css", "auto-breakdown.js", "auto-breakdown.css", "content-flow.js", "content-flow.css", "workflow-links.js", "workflow-links.css", "production-needs.js", "production-needs.css", "feedback-chain.js", "feedback-chain.css", "delivery-provenance.js", "delivery-provenance.css")})
+                files.update({"/review-experiences.js": "review-experiences.js", "/review-experiences.css": "review-experiences.css"})
+                files.update({"/index.html": "index.html", "/remote-session.js": "remote-session.js", "/remote-session.css": "remote-session.css",
+                              "/tk-candidates.js": "tk-candidates.js", "/tk-candidates.css": "tk-candidates.css"})
+                files.update({f"/caption-styles/{name}.png": f"caption-styles/{name}.png"
+                              for name in ("yellow_impact", "orange_depth", "red_comic", "lime_pop")})
                 if path in files:
-                    return self.file(APP_ROOT / "static" / files[path], cache=True)
+                    return self.file(APP_ROOT / "static" / files[path], cache=True, immutable=path != "/" and "v" in query)
                 if path in {"/activity.js", "/activity.css"}:
-                    return self.file(APP_ROOT / "static" / path[1:], cache=True)
+                    return self.file(APP_ROOT / "static" / path[1:], cache=True, immutable="v" in query)
                 if path == "/directions.css":
-                    return self.file(APP_ROOT / "static" / "directions.css", cache=True)
+                    return self.file(APP_ROOT / "static" / "directions.css", cache=True, immutable="v" in query)
                 raise ApiError(404, "页面不存在。")
             if self.command == "POST":
                 if path == "/api/upload":
@@ -1476,6 +2350,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.upload(query)
                 carousel_upload = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/upload", path)
                 if carousel_upload:
+                    if self.app.autopilot_running(carousel_upload.group(1)):
+                        raise VoiceError(409, "AI 正在全程制作这组图文，请先停止后再添加图片。")
                     post_body_unread = False  # the upload handler reads or drains its own body.
                     return self.carousel_upload(carousel_upload.group(1), query)
                 if path == "/api/data/import/inspect":
@@ -1497,6 +2373,35 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(400, "提交内容不是有效数据。")
                 if not isinstance(body, dict):
                     raise ApiError(400, "提交内容格式错误。")
+                if path == "/api/remote-account":
+                    with self.app.lock:
+                        return self.output(200, RemoteAccounts(self.app.runtime).save(body))
+                if path == "/api/public-stats/ping":
+                    return self.output(200, {"ok": True, "app": "video-case-workbench"})
+                if path == "/api/public-stats/push":
+                    return self.output(200, self.app.push_public_stats(body))
+                if path == "/api/public-stats/comments":
+                    return self.output(200, self.app.push_public_comments(body))
+                if path == "/api/public-stats/products":
+                    return self.output(200, self.app.extension_products(body))
+                if path == "/api/public-stats/product-brief":
+                    return self.output(200, self.app.extension_product_brief(body))
+                if path == "/api/public-stats/direction-candidates":
+                    return self.output(200, self.app.extension_save_candidates(body))
+                if path == "/api/public-stats/reference-status":
+                    return self.output(200, self.app.extension_reference_status(body))
+                if path == "/api/public-stats/direction-produce":
+                    return self.output(200, self.app.extension_produce_candidate(body))
+                if path == "/api/tk-candidates/produce":
+                    return self.output(200, self.app.tk_candidate_produce(body))
+                if path == "/api/tk-candidates/status":
+                    return self.output(200, self.app.tk_candidate_status(body))
+                if path == "/api/tk-candidates/associate":
+                    return self.output(200, self.app.tk_candidate_associate(body))
+                if path == "/api/public-stats/link/rotate":
+                    if body:
+                        raise ApiError(400, "重置只接受空对象。")
+                    return self.output(200, {"key": self.app.public_stats.rotate_key()})
                 if path == "/api/activity/read":
                     return self.output(200, self.app.activity.read(body))
                 if path == "/api/activity/notify-claim":
@@ -1560,12 +2465,29 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         raise ApiError(400, "截图识别未完成，请重试或按图片手动填写，尚未保存案例。")
                     return self.output(200, draft)
+                if path == "/api/ai/tasks/import":
+                    from workbench_completed_import import import_completed_task
+                    return self.output(200, import_completed_task(self.app, body))
                 if path == "/api/ai/tasks":
                     return self.output(200, {"task": self.app.create_ai_task(body)})
+                if path == "/api/ai/tasks/manage":
+                    return self.output(200, self.app.ai.manage_tasks(body))
+                if path == "/api/content/calendar":
+                    return self.output(200, self.app.set_content_calendar(body))
+                if path == "/api/content/views":
+                    return self.output(200, self.app.save_content_views(body))
+                if path == "/api/campaigns":
+                    return self.output(200, self.app.campaigns.mutate(body))
+                if path == "/api/content/manage":
+                    return self.output(200, self.app.save_content_management(body))
+                if path == "/api/content/delete-archived":
+                    return self.output(200, self.app.delete_archived_content(body))
                 if path == "/api/ai/preferences":
                     return self.output(200, {"preferences": self.app.ai.save_preferences(body)})
                 if path == "/api/scripts":
                     return self.output(200, self.app.save_script(body))
+                if path == "/api/variant-links":
+                    return self.output(200, self.app.save_variant_link(body))
                 script_action = re.fullmatch(r"/api/scripts/(SCR-[0-9a-f]{12})/(status|case)", path)
                 if script_action:
                     identifier, action = script_action.groups()
@@ -1594,26 +2516,37 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.cancel_still_search(*search_cancel.groups()))
                 search_delete = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/searches/(STS-[0-9a-f]{12})/delete", path)
                 if search_delete:
+                    if self.app.autopilot_running(search_delete.group(1)):
+                        raise VoiceError(409, "AI 正在全程制作这组图文，请先停止后再调整素材。")
                     return self.output(200, self.app.delete_still_search(*search_delete.groups(), body))
                 image_cancel = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/generations/(IMG-[0-9a-f]{12})/cancel", path)
                 if image_cancel:
                     return self.output(200, self.app.cancel_image_generation(*image_cancel.groups()))
-                review_cancel = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/reviews/(REV-[0-9a-f]{12})/cancel", path)
+                review_cancel = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/(?:reviews|group-reviews)/((?:REV|GRV)-[0-9a-f]{12})/cancel", path)
                 if review_cancel:
                     return self.output(200, self.app.cancel_image_generation(*review_cancel.groups()))
-                carousel_action = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/(slides|archive|delete|search|clip-picks|base|tidy|import|clip-frame|reveal|import-finished|generate|recheck|select-output|requirements|preflight|approval|delivery|publication)", path)
+                autopilot_cancel = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/autopilot/(AUT-[0-9a-f]{12})/cancel", path)
+                if autopilot_cancel:
+                    return self.output(200, self.app.cancel_carousel_autopilot(*autopilot_cancel.groups(), body))
+                carousel_action = re.fullmatch(r"/api/production/carousels/(CAR-[0-9a-f]{12})/(slides|archive|delete|search|clip-picks|base|tidy|import|compose|clip-frame|reveal|import-finished|generate|recheck|select-output|requirements|preflight|approval|approve-all|delivery|publication|calendar|autopilot|plan|group-review)", path)
                 if carousel_action:
                     identifier, action = carousel_action.groups()
+                    if action not in {"autopilot", "preflight", "calendar"} and self.app.autopilot_running(identifier):
+                        raise VoiceError(409, "AI 正在全程制作这组图文，若要手动调整，请先停止全程制作。")
                     handler = {"slides": self.app.save_carousel_slides, "archive": self.app.archive_carousel,
+                               "autopilot": self.app.start_carousel_autopilot,
                                "delete": self.app.delete_carousel_order, "clip-picks": self.app.ai_pick_clips,
                                "search": self.app.start_still_search, "base": self.app.choose_base, "tidy": self.app.tidy_candidates,
-                               "import": self.app.import_folder_image, "clip-frame": self.app.use_clip_frame,
+                               "import": self.app.import_folder_image, "compose": self.app.compose_candidates, "clip-frame": self.app.use_clip_frame,
                                "reveal": self.app.reveal_clip, "generate": self.app.start_image_generation,
                                "import-finished": self.app.import_finished_images, "recheck": self.app.start_carousel_review,
                                "select-output": self.app.select_carousel_output, "requirements": self.app.save_carousel_requirements,
                                "preflight": self.app.carousel_delivery_preflight,
-                               "approval": self.app.approve_carousel_output, "delivery": self.app.create_carousel_delivery,
-                               "publication": self.app.save_carousel_publication}[action]
+                               "approval": self.app.approve_carousel_output, "approve-all": self.app.approve_carousel_outputs,
+                               "delivery": self.app.create_carousel_delivery,
+                               "publication": self.app.save_carousel_publication, "calendar": self.app.set_carousel_calendar_status,
+                               "plan": self.app.save_carousel_plan,
+                               "group-review": self.app.start_carousel_group_review}[action]
                     return self.output(200, handler(identifier, body))
                 edit_cancel = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/edits/(EDT-[0-9a-f]{12})/cancel", path)
                 if edit_cancel:
@@ -1629,14 +2562,37 @@ class Handler(BaseHTTPRequestHandler):
                     identifier, edit_id, action = edit_action.groups()
                     handler = {"approval": self.app.approve_edit, "baseline": self.app.adopt_edit_baseline}[action]
                     return self.output(200, handler(identifier, edit_id, body))
-                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|archive|delete|timeline|open|edit|handoff|recover)", path)
+                video_carousel = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/video-carousel", path)
+                if video_carousel:
+                    return self.output(200, self.app.start_video_carousel(video_carousel[1], body))
+                prepublish = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/prepublish(?:/(PPR-[0-9a-f]{12})/(findings|cancel))?", path)
+                if prepublish:
+                    identifier, review_id, action = prepublish.groups()
+                    if not review_id:
+                        return self.output(200, self.app.start_prepublish_review(identifier, body))
+                    if action == "cancel":
+                        return self.output(200, self.app.cancel_prepublish_review(identifier, review_id))
+                    return self.output(200, self.app.resolve_prepublish_finding(identifier, review_id, body))
+                video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication(/verify|/calendar)?", path)
+                if video_publication:
+                    handler = {"/verify": self.app.verify_video_publication, "/calendar": self.app.set_video_calendar_status}.get(video_publication[2], self.app.save_video_publication)
+                    return self.output(200, handler(video_publication[1], body))
+                timeline_cancel = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/timeline/cancel", path)
+                if timeline_cancel:
+                    return self.output(200, self.app.cancel_timeline(timeline_cancel.group(1), body))
+                timeline_lifecycle = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/timeline/(archive|task-status)", path)
+                if timeline_lifecycle:
+                    identifier, action = timeline_lifecycle.groups()
+                    handler = self.app.archive_timeline if action == "archive" else self.app.set_timeline_task_status
+                    return self.output(200, handler(identifier, body))
+                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|fill|archive|delete|timeline|open|edit|handoff|recover|completion)", path)
                 if job_action:
                     identifier, action = job_action.groups()
                     handler = {"takes": self.app.generate_take, "select": self.app.select_take,
-                               "lines": self.app.save_job_lines, "archive": self.app.archive_job, "delete": self.app.delete_job_order,
+                               "lines": self.app.save_job_lines, "fill": self.app.fill_production_job, "archive": self.app.archive_job, "delete": self.app.delete_job_order,
                                "timeline": self.app.build_timeline, "open": self.app.open_timeline,
                                "edit": self.app.start_edit, "handoff": self.app.edit_handoff,
-                               "recover": self.app.recover_production_operation}[action]
+                               "recover": self.app.recover_production_operation, "completion": self.app.complete_production_job}[action]
                     return self.output(200, handler(identifier, body))
                 if path == "/api/materials/remove":
                     return self.output(200, self.app.remove_materials(body))
@@ -1648,6 +2604,17 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.save_material_theme(body))
                 if path == "/api/plans":
                     return self.output(200, self.app.save_plan(body))
+                if path == "/api/review-followups":
+                    prior = self.app.review_followups.replay("followup", body)
+                    if prior:
+                        return self.output(200, prior)
+                    if body.get("classification_only") is True:
+                        return self.output(200, self.app.review_followups.save(body, None))
+                    video = next((item for item in self.app.review_videos() if item["video_id"] == body.get("video_id") and
+                                  product_key(item.get("product")) == product_key(body.get("product"))), None)
+                    return self.output(200, self.app.review_followups.save(body, video))
+                if path == "/api/review-experiences":
+                    return self.output(200, self.app.save_review_experience(body))
                 if path == "/api/ai/tasks/delete":
                     return self.output(200, self.app.ai.delete_tasks(body))
                 if path == "/api/ai/claude/login":
@@ -1676,6 +2643,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.performance.sync())
                 if path == "/api/performance/import":
                     return self.output(200, self.app.import_performance_uploads(body))
+                if path == "/api/performance/public-export":
+                    return self.output(200, self.app.export_public_views(body))
                 if path == "/api/reviews/sync":
                     if body:
                         raise ApiError(400, "同步只接受空对象。")
@@ -1695,6 +2664,32 @@ class Handler(BaseHTTPRequestHandler):
                 archive_match = re.fullmatch(r"/api/cases/(PVR-[0-9a-f]{12})/archive", path)
                 if archive_match:
                     return self.output(200, self.app.set_archived(archive_match.group(1), body))
+                if path == "/api/performance/batch-collect":
+                    try:
+                        return self.output(200, {"results": self.app.auto_breakdown.batch_collect(body.get("video_ids"))})
+                    except ValueError as exc:
+                        raise ApiError(400, str(exc))
+                transcribe = re.fullmatch(r"/api/cases/(PVR-[0-9a-f]{12})/transcribe", path)
+                if transcribe:
+                    try:
+                        transcript = transcribe_case(self.app, transcribe.group(1), replace=body.get("replace") is True,
+                                                     translate_only=body.get("translate_only") is True)
+                    except (ValueError, StoreError) as exc:
+                        raise ApiError(400, str(exc))
+                    return self.output(200, transcript)
+                auto_start = re.fullmatch(r"/api/cases/(PVR-[0-9a-f]{12})/auto-breakdown", path)
+                if auto_start:
+                    try:
+                        job = self.app.auto_breakdown.start(auto_start.group(1), video_id=body.get("video_id"), retry=body.get("retry") is True,
+                                                            model=body.get("model"), reasoning_effort=body.get("reasoning_effort"))
+                    except (ValueError, StoreError) as exc:
+                        raise ApiError(400, str(exc))
+                    return self.output(200, {"job": job})
+                if path == "/api/products/catalog":
+                    return self.output(200, self.app.change_product_catalog(body))
+                product_set = re.fullmatch(r"/api/cases/(PVR-[0-9a-f]{12})/product", path)
+                if product_set:
+                    return self.output(200, self.app.set_case_product(product_set.group(1), body.get("product")))
                 if path.startswith("/api/cases/"):
                     return self.output(200, self.app.save(path.split("/")[-1], body))
                 if path == "/api/open":
@@ -1719,11 +2714,11 @@ class Handler(BaseHTTPRequestHandler):
                 except (OSError, ValueError):
                     pass
             self.close_connection = True
-            self.output(exc.status, {"error": str(exc)})
-        except (TransferError, BackupError) as exc:
+            self.output(exc.status, {"error": str(exc), **getattr(exc, "details", {})})
+        except (TransferError, BackupError, RemoteAccountError) as exc:
             self.close_connection = True
             return self.output(exc.status, {"error": str(exc)})
-        except DirectionError as exc:
+        except (DirectionError, CandidateError) as exc:
             return self.output(exc.status, {"error": str(exc)})
         except CreationError as exc:
             return self.output(exc.status, {"error": str(exc)})
@@ -1859,15 +2854,16 @@ class Handler(BaseHTTPRequestHandler):
         return self.output(200, {"path": str(target), "name": raw_name, "bytes": length,
                                  "managed": True, "temporary": True})
 
-    def file(self, path, download=False, cache=False):
+    def file(self, path, download=False, cache=False, immutable=False):
         content = None
         compressed = False
         if cache:
             with self.server.static_lock:
-                key = file_key(path)
+                index = path.name == "index.html"
+                key = (file_key(path), static_signature()) if index else file_key(path)
                 cached = self.server.static_cache.get(path)
                 if cached is None or cached[0] != key:
-                    raw = path.read_bytes()
+                    raw = versioned_index(path.read_bytes()) if index else path.read_bytes()
                     packed = gzip.compress(raw, compresslevel=5, mtime=0) if len(raw) >= 1024 and path.suffix in {".js", ".css", ".html", ".svg"} else None
                     if packed is not None and len(packed) >= len(raw):
                         packed = None
@@ -1879,9 +2875,21 @@ class Handler(BaseHTTPRequestHandler):
             supplied = self.headers.get("If-None-Match", "")
             if any(tag.strip().removeprefix("W/") in {etag, "*"} for tag in supplied.split(",")):
                 self.send_response(304)
-                self.headers_common("private, no-cache")
+                self.headers_common("private, max-age=31536000, immutable" if immutable else "private, no-cache")
                 self.send_header("ETag", etag)
                 self.send_header("Vary", "Accept-Encoding")
+                self.end_headers()
+                return
+        image_tag = None
+        if not cache and not download and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            # Thumbnails and stills keep their bytes once written, so the browser keeps them and only asks
+            # whether they changed; production pages redraw them on every refresh.
+            stat = path.stat()
+            image_tag = f'W/"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
+            if image_tag in {tag.strip() for tag in self.headers.get("If-None-Match", "").split(",")} and not self.headers.get("Range"):
+                self.send_response(304)
+                self.headers_common("private, no-cache")
+                self.send_header("ETag", image_tag)
                 self.end_headers()
                 return
         total = len(content) if content is not None else path.stat().st_size
@@ -1900,7 +2908,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             status = 206
         self.send_response(status)
-        self.headers_common("private, no-cache" if cache else "no-store")
+        self.headers_common("private, max-age=31536000, immutable" if cache and immutable else "private, no-cache" if cache or image_tag else "no-store")
+        if image_tag:
+            self.send_header("ETag", image_tag)
         if cache:
             self.send_header("ETag", etag)
             self.send_header("Vary", "Accept-Encoding")
@@ -1957,20 +2967,38 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
         with self._write_gate:
             return self._shutting_down
 
+    def transfer_operation(self):
+        transfer = getattr(self.app, "data_transfer", None)
+        return getattr(transfer, "operation_kind", None) or ("restore" if self.data_maintenance else None)
+
+    def transfer_busy_error(self):
+        operation = self.transfer_operation()
+        message = {"export": "总数据正在导出，完成后即可继续保存。",
+                   "backup": "总数据正在备份，完成后即可继续保存。",
+                   "restore": "总数据正在导入，完成后将自动恢复。",
+                   "inspect": "备份包正在检查，请稍后重试。"}.get(operation, "总数据操作正在进行，请稍后重试。")
+        return ApiError(409, message, maintenance=True, operation=operation)
+
     def begin_write(self):
         with self._write_gate:
             if self.data_maintenance:
-                raise ApiError(409, "总数据导入、导出或备份正在进行，请完成后再保存或上传。")
+                raise self.transfer_busy_error()
             if self._shutting_down:
                 raise ApiError(409, "工作台正在重新启动，请稍后重试。")
             self._active_writes += 1
             self._request_context.writing = True
+        self._content_write("content_write_started")
 
     def end_write(self):
         with self._write_gate:
             self._active_writes -= 1
             self._request_context.writing = False
             self._write_gate.notify_all()
+        self._content_write("content_write_finished")
+
+    def _content_write(self, event):
+        # Content lists reuse a short-lived snapshot for filter changes; a write in flight ends that reuse.
+        getattr(getattr(self, "app", None), event, lambda: None)()
 
     def begin_data_maintenance(self):
         with self._write_gate:
@@ -1994,6 +3022,8 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
 
     def _activity_blocker(self):
         """Why the service must not stop right now, or None. Never interrupts: running work is only reported."""
+        if getattr(self.app, "autopilot_running", lambda: False)():
+            return "AI 全程图文制作仍在运行，请等它完成或先停止，再重新启动。"
         tasks = self.app.ai.list_tasks()
         if any(task.get("status") in {"queued", "running", "stopping"}
                or task.get("busy") or task.get("stopping") for task in tasks):
@@ -2002,6 +3032,8 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
             return "AI 剪辑仍在运行，请等它结束或先停止，再重新启动。"
         if getattr(self.app, "_voicing_jobs", set()):
             return "配音仍在运行，请等它完成后再重新启动。"
+        if getattr(self.app, "_timeline_building", {}):
+            return "建时间线正在排队或进行，请等它完成或先取消排队，再重新启动。"
         if getattr(self.app, "image_running", lambda: False)():
             return "图文出图仍在运行，请等它结束或先停止，再重新启动。"
         if getattr(self.app, "carousel_table_running", lambda: False)():
@@ -2050,6 +3082,7 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
     def server_close(self):
         if hasattr(self, "app"):
             self.app.data_transfer.close()
+            getattr(self.app, "stop_carousel_autopilots", lambda: None)()
             getattr(self.app, "stop_images", lambda: None)()
             self.app.stop_edits()
             getattr(self.app, "stop_carousel_tables", lambda: None)()

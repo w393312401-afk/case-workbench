@@ -172,7 +172,10 @@ class ServiceShutdownTests(unittest.TestCase):
 
     def test_failed_post_releases_admission_and_ai_check_failure_does_not_lock_service(self):
         self.assertEqual(self.request("POST", "/api/not-a-route", {})[0], 404)
-        self.assertEqual(self.server._active_writes, 0)
+        # The response can reach the client before dispatch's finally runs on
+        # the server thread. Wait for the cleanup notification, not scheduling.
+        with self.server._write_gate:
+            self.assertTrue(self.server._write_gate.wait_for(lambda: self.server._active_writes == 0, timeout=1))
         with patch.object(self.server.app.ai, "list_tasks", side_effect=OSError("fixture read failed")):
             self.assertEqual(self.request("POST", "/api/service/shutdown", {})[0], 500)
         self.assertFalse(self.server.shutting_down)

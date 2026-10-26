@@ -1,0 +1,18 @@
+.remote-account{position:relative;flex-shrink:0;font-size:12px}
+.remote-account>summary{display:flex;align-items:center;gap:7px;min-height:34px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;color:var(--muted);background:var(--surface);cursor:pointer;list-style:none}
+.remote-account>summary::-webkit-details-marker{display:none}
+.remote-account>summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.remote-account-avatar{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:20px;height:20px;border-radius:50%;color:var(--accent);background:var(--surface-tint);font-size:11px;font-weight:600}
+.remote-account-short{max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.remote-account-menu{position:absolute;z-index:100;right:0;top:calc(100% + 8px);display:grid;gap:10px;width:210px;max-width:calc(100vw - 32px);padding:15px;border:1px solid var(--line);border-radius:10px;background:var(--paper);box-shadow:0 8px 30px #00000012;color:var(--ink)}
+.remote-account-menu>span{color:var(--muted-soft);font-size:11px}
+.remote-account-name{margin:0;overflow-wrap:anywhere;font-size:13px}
+.remote-account-menu .remote-account-logout{justify-content:center;min-height:34px;width:100%}
+.remote-account-error{margin:0;color:var(--warn);line-height:1.6}
+@media(max-width:1050px){.remote-account-short{display:none}.remote-account>summary{padding:6px}}
+/* On phones the product picker is fixed at the top left and sized to leave room for the top-bar buttons
+   (writing.css reserves four); the account button is a fifth, 40px plus its 6px gap. */
+@media(max-width:760px){
+  .remote-account>summary{width:40px;height:40px;justify-content:center;padding:0}
+  body:not(.public-text-mode):has(.topbar .remote-account) .sidebar .global-product{width:min(calc(100vw - 251px),220px)}
+}

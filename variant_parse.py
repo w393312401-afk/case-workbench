@@ -14,6 +14,9 @@ import json
 import re
 
 from ai_tasks import SPOKEN_HEADING, VARIANT_LABEL
+from carousel_plan import normalize_plan, slide_fields
+from carousel_lineage import slide_lineage
+from elevenlabs_client import VoiceError
 
 CHINESE_HEADING = re.compile(r"对应中文")
 TABLE_HEADING = re.compile(r"意群表")
@@ -98,6 +101,8 @@ def _strict_variants(text):
         found = VARIANT_LABEL.search(line)
         if found:
             label = found.group(0).strip(" *·・")
+        elif _heading(line):
+            label = _heading(line)
         if SPOKEN_HEADING.search(line):
             block, end = _fence(lines, index)
             if block is not None:
@@ -164,13 +169,16 @@ def _blocks(text):
     lines = str(text or "").splitlines()
     if not _strict_variants(text):
         return ["\n".join(lines[start:end]) for start, end in (variant["span"] for variant in _loose_variants(text))]
-    starts, heads, seen, inside = [], [], set(), False
+    starts, heads, seen, inside, titles = [], [], set(), False, []
     for index, line in enumerate(lines):
         if line.strip().startswith("```"):
             inside = not inside
             continue
         if inside:
             continue
+        # Variants named 版本 A/B/C or headed by a markdown heading carry no 变体 number.
+        if line.strip().startswith("#") or _heading(line):
+            titles.append(index)
         found = VARIANT_LABEL.search(line)
         if found:
             number = re.search(r"\d+", found.group(0)).group(0)
@@ -181,7 +189,9 @@ def _blocks(text):
             heads.append(index)
     spans = []
     for position, head in enumerate(heads):
-        start = max([value for value in starts if value <= head], default=0)
+        previous = heads[position - 1] if position else -1
+        heading = [value for value in titles if previous < value <= head]
+        start = heading[0] if heading else max([value for value in starts if value <= head], default=0)
         if spans and start <= spans[-1][0]:
             start = heads[position - 1] + 1
         spans.append([start, len(lines)])
@@ -212,6 +222,16 @@ def variant_notes(text, index):
     return {"opening": opening, "onscreen": onscreen, "pickups": pickups}
 
 
+def _title_line(stripped):
+    """A variant's own heading or 标题行 (方向编号 · 变体/版本 · 推进结构), shown by the workbench elsewhere."""
+    if SPOKEN_HEADING.search(stripped) or re.fullmatch(r"(?:---+|\*\*\*+)", stripped):
+        return bool(re.fullmatch(r"(?:---+|\*\*\*+)", stripped))
+    if stripped.startswith("#") or _heading(stripped):
+        return True
+    bold = re.fullmatch(r"\*\*([^*]+)\*\*", stripped)
+    return bool(bold and (VARIANT_LABEL.search(bold.group(1)) or LOOSE_VARIANT.search(bold.group(1)) or "·" in bold.group(1)))
+
+
 def variant_script(text, index):
     """Markdown of one variant as written, without its carousel part and without the 意群表 (the job keeps its own)."""
     blocks = _blocks(text)
@@ -231,10 +251,10 @@ def variant_script(text, index):
             position = end + 1
             continue
         if not seen_label and stripped:
-            seen_label = True
-            if VARIANT_LABEL.search(line) and not SPOKEN_HEADING.search(line) and len(stripped) < 80:
+            if _title_line(stripped):
                 position += 1
                 continue
+            seen_label = True
         if stripped.startswith(("**", "#")) and "图文" in stripped:
             break
         if stripped.startswith("|") and "叠字" in stripped:
@@ -253,8 +273,10 @@ def variant_script(text, index):
     return "\n".join(out)
 
 
-CAROUSEL_COLUMNS = (("number", ("张",)), ("role", ("作用",)), ("overlay", ("叠字",)), ("body", ("正文",)),
-                    ("zh", ("中文",)), ("source", ("素材",)), ("forbidden", ("禁写",)))
+CAROUSEL_COLUMNS = (("source_lines", ("原稿意群",)), ("proof_goal", ("本张任务",)),
+                    ("visual_method", ("表达方式",)), ("evidence_requirement", ("画面证据",)),
+                    ("number", ("张",)), ("role", ("作用",)), ("overlay", ("叠字",)), ("body", ("正文",)),
+                    ("zh", ("中文",)), ("source", ("素材",)), ("forbidden", ("禁写",)), ("stage", ("环节",)), ("shot", ("景别",)))
 
 
 def _carousel_table(lines):
@@ -304,9 +326,34 @@ def parse_carousels(text):
             number = item.get("number") if type(item.get("number")) is int else position
             row = (rows or {}).get(number, {})
             lines = [str(line).strip() for line in item.get("title_lines") or [] if str(line).strip()]
+            fields, wrong = slide_fields({"number": number, "stage": item.get("stage") or row.get("stage", ""),
+                                          "shot": item.get("shot") or row.get("shot", "")})
+            problems += wrong
+            lineage = {key: item[key] if key in item else row[key]
+                       for key in ("source_lines", "proof_goal", "visual_method", "evidence_requirement")
+                       if key in item or key in row}
+            # The JSON uses integer arrays; the table may write [1,2] or 1、2. Never
+            # strip signs or guess numbers from prose such as "unknown / group 2".
+            if "source_lines" not in item and isinstance(lineage.get("source_lines"), str):
+                raw = lineage["source_lines"].strip()
+                try:
+                    lineage["source_lines"] = json.loads(raw)
+                except (ValueError, TypeError):
+                    if re.fullmatch(r"[0-9]+(?:\s*[,，、]\s*[0-9]+)*", raw):
+                        lineage["source_lines"] = [int(value) for value in re.split(r"\s*[,，、]\s*", raw)]
+                if type(lineage.get("source_lines")) is int:
+                    lineage["source_lines"] = [lineage["source_lines"]]
+            try:
+                fields.update(slide_lineage(lineage, strict=True))
+            except VoiceError as exc:
+                problems.append(f"第 {number} 张原稿对应无效：{exc}")
+                # Keep the submitted data so creation cannot silently discard an
+                # illegal mapping and treat it as a compatible historical slide.
+                fields.update(lineage)
             slides.append({"number": number, "title_lines": lines, "body": str(item.get("body") or "").strip(),
                            "title_zh": str(item.get("title_zh") or "").strip(), "body_zh": str(item.get("body_zh") or "").strip(),
-                           "role": row.get("role", ""), "source": row.get("source", ""), "forbidden": row.get("forbidden", "")})
+                           "role": row.get("role", ""), "source": row.get("source", ""), "forbidden": row.get("forbidden", ""),
+                           **fields})
         if rows is None:
             problems.append("没有找到逐张表，作用、素材来源和禁写请在制作单里补填。")
         elif sorted(rows) != [slide["number"] for slide in slides]:
@@ -315,7 +362,9 @@ def parse_carousels(text):
             problems.append(f"图文共 {len(slides)} 张，通常是 3–5 张，请核对。")
         if any(not slide["title_lines"] for slide in slides):
             problems.append("有的张没有叠字标题。")
-        found.append({"index": index, "label": label, "slides": slides,
+        plan, wrong = normalize_plan(copy.get("plan"))
+        problems += wrong
+        found.append({"index": index, "label": label, "slides": slides, "plan": plan,
                       "caption_en": str(copy.get("caption_en") or "").strip(), "caption_zh": str(copy.get("caption_zh") or "").strip(),
                       "copy": copy, "problems": problems})
     return found
@@ -439,7 +488,7 @@ def reformat_problems(original, formatted, carousel=False):
 
 # ---- loose pass: candidates that ignored the "口播（配音用）" code-block format ----
 
-LOOSE_VARIANT = re.compile(r"(?:版本|变体|稿|Version|Variant)\s*[#＃]?\s*(?:[A-Za-z](?![A-Za-z])|\d+|[一二三四五六七八九十]+)"
+LOOSE_VARIANT = re.compile(r"(?:版本|变体|发散|稿|Version|Variant)\s*[#＃]?\s*(?:[A-Za-z](?![A-Za-z])|\d+|[一二三四五六七八九十]+)"
                            r"|第\s*(?:\d+|[一二三四五六七八九十]+)\s*(?:条|版|稿)", re.I)
 LOOSE_SPOKEN = re.compile(r"(?:English|英文|口播|配音|Voice\s*-?\s*over|VO|Script|Spoken)"
                           r"(?:\s*(?:口播|稿|文案|正文|版|script|version|text))?(?:\s*[（(][^）)]{0,20}[）)])?", re.I)
@@ -613,3 +662,28 @@ def _loose_variants(text):
                              "loose": f"没有「口播（配音用）」代码块，已按「{heading}」{'段落' if splittable else '代码块'}宽松识别"
                                       f"{'，意群按句拆分' if splittable else ''}；请逐行核对后再配音。"})
     return variants
+
+
+def publish_titles(text, index):
+    """The 🔴 title-and-hashtag lines written for one variant, one copyable line each.
+
+    Each variant's lines sit together under its 发布文案; when the groups line up with the voiced variants the
+    group at the variant's index is it, and a single group belongs to the only variant there is."""
+    groups, current, inside = [], [], False
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            inside = not inside
+            continue
+        if stripped.startswith("🔴"):
+            current.append(stripped)
+        elif stripped and current and not inside:
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+    if len(groups) == 1:
+        return groups[0]
+    if isinstance(index, int) and 0 <= index < len(groups) and len(groups) == len(_blocks(text)):
+        return groups[index]
+    return []

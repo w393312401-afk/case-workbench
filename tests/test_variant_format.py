@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import test_ai_tasks as base
 from variant_parse import (delivery_ready, looks_like_script, parse_carousels, parse_variants, reformat_problems,
-                           variant_notes)
+                           variant_notes, variant_script)
 
 # Shape of a real round (AIT-37ea44f7c61d, 2026-10-09) that ignored the code-block format.
 LOOSE = """# 202H-S2 三个版本(口播候选)
@@ -150,6 +150,68 @@ class LooseParseTests(unittest.TestCase):
         self.assertEqual(found[0]["slides"][0]["title_lines"], ["One kit", "no jig"])
         self.assertEqual(found[0]["slides"][0]["body"], "Open the case.")
         self.assertIn("没有找到图文 JSON", found[0]["problems"][0])
+
+
+# Shape of a real round (AIT-230fa117a95e, 2026-10-15): strict blocks, but variants named 版本 A/B with no 变体 number.
+NAMED = """**核对范围：** 看了 8 帧。
+
+---
+
+## 版本 A｜与原稿一致
+
+**202H-S2 · 版本 A（原稿原样）· 镜面经历 → 下方看 202H**
+
+**开头画面：** 手里转刀。
+
+**口播（配音用）**
+```
+I sharpened every EDC knife.
+Check out the 202H below.
+```
+
+**对应中文**
+```
+我把每把刀都磨了。
+点下面看看。
+```
+
+```
+🔴Mirror Edge#SHARPAL202H #EDC
+```
+
+---
+
+## 版本 B｜口袋刀是不是过头
+
+**202H-S2 · 版本 B · 镜面经历 → 过头吗 → 下方看 202H**
+
+执行变化：换观看问题。
+
+**口播（配音用）**
+```
+Overkill for a pocket knife?
+Maybe.
+```
+
+```
+🔴Overkill#SHARPAL202H
+```
+"""
+
+
+class NamedVariantTests(unittest.TestCase):
+    def test_variants_named_by_version_letter_split_at_their_own_heading(self):
+        found = parse_variants(NAMED)
+        self.assertEqual([item["label"] for item in found], ["版本 A｜与原稿一致", "版本 B｜口袋刀是不是过头"])
+        first, second = variant_script(NAMED, 0), variant_script(NAMED, 1)
+        self.assertTrue(first.startswith("**开头画面：**"), first[:60])
+        self.assertIn("I sharpened every EDC knife.", first)
+        self.assertIn("🔴Mirror Edge", first)
+        self.assertNotIn("版本 B", first)
+        self.assertNotIn("核对范围", first)
+        self.assertTrue(second.startswith("执行变化"), second[:60])
+        self.assertNotIn("I sharpened", second)
+        self.assertIn("🔴Overkill", second)
 
 
 class ReformatCheckTests(unittest.TestCase):

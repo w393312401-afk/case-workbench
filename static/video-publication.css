@@ -1,0 +1,49 @@
+.video-publication-receipt {border:1px solid var(--line);border-radius:12px;padding:16px;margin:16px 0;background:var(--surface);}
+.video-publication-title,.video-publication-actions {display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;}
+.video-publication-receipt p {overflow-wrap:anywhere;}
+.video-publication-receipt dl {display:grid;grid-template-columns:110px minmax(0,1fr);gap:8px;font-size:13px;}
+.video-publication-receipt dt {color:var(--muted);}
+.video-publication-receipt dd {margin:0;overflow-wrap:anywhere;}
+.video-publication-receipt [data-verify-video] {margin-top:12px;}
+.video-publication-editor,.video-publication-history {margin:20px 0;}
+.video-publication-editor summary,.video-publication-history summary {cursor:pointer;font-weight:600;}
+.video-publication-editor form {display:grid;grid-template-columns:minmax(0,1fr);gap:14px;margin-top:14px;}
+.video-publication-confirm {display:flex;align-items:flex-start;gap:8px;line-height:1.6;}
+.video-publication-confirm input {width:auto;flex:0 0 auto;margin-top:5px;}
+.video-publication-warning {color:var(--warm-ink);background:var(--surface-warm);padding:10px;border-radius:6px;}
+.video-publication-actions {justify-content:flex-start;}
+@media(max-width:640px) {.video-publication-receipt dl {grid-template-columns:1fr;}.video-publication-receipt dt {margin-top:8px;}}
+.video-publish-copy {margin:14px 0 18px;}
+.video-publish-copy h4 {font-size:12px;font-weight:600;color:var(--muted);margin:4px 0 8px;}
+.video-publish-copy-actions {display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;}
+.video-publish-copy details {margin-top:10px;font-size:13px;}
+.video-publish-copy details summary {cursor:pointer;color:var(--muted);}
+.video-publish-copy-compact{display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap;margin:12px 0;position:relative;}
+.video-publish-copy-fold{flex:1;min-width:0;font-size:13px;color:var(--muted);}
+.video-publish-copy-fold>summary{cursor:pointer;line-height:1.8;}
+.video-publish-copy-fold .video-publish-copy{margin-top:10px;}
+.video-publish-copy details p {white-space:pre-wrap;line-height:1.7;margin:8px 0 0;overflow-wrap:anywhere;}
+.video-publication-more summary {cursor:pointer;color:var(--muted);font-size:13px;}
+.video-publication-more[open] summary {margin-bottom:12px;}
+.video-publication-editor [data-account-hint] {display:inline;color:var(--success-ink);font-weight:400;margin-left:6px;}
+.video-publication-editor [data-save-status]:empty {display:none;}
+.video-publication-identity {grid-template-columns:minmax(0,1fr);}
+.video-publication-more .video-publication-confirm {margin-top:4px;}
+.video-publication-calendar {display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+@media(max-width:640px) {.video-publication-identity {grid-template-columns:minmax(0,1fr);}}
+
+.video-carousel {border-top:1px solid var(--line);margin-top:20px;padding-top:16px;}
+.video-carousel h3 {display:flex;align-items:center;gap:6px;margin:0 0 10px;font-size:15px;}
+.video-carousel-run {border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 12px;display:grid;gap:6px;}
+.video-carousel-run p {margin:0;overflow-wrap:anywhere;}
+.video-carousel-run.is-done {border-color:color-mix(in srgb,var(--success) 35%,var(--surface));background:var(--surface-success);}
+.video-carousel-run.is-failed {border-color:color-mix(in srgb,var(--warn) 35%,var(--surface));background:var(--surface-warm);}
+.video-carousel-run .primary,.video-carousel-run .secondary {justify-self:start;}
+.video-carousel-run ul {margin:6px 0 0;padding-left:18px;font-size:13px;}
+.video-carousel-form {display:grid;gap:12px;}
+.video-carousel-options {grid-template-columns:minmax(0,1fr) minmax(0,2fr) minmax(0,1fr);}
+.video-carousel-again summary {cursor:pointer;color:var(--muted);font-size:13px;margin-bottom:10px;}
+@media(max-width:640px) {.video-carousel-options {grid-template-columns:1fr;}}
+.video-publication-calendar-date {display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:13px;}
+.video-publication-calendar-date input {width:auto;min-width:0;}
+.video-publication-aside {margin-left:8px;color:var(--muted-soft);font-size:12px;}

@@ -40,7 +40,9 @@ class Runner:
         self.calls.append(request)
         if request["command"] == "status":
             body = {"ok": True, "project": self.project, "timelines": ["蓝点折刀成品素材", "Lab261010-202-1"],
-                    "current_timeline": "Lab261010-202-1", "current_timeline_uid": "uid-own", "current_timecode": "00:00:12:03",
+                    "current_timeline": getattr(self, "timeline", "Lab261010-202-1"),
+                    "current_timeline_uid": getattr(self, "timeline_uid", "uid-own"),
+                    "current_timecode": getattr(self, "timecode", "00:00:12:03"),
                     "version": "21.1.0.14", "fps": "29.97", "width": "1080", "height": "1920"}
         elif request["command"] == "restore" and getattr(self, "restore_error", ""):
             body = {"ok": False, "error": self.restore_error}
@@ -297,22 +299,148 @@ class StillTests(unittest.TestCase):
         self.assertIn("没能恢复播放头位置", search["readback_error"])
         self.assertFalse(self.bench.resolve.busy())
 
-    def test_wrong_project_or_busy_resolve_spends_nothing(self):
+    def test_wrong_project_is_checked_in_worker_before_spending_ai_usage(self):
         self.bench.runner.project = "别的项目"
-        with self.assertRaises(VoiceError) as caught:
-            self.start()
-        self.assertIn("别的项目", str(caught.exception))
-        self.bench.runner.project = "202H"
-        self.bench.resolve.lock.acquire()
-        try:
-            with self.assertRaises(VoiceError):
-                self.start()
-        finally:
-            self.bench.resolve.lock.release()
+        self.start()
+        search = self.wait()["searches"][-1]
+        self.assertEqual(search["status"], "failed")
+        self.assertIn("别的项目", search["error"])
         self.assertEqual(self.searcher.calls, [])
-        self.assertEqual(self.bench.production.carousel(self.item["id"])["searches"], [])
+        self.assertEqual(search["restore"], {})
+        self.assertFalse(any(call["command"] == "restore" for call in self.bench.runner.calls))
+        self.assertFalse(self.bench.resolve.busy())
         with self.assertRaises(VoiceError):
             self.start(slides=[9])
+
+    def hold_resolve(self):
+        occupied, release = threading.Event(), threading.Event()
+
+        def edit():
+            with self.bench.resolve.lock:
+                occupied.set()
+                release.wait(5)
+
+        thread = threading.Thread(target=edit, name="fake-active-edit")
+        thread.start()
+        self.addCleanup(lambda: (release.set(), thread.join(3)))
+        self.assertTrue(occupied.wait(3))
+        return release, thread
+
+    def wait_for_queue(self, search_id):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            live = self.bench.edit_live(search_id)
+            if live and "其他任务完成后自动找底图" in live.get("progress", ""):
+                return
+            time.sleep(.01)
+        self.fail("找底图没有进入达芬奇等待队列")
+
+    def test_busy_edit_accepts_queued_search_and_uses_position_at_admission(self):
+        release, thread = self.hold_resolve()
+        edit_id = "EDT-0123456789ab"
+        self.bench._reserve(edit_id)
+        self.addCleanup(lambda: self.bench._forget(edit_id))
+        self.assertTrue(self.bench.edit_running())
+        started = self.start()["search"]
+        self.wait_for_queue(started["id"])
+        self.assertEqual(started["status"], "running")
+        self.assertEqual(self.searcher.calls, [])
+        self.assertEqual(self.bench.runner.calls, [])
+        # The editor has moved since submission; restore must use the position
+        # read after it releases Resolve, rather than an earlier snapshot.
+        self.bench.runner.timeline, self.bench.runner.timeline_uid = "剪辑完成时间线", "uid-after-edit"
+        self.bench.runner.timecode = "00:01:02:03"
+        self.bench._forget(edit_id)
+        release.set()
+        thread.join(3)
+        search = self.wait()["searches"][-1]
+        self.assertEqual((search["status"], search["added"]), ("completed", 2))
+        self.assertEqual(len(self.searcher.calls), 1)
+        restore = next(call for call in self.bench.runner.calls if call["command"] == "restore")
+        self.assertEqual((restore["unique_id"], restore["timecode"]), ("uid-after-edit", "00:01:02:03"))
+        self.assertEqual(search["restore"]["unique_id"], "uid-after-edit")
+        self.assertFalse(self.bench.resolve.busy())
+
+    def test_queued_search_cancel_does_not_release_the_edit_lock_or_call_resolve(self):
+        release, thread = self.hold_resolve()
+        started = self.start()["search"]
+        self.wait_for_queue(started["id"])
+        self.bench.cancel_still_search(self.item["id"], started["id"])
+        search = self.wait()["searches"][-1]
+        self.assertEqual((search["status"], search["added"]), ("cancelled", 0))
+        self.assertEqual(search["restore"], {})
+        self.assertTrue(self.bench.resolve.busy())
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(self.searcher.calls, [])
+        self.assertEqual(self.bench.runner.calls, [])
+        release.set()
+        thread.join(3)
+        self.assertFalse(self.bench.resolve.busy())
+
+    def test_queued_search_excludes_same_carousel_and_accepts_another_carousel(self):
+        release, thread = self.hold_resolve()
+        first = self.start()["search"]
+        self.wait_for_queue(first["id"])
+        with self.assertRaises(VoiceError) as caught:
+            self.start()
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn("这张图文单", str(caught.exception))
+        other = self.carousel()
+        second = self.bench.start_still_search(other["id"], {"request_id": uuid4().hex,
+            "materials": ["蓝点折刀成品素材"]})["search"]
+        self.wait_for_queue(second["id"])
+        self.assertEqual(self.searcher.calls, [])
+        release.set()
+        thread.join(3)
+        self.wait()
+        self.assertEqual(self.bench.production.carousel(self.item["id"])["searches"][-1]["status"], "completed")
+        self.assertEqual(self.bench.production.carousel(other["id"])["searches"][-1]["status"], "completed")
+        self.assertEqual(len(self.searcher.calls), 2)
+
+    def test_only_same_carousel_image_work_blocks_still_search(self):
+        for method in ("autopilot_running", "_carousel_image_running"):
+            with self.subTest(method=method):
+                with patch.object(self.bench, method, return_value=True, create=True) as running:
+                    with self.assertRaises(VoiceError) as caught:
+                        self.start()
+                    self.assertEqual(caught.exception.status, 409)
+                    running.assert_called_once_with(self.item["id"])
+                with patch.object(self.bench, method, side_effect=lambda owner: owner == "CAR-ffffffffffff", create=True):
+                    self.start()
+                    self.assertEqual(self.wait()["searches"][-1]["status"], "completed")
+
+    def test_queued_search_timeout_is_saved_without_releasing_the_edit_lock(self):
+        release, thread = self.hold_resolve()
+        with patch("workbench_carousel_stills.SEARCH_TIMEOUT", .1):
+            self.start()
+            search = self.wait()["searches"][-1]
+        self.assertEqual((search["status"], search["added"]), ("failed", 0))
+        self.assertTrue(search["error"])
+        self.assertTrue(self.bench.resolve.busy())
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(self.searcher.calls, [])
+        self.assertEqual(self.bench.runner.calls, [])
+        release.set()
+        thread.join(3)
+
+    def test_preparation_or_start_failure_never_releases_another_tasks_lock(self):
+        release, thread = self.hold_resolve()
+        with patch("workbench_carousel_stills.shutil.copytree", side_effect=OSError("资料复制失败")):
+            with self.assertRaises(OSError):
+                self.start()
+        self.assertFalse(self.bench.edit_running())
+        self.assertEqual(self.bench.production.carousel(self.item["id"])["searches"], [])
+        with patch("workbench_carousel_stills.threading.Thread.start", side_effect=RuntimeError("线程未启动")):
+            with self.assertRaises(VoiceError):
+                self.start()
+        self.assertFalse(self.bench.edit_running())
+        self.assertEqual(self.bench.production.carousel(self.item["id"])["searches"][-1]["status"], "failed")
+        self.assertTrue(self.bench.resolve.busy())
+        self.assertTrue(thread.is_alive())
+        self.assertEqual(self.searcher.calls, [])
+        self.assertEqual(self.bench.runner.calls, [])
+        release.set()
+        thread.join(3)
 
     def test_stop_and_restart_are_recorded(self):
         self.searcher.block = True

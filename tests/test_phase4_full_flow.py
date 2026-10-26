@@ -1,12 +1,27 @@
 """The complete direction-to-case workflow, with a fake AI and disposable records."""
 from __future__ import annotations
 
+import json
+import re
+
 import unittest
 from uuid import uuid4
 
 import test_server as fixture
 import test_ai_selection_ui as ai_fixture
 
+
+
+def skip_skills(page):
+    """The skill picker is gone from the UI; the isolated test store has no skill files, so submit with skills off."""
+    def handle(route):
+        request = route.request
+        if request.method != "POST":
+            return route.continue_()
+        body = json.loads(request.post_data or "{}")
+        body["skill_selection"] = "none"
+        route.continue_(post_data=json.dumps(body))
+    page.route(re.compile(r"/api/ai/tasks$"), handle)
 
 class PhaseFourFullFlowTests(unittest.TestCase):
     setUpClass = classmethod(ai_fixture.AISelectionBrowserTests.setUpClass.__func__)
@@ -47,20 +62,21 @@ class PhaseFourFullFlowTests(unittest.TestCase):
         page.wait_for_url("**/directions/202H-S1")
         page.locator("#direction-write").click()
         page.locator("#ai-create-instruction").fill("为临时方向生成一条测试稿。")
-        page.locator("#ai-create-advanced").evaluate("details => { details.open = true; }")  # model and skills are folded
-        page.locator("#ai-create-skills").select_option("none")
+        skip_skills(page)
         page.locator("#submit-ai-create").click()
-        page.get_by_role("button", name="采纳为脚本版本", exact=True).click()
+        page.locator(".ai-candidate-actions .ai-menu summary").first.click()
+        page.get_by_role("menuitem", name="保存采用稿", exact=True).click()
         dialog = page.locator("#script-editor-dialog")
         dialog.locator('[name="title"]').fill("独立方向的第一条脚本")
         dialog.locator('[name="text"]').fill("Set the angle. Follow the guide.")
         dialog.locator('[name="translation_zh"]').fill("先设角度，再跟着导杆磨。")
-        dialog.get_by_role("button", name="核对并采纳", exact=True).click()
+        dialog.get_by_role("button", name="保存采用稿", exact=True).click()
         page.locator("#script-release").click()
         dialog.locator('[name="status"]').select_option("published")
         dialog.locator('[name="video_id"]').fill("7664986913497009442")
         dialog.locator('[name="published_on"]').fill("2026-10-08")
         dialog.get_by_role("button", name="保存进度", exact=True).click()
+        page.locator(".script-facts").get_by_text("7664986913497009442", exact=True).wait_for()
         page.locator("#script-more-actions > summary").click()
         page.locator("#script-case").click()
         dialog.locator('[name="conclusion"]').fill("方向、脚本与发布已登记，销售数据等待导入后观察。")

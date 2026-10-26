@@ -230,7 +230,8 @@ def _restore_historical_baseline(production_root, job, edit, timeline, take):
                 handoff["width"], handoff["height"], handoff["fps"]):
             _refuse("原交接文件与独立建线前配置矛盾。")
         try:
-            candidates = [meaning_markers(old_job, old_take, timeline["fps"], legacy=legacy) for legacy in (False, True)]
+            candidates = [meaning_markers(old_job, old_take, timeline["fps"], legacy=legacy, lead_frames=timeline.get("lead_frames", 0))
+                          for legacy in (False, True)]
         except Exception:
             _refuse("独立配音意群资料无法重建完整标记。")
         candidates = [[{**marker, "color": "Blue", "duration": min(marker["duration"], timeline["frames"] - marker["frame"])}

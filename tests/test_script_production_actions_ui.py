@@ -7,6 +7,7 @@ from uuid import uuid4
 from elevenlabs_client import ElevenLabsClient
 from test_production import FakeEleven
 import test_phase4_writing_ui as writing
+from playwright.sync_api import expect
 
 
 class ScriptProductionActionsBrowserTests(unittest.TestCase):
@@ -38,46 +39,46 @@ class ScriptProductionActionsBrowserTests(unittest.TestCase):
         return {"id": identifier, "script_id": self.script["id"], "product": "202H",
                 "title": "同一条脚本", "status": "draft", "archived": False, **overrides}
 
-    def test_empty_script_offers_both_formats_without_creating_until_confirmation(self):
+    def test_empty_script_offers_video_and_creates_only_after_confirmation(self):
         page = self.detail_page(width=390)
         self.assertEqual(page.locator("#script-production-toggle").inner_text(), "开始制作")
         self.assertFalse(page.locator("#script-produce").is_visible())
         self.assertFalse(page.locator("#script-case").is_visible())
         page.locator("#script-production-toggle").click()
+        expect(page.locator("#script-produce-carousel")).to_have_count(0)
         page.locator("#script-produce").click()
         page.locator(".production-dialog[open]").wait_for()
         self.assertEqual(self.app.production.public()["jobs"], [])
         page.locator('.production-dialog [data-close]').first.click()
-        page.locator("#script-produce-carousel").click()
-        page.locator(".production-dialog[open]").wait_for()
-        self.assertIn("用图文技能生成逐张表", page.locator(".production-dialog").inner_text())
+        page.locator("#script-produce").click()
+        page.locator(".production-dialog[open] [data-submit]").click()
+        page.locator("#job-archive").wait_for(state="attached")
+        jobs = self.app.production.public()["jobs"]
+        self.assertEqual((len(jobs), jobs[0]["script_id"]), (1, self.script["id"]))
         self.assertEqual(self.app.production.public()["carousels"], [])
         self.assertFalse(page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth"))
 
-    def test_carousel_goes_through_the_photo_skill_table_before_a_job_is_created(self):
-        from pathlib import Path
-        from test_ai_tasks import FakeBridge
-        from test_production_carousel_table import TABLE
-        photo = Path(self.app.edit_skill_dir).parent / "tiktok-photo-commerce"
-        (photo / "references").mkdir(parents=True, exist_ok=True)
-        (photo / "SKILL.md").write_text("---\nname: tiktok-photo-commerce\n---\n# 图文", encoding="utf-8")
-        bridge = FakeBridge(output=TABLE)
-        self.app.ai.bridge = bridge
+    def test_existing_carousel_resumes_without_a_new_carousel_entry_or_creation(self):
+        from test_production_carousel import CANDIDATE
+        from variant_parse import carousel_text, parse_carousels
+        source = {"task_id": "AIT-0123456789ab", "round_id": "AIR-0123456789ab", "task_revision": 1,
+                  "product": "202H", "case_id": None, "candidate_text": CANDIDATE,
+                  "candidate_sha256": "x", "snapshot": {}}
+        self.script = self.app.creation.mutate("script", {"request_id": uuid4().hex,
+            "revision": self.app.creation.current_revision(), "script": {"product": "202H", "title": "已有图文",
+            "text": carousel_text(parse_carousels(CANDIDATE)[0]), "confirmed": True}}, source)["script"]
+        carousel = self.app.create_carousel({"request_id": uuid4().hex,
+            "revision": self.app.production.current_revision(), "carousel": {"script_id": self.script["id"]}})["carousel"]
         page = self.detail_page()
+        expect(page.locator("#script-production-toggle")).to_have_text("继续制作")
         page.locator("#script-production-toggle").click()
-        page.locator("#script-produce-carousel").click()
-        page.locator(".production-dialog[open] [data-submit]").click()
-        page.get_by_text("核对图文逐张表").wait_for(timeout=15000)
-        self.assertEqual(self.app.production.public()["carousels"], [])
-        self.assertEqual([item["name"] for item in bridge.calls[-1]["skills"]], ["tiktok-photo-commerce"])
-        self.assertIn("Hook 1", page.locator(".production-dialog").inner_text())
-        page.locator(".production-dialog[open] [data-submit]").click()
-        for _ in range(150):
-            if self.app.production.public()["carousels"]:
-                break
-            page.wait_for_timeout(100)
+        expect(page.locator("#script-produce-carousel")).to_have_count(0)
+        page.locator(".script-production-link").click()
+        page.locator("#carousel-archive").wait_for(state="attached")
+        self.assertEqual(page.evaluate("location.hash"), f'#/202H/production/{carousel["id"]}')
         carousels = self.app.production.public()["carousels"]
         self.assertEqual((len(carousels), carousels[0]["script_id"]), (1, self.script["id"]))
+        self.assertEqual(self.app.production.public()["jobs"], [])
 
     def test_multiple_jobs_only_offer_exact_active_script_links_and_explicit_new_version(self):
         listing = {"jobs": [self.item("PRD-111111111111", status="awaiting_review"),
@@ -98,7 +99,7 @@ class ScriptProductionActionsBrowserTests(unittest.TestCase):
         self.assertFalse(page.locator("#script-produce").is_visible())
         page.locator(".script-production-new > summary").click()
         self.assertTrue(page.locator("#script-produce").is_visible())
-        self.assertTrue(page.locator("#script-produce-carousel").is_visible())
+        expect(page.locator("#script-produce-carousel")).to_have_count(0)
         self.assertFalse(page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth"))
         self.assertEqual(self.app.production.public()["jobs"], [])
 
@@ -130,9 +131,13 @@ class ScriptProductionActionsBrowserTests(unittest.TestCase):
             "revision": self.app.production.public()["revision"],
             "job": {"script_id": self.script["id"]}})["job"]
         page = self.detail_page()
+        # With an order, the video ID is registered in its publish step; the script page points there.
+        release = page.locator("#script-release")
+        expect(release).to_have_text("去制作单登记发布")
+        page.locator("#script-release-manual").wait_for()
         page.locator("#script-production-toggle").click()
         page.locator(".script-production-link").click()
-        page.locator("#job-archive").wait_for()
+        page.locator("#job-archive").wait_for(state="attached")
         self.assertEqual(page.evaluate("location.hash"), f'#/202H/production/{job["id"]}')
         self.assertEqual(len(self.app.production.public()["jobs"]), 1)
 

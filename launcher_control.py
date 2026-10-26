@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 import zipfile
+from app_config import load_config
 
 ROOT = Path(__file__).resolve().parent
 ACTIVE_TASKS = {"queued", "running", "stopping"}
@@ -192,7 +193,7 @@ def read_existing_service(url, phase, timeout):
     except (TimeoutError, urllib.error.URLError) as error:
         timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
         reason = "超时" if timed_out else "失败"
-        raise RuntimeError(f"{phase}{reason}，尚未关闭旧服务。请稍后重新双击案例工作台。") from error
+        raise RuntimeError(f"{phase}{reason}，尚未关闭旧服务。请稍后重新双击TK工作台。") from error
 
 
 def wait_for_process_exit(process):
@@ -347,7 +348,7 @@ def restart(root, config, no_browser=False):
             except (TimeoutError, urllib.error.URLError) as error:
                 timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
                 reason = "超时" if timed_out else "失败"
-                raise RuntimeError(f"等待旧服务关闭{reason}，尚未启动新实例。请稍后重新双击案例工作台。") from error
+                raise RuntimeError(f"等待旧服务关闭{reason}，尚未启动新实例。请稍后重新双击TK工作台。") from error
             if not result.get("ok"):
                 raise RuntimeError("服务未确认关闭，尚未启动第二个实例。")
             wait_for_process_exit(processes[0])
@@ -376,7 +377,7 @@ def restart(root, config, no_browser=False):
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
-    config = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+    config = load_config(ROOT)
     if "--inspect" in args:
         print(json.dumps(matching_processes(ROOT, config), ensure_ascii=True))
         return 0
@@ -392,5 +393,5 @@ def desktop_main():
     except Exception as error:
         with (ROOT / "launcher-error.log").open("a", encoding="utf-8") as log:
             log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {error}\n{traceback.format_exc()}\n")
-        ctypes.windll.user32.MessageBoxW(0, str(error), "案例工作台", 0x10)
+        ctypes.windll.user32.MessageBoxW(0, str(error), "TK工作台", 0x10)
         return 1

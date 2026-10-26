@@ -143,7 +143,11 @@ class CreationHTTPTests(unittest.TestCase):
         catalog = self.server.app.direction_catalog("202H")
         self.server.app.save_direction_catalog("direction", {"revision": catalog["revision"], "request_id": uuid4().hex,
             "direction": {"product": "202H", "direction_id": direction["direction_id"], "selling_point_id": direction["selling_point_id"],
-                          "progression": "逐件对照", "concern": "旧夹具换成 S1", "closing": "核对挂车款", "execution_change": "逐件替换"}})
+                          "progression": "逐件对照", "concern": "旧夹具换成 S1", "closing": "核对挂车款", "execution_change": "逐件替换",
+                          "audience": "已有夹具和多块磨石的人"}})
+        catalog = self.server.app.direction_catalog("202H")
+        self.server.app.save_direction_catalog("direction", {"revision": catalog["revision"], "request_id": uuid4().hex, "operation": "update",
+            "direction": {**catalog["directions"][0], "audience": "守不住角度的徒手磨石用户"}})
         variants = self.server.app.direction_catalog("202H")["directions"][0]["variants"]
         self.assertEqual(len(variants), 2)
         sample = "\n".join(["**202H-S1 · 变体 #1 基准**", "", "**口播（配音用）**", "", "```", "One kit, replacing this jig.",
@@ -178,6 +182,8 @@ class CreationHTTPTests(unittest.TestCase):
         plan = task["context"]["writing_plan"]
         self.assertEqual([item["number"] for item in plan["variants"]], [1, 2])
         self.assertEqual(plan["variants"][1]["execution_change"], "逐件替换")
+        self.assertEqual([(item.get("audience"), item.get("audience_source")) for item in plan["variants"]],
+                         [("守不住角度的徒手磨石用户", "direction"), ("已有夹具和多块磨石的人", "variant")])
         self.assertEqual((plan["new_variant_count"], plan["used_progressions"]), (1, ["逐件对照"]))
         self.assertEqual(task["rounds"][0]["instruction"], "按所选 2 条已登记变体（#1、#2）各写一条，另提出 1 条建议新增变体。")
         self.assertNotIn("carousel", task["context"])
@@ -189,6 +195,48 @@ class CreationHTTPTests(unittest.TestCase):
         self.assertNotIn("简明原生度评分", prompt)
         self.assertIn("每条变体各写一条候选", prompt)
         self.assertIn("以主打卖点为准修正那一环", prompt)
+        self.assertIn("开头按该条的目标人群 audience 圈人", prompt)
+        self.assertIn("复核时逐条核对开头圈人", prompt)
+        # Opening, middle and closing rules live in the writing skill; the prompt only points to them.
+        self.assertIn("按已加载写作参考“开头、中段与收口”执行", bridge.calls[0]["prompt"])
+        self.assertNotIn("让步句之后至少隔一句", bridge.calls[0]["prompt"])
+        self.assertEqual(self.request("POST", "/api/ai/tasks", body)[2]["task"]["task_id"], task["task_id"])
+
+    def test_case_diverge_mode_freezes_count_and_carries_the_breakdown(self):
+        direction = self.direction()
+        catalog = self.server.app.direction_catalog("202H")
+        self.server.app.save_direction_catalog("direction", {"revision": catalog["revision"], "request_id": uuid4().hex,
+            "direction": {"product": "202H", "direction_id": direction["direction_id"], "selling_point_id": direction["selling_point_id"],
+                          "progression": "逐件对照", "concern": "旧夹具换成 S1", "closing": "核对挂车款", "execution_change": "逐件替换"}})
+        bridge = FakeBridge(output="**发散 #1 · 结果倒叙**")
+        self.server.app.ai.bridge = bridge
+        detail = self.detail()
+        base = {"case_id": self.identifier, "revision": detail["revision"], "action": "variants", "skill_selection": "none",
+                "direction_id": direction["direction_id"]}
+        for extra, code in [({"writing_mode": {"mode": "other"}}, 400), ({"writing_mode": {"mode": "diverge", "count": 0}}, 400),
+                            ({"writing_mode": {"mode": "diverge", "count": 6}}, 400),
+                            ({"writing_mode": {"mode": "diverge"}, "action": "review", "instruction": "看看"}, 400),
+                            ({"writing_mode": {"mode": "diverge"}, "variants": [{"index": 1, "progression": "逐件对照"}]}, 400)]:
+            status, _, data = self.request("POST", "/api/ai/tasks", {**base, "request_id": uuid4().hex, **extra})
+            self.assertEqual(status, code, (extra, data))
+        blank = {"product": "202H", "action": "variants", "skill_selection": "none", "writing_mode": {"mode": "diverge"}}
+        self.assertEqual(self.request("POST", "/api/ai/tasks", {**blank, "request_id": uuid4().hex})[0], 400)
+        body = {**base, "request_id": uuid4().hex, "instruction": "", "writing_mode": {"mode": "diverge", "count": 2}}
+        status, _, data = self.request("POST", "/api/ai/tasks", body)
+        self.assertEqual(status, 200, data)
+        task = data["task"]
+        deadline = time.monotonic() + 4
+        while task["busy"] and time.monotonic() < deadline:
+            time.sleep(.02)
+            task = self.server.app.ai.get(task["task_id"])
+        mode = task["context"]["writing_mode"]
+        self.assertEqual((mode["mode"], mode["count"], mode["used_progressions"]), ("diverge", 2, ["逐件对照"]))
+        self.assertEqual(task["rounds"][0]["instruction"], "以原稿为底发散 2 条新稿：保留原稿主打卖点和有效原话，每条换一种推进结构。")
+        prompt = bridge.calls[0]["prompt"]
+        self.assertIn("原稿发散", prompt)
+        self.assertIn("推进结构两两不同", prompt)
+        self.assertIn("<untrusted_case_breakdown>", prompt)
+        self.assertIn("原稿形式是写稿底线", prompt)
         self.assertEqual(self.request("POST", "/api/ai/tasks", body)[2]["task"]["task_id"], task["task_id"])
 
     def test_plans_and_source_material_expressions_are_checked(self):

@@ -214,7 +214,7 @@ class LauncherTests(unittest.TestCase):
              patch.object(LAUNCHER, "windows_kernel", return_value=kernel), \
              patch.object(LAUNCHER, "restart") as restart:
             self.assertEqual(LAUNCHER.main(["--no-browser"]), 0)
-        restart.assert_called_once_with(self.root, self.config, no_browser=True)
+        restart.assert_called_once_with(self.root, {**self.config, "performance_sources": []}, no_browser=True)
 
     def test_unknown_port_owner_is_never_killed_and_no_service_is_spawned(self):
         with ExitStack() as stack:

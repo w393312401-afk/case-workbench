@@ -10,6 +10,8 @@ from codex_bridge import BridgeError
 from codex_stills_bridge import CodexStillsBridge, STILLS_TIMEOUT, _JobFiles, _file_specs
 
 EDIT_TIMEOUT = 150 * 60
+PLANNER_TIMEOUT = 30 * 60
+PLANNER_FILE_TOOLS = {"Read", "Glob", "Grep"}
 
 
 class CodexEditBridge(CodexStillsBridge):
@@ -73,3 +75,52 @@ class CodexEditBridge(CodexStillsBridge):
             # Keep the inherited cancellation/unavailability exception type,
             # while describing the editing task rather than a still search.
             raise type(exc)(str(exc).replace("找底图", "剪辑").replace("本次分析", "本次剪辑")) from None
+
+
+class CodexEditPlannerBridge(CodexEditBridge):
+    """Independent read-only planning sessions; no session receives Resolve tools.
+
+    The caller supplies the candidate snapshot and task in ``prompt`` and stores
+    the returned text. Concurrent calls own separate App Server processes, file
+    relays, cancellation scopes and model contexts.
+    """
+    TASK_NAME = "剪辑选材分析"
+    READ_ONLY_ANALYSIS = True
+    TASK_RULES = (
+        "\n只根据本次提供的交接内容、候选资料和任务目录内已有静帧进行剪辑选材分析。"
+        "只使用 Read、Glob、Grep 和 view_image；所有文件均只读。"
+        "view_image 仅查看本次任务目录内已有图片，不导出或生成静帧。"
+        "不连接或操作达芬奇，不修改时间线、文件或项目，不保存分析结果文件。"
+        "不联网、不生图、不执行系统命令、不操作界面，不创建其他会话或任务。"
+        "直接返回分析文本，由工作台汇总后交给唯一的剪辑执行者。"
+    )
+
+    def __init__(self, executable=None, *, timeout=PLANNER_TIMEOUT, startup_timeout=45, popen_factory=None):
+        super().__init__(executable, timeout=timeout, startup_timeout=startup_timeout, popen_factory=popen_factory)
+
+    @staticmethod
+    def _profile(profile):
+        if profile is None:
+            profile = {}
+        if not isinstance(profile, dict):
+            raise BridgeError("剪辑选材分析配置无效。")
+        if profile.get("mcp") not in (None, {}) or profile.get("dirs"):
+            raise BridgeError("剪辑选材分析不能连接达芬奇或增加可写目录。")
+        allowed, denied = profile.get("allowed", sorted(PLANNER_FILE_TOOLS)), profile.get("denied", [])
+        if (not isinstance(allowed, list) or not isinstance(denied, list)
+                or any(not isinstance(name, str) for name in allowed + denied)
+                or not set(allowed) <= PLANNER_FILE_TOOLS):
+            raise BridgeError("剪辑选材分析仅允许读取和检索本次任务文件。")
+        rules = profile.get("rules", "")
+        if not isinstance(rules, str) or len(rules) > 16000:
+            raise BridgeError("剪辑选材分析规则无效。")
+        timeout = profile.get("timeout", PLANNER_TIMEOUT)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= PLANNER_TIMEOUT:
+            raise BridgeError("剪辑选材分析时限无效。")
+        return {"files": set(allowed) - set(denied), "rules": rules, "timeout": timeout}
+
+    def _file_tools(self, settings):
+        specs = _file_specs(settings["files"])
+        for spec in specs:
+            spec["description"] = "只读取或检索本次剪辑任务目录内已有资料和图片；不写文件、不连接达芬奇、不执行命令或联网。"
+        return specs

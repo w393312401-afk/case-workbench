@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -32,7 +33,7 @@ class ExportBuildTests(unittest.TestCase):
         static = self.root / "static"
         static.mkdir()
         (static / "index.html").write_text(
-            '<html><head><title>案例工作台 · 视频参考库</title>'
+            '<html><head><title>TK工作台</title>'
             '<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
             '</head><body>文字</body></html>', encoding="utf-8")
         (static / "app.js").write_text("function productFilterGroup(item) { return item.product; }", encoding="utf-8")
@@ -108,6 +109,66 @@ class ExportBuildTests(unittest.TestCase):
         self.build(changed)
         self.assertNotEqual(second, self.manifest()["meta"]["content_revision"])
 
+    def test_product_catalog_is_authoritative_without_removing_any_cases(self):
+        bundle = self.bundle(second_case=True)
+        original_cases = copy.deepcopy(bundle["cases"])
+        for visible in (["198H"], []):
+            with self.subTest(products=visible):
+                bundle["product_catalog"] = {"products": visible, "removed": ["hidden product"], "deleted": ["202H"]}
+                self.build(copy.deepcopy(bundle))
+                manifest = self.manifest()
+                self.assertEqual(manifest["products"], visible)
+                self.assertEqual(manifest["product_catalog"], bundle["product_catalog"])
+                self.assertEqual(manifest["state"]["cases"], bundle["state"]["cases"])
+                saved = json.loads((self.site.parent / "text-snapshot.json").read_text(encoding="utf-8"))
+                self.assertEqual(saved["product_catalog"], bundle["product_catalog"])
+                self.assertEqual(saved["cases"], original_cases)
+                for identifier, case in original_cases.items():
+                    fragment = json.loads((self.site / "data" / f"case-{identifier}.json").read_text(encoding="utf-8"))
+                    self.assertEqual(fragment["cases"][identifier], case)
+
+    def test_export_reads_catalog_and_rejects_catalog_changes_during_export(self):
+        bundle = self.bundle()
+        responses = {
+            "/api/state": bundle["state"], "/api/products": {"products": [], "removed": [], "deleted": ["202H"]},
+            "/api/reviews/summary": {}, "/api/reviews/picks": {"picks": []}, "/api/reviews/tag-edits": {"edits": []},
+            "/api/performance/summary": {}, "/api/performance/analytics": {}, "/api/performance/videos": {"videos": []},
+            "/api/direction-catalog": bundle["direction_catalog"], "/api/directions": bundle["directions"],
+            "/api/directions?archive=all": bundle["directions_all"],
+            "/api/creation": {**bundle["creation"], "revision": "creation-1"}, "/api/materials": bundle["materials"],
+            "/api/ai/tasks": {"tasks": []}, "/api/review-followups": {"entries": [], "revision": "followups-1"},
+            "/api/cases/" + CASE_A: bundle["cases"][CASE_A],
+        }
+        for changing in (False, True):
+            with self.subTest(changing_catalog=changing):
+                catalog_reads = []
+                def read(url, **unused):
+                    path = url.removeprefix("http://fixture")
+                    result = responses.get(path)
+                    if path.startswith("/api/reviews?"):
+                        result = {"reviews": [], "total": 0}
+                    if path == "/api/products":
+                        catalog_reads.append(path)
+                        if changing and len(catalog_reads) > 1:
+                            result = {"products": ["202H"], "removed": [], "deleted": []}
+                    if result is None:
+                        raise AssertionError("Unexpected fixture request: " + path)
+                    return io.BytesIO(json.dumps(result).encode("utf-8"))
+                with patch.object(exporter, "urlopen", side_effect=read), patch.object(exporter, "video_details", return_value={}), \
+                        patch.object(exporter, "build_site") as build:
+                    if changing:
+                        with self.assertRaisesRegex(RuntimeError, "导出期间"):
+                            exporter.export("http://fixture")
+                        build.assert_not_called()
+                    else:
+                        exporter.export("http://fixture")
+                        exported = build.call_args.args[0]
+                        self.assertEqual(exported["product_catalog"], responses["/api/products"])
+                        self.assertEqual(set(exported["cases"]), {CASE_A})
+                        self.assertEqual({key: exported["cases"][CASE_A][key] for key in bundle["cases"][CASE_A]},
+                                         bundle["cases"][CASE_A])
+                self.assertEqual(len(catalog_reads), 2)
+
     def test_deleted_cases_and_stale_media_are_absent_from_the_next_site_and_zip(self):
         self.build(self.bundle(second_case=True))
         self.assertTrue((self.site / "data" / f"case-{CASE_B}.json").exists())
@@ -160,6 +221,42 @@ class ExportBuildTests(unittest.TestCase):
         serialized = json.dumps(cleaned, ensure_ascii=False)
         for omitted in ("test@example.com", "C:/Users", "photo.jpg", "x" * 24, "output_path"):
             self.assertNotIn(omitted, serialized)
+
+    def test_sales_details_use_real_normalization_without_persistent_database_changes(self):
+        from performance_store import PerformanceStore, SCHEMA
+
+        runtime = self.root / "runtime"
+        database = runtime / "performance" / "performance.sqlite"
+        database.parent.mkdir(parents=True)
+        (self.root / "config.json").write_text(json.dumps({"runtime_root": str(runtime)}), encoding="utf-8")
+        video_id = "7600000000000000001"
+        connection = sqlite3.connect(database)
+        try:
+            connection.executescript(SCHEMA)
+            connection.executemany(
+                "INSERT INTO periods (video_id, range_start, range_end, span_days, views, clicks, orders, items, gmv, source_file) VALUES (?, ?, ?, 7, ?, ?, ?, ?, ?, ?)",
+                [(video_id, "2026-09-01", "2026-09-07", 700, 70, 7, 7, 70, "older.xlsx"),
+                 (video_id, "2026-09-05", "2026-09-11", 900, 90, 9, 9, 90, "newer.xlsx")])
+            connection.executemany(
+                "INSERT INTO daily (video_id, date, views, clicks, orders, items, gmv, source_file) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(video_id, "2026-09-06", 999999, 999, 99, 99, 999, "covered.xlsx"),
+                 (video_id, "2026-09-12", 50, 5, 1, 1, 5, "outside.xlsx")])
+            connection.commit()
+        finally:
+            connection.close()
+        before = {file.name: file.read_bytes() for file in database.parent.iterdir()}
+        videos = [{"video_id": video_id, "status": "focus", "window_views": 950, "gmv": 95}]
+        with patch.object(PerformanceStore, "connect", side_effect=AssertionError("Exporter must use its read-only connection")), \
+                patch.object(exporter.sqlite3, "connect", wraps=sqlite3.connect) as connect:
+            details = exporter.video_details(videos)
+        connect.assert_called_once_with(database.as_uri() + "?mode=ro", uri=True)
+        self.assertEqual(details[video_id]["series"], [
+            {"start": "2026-09-05", "end": "2026-09-11", "views": 900.0, "clicks": 90.0, "orders": 9.0, "items": 9.0, "gmv": 90.0},
+            {"start": "2026-09-12", "end": "2026-09-12", "views": 50.0, "clicks": 5.0, "orders": 1.0, "items": 1.0, "gmv": 5.0},
+        ])
+        self.assertEqual(details[video_id]["judged_videos"], 1)
+        self.assertEqual(details[video_id]["gmv_top_pct"], 100)
+        self.assertEqual(before, {file.name: file.read_bytes() for file in database.parent.iterdir()})
 
     def test_final_artifact_commit_failure_preserves_the_entire_previous_publication(self):
         self.build(self.bundle())

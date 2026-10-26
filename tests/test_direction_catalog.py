@@ -298,6 +298,10 @@ class DirectionRuleTests(unittest.TestCase):
     request = fixture.WorkbenchHTTPTests.request
     catalog = DirectionCatalogTests.catalog
     mutate = DirectionCatalogTests.mutate
+    setup_direction = DirectionCatalogTests.setup_direction
+    detail = fixture.WorkbenchHTTPTests.detail
+    body = fixture.WorkbenchHTTPTests.body
+    save = fixture.WorkbenchHTTPTests.save
 
     def created(self, code="S1", **extra):
         install_points(self.skill)
@@ -350,6 +354,103 @@ class DirectionRuleTests(unittest.TestCase):
         other = next(item for item in self.catalog()["selling_points"] if item["code"] == "S2")
         self.assertFalse(other["grading_mismatch"])
         self.assertIsNone(other["performance"])
+
+    def test_point_delete_is_blocked_while_used_and_not_reimported(self):
+        source = self.skill / "references" / "products" / "202H-selling-point-grading.md"
+        catalog = self.setup_direction("S1")
+        points = {item["code"]: item for item in catalog["selling_points"]}
+        delete = lambda point: self.mutate("/api/selling-points", operation="delete", point={"id": point["id"], "product": "202H"})
+        status, _, result = delete(points["S1"])
+        self.assertEqual(status, 409, result)
+        self.assertIn("202H-S1", result["error"])
+        self.assertEqual(self.mutate("/api/selling-points", point={**points["A3"], "status": "merged", "merged_into": "A1"})[0], 200)
+        status, _, result = delete(points["A1"])
+        self.assertEqual(status, 409, result)
+        self.assertIn("A3 并入了它", result["error"])
+        status, _, result = delete(points["B5"])
+        self.assertEqual(status, 200, result)
+        self.assertNotIn("B5", {item["code"] for item in self.catalog()["selling_points"]})
+        source.write_text(source.read_text(encoding="utf-8") + "\n分级表后来又改过。\n", encoding="utf-8")
+        catalog = self.catalog()
+        self.assertNotIn("B5", {item["code"] for item in catalog["selling_points"]})
+        self.assertEqual([item["code"] for item in catalog["migration"]["deleted_points"]], ["B5"])
+        self.assertEqual(delete(points["B5"])[0], 404)
+        status, _, result = self.mutate("/api/selling-points", point={"product": "202H", "code": "B5", "title": "重新写的 B5", "status": "testing"})
+        self.assertEqual(status, 200, result)
+        self.assertNotEqual(result["point"]["id"], points["B5"]["id"])
+
+    def test_renumbered_point_carries_references_and_keeps_direction_id(self):
+        source = self.skill / "references" / "products" / "202H-selling-point-grading.md"
+        catalog = self.setup_direction("S1")
+        points = {item["code"]: item for item in catalog["selling_points"]}
+        entity = catalog["directions"][0]
+        self.assertEqual(self.mutate("/api/selling-points", point={**points["B1"], "same_fact_as": ["A2"]})[0], 200)
+        self.assertEqual(self.mutate("/api/selling-points", point={**points["A3"], "status": "merged", "merged_into": "A2"})[0], 200)
+        status, _, result = self.mutate("/api/direction-catalog", operation="update", direction={**entity, "concern": "装夹麻烦吗 → A2 双夹；A1 不受影响"})
+        self.assertEqual(status, 200, result)
+        status, _, result = self.mutate("/api/selling-points", point={**points["A2"], "code": "s5", "tier": "S"})
+        self.assertEqual(status, 200, result)
+        self.assertEqual((result["point"]["id"], result["point"]["code"], result["point"]["tier"], result["point"]["former_codes"]),
+                         (points["A2"]["id"], "S5", "S", ["A2"]))
+        catalog = self.catalog()
+        renamed = {item["code"]: item for item in catalog["selling_points"]}
+        self.assertEqual(renamed["B1"]["same_fact_as"], ["S5"])
+        self.assertEqual(renamed["A3"]["merged_into"], "S5")
+        entity = catalog["directions"][0]
+        self.assertEqual(entity["concern"], "装夹麻烦吗 → S5 双夹；A1 不受影响")
+        self.assertIn("A2 改为 S5", entity["history"][-1]["reason"])
+        for code in ("A2", "S1"):
+            with self.subTest(code=code):
+                status, _, result = self.mutate("/api/selling-points", point={"product": "202H", "code": code, "title": "占用旧编号", "status": "testing"})
+                self.assertEqual(status, 409, result)
+        status, _, result = self.mutate("/api/selling-points", point={**renamed["S1"], "code": "S8"})
+        self.assertEqual(status, 200, result)
+        entity = next(item for item in self.catalog()["directions"] if item["selling_point_id"] == points["S1"]["id"])
+        self.assertEqual(entity["direction_id"], "202H-S1")
+        self.assertTrue(entity["main_difference"].startswith("S8 "))
+        self.assertEqual(entity["chain_issues"], [])
+        status, _, result = self.mutate("/api/direction-catalog", operation="update", direction={**entity, "closing": "改号后仍能编辑方向"})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.save(self.body(self.detail()))[0], 200)
+        source.write_text(source.read_text(encoding="utf-8") + "\n分级表后来又改过。\n", encoding="utf-8")
+        codes = [item["code"] for item in self.catalog()["selling_points"]]
+        self.assertNotIn("A2", codes)
+        self.assertNotIn("S1", codes)
+        self.assertEqual(len(codes), 12)
+
+    def test_point_status_same_fact_and_audience(self):
+        path = install_points(self.skill)
+        content = path.read_text(encoding="utf-8").replace("| 编号 | 卖点 | 为什么是这一级 | 依据状态 |\n|---|---|---|---|\n| S1", "| 编号 | 卖点 | 为什么是这一级 | 依据状态 | 状态 |\n|---|---|---|---|---|\n| S1", 1)
+        content = content.replace("| S3 | S3的独立购买理由 | S3的分级用途 | S3的证据边界 |", "| S3 | S3的独立购买理由 | S3的分级用途 | S3的证据边界 | 待核候选 |")
+        path.write_text(content, encoding="utf-8")
+        points = {item["code"]: item for item in self.catalog()["selling_points"]}
+        self.assertEqual(points["S3"]["status"], "candidate")
+        self.assertEqual(points["S1"]["status"], "testing")
+        self.assertFalse(points["S3"]["grading_mismatch"])
+        new = {"product": "202H", "code": "S7", "title": "坏刀修回来"}
+        self.assertEqual(self.mutate("/api/selling-points", point={**new, "status": "verified"})[0], 400)
+        status, _, result = self.mutate("/api/selling-points", point={**new, "status": "candidate", "same_fact_as": ["S2"]})
+        self.assertEqual(status, 400, result)
+        self.assertIn("目标人群", result["error"])
+        status, _, result = self.mutate("/api/selling-points", point={**new, "status": "candidate", "same_fact_as": ["S2"], "motive_difference": "S2 讲多精，S7 讲能不能修"})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.mutate("/api/selling-points", point={**points["S3"], "status": "merged", "merged_into": "S98"})[0], 400)
+        status, _, result = self.mutate("/api/selling-points", point={**points["S3"], "status": "merged", "merged_into": "a1"})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["point"]["merged_into"], "A1")
+        _, (status, _, result) = self.created("S3")
+        self.assertEqual(status, 400, result)
+        _, (status, _, created) = self.created(audience="守不住角度的人")
+        self.assertEqual(status, 200, created)
+        self.assertEqual(created["direction"]["audience"], "守不住角度的人")
+        status, _, updated = self.mutate("/api/direction-catalog", operation="update", direction={**created["direction"], "audience": "家庭厨师"})
+        self.assertEqual(status, 200, updated)
+        self.assertEqual(updated["direction"]["audience"], "家庭厨师")
+        self.assertEqual(updated["direction"]["history"][-1]["audience"], "守不住角度的人")
+        status, _, marked = self.mutate("/api/direction-catalog", operation="variant_meta",
+                                        direction={"product": "202H", "direction_id": "202H-S1", "index": 0, "audience": "节前刀座"})
+        self.assertEqual(status, 200, marked)
+        self.assertEqual(marked["direction"]["variants"][0]["audience"], "节前刀座")
 
 
 if __name__ == "__main__":

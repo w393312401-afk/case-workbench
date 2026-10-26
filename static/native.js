@@ -3,7 +3,7 @@
 function nativeSummary(items) {
   const count = items.reduce((total, item) => total + (item.current?.native_reference?.entries.length || 0), 0);
   const mode = state.nativeMode === 'entries' ? 'entries' : 'videos';
-  return `<div class="archive-overview native-overview"><div><strong>${items.length} 条视频 · ${count} 条表达</strong><p>连同原句、场景、前后承接与复用边界一起保存。入选表达参考不代表流量或成交已验证。</p></div><div class="layout-switch native-mode-switch" role="group" aria-label="本土表达显示方式"><button type="button" data-native-mode="videos" class="${mode === 'videos' ? 'active' : ''}" aria-pressed="${mode === 'videos'}">按视频</button><button type="button" data-native-mode="entries" class="${mode === 'entries' ? 'active' : ''}" aria-pressed="${mode === 'entries'}">按表达</button></div></div>`;
+  return `<div class="archive-overview native-overview"><div><strong>${items.length} 条视频 · ${count} 条表达</strong><details><summary>表达参考的验证边界</summary><p>保留原句、场景、前后承接与复用边界；入选不代表流量或成交已经验证。</p></details></div><div class="layout-switch native-mode-switch" role="group" aria-label="本土表达显示方式"><button type="button" data-native-mode="videos" class="${mode === 'videos' ? 'active' : ''}" aria-pressed="${mode === 'videos'}">按视频</button><button type="button" data-native-mode="entries" class="${mode === 'entries' ? 'active' : ''}" aria-pressed="${mode === 'entries'}">按表达</button></div></div>`;
 }
 function nativeEntryRows(items, query) {
   const needle = (query || '').trim().toLowerCase();
@@ -17,8 +17,11 @@ function nativeEntryRows(items, query) {
   return rows;
 }
 function nativeEntriesView(rows) {
-  return `<div class="native-list">${rows.map(({ item, entry }) => `<article class="native-row"><div class="native-row-head"><span class="badge">${entry.channel === 'speech' ? '口播' : '屏幕文字'}</span><strong>${esc(entry.function)}</strong><span class="native-row-time">${entry.start_sec}–${entry.end_sec} 秒</span></div><blockquote lang="en">${esc(entry.original)}</blockquote><p class="native-meaning">${esc(entry.meaning_zh)}</p><div class="native-row-foot"><span class="native-row-source">${esc(shortTitle(item))}</span><span class="native-row-actions"><button type="button" class="subtle" data-native-copy="${esc(entry.id)}">复制原句</button><button type="button" class="subtle" data-native-material="${esc(item.case_id+':'+entry.id)}">加入摘录篮</button><a class="subtle" href="#case/${item.case_id}">在案例中定位</a></span></div></article>`).join('')}</div>`;
+  const groups = new Map();
+  rows.forEach(row => { if (!groups.has(row.item.case_id)) groups.set(row.item.case_id,[]); groups.get(row.item.case_id).push(row); });
+  return `<div class="native-list">${[...groups.values()].map(group => `<section class="native-source-group"><h2><a href="#case/${esc(group[0].item.case_id)}">${esc(shortTitle(group[0].item))}</a><small>${group.length} 条表达</small></h2>${group.map(({item,entry}) => `<article class="native-row"><div class="native-row-head"><span>${entry.start_sec}–${entry.end_sec} 秒</span><strong>${esc(entry.function)}</strong><span>${entry.channel === "speech" ? "口播" : "屏幕文字"}</span></div><blockquote lang="en">${esc(entry.original)}</blockquote><p class="native-meaning">${esc(entry.meaning_zh)}</p><details class="native-row-context"><summary>场景、用法与来源</summary>${[["场景与承接",entry.context],["表达分析",entry.analysis],["复用示例（改写）",entry.adaptation],["适用边界",entry.boundary]].filter(([,value]) => value).map(([label,value]) => `<p><strong>${label}</strong> ${esc(value)}</p>`).join("")}<a href="#case/${esc(item.case_id)}">打开案例</a></details><div class="native-row-actions"><button type="button" class="subtle" data-native-copy="${esc(entry.id)}">复制原句</button><button type="button" class="subtle" data-native-material="${esc(item.case_id+":"+entry.id)}">加入摘录篮</button></div></article>`).join("")}</section>`).join("")}</div>`;
 }
+
 function bindNativeList(rows) {
   const byId = new Map(rows.map(({ entry }) => [entry.id, entry.original]));
   $$('[data-native-copy]').forEach(button => button.onclick = () => copyText(byId.get(button.dataset.nativeCopy) || '', '原句已复制'));

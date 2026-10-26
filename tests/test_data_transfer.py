@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import Mock, patch
 import urllib.error
 import zipfile
+from contextlib import contextmanager
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -254,6 +255,58 @@ class DataTransferTests(unittest.TestCase):
             self.service.inspect_upload(io.BytesIO(b"truncated"), 100)
         self.assertFalse(self.service.busy)
         self.assertFalse(list((self.service.root / "imports").glob("*.zip")))
+
+    def test_export_reports_kind_and_progress_then_clears_operation_state(self):
+        active = []
+        @contextmanager
+        def maintenance():
+            active.append(self.service.status())
+            yield
+        self.service.maintenance = maintenance
+        def archive(*args, **kwargs):
+            self.service.manager.on_progress("正在打包 fixture.json")
+            status = self.service.status()
+            self.assertEqual(status["operation"], "export")
+            self.assertTrue(status["busy"])
+            self.assertTrue(status["started_at"])
+            self.assertIn("fixture.json", status["progress"])
+            return self.fake_archive(*args, **kwargs)
+        with patch.object(self.service.manager, "create_archive", side_effect=archive):
+            self.service.export({"preferences": {}})
+        self.assertEqual(active[0]["operation"], "export")
+        self.assertFalse(self.service.busy)
+        self.assertIsNone(self.service.status()["operation"])
+        self.assertIsNone(self.service.status()["started_at"])
+
+    def test_maintenance_enter_and_exit_failures_do_not_leave_transfer_locked(self):
+        for stage in ("enter", "exit"):
+            with self.subTest(stage=stage):
+                gate = Mock()
+                gate.__enter__ = Mock(side_effect=RuntimeError("gate enter") if stage == "enter" else None)
+                gate.__exit__ = Mock(side_effect=RuntimeError("gate exit") if stage == "exit" else None)
+                self.service.maintenance = Mock(return_value=gate)
+                with patch.object(self.service.manager, "create_archive", side_effect=self.fake_archive):
+                    with self.assertRaisesRegex(RuntimeError, "gate " + stage):
+                        self.service.export({"preferences": {}})
+                self.assertFalse(self.service.busy)
+                self.assertIsNone(self.service._gate)
+                self.assertIsNone(self.service.operation_kind)
+                self.assertTrue(self.service.operation.acquire(blocking=False))
+                self.service.operation.release()
+
+    def test_upload_preview_does_not_enter_live_data_maintenance(self):
+        self.service.maintenance = Mock(side_effect=AssertionError("preview touched live data gate"))
+        with self.assertRaises(transfer.TransferError):
+            self.service.inspect_upload(io.BytesIO(b"truncated"), 100)
+        self.service.maintenance.assert_not_called()
+        self.assertFalse(self.service.busy)
+
+    def test_backup_response_reports_operation_finished(self):
+        self.service.config["settings"] = self.settings(keep=0)
+        with patch.object(self.service.manager, "create_archive", side_effect=self.fake_archive):
+            result = self.service.backup()
+        self.assertFalse(result["status"]["busy"])
+        self.assertIsNone(result["status"]["operation"])
 
     @unittest.skipUnless(os.name == "nt", "Windows task registration")
     def test_windows_schedule_uses_current_user_no_credentials_and_catch_up(self):

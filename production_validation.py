@@ -103,6 +103,19 @@ def _intervals_uncovered(intervals, start, end):
     return uncovered
 
 
+def gap_status(gap):
+    """Old declarations remain missing material; uncertainty must be explicit."""
+    return "unverified" if isinstance(gap, dict) and gap.get("status") == "unverified" else "missing"
+
+
+def delivery_gap_status(report):
+    """Delivery status from declared empty ranges, without guessing from wording."""
+    gaps = report.get("gaps") if isinstance(report, dict) else None
+    if not isinstance(gaps, list) or not gaps:
+        return None
+    return "needs_material" if any(gap_status(gap) == "missing" for gap in gaps) else "needs_verification"
+
+
 def reported_gaps(report, voice_end):
     """Missing-footage gaps as the edit's final json declares them; the timeline itself carries no gap markers."""
     found, gaps = [], report.get("gaps") if isinstance(report, dict) else None
@@ -112,7 +125,7 @@ def reported_gaps(report, voice_end):
         left, right = gap.get("start"), gap.get("end")
         if type(left) is not int or type(right) is not int or not 0 <= left < right <= voice_end:
             continue
-        found.append({"start": left, "end": right, "need": str(gap.get("need") or "").strip()[:300]})
+        found.append({"start": left, "end": right, "need": str(gap.get("need") or "").strip()[:300], "status": gap_status(gap)})
     return found
 
 
@@ -132,7 +145,7 @@ def engineering_summary(inspect, job, record, fps=None, report=None):
                    for track in inspect["tracks"]["video"] if track.get("enabled") is not False
                    for item in track["items"] if item.get("enabled") is not False)
     limit = math.floor(actual_rate)
-    gaps = [{"start": marker["frame"], "end": marker["frame"] + marker["duration"], "name": marker.get("name") or "",
+    gaps = [{"start": marker["frame"], "end": marker["frame"] + marker["duration"], "name": marker.get("name") or "", "status": "missing",
              "note": marker.get("note") or "", "seconds": round(marker["frame"] / actual_rate, 2)}
             for marker in inspect["markers"] if GAP_NAME.match(marker.get("name") or "") and marker.get("color") == "Red"
             and marker["duration"] > 0 and str(marker.get("note") or "").strip()]
@@ -140,9 +153,20 @@ def engineering_summary(inspect, job, record, fps=None, report=None):
     raw_uncovered = _intervals_uncovered(intervals, 0, voice_end)
     declared = reported_gaps(report, voice_end)
     for left, right in _declared([(gap["start"], gap["end"]) for gap in declared], raw_uncovered):
-        need = "；".join(gap["need"] for gap in declared if max(left, gap["start"]) < min(right, gap["end"]) and gap["need"])
-        gaps.append({"start": left, "end": right, "name": need or "缺素材", "note": "", "seconds": round(left / actual_rate, 2),
-                     "source": "report"})
+        declarations = [gap for gap in declared if max(left, gap["start"]) < min(right, gap["end"])]
+        # Adjacent declarations may have different certainty. Preserve their
+        # split instead of calling an unverified half confirmed missing material.
+        boundaries = ([left, right] if len({gap_status(gap) for gap in declarations}) == 1 else
+                      sorted({left, right, *(max(left, min(right, edge)) for gap in declarations
+                                             for edge in (gap["start"], gap["end"]))}))
+        for a, b in zip(boundaries, boundaries[1:]):
+            active = [gap for gap in declarations if max(a, gap["start"]) < min(b, gap["end"])]
+            if not active:
+                continue
+            state = "missing" if any(gap_status(gap) == "missing" for gap in active) else "unverified"
+            need = "；".join(gap["need"] for gap in active if gap["need"])
+            gaps.append({"start": a, "end": b, "name": need or ("待核实素材" if state == "unverified" else "缺素材"),
+                         "status": state, "note": "", "seconds": round(a / actual_rate, 2), "source": "report"})
     uncovered = _intervals_uncovered(intervals + [(gap["start"], gap["end"]) for gap in gaps], 0, voice_end)
     prefix = f"workbench-group:{job['id']}:"
     groups = [marker for marker in inspect["markers"] if str(marker.get("custom") or "").startswith(prefix)]
@@ -157,6 +181,120 @@ def engineering_summary(inspect, job, record, fps=None, report=None):
 def failed_validation(code, message, **details):
     return {"schema_version": 1, "status": "verification_failed", "checked_at": now(),
             "issues": [{"code": code, "message": str(message)[:1000], "severity": "failure", **details}], "checks": {}}
+
+
+def _current_declared_gaps(summary, report, actual_rate):
+    """Intersect declarations with actual empty ranges for a precise current-state refresh.
+
+    Legacy engineering checks intentionally tolerate imprecise declarations;
+    this refresh must leave every undeclared part of the current gap visible.
+    """
+    declarations = [{**gap, "name": gap["need"], "note": "", "source": "report"}
+                    for gap in reported_gaps(report, summary["voice_frames"])]
+    declarations += [gap for gap in summary["gaps"] if gap.get("source") != "report"]
+    found = []
+    for picture in summary["picture_gaps"]:
+        left, right = picture["start"], picture["end"]
+        relevant = [gap for gap in declarations if max(left, gap["start"]) < min(right, gap["end"])]
+        boundaries = sorted({left, right, *(max(left, min(right, edge)) for gap in relevant
+                                            for edge in (gap["start"], gap["end"]))})
+        for a, b in zip(boundaries, boundaries[1:]):
+            active = [gap for gap in relevant if max(a, gap["start"]) < min(b, gap["end"])]
+            if not active:
+                continue
+            state = "missing" if any(gap_status(gap) == "missing" for gap in active) else "unverified"
+            names = list(dict.fromkeys(gap.get("name") or "" for gap in active))
+            notes = list(dict.fromkeys(gap.get("note") or "" for gap in active))
+            found.append({"start": a, "end": b, "name": "；".join(name for name in names if name) or
+                          ("待核实素材" if state == "unverified" else "缺素材"),
+                          "status": state, "note": "；".join(note for note in notes if note),
+                          "seconds": round(a / actual_rate, 2),
+                          "source": "report" if any(gap.get("source") == "report" for gap in active) else "marker"})
+    return found
+
+
+def review_current_coverage(inspect, job, timeline, *, report=None, voice_paths=None, expected_markers=None):
+    """Manual refresh of skill delivery: inspect today's coverage without inventing a pre-edit baseline.
+
+    Original declarations remain in report. Covered declarations are historical
+    context for human content review, rather than errors in the current cut.
+    This deliberately does not claim preservation or source/audio verification.
+    """
+    try:
+        inspect = snapshot(inspect)
+        summary = engineering_summary(inspect, job, timeline, report=report)
+    except Exception as exc:
+        validation = failed_validation("readback_invalid", str(exc))
+        validation["scope"] = "current_coverage"
+        return validation, None
+    issues = []
+    def issue(code, message, severity="repair", **details):
+        issues.append({"code": code, "message": message, "severity": severity, **details})
+
+    if inspect.get("saved") is not True:
+        issue("project_not_saved", "达芬奇没有确认当前工程保存，须先核对并保存。", "failure")
+    if not inspect.get("unique_id") or str(inspect.get("unique_id")) != str(timeline.get("unique_id")):
+        issue("timeline_identity_mismatch", "回读的时间线与本次目标不一致，未确认当前覆盖。", "failure")
+    voice = voice_track(inspect)
+    if not voice or not voice["items"] or summary["voice_frames"] <= 0:
+        issue("voice_missing", "配音轨或配音片段已经缺失，无法核对配音范围的画面覆盖。")
+    voice_current = bool(voice and voice["items"])
+    if voice_current and voice_paths:
+        identities = {str(path).replace("\\", "/").casefold() for path in voice_paths}
+        items = voice["items"]
+        voice_current = all(str(item.get("media_path") or "").replace("\\", "/").casefold() in identities for item in items)
+        if not voice_current:
+            issue("current_voice_identity_mismatch", "当前配音媒体与制作单的这次配音不一致，须先人工核对。")
+    voice_position_record = None
+    if voice_current:
+        items, start = voice["items"], inspect["start_frame"]
+        lead, end = timeline.get("lead_frames", 0), timeline.get("frames")
+        if end is not None:
+            voice_position_record = (len(items) == 1 and items[0]["start"] - start == lead and items[0]["end"] - start == end
+                                     and items[0].get("source_start") == 0)
+            if not voice_position_record:
+                issue("current_voice_position_changed", "当前配音已切分或修剪，与建线记录不同；画面覆盖按当前配音计算，请在人工听审时确认。", "info")
+    groups_current = None
+    if expected_markers is not None:
+        prefix = f"workbench-group:{job['id']}:"
+        groups = [marker for marker in inspect["markers"] if str(marker.get("custom") or "").startswith(prefix)]
+        expected = [{"frame": marker["frame"], "duration": marker["duration"],
+                     "custom": marker.get("custom") or prefix + str(marker["number"])} for marker in expected_markers]
+        groups_current = _canonical(groups, ("frame", "duration", "custom")) == _canonical(expected, ("frame", "duration", "custom"))
+        if not groups_current:
+            issue("current_group_markers_mismatch", "当前意群标记的编号、位置或范围与制作单建线记录不同，须先人工核对。")
+
+    picture_gaps = [(gap["start"], gap["end"]) for gap in summary["picture_gaps"]]
+    summary["gaps"] = _current_declared_gaps(summary, report, rate(inspect["fps"]))
+    summary["resolved_gaps"] = [{**gap, "name": gap["need"] or "原报告空段", "coverage_status": "covered",
+                                 "seconds": round(gap["start"] / rate(inspect["fps"]), 2)}
+                                for gap in reported_gaps(report, summary["voice_frames"])
+                                if not _declared([(gap["start"], gap["end"])], picture_gaps)]
+    intervals = [(gap["start"], gap["end"]) for gap in summary["gaps"]]
+    summary["uncovered"] = [{"start": a, "end": b, "seconds": round(a / rate(inspect["fps"]), 2)}
+                            for left, right in picture_gaps for a, b in _intervals_uncovered(intervals, left, right)]
+    summary["voice_changed"] = None
+    summary["voice_preservation"] = "not_compared"
+    if summary["uncovered"]:
+        issue("unmarked_picture_gap", "当前配音范围仍有未说明的画面空段，请补齐或明确记录原因。", ranges=summary["uncovered"])
+    missing = [gap for gap in summary["gaps"] if gap_status(gap) == "missing"]
+    unverified = [gap for gap in summary["gaps"] if gap_status(gap) == "unverified"]
+    if missing:
+        issue("missing_material", "当前仍有已报告缺素材的画面空段，须补齐后再核对。", "material", ranges=missing)
+    if unverified:
+        issue("material_unverified", "当前仍有待核实素材的画面空段，请查看候选或确认后补齐。", "verification", ranges=unverified)
+    severity = {entry["severity"] for entry in issues}
+    status = ("verification_failed" if "failure" in severity else "needs_repair" if "repair" in severity else
+              "needs_material" if missing else "needs_verification" if unverified else "awaiting_review")
+    ranges = [{key: item.get(key) for key in ("media_id", "media_path", "source_start", "source_end", "start", "end", "uid")}
+              for track in inspect["tracks"]["video"] if track.get("enabled") is not False
+              for item in track["items"] if item.get("enabled") is not False]
+    return {"schema_version": 1, "scope": "current_coverage", "status": status, "checked_at": now(), "issues": issues,
+            "checks": {"project_saved": inspect.get("saved") is True, "picture_coverage": not summary["picture_gaps"],
+                       "current_voice_record": voice_current, "current_voice_position_record": voice_position_record,
+                       "current_group_markers": groups_current,
+                       "baseline_comparison": None}, "saved": inspect.get("saved"), "baseline_available": False,
+            "source_ranges": ranges, "manual_scope": list(MANUAL_SCOPE)}, summary
 
 
 def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="completed", require_saved=True, recheck=False, report=None):
@@ -283,8 +421,12 @@ def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="co
             issue("reported_gap_not_gap", "剪辑回复报的缺素材区间在时间线上已有画面，请核对。", ranges=[gap])
     valid_gaps += [gap for gap in summary["gaps"] if gap.get("source") == "report"]
     checks["picture_coverage"] = not summary["uncovered"]
-    if valid_gaps:
-        issue("missing_material", "已保留并报明缺素材空段，须补齐素材后重新核验。", "material", ranges=valid_gaps)
+    missing_gaps = [gap for gap in valid_gaps if gap_status(gap) == "missing"]
+    unverified_gaps = [gap for gap in valid_gaps if gap_status(gap) == "unverified"]
+    if missing_gaps:
+        issue("missing_material", "已保留并报明缺素材空段，须补齐素材后重新核验。", "material", ranges=missing_gaps)
+    if unverified_gaps:
+        issue("material_unverified", "已记录待核实素材的空段，请查看候选后补齐，不代表确认缺素材。", "verification", ranges=unverified_gaps)
 
     videos = [item for track in inspect["tracks"]["video"] for item in track["items"]]
     audio = [item for track in inspect["tracks"]["audio"] if track is not voice for item in track["items"]]
@@ -359,7 +501,8 @@ def validate_edit(inspect, job, timeline, baseline=None, *, execution_status="co
                     issue("source_range_used_elsewhere", "新增镜头的源区间与另一条成片重叠。", item=item.get("uid"),
                           timeline=previous.get("timeline_name"), timeline_uid=previous.get("timeline_uid"))
     severity = {entry["severity"] for entry in issues}
-    status = "verification_failed" if "failure" in severity else "needs_repair" if "repair" in severity else "needs_material" if valid_gaps else "awaiting_review"
+    status = ("verification_failed" if "failure" in severity else "needs_repair" if "repair" in severity else
+              "needs_material" if missing_gaps else "needs_verification" if unverified_gaps else "awaiting_review")
     return {"schema_version": 1, "status": status, "issues": issues, "checked_at": now(), "checks": checks,
             "source_ranges": ranges, "saved": inspect.get("saved"), "baseline_available": bool(baseline),
             "manual_scope": list(MANUAL_SCOPE),

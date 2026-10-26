@@ -11,6 +11,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -382,13 +383,230 @@ class DataBackupTests(unittest.TestCase):
         self.assertEqual(json.loads((self.skill / "cases" / "credential-comments.json").read_bytes())["comments"], comments["comments"])
         self.assertTrue(all(path.is_file() for path in sensitive))
 
+    def with_remote_access(self, archive, files, entry="remote-access", *, mutate=None):
+        """An archive as written before remote-access was kept out of exports."""
+        def declare(manifest):
+            manifest["runtime_entries"] = sorted([*manifest["runtime_entries"], entry])
+            manifest["directories"] = sorted([*manifest["directories"], "runtime/" + entry])
+            for name, content in files.items():
+                manifest["files"].append({"path": "runtime/" + entry + "/" + name, "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest()})
+                manifest["bytes"] += len(content)
+            if mutate:
+                mutate(manifest)
+        def add(outgoing):
+            for name, content in files.items():
+                outgoing.writestr("runtime/" + entry + "/" + name, content)
+        return self.rewrite(archive, mutate_manifest=declare, mutate_entries=add)
+
+    @staticmethod
+    def short_name(path):
+        if os.name != "nt":
+            return None
+        import ctypes
+        buffer = ctypes.create_unicode_buffer(32768)
+        if not ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, len(buffer)):
+            return None
+        name = Path(buffer.value).name
+        return name if name.casefold() != path.name.casefold() else None
+
+    def test_remote_access_secrets_are_not_exported_and_survive_restore(self):
+        token = self.write(self.runtime / "remote-access" / "tunnel-token.txt", b"live tunnel token")
+        account = self.write(self.runtime / "remote-access" / "account.json", b'{"password_hash": "live"}')
+        self.write(self.runtime / "remote-access" / "guest" / "site" / "index.html", b"<p>guest</p>")
+        archive = self.export()
+        with zipfile.ZipFile(archive) as packed:
+            self.assertFalse(any("remote-access" in name.casefold() for name in packed.namelist()))
+            manifest = json.loads(packed.read("manifest.json"))
+            self.assertNotIn("remote-access", manifest["runtime_entries"])
+            self.assertFalse(any("remote-access" in name for name in manifest["directories"]))
+        self.write(token, b"rotated tunnel token")
+        result = self.manager.restore_archive(archive, self.root / "recoveries")
+        self.assertEqual(token.read_bytes(), b"rotated tunnel token")
+        self.assertEqual(account.read_bytes(), b'{"password_hash": "live"}')
+        self.assertTrue((self.runtime / "remote-access" / "guest" / "site" / "index.html").is_file())
+        with zipfile.ZipFile(result["recovery_path"]) as recovery:
+            self.assertFalse(any("remote-access" in name.casefold() for name in recovery.namelist()))
+
+    def test_older_archive_with_remote_access_imports_without_touching_it(self):
+        archive = self.export()
+        plain = self.manager.inspect_archive(archive)
+        secrets = {"tunnel-token.txt": b"old tunnel token", "account.json": b'{"password_hash": "old"}'}
+        for name, files, entry in (("with secrets", secrets, "remote-access"), ("directory only", {}, "remote-access"),
+                ("other letter case", secrets, "Remote-Access")):
+            with self.subTest(name=name):
+                legacy = self.with_remote_access(archive, files, entry)
+                summary = self.manager.inspect_archive(legacy)
+                self.assertEqual((summary["files"], summary["bytes"]), (plain["files"], plain["bytes"]))
+                token = self.write(self.runtime / "remote-access" / "tunnel-token.txt", b"live tunnel token")
+                self.write(self.skill / "cases" / "case.json", b'{"changed": true}')
+                self.manager.restore_archive(legacy, self.root / "recoveries")
+                self.assertEqual((self.skill / "cases" / "case.json").read_bytes(), self.original)
+                self.assertEqual(token.read_bytes(), b"live tunnel token")
+                self.assertEqual(sorted(path.name for path in (self.runtime / "remote-access").iterdir()), ["tunnel-token.txt"])
+        skill, runtime, app = (self.root / "second" / name for name in ("skill", "runtime", "app"))
+        BackupManager(skill, runtime, app).restore_archive(self.with_remote_access(archive, secrets), runtime / "data-transfer" / "recovery")
+        self.assertTrue((skill / "cases" / "case.json").is_file())
+        self.assertFalse((runtime / "remote-access").exists())
+
+    def test_tampered_remote_access_entry_still_fails_archive_verification(self):
+        legacy = self.with_remote_access(self.export(), {"tunnel-token.txt": b"old tunnel token"})
+        bad = self.rewrite(legacy, mutate_manifest=lambda manifest: next(row for row in manifest["files"]
+            if row["path"] == "runtime/remote-access/tunnel-token.txt").update(sha256="0" * 64))
+        with self.assertRaisesRegex(BackupError, "校验失败"):
+            self.manager.restore_archive(bad, self.root / "recoveries")
+        self.assertFalse((self.root / "recoveries").exists())
+
+    def test_short_name_alias_of_a_local_only_folder_is_rejected_before_changes(self):
+        token = self.write(self.runtime / "remote-access" / "tunnel-token.txt", b"live tunnel token")
+        for folder, name, live in (("remote-access", "tunnel-token.txt", b"live tunnel token"), ("thumbnail-cache", "thumb.png", b"cache")):
+            with self.subTest(folder=folder):
+                alias = self.short_name(self.runtime / folder)
+                if alias is None:
+                    self.skipTest("this volume has no 8.3 short names")
+                legacy = self.with_remote_access(self.export(), {name: b"replacement"}, alias)
+                self.write(self.skill / "cases" / "case.json", b'{"changed": true}')
+                with self.assertRaisesRegex(BackupError, "不允许导入"):
+                    self.manager.restore_archive(legacy, self.root / "recoveries")
+                self.assertEqual((self.runtime / folder / name).read_bytes(), live)
+                self.assertEqual((self.skill / "cases" / "case.json").read_bytes(), b'{"changed": true}')
+                self.assertFalse((self.root / "recoveries").exists())
+        self.assertEqual(token.read_bytes(), b"live tunnel token")
+
+    def test_older_archive_sales_folder_inside_remote_access_is_not_restored_as_source(self):
+        old_sales = str(self.root / "old-machine" / "sales")
+        def include(manifest):
+            manifest["directories"].append("runtime/remote-access/sales")
+            manifest["included_source_roots"] = {old_sales: "runtime/remote-access/sales"}
+        legacy = self.with_remote_access(self.export(), {"sales/report.xlsx": b"old sales"}, mutate=include)
+        result = self.manager.restore_archive(legacy, self.root / "recoveries")
+        self.assertEqual(result["extra_source_roots"], [])
+        self.assertFalse((self.runtime / "remote-access").exists())
+
+    def test_sales_folder_containing_runtime_data_is_rejected(self):
+        self.write(self.runtime / "remote-access" / "tunnel-token.txt", b"live tunnel token")
+        elsewhere = tempfile.TemporaryDirectory(prefix="workbench-backup-out-")
+        self.addCleanup(elsewhere.cleanup)
+        manager = BackupManager(self.skill, self.runtime, self.app, extra_sources=(self.root,))
+        with self.assertRaisesRegex(BackupError, "不能包含运行资料目录"):
+            manager.create_archive(elsewhere.name)
+        self.assertEqual(list(Path(elsewhere.name).iterdir()), [])
+
     def test_backup_destinations_inside_business_data_are_rejected_and_ordinary_locks_work(self):
-        for destination in (self.skill / "cases" / "backup", self.runtime / "creation" / "backup", self.app / "图文素材" / "backup"):
+        for destination in (self.skill / "cases" / "backup", self.runtime / "creation" / "backup", self.app / "图文素材" / "backup",
+                self.runtime / "remote-access" / "guest" / "site"):
             with self.subTest(destination=destination), self.assertRaises(BackupError):
                 self.manager.create_archive(destination)
         manager = BackupManager(self.skill, self.runtime, self.app, locks=(threading.Lock(),))
         archive = Path(manager.create_archive(self.out)["path"])
         manager.restore_archive(archive, self.runtime / "data-transfer" / "recovery")
+
+    def test_sqlite_exclusive_writer_times_out_and_releases_business_locks(self):
+        database = self.runtime / "busy.sqlite"
+        writer = sqlite3.connect(database)
+        self.addCleanup(writer.close)
+        writer.execute("CREATE TABLE data(value TEXT)")
+        writer.execute("INSERT INTO data VALUES ('committed')")
+        writer.commit()
+        writer.execute("BEGIN EXCLUSIVE")
+        writer.execute("INSERT INTO data VALUES ('uncommitted')")
+        business = threading.Lock()
+        manager = BackupManager(self.skill, self.runtime, self.app, locks=(business,))
+        started = time.monotonic()
+        with patch("data_backup.SQLITE_SNAPSHOT_TIMEOUT", .1):
+            with self.assertRaisesRegex(BackupError, "数据库快照超时") as caught:
+                manager.create_archive(self.out)
+        self.assertEqual(caught.exception.status, 503)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertTrue(business.acquire(blocking=False))
+        business.release()
+        self.assertFalse(list(self.out.glob("*.zip")))
+        self.assertFalse(list(self.out.glob("*.partial")))
+        self.assertFalse(list(manager.transfer_root.glob("backup-sqlite-*")))
+        writer.rollback()
+        archive = Path(manager.create_archive(self.out)["path"])
+        self.assertTrue(archive.is_file())
+        self.assertEqual(writer.execute("SELECT value FROM data").fetchall(), [("committed",)])
+
+    def test_business_read_lock_is_available_while_export_compresses_snapshots(self):
+        database = self.runtime / "wide.sqlite"
+        with closing(sqlite3.connect(database)) as db:
+            db.execute("CREATE TABLE rows(first TEXT, second TEXT, count INTEGER, payload BLOB)")
+            db.execute("INSERT INTO rows VALUES (?, ?, ?, ?)", (str(self.skill / "sources" / "source.md"), "unchanged", 7, b"opaque"))
+            db.commit()
+        business = threading.Lock()
+        manager = BackupManager(self.skill, self.runtime, self.app, locks=(business,))
+        original_open = zipfile.ZipFile.open
+        checked = []
+        def check_lock(archive, name, mode="r", *args, **kwargs):
+            if mode == "w":
+                acquired = business.acquire(blocking=False)
+                self.assertTrue(acquired, "compression kept the business read lock")
+                if acquired:
+                    business.release()
+                checked.append(name)
+            return original_open(archive, name, mode, *args, **kwargs)
+        with patch("data_backup.zipfile.ZipFile.open", new=check_lock):
+            archive = Path(manager.create_archive(self.out)["path"])
+        self.assertTrue(checked)
+        restored = BackupManager(self.root / "new-skill", self.root / "new-runtime", self.root / "new-app")
+        restored.restore_archive(archive, self.root / "recovery")
+        with closing(sqlite3.connect(restored.runtime_root / "wide.sqlite")) as db:
+            self.assertEqual(db.execute("SELECT second, count, payload FROM rows").fetchall(), [("unchanged", 7, b"opaque")])
+
+    def test_sync_migration_cannot_mix_new_catalog_with_old_archive_file_list(self):
+        catalog = self.runtime / "directions" / "catalog.json"
+        previous = self.runtime / "directions" / "backups" / "before.json"
+        updated = previous.with_name("after.json")
+        self.write(previous, b'{"revision":1}')
+        self.write(catalog, json.dumps({"revision": 1, "history": str(previous)}).encode())
+        external = self.root / "sales"
+        self.write(external / "source.csv", b"external source")
+        business = threading.Lock()
+        manager = BackupManager(self.skill, self.runtime, self.app, locks=(business,), extra_sources=(external,))
+        attempted, migrated = threading.Event(), threading.Event()
+        writers = []
+        original_walk = manager._walk
+
+        def sync_migration():
+            attempted.set()
+            with business:
+                self.write(updated, b'{"revision":2}')
+                self.write(catalog, json.dumps({"revision": 2, "history": str(updated)}).encode())
+                previous.unlink()  # Sync can also prune a history file after the snapshot.
+            migrated.set()
+
+        def walk_with_sync(path, root, archive_path, directories):
+            if path == external and not writers:
+                writer = threading.Thread(target=sync_migration)
+                writers.append(writer)
+                writer.start()
+                self.assertTrue(attempted.wait(2))
+                # An old two-lock implementation let sync finish in this gap.
+                acquired = business.acquire(blocking=False)
+                if acquired:
+                    business.release()
+                    self.assertTrue(migrated.wait(2))
+            yield from original_walk(path, root, archive_path, directories)
+
+        def progress(message):
+            if message == "正在整理素材引用并打包":
+                self.assertTrue(migrated.wait(2), "metadata lock was not released before packaging")
+
+        manager.on_progress = progress
+        try:
+            with patch.object(manager, "_walk", side_effect=walk_with_sync):
+                archive = Path(manager.create_archive(self.out)["path"])
+        finally:
+            for writer in writers:
+                writer.join(2)
+        self.assertTrue(migrated.is_set())
+        self.assertEqual(json.loads(catalog.read_bytes())["revision"], 2)
+        with zipfile.ZipFile(archive) as packed:
+            snapshot = json.loads(packed.read("runtime/directions/catalog.json"))
+            self.assertEqual(snapshot["revision"], 1)
+            self.assertIn("runtime/directions/backups/" + Path(snapshot["history"]).name, packed.namelist())
+            self.assertNotIn("runtime/directions/backups/after.json", packed.namelist())
 
 
 if __name__ == "__main__":

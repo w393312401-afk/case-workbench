@@ -10,6 +10,7 @@ import test_phase4_writing_ui as writing_fixture
 import test_review_ui as review_fixture
 import test_server as fixture
 import test_performance as performance
+from test_content_flow_ui import content_filter, set_content_condition
 from elevenlabs_client import ElevenLabsClient
 from test_production import FakeEleven
 from test_review_store import write
@@ -63,6 +64,8 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
         }""", selector)
 
     def enter_detail(self, page, link, ready):
+        # The order list repaints once its delivery states arrive; enter only after that.
+        page.wait_for_load_state("networkidle")
         link.scroll_into_view_if_needed()
         page.wait_for_function("() => window.scrollY > 300")
         scroll = page.evaluate("window.scrollY")
@@ -79,56 +82,68 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
             page.locator("#content h1").click()
             page.keyboard.press("Escape")
 
-    def test_script_search_status_and_scroll_survive_all_return_actions(self):
+    def test_content_search_kind_and_scroll_survive_all_return_actions(self):
+        target = self.create_script("导航目标采用稿")
         page = self.open_page("#/202H/scripts")
-        page.locator("#script-query").fill("导航目标")
-        page.locator("#script-status-filter").select_option("adopted")
-        self.create_scrolling_list(page, "#script-list")
+        page.locator("#content-flow-query").fill("导航目标采用稿")
+        set_content_condition(page, "kind", ["script"])
+        page.locator(f'.flow-title[href$="/{target["id"]}"]').wait_for()
+        parent = page.evaluate("location.hash")
+        self.assertTrue(parent.startswith("#/202H/content?"))
+        self.create_scrolling_list(page, "#content-flow-list")
         for action in ("top", "breadcrumb", "escape"):
             with self.subTest(action=action):
-                self.assertEqual(page.locator("#script-list .script-card").count(), 1)
-                link = page.locator("#script-list .script-card")
+                self.assertEqual(page.locator("#content-flow-list .flow-row").count(), 1)
+                link = page.locator("#content-flow-list .flow-title")
                 scroll = self.enter_detail(page, link, "#script-production-toggle")
-                self.assertEqual(page.locator("#navigate-up").get_attribute("href"), "#/202H/scripts")
-                self.assertEqual(page.locator("#content .back-link").inner_text().strip(), "返回脚本版本")
+                self.assertEqual(page.locator("#navigate-up").get_attribute("href"), parent)
+                self.assertEqual(page.locator("#content .back-link").inner_text().strip(), "返回内容列表")
                 self.assertFalse(page.locator("#content .back-link").is_visible())
                 self.leave_detail(page, action)
-                self.assert_return(page, "#/202H/scripts", "#script-query", scroll)
-                self.assertEqual(page.locator("#script-query").input_value(), "导航目标")
-                self.assertEqual(page.locator("#script-status-filter").input_value(), "adopted")
+                self.assert_return(page, parent, "#content-flow-query", scroll)
+                self.assertEqual(page.locator("#content-flow-query").input_value(), "导航目标采用稿")
+                self.assertIn({"field": "kind", "values": ["script"]}, content_filter(page)["conditions"])
 
     def test_standard_production_archive_filter_and_scroll_survive_all_return_actions(self):
-        page = self.open_page("#/202H/production")
-        page.locator("#production-archived").check()
-        self.create_scrolling_list(page, ".production-main")
+        page = self.open_page("#/202H/production?scope=all")
+        set_content_condition(page, "kind", ["video"])
+        page.wait_for_function("document.querySelectorAll('#content-flow-list .flow-row').length === 2")
+        parent = page.evaluate("location.hash")
+        self.create_scrolling_list(page, "#content-flow-list")
         for action in ("top", "breadcrumb", "escape"):
             with self.subTest(action=action):
-                link = page.locator(f'.production-card[href$="/{self.job["id"]}"]')
-                scroll = self.enter_detail(page, link, "#job-archive")
-                self.assertEqual(page.locator("#content .back-link").inner_text().strip(), "返回制作单")
-                self.assertEqual(page.locator("#content .back-link").get_attribute("href"), "#/202H/production")
+                link = page.locator(f'.flow-title[href*="/{self.job["id"]}"]')
+                # 归档 sits in the 更多操作 menu; its visible summary marks the rendered detail page.
+                scroll = self.enter_detail(page, link, ".production-more-actions > summary")
+                self.assertEqual(page.locator("#content .back-link").inner_text().strip(), "返回内容列表")
+                self.assertEqual(page.locator("#content .back-link").get_attribute("href"), parent)
                 self.leave_detail(page, action)
-                self.assert_return(page, "#/202H/production", "#production-archived", scroll)
-                self.assertTrue(page.locator("#production-archived").is_checked())
-                self.assertEqual(page.locator(".production-card").count(), 2)
+                self.assert_return(page, parent, "#content-flow-query", scroll)
+                self.assertEqual(content_filter(page), {"match": "all", "conditions": [
+                    {"field": "kind", "values": ["video"]}]})
+                self.assertEqual(page.locator('[data-flow-view="all"]').get_attribute("aria-pressed"), "false")
+                self.assertEqual(page.locator("#content-flow-list .flow-row").count(), 2)
 
     def test_all_product_production_return_keeps_archive_scope_scroll_and_empty_picker(self):
-        page = self.open_page("#/all/production")
-        page.locator("#production-archived").check()
-        self.create_scrolling_list(page, ".production-main")
+        page = self.open_page("#/all/production?scope=all")
+        set_content_condition(page, "kind", ["video"])
+        page.wait_for_function("document.querySelectorAll('#content-flow-list .flow-row').length === 2")
+        parent = page.evaluate("location.hash")
+        self.create_scrolling_list(page, "#content-flow-list")
         for action in ("top", "breadcrumb"):
             with self.subTest(action=action):
-                link = page.locator(f'.production-card[href$="/{self.job["id"]}"]')
-                scroll = self.enter_detail(page, link, "#job-archive")
-                self.assertEqual(page.evaluate("location.hash"), f'#/202H/production/{self.job["id"]}')
+                link = page.locator(f'.flow-title[href*="/{self.job["id"]}"]')
+                scroll = self.enter_detail(page, link, ".production-more-actions > summary")
+                self.assertEqual(page.evaluate("location.hash").split("?")[0], f'#/202H/production/{self.job["id"]}')
                 for selector in ("#navigate-up", "#content .back-link"):
-                    self.assertEqual(page.locator(selector).get_attribute("href"), "#/all/production")
+                    self.assertEqual(page.locator(selector).get_attribute("href"), parent)
                 if action == "breadcrumb":
-                    page.locator("#breadcrumb").get_by_role("link", name="制作单", exact=True).click()
+                    page.locator("#breadcrumb").get_by_role("link", name="内容列表", exact=True).click()
                 else:
                     page.locator("#navigate-up").click()
-                self.assert_return(page, "#/all/production", "#production-archived", scroll)
-                self.assertTrue(page.locator("#production-archived").is_checked())
+                self.assert_return(page, parent, "#content-flow-query", scroll)
+                self.assertEqual(content_filter(page), {"match": "all", "conditions": [
+                    {"field": "kind", "values": ["video"]}]})
                 self.assertEqual(page.locator("#global-product").input_value(), "")
 
     def test_ai_status_grouping_and_scroll_survive_all_return_actions(self):
@@ -141,28 +156,32 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
             with self.subTest(action=action):
                 link = page.locator(f'[data-ai-task-id="{task["task_id"]}"] .ai-task-card')
                 scroll = self.enter_detail(page, link, "#ai-rounds")
-                self.assertEqual(page.locator("#content .back-link").inner_text().strip(), "返回内容创作")
+                self.assertEqual(page.locator("#content .back-link").inner_text().strip(), "返回协作记录")
                 self.leave_detail(page, action)
                 self.assert_return(page, "#/202H/ai", "#ai-task-list", scroll)
                 self.assertEqual(page.locator('[data-ai-filter="completed"]').get_attribute("aria-pressed"), "true")
                 self.assertEqual(page.locator("#ai-group-by").input_value(), "case")
 
-    def test_all_product_script_detail_reload_keeps_the_parent_scope_and_filters(self):
+    def test_all_product_content_detail_reload_keeps_the_parent_scope_and_filters(self):
+        target = self.create_script("导航目标采用稿")
         page = self.open_page("#/all/scripts")
-        page.locator("#script-query").fill("导航目标")
-        page.locator("#script-status-filter").select_option("adopted")
-        page.locator("#script-list .script-card").click()
+        page.locator("#content-flow-query").fill("导航目标采用稿")
+        set_content_condition(page, "kind", ["script"])
+        link = page.locator(f'.flow-title[href$="/{target["id"]}"]')
+        link.wait_for()
+        parent = page.evaluate("location.hash")
+        link.click()
         page.locator("#script-production-toggle").wait_for()
         page.reload()
         page.locator("#script-production-toggle").wait_for()
-        self.assertEqual(page.locator("#content .back-link").get_attribute("href"), "#/all/scripts")
+        self.assertEqual(page.locator("#content .back-link").get_attribute("href"), parent)
         page.locator("#navigate-up").click()
-        page.locator("#script-query").wait_for()
-        self.assertEqual(page.evaluate("location.hash"), "#/all/scripts")
-        self.assertEqual(page.locator("#script-query").input_value(), "导航目标")
-        self.assertEqual(page.locator("#script-status-filter").input_value(), "adopted")
+        page.locator("#content-flow-query").wait_for()
+        self.assertEqual(page.evaluate("location.hash"), parent)
+        self.assertEqual(page.locator("#content-flow-query").input_value(), "导航目标采用稿")
+        self.assertIn({"field": "kind", "values": ["script"]}, content_filter(page)["conditions"])
         self.assertEqual(page.locator("#global-product").input_value(), "")
-        self.assertEqual(page.locator("#script-list .script-card").count(), 1)
+        self.assertEqual(page.locator("#content-flow-list .flow-row").count(), 1)
 
     def test_viewing_previous_script_version_keeps_the_original_all_product_parent(self):
         child = self.app.creation.mutate("script", {
@@ -171,30 +190,39 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
                        "confirmed": True, "parent_id": self.script["id"]},
         })["script"]
         page = self.open_page("#/all/scripts")
-        page.locator("#script-query").fill("导航子版本")
-        page.locator("#script-list .script-card").click()
+        page.locator("#content-flow-query").fill("导航子版本")
+        set_content_condition(page, "kind", ["script"])
+        link = page.locator(f'.flow-title[href$="/{child["id"]}"]')
+        link.wait_for()
+        parent = page.evaluate("location.hash")
+        link.click()
         page.locator("#script-production-toggle").wait_for()
-        page.get_by_role("link", name="查看上一版本", exact=True).click()
+        history = page.locator("#content-adopted-script [data-script-versions]")
+        history.locator(":scope > summary").click()
+        previous = history.locator(f'[data-script-version="{self.script["id"]}"]')
+        previous.locator(":scope > summary").click()
+        previous.get_by_role("link", name="查看这版内容", exact=True).click()
         page.locator("#content h1").get_by_text("导航目标脚本", exact=True).wait_for()
-        self.assertEqual(page.evaluate("location.hash"), f'#/202H/scripts/{self.script["id"]}')
-        self.assertEqual(page.locator("#content .back-link").get_attribute("href"), "#/all/scripts")
+        self.assertEqual(page.evaluate("location.hash"), f'#/202H/content/{self.script["id"]}')
+        self.assertEqual(page.locator("#content .back-link").get_attribute("href"), parent)
         page.locator("#navigate-up").click()
-        page.locator("#script-query").wait_for()
-        self.assertEqual(page.locator("#script-query").input_value(), "导航子版本")
+        page.locator("#content-flow-query").wait_for()
+        self.assertEqual(page.locator("#content-flow-query").input_value(), "导航子版本")
+        self.assertIn({"field": "kind", "values": ["script"]}, content_filter(page)["conditions"])
         self.assertEqual(page.locator("#global-product").input_value(), "")
-        self.assertEqual(page.locator("#script-list .script-card").count(), 1)
+        self.assertEqual(page.locator("#content-flow-list .flow-row").count(), 1)
 
     def test_direct_all_product_production_deep_link_has_consistent_parent(self):
         page = self.open_page(f'#/all/production/{self.job["id"]}')
-        page.locator("#job-archive").wait_for()
-        breadcrumb = page.locator("#breadcrumb").get_by_role("link", name="制作单", exact=True)
+        page.locator(".production-more-actions > summary").wait_for()
+        breadcrumb = page.locator("#breadcrumb").get_by_role("link", name="内容列表", exact=True)
         for link in (breadcrumb, page.locator("#navigate-up"), page.locator("#content .back-link")):
-            self.assertEqual(link.get_attribute("href"), "#/all/production")
+            self.assertEqual(link.get_attribute("href"), "#/all/content")
         page.locator("#navigate-up").click()
-        page.locator("#production-settings-open").wait_for()
-        self.assertEqual(page.evaluate("location.hash"), "#/all/production")
+        page.locator("#content-flow-list").wait_for()
+        self.assertEqual(page.evaluate("location.hash"), "#/all/content")
         self.assertEqual(page.locator("#global-product").input_value(), "")
-        self.assertFalse(page.locator("#production-archived").is_checked())
+        self.assertEqual(page.locator('[data-flow-view="attention"]').get_attribute("aria-pressed"), "true")
 
     def test_weekly_selected_tab_and_scroll_survive_switching_modules(self):
         page = self.open_page("#/202H/home")
@@ -232,7 +260,6 @@ class ModuleSwitchingBrowserTests(unittest.TestCase):
         page.locator('#perf-video-drawer [data-drawer-close]').click()
         page.locator("#perf-video-drawer").wait_for(state="hidden")
         page.locator("#perf-q").fill("")
-        page.locator("#perf-range").select_option("all")
         page.locator("#perf-account").select_option("bushcraftedge")
         page.locator('.perf-table [data-sort="gmv"]').click()
         page.locator('.perf-table [data-sort="gmv"]').click()
@@ -252,7 +279,7 @@ class ModuleSwitchingBrowserTests(unittest.TestCase):
         self.assertNotEqual(parameters.get("tab"), "list")
         page.locator("#perf-tab-list").click()
         self.assertEqual(page.locator("#perf-q").input_value(), "")
-        self.assertEqual(page.locator("#perf-range").input_value(), "all")
+        self.assertEqual(page.locator("#perf-date-trigger").inner_text().strip(), "全部周期")
         self.assertEqual(page.locator('.perf-table th[aria-sort="ascending"] [data-sort="gmv"]').count(), 1)
 
     def test_reviews_search_source_sort_and_expanded_count_survive_sidebar_return(self):

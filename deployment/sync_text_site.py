@@ -27,10 +27,12 @@ from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
-ACCOUNT_ID = "01267175a0eda8ddb6d390d6869ffe16"
-PROJECT = "case-workbench-text"
+sys.path.insert(0, str(ROOT))
+from app_config import load_config
+ACCOUNT_ID = ""
+PROJECT = ""
 AUTH_PROFILE = "case-workbench-text-sync"
-PUBLIC_URL = "https://case-workbench-text.pages.dev"
+PUBLIC_URL = ""
 TZ = ZoneInfo("Asia/Shanghai")
 STATES = {
     "starting": "自动同步已启动，正在检查本机文字资料。",
@@ -146,7 +148,7 @@ class FingerprintScanner:
 
     def take(self):
         config_path = self.root / "config.json"
-        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        config = load_config(self.root)
         skill, runtime = Path(config["skill_root"]), Path(config["runtime_root"])
         found = {}
 
@@ -173,6 +175,7 @@ class FingerprintScanner:
                     add(path, derived)
 
         add(config_path)
+        add(self.root / "config.local.json")
         cases = skill / "cases"
         if cases.is_dir():
             for path in cases.rglob("*.json"):
@@ -183,7 +186,7 @@ class FingerprintScanner:
         walk(skill / "templates", {".md", ".txt", ".json"})
         walk(runtime / "ai-tasks", {".json"}, names={"task.json"})
         for relative in ("directions/catalog.json", "creation/catalog.json", "reviews/state.json",
-                         "navigation-assignments.json"):
+                         "navigation-assignments.json", "evidence/product-catalog.json"):
             add(runtime / relative)
         walk(runtime / "reviews" / "sources", {".json"})
         walk(runtime / "performance" / "uploads", {".xlsx"})
@@ -196,8 +199,8 @@ class FingerprintScanner:
         walk(self.root / "static", {".html", ".js", ".css"})
         walk(self.root / "deployment" / "text-only", {".js", ".css"})
         add(self.root / "deployment" / "export_text_site.py")
-        # Case/source markdown can live outside the store. Never watch evidence
-        # directories or import media; only markdown/text source_analysis files.
+        # Case/source markdown can live outside the store. Never recursively
+        # watch evidence directories or import media; only markdown/text source_analysis files.
         owners = {path for path in found if Path(path).name == "original.json" or Path(path).parent.name == "events"}
         self.references = {key: value for key, value in self.references.items() if key in owners}
         for path in owners:
@@ -273,6 +276,30 @@ class StageFailure(RuntimeError):
         super().__init__(ERRORS[code])
 
 
+def publish_settings(root=ROOT, *, required=True):
+    """Resolve this installation's destination; a fresh clone has none."""
+    config = load_config(root).get("text_public_sync", {})
+    if not isinstance(config, dict):
+        raise StageFailure("configuration")
+    names = {"account_id": "CLOUDFLARE_ACCOUNT_ID", "project": "CASE_WORKBENCH_TEXT_PROJECT",
+             "public_url": "CASE_WORKBENCH_TEXT_PUBLIC_URL", "auth_profile": "CASE_WORKBENCH_TEXT_AUTH_PROFILE"}
+    value = {key: str(os.environ.get(env) or config.get(key) or "").strip() for key, env in names.items()}
+    value["auth_profile"] = value["auth_profile"] or AUTH_PROFILE
+    value["public_url"] = value["public_url"] or (f"https://{value['project']}.pages.dev" if value["project"] else "")
+    if required:
+        try:
+            url = urlsplit(value["public_url"])
+        except ValueError:
+            raise StageFailure("configuration") from None
+        if (not re.fullmatch(r"[a-fA-F0-9]{32}", value["account_id"])
+                or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", value["project"])
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value["auth_profile"])
+                or url.scheme != "https" or not url.hostname or url.username or url.password
+                or url.path not in {"", "/"} or url.query or url.fragment):
+            raise StageFailure("configuration")
+    return value
+
+
 class Publisher:
     def __init__(self, root, base, node=None, wrangler=None, timeout=600):
         self.root, self.base = Path(root), base
@@ -282,13 +309,14 @@ class Publisher:
 
     def _run(self, command, stage):
         environment = os.environ.copy()
-        environment.update(CLOUDFLARE_ACCOUNT_ID=ACCOUNT_ID, CLOUDFLARE_AUTH_USE_KEYRING="true",
+        environment.update(CLOUDFLARE_AUTH_USE_KEYRING="true",
                            CLOUDFLARE_SEND_METRICS="false", WRANGLER_SEND_METRICS="false", CI="1", PYTHONUTF8="1")
         if stage == "deploy":
             try:
-                config = json.loads((self.root / "config.json").read_text(encoding="utf-8-sig"))
+                config = load_config(self.root)
                 auth_root = Path(config["runtime_root"]) / "text-public-sync" / "cloudflare-auth"
-                if not auth_root.is_absolute():
+                site = (self.root / "deployment" / "site").resolve()
+                if not auth_root.is_absolute() or auth_root.resolve().is_relative_to(site):
                     raise ValueError()
             except (OSError, ValueError, KeyError):
                 raise StageFailure("configuration") from None
@@ -296,6 +324,7 @@ class Publisher:
             # desktop app. The opaque encrypted profile lives in this shared
             # private runtime directory; the encryption key stays in keyring.
             environment["XDG_CONFIG_HOME"] = str(auth_root)
+            environment["CLOUDFLARE_ACCOUNT_ID"] = publish_settings(self.root)["account_id"]
         try:
             result = subprocess.run(command, cwd=self.root, env=environment, shell=False,
                                     capture_output=True, encoding="utf-8", errors="replace",
@@ -319,14 +348,15 @@ class Publisher:
                    "--base", self.base], "export")
 
     def deploy(self):
+        destination = publish_settings(self.root)
         node = shutil.which(self.node or "node")
         if not node or not self.wrangler.is_file():
             raise StageFailure("configuration")
         output = self._run([str(Path(node).resolve()), str(self.wrangler.resolve()), "pages", "deploy",
-                            str(self.root / "deployment" / "site"), "--project-name", PROJECT,
-                            "--branch", "main", "--commit-dirty=true", "--profile", AUTH_PROFILE], "deploy")
+                            str(self.root / "deployment" / "site"), "--project-name", destination["project"],
+                            "--branch", "main", "--commit-dirty=true", "--profile", destination["auth_profile"]], "deploy")
         urls = re.findall(r"https://[a-z0-9.-]+\.pages\.dev\b", output, re.I)
-        return urls[-1] if urls else PUBLIC_URL
+        return urls[-1] if urls else destination["public_url"]
 
 
 class SyncService:
@@ -349,7 +379,7 @@ class SyncService:
         self.status = {"schema": 1, "pid": os.getpid(), "started_at": timestamp(),
                        "state": "starting", "message": STATES["starting"],
                        "poll_seconds": poll, "debounce_seconds": debounce,
-                       "public_url": PUBLIC_URL, "consecutive_failures": 0,
+                       "public_url": publish_settings(root, required=False)["public_url"], "consecutive_failures": 0,
                        "last_published_digest": previous.get("last_published_digest"),
                        "last_published_at": previous.get("last_published_at"),
                        "last_deployment_url": previous.get("last_deployment_url")}
@@ -468,7 +498,7 @@ def main(argv=None):
     parser.add_argument("--debounce", type=float, default=5)
     args = parser.parse_args(argv)
     try:
-        config = json.loads((ROOT / "config.json").read_text(encoding="utf-8-sig"))
+        config = load_config(ROOT)
         state_root = Path(config["runtime_root"]) / "text-public-sync"
         base = args.base or f"http://127.0.0.1:{config.get('port', 8767)}"
         url = urlsplit(base)

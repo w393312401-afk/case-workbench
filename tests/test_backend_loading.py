@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+import re
 import unittest
 from unittest.mock import patch
 
@@ -122,6 +123,20 @@ class BackendLoadingTests(unittest.TestCase):
         _, uncompressed, body = self.request("GET", "/app.js", headers={"Accept-Encoding": "gzip;q=0, *;q=1"})
         self.assertNotIn("Content-Encoding", uncompressed)
         self.assertEqual(body, plain)
+
+    def test_index_versions_assets_and_versioned_assets_are_immutable(self):
+        status, headers, body = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Cache-Control"], "private, no-cache")
+        page = body.decode("utf-8")
+        self.assertRegex(page, r'src="/app\.js\?v=[0-9a-f]{12}"')
+        self.assertNotRegex(page, r'(?:src|href)="/[A-Za-z0-9_.-]+\.(?:js|css)"')
+        version = re.search(r'src="/app\.js\?v=([0-9a-f]{12})"', page)[1]
+        status, asset, _ = self.request("GET", f"/app.js?v={version}")
+        self.assertEqual(status, 200)
+        self.assertEqual(asset["Cache-Control"], "private, max-age=31536000, immutable")
+        status, plain, _ = self.request("GET", "/app.js")
+        self.assertEqual(plain["Cache-Control"], "private, no-cache")
 
     def test_static_changed_file_invalidates_body_and_etag(self):
         temporary = self.root / "static-fixture"

@@ -25,8 +25,9 @@ class ServerBindingTests(unittest.TestCase):
         self.silence.start()
         self.addCleanup(self.silence.stop)
 
-    def start_server(self, port=0):
-        server = fixture.SERVER.make_server(self.root / "skill", self.root / "runtime", port=port, allow_open=False)
+    def start_server(self, port=0, workspace=None):
+        root = self.root / workspace if workspace else self.root
+        server = fixture.SERVER.make_server(root / "skill", root / "runtime", port=port, allow_open=False)
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self.servers.append((server, thread))
         thread.start()
@@ -74,9 +75,32 @@ class ServerBindingTests(unittest.TestCase):
         self.assertEqual(replacement.server_port, port)
         self.assertNotEqual(self.state(replacement)["token"], old_token)
 
+    def test_keepalive_requests_send_small_responses_without_nagle_delay(self):
+        observed = []
+        original_output = fixture.SERVER.Handler.output
+
+        def output(handler, *args, **kwargs):
+            observed.append((handler.connection, handler.connection.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)))
+            return original_output(handler, *args, **kwargs)
+
+        server = self.start_server()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        try:
+            with patch.object(fixture.SERVER.Handler, "output", output):
+                for _ in range(3):
+                    connection.request("GET", "/api/products")
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertIn("products", json.loads(response.read()))
+            self.assertEqual(len(observed), 3)
+            self.assertTrue(all(sock is observed[0][0] and no_delay == 1 for sock, no_delay in observed))
+        finally:
+            connection.close()
+
     def test_ephemeral_servers_still_receive_separate_usable_ports(self):
         first = self.start_server()
-        second = self.start_server()
+        # A runtime has one owner, even when listeners request ephemeral ports.
+        second = self.start_server(workspace="independent")
         self.assertNotEqual(first.server_port, second.server_port)
         self.assertGreater(first.server_port, 0)
         self.assertGreater(second.server_port, 0)

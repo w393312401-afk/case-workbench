@@ -218,10 +218,15 @@ class DirectionProgressiveTests(unittest.TestCase):
         self.wait_for_task_read(page, held)
         page.evaluate("location.hash='#/202H/settings'")
         page.locator(".settings-page").wait_for()
-        before = page.locator("#content").inner_html()
+        # Settings has its own asynchronous backup-status update. Detect a stale
+        # direction render without treating that legitimate update as pollution.
+        page.evaluate("window.__settingsNode=document.querySelector('.settings-page')")
         held[0].fulfill(status=200, json={"tasks": [self.task_data("过期回应不能出现")]})
         page.evaluate("()=>new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)))")
-        self.assertEqual(page.locator("#content").inner_html(), before)
+        self.assertTrue(page.evaluate("document.querySelector('.settings-page')===window.__settingsNode"))
+        self.assertEqual(page.evaluate("location.hash"), "#/202H/settings")
+        self.assertNotIn("过期回应不能出现", page.locator("#content").inner_text())
+        self.assertEqual(page.locator("#direction-definition").count(), 0)
         self.assertEqual(page.locator("#direction-tasks").count(), 0)
 
     def test_ninth_variant_and_offscreen_case_table_work_on_a_narrow_viewport(self):
@@ -240,6 +245,7 @@ class DirectionProgressiveTests(unittest.TestCase):
 
         page.route("**/api/direction-catalog", save_variant)
         self.open_detail(page)
+        page.locator('details.dir-variant[data-variant-index="8"] > summary').click()
         last = page.locator('[data-variant-progression="8"]')
         last.scroll_into_view_if_needed()
         self.assertTrue(last.is_visible())

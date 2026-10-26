@@ -4,7 +4,7 @@
 .quick-create-fields textarea[name="conclusion"] { min-height: 78px; }
 .quick-create-media { margin-top: 2px; }
 .quick-create-media .video-dropzone { min-height: 82px; }
-.case-inline-editor { clear: both; padding: 20px; margin-top: 18px; background: var(--surface, #fff); border: 1px solid var(--accent, #bd8b4c); border-radius: 12px; scroll-margin-top: 150px; }
+.case-inline-editor { clear: both; padding: 20px; margin-top: 18px; background: var(--surface); border: 1px solid var(--accent); border-radius: 12px; scroll-margin-top: 150px; }
 .inline-editor-heading, .inline-editor-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .inline-editor-heading { margin-bottom: 18px; }
 .inline-editor-heading h3 { margin: 0; }

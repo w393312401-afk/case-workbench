@@ -149,6 +149,17 @@ class SalesDataResolver:
                 rows = self.performance.video_brief(ids)
             except (sqlite3.Error, OSError, ValueError):
                 available = False
+        # Public-page observations are useful even for reference cases that have
+        # no sales export. Keep them separate so they never imply sales coverage.
+        public = {video_id: row["public_stats"] for video_id, row in rows.items()
+                  if isinstance(row.get("public_stats"), dict)}
+        missing = ids - rows.keys()
+        public_store = getattr(self.performance, "public", None)
+        if missing and public_store is not None:
+            try:
+                public.update(public_store.latest(missing))
+            except (sqlite3.Error, OSError, ValueError):
+                pass
         result = {}
         for case in cases:
             video_id = _identity(case)
@@ -160,6 +171,10 @@ class SalesDataResolver:
                 data = unavailable_data(video_id, status="not_found")
             else:
                 data = _matched(video_id, rows[video_id])
+            if video_id in public:
+                snapshot = public[video_id]
+                data["public_stats"] = {field: snapshot.get(field) for field in
+                    ("views", "likes", "comments", "shares", "saves", "observed_at", "last_seen_at")}
             result[case["case_id"]] = data
         return result
 

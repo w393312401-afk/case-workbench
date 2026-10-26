@@ -43,6 +43,7 @@ function normalizeNavigation(value) {
     const normalized = {...fallback,label:text("label",24) || fallback.label,icon:typeof item.icon === "string" && Object.hasOwn(navigationIcons,item.icon) ? item.icon : fallback.icon,visible:item.visible !== false,deleted:item.deleted === true,content:typeof item.content === "string" && Object.hasOwn(navigationSources,item.content) ? item.content : fallback.content,description:text("description",200),product:text("product",120),query:text("query",200),caseIds:[...new Set((Array.isArray(item.caseIds) ? item.caseIds : []).filter(id => typeof id === "string" && /^PVR-[0-9a-f]{12}$/.test(id)))]};
     const filters = libraryViewFilters(item.filters);
     if (filters) { if(filters.baseView === item.id) filters.baseView="all"; normalized.filters=filters; }
+    else if (item.libraryCategory === true && normalized.content === "custom") normalized.libraryCategory = true;
     result.push(normalized);
   }
   defaults.forEach(item => { if (!seen.has(item.id)) result.push(item); });
@@ -61,6 +62,7 @@ function navigationAssignment(caseId) {
   return typeof value === "string" && value.startsWith("column:") ? value.slice(7) : null;
 }
 function navigationCollectionCaseIds(column) {
+  if (column.libraryCategory) return [...column.caseIds];
   const selected = new Set(column.caseIds.filter(id => !navigationAssignment(id)));
   for (const item of state.cases) {
     if (navigationAssignment(item.case_id) === column.id) selected.add(item.case_id);
@@ -75,7 +77,8 @@ function navigationMatches(item, view, depth=0, archiveOverride=null) {
   if (archive !== "all" && !!item.archived !== (archive === "archived")) return false;
   if(Object.hasOwn(libraryReferenceViews,view)) return content === "all" || (content === "native" ? !!item.current?.native_reference : !!item.current?.source_case);
   let matches;
-  if (content === "all" || content === "archived") matches = true;
+  if (column?.libraryCategory && content === "custom") matches = column.caseIds.includes(item.case_id);
+  else if (content === "all" || content === "archived") matches = true;
   else if (navigationAssignment(item.case_id)) matches = navigationAssignment(item.case_id) === view;
   else if (content === "custom") matches = !!column?.caseIds.includes(item.case_id);
   else if (content === "self_produced" || content === "overseas_creator") matches = item.current?.content_origin === content;
@@ -86,7 +89,7 @@ function navigationMatches(item, view, depth=0, archiveOverride=null) {
   return matches && (!column?.product || productFilterGroup(item) === column.product) && (!column?.query || (item.search_text || "").toLowerCase().includes(column.query.toLowerCase()));
 }
 function navigationMoveChoices() {
-  return navigationItems.filter(item => item.visible && !item.deleted && !["self_produced","overseas_creator"].includes(item.content) && !item.product && !item.query);
+  return navigationItems.filter(item => item.visible && !item.deleted && !item.libraryCategory && !item.filters && !["self_produced","overseas_creator"].includes(item.content) && !item.product && !item.query);
 }
 function saveNavigation(value) {
   const current = localStorage.getItem(navigationStorageKey);
@@ -97,7 +100,7 @@ function saveNavigation(value) {
   navigationItems = normalized;
 }
 function openNavigationView(view) {
-  Object.assign(state,{view,query:"",product:window.WorkbenchShell?.product() || "",archiveCategory:"all",sourceType:"all",contentOrigin:"all",archiveStatus:navigationContent(view)==="archived"?"archived":"active",sort:"updated",sortDir:"desc",detailTab:"current",libraryScrollY:0});
+  Object.assign(state,{view,query:"",libraryProduct:"",direction:"",variantType:"all",archiveCategory:"all",sourceType:"all",contentOrigin:"all",archiveStatus:navigationContent(view)==="archived"?"archived":"active",sort:"updated",sortDir:"desc",detailTab:"current",libraryScrollY:0});
   const next = libraryHash();
   if (location.hash === next) { updateNav(); renderLibrary(); window.scrollTo(0,0); }
   else location.hash = next;
@@ -226,12 +229,13 @@ window.LibraryViews = (() => {
     return navigationItems.filter(item => (includeDeleted || (!item.deleted && item.visible)) && (item.id.startsWith("custom-") || item.filters || assigned.has(item.id) || item.caseIds.length || item.label !== navigationSources[item.id] || item.content !== item.id || item.product || item.query || !Object.hasOwn(navigationDefaultIcons,item.id)));
   }
   function snapshot() {
-    return libraryViewFilters({...state,product:window.WorkbenchShell?.product() ?? state.product,baseView:selected()?.filters?.baseView || state.view});
+    return libraryViewFilters({...state,product:state.libraryProduct || "",baseView:selected()?.filters?.baseView || state.view});
   }
   function applyRouteFilters() {
     const filters=selected()?.filters;
     if(!filters)return;
     for(const [key,value] of Object.entries(filters)) if(!["baseView","product"].includes(key)) state[key]=value;
+    state.libraryProduct = window.WorkbenchShell?.normalizeProduct(filters.product) || filters.product || "";
   }
   function detach() { if(selected()?.filters) state.view=selected().filters.baseView; }
   function open(id) {
@@ -240,8 +244,7 @@ window.LibraryViews = (() => {
     if(!item.filters) {openNavigationView(id);return;}
     state.view=id;
     applyRouteFilters();
-    let target=libraryHash();
-    if(window.WorkbenchShell) target=window.WorkbenchShell.url(target,item.filters.product);
+    const target=libraryHash();
     if(location.hash===target) {updateNav();renderLibrary();} else location.hash=target;
   }
   function persist(change) {
@@ -292,4 +295,90 @@ window.LibraryViews = (() => {
     render();dialog.showModal();
   }
   return {available,snapshot,applyRouteFilters,detach,open,saveCurrent,openManager};
+})();
+
+// User categories reuse the existing preference store; case records and earlier
+// server-side moves stay untouched when a collection is edited or restored.
+window.LibraryCategories = (() => {
+  const editable = () => !window.WorkbenchGuest && !window.PublicTextMode;
+  const available = (includeDeleted = false) => window.LibraryViews.available(includeDeleted);
+  function commit(change, baseline) {
+    if (baseline !== navigationStoredValue || localStorage.getItem(navigationStorageKey) !== baseline) throw new Error("分类已在其他页面更新，请关闭后重新打开再修改。");
+    const copy = structuredClone(navigationItems);
+    change(copy); saveNavigation(copy); applyNavigation();
+    if (!isNavigationView(state.view)) { state.view = "reference-all"; state.libraryProduct = ""; writeLibraryHash(); }
+    if (state.routeKind === "library") renderLibrary();
+  }
+  function openEditor(id = "") {
+    if (!editable()) return;
+    const existing = id ? navigationItem(id) : null;
+    if (id && (!existing || existing.deleted)) return;
+    const manual = !existing || (existing.content === "custom" && !existing.filters);
+    const members = new Set(existing && manual ? navigationCollectionCaseIds(existing) : []);
+    const baseline = navigationStoredValue;
+    let dialog = $("#library-category-editor");
+    if (!dialog) { dialog = document.createElement("dialog"); dialog.id = "library-category-editor"; document.body.append(dialog); }
+    dialog.setAttribute("aria-labelledby", "library-category-editor-title");
+    dialog.innerHTML = `<form><div class="dialog-heading"><h2 id="library-category-editor-title">${existing ? "编辑分类" : "新建分类"}</h2><button type="button" class="icon-button" data-close aria-label="关闭分类编辑">${icon("close")}</button></div><div class="library-category-form"><label class="field"><span>分类名称</span><input name="category_name" required maxlength="24" autocomplete="off" value="${esc(existing?.label || "")}" placeholder="例如：开头参考、待复拍、产品实拍"></label><label class="field"><span>分类说明（可选）</span><textarea name="description" rows="2" maxlength="200" placeholder="这个分类用来收纳什么…">${esc(existing?.description || "")}</textarea></label>${manual ? `<div class="library-category-pick-heading"><h3>收纳案例</h3><span data-category-count></span></div><p class="context-note">可从全部产品中选择，同一案例可以加入多个分类。</p><label class="search library-category-search">${icon("search")}<input type="search" data-category-search aria-label="搜索可收纳案例" placeholder="搜索案例标题或产品…"></label><div class="library-category-cases" data-category-cases></div>` : '<p class="context-note">这个分类按已保存的条件自动展示案例；原有筛选条件保持不变。</p>'}<p class="library-view-error" role="alert"></p></div><div class="dialog-footer"><span>分类保存在当前浏览器。</span><div><button type="button" class="secondary" data-close>取消</button><button type="submit" class="primary">保存分类</button></div></div></form>`;
+    function paintCases() {
+      const query = dialog.querySelector("[data-category-search]").value.trim().toLocaleLowerCase();
+      const rows = state.cases.filter(item => (!item.archived || members.has(item.case_id)) && (!query || `${shortTitle(item)} ${item.product || ""}`.toLocaleLowerCase().includes(query)));
+      dialog.querySelector("[data-category-count]").textContent = `已选 ${members.size} 条`;
+      dialog.querySelector("[data-category-cases]").innerHTML = rows.length ? rows.map(item => `<label class="library-category-case"><input type="checkbox" data-case-id="${esc(item.case_id)}" ${members.has(item.case_id) ? "checked" : ""}><span><strong>${esc(shortTitle(item))}</strong><small>${esc(item.product || "未标注产品")}${item.archived ? " · 已归档，恢复后显示" : ""}</small></span></label>`).join("") : '<p class="context-note">没有匹配的案例。</p>';
+    }
+    if (manual) {
+      paintCases();
+      dialog.querySelector("[data-category-search]").oninput = paintCases;
+      dialog.querySelector("[data-category-cases]").onchange = event => {
+        const input = event.target.closest("[data-case-id]");
+        if (!input) return;
+        if (input.checked) members.add(input.dataset.caseId); else members.delete(input.dataset.caseId);
+        dialog.querySelector("[data-category-count]").textContent = `已选 ${members.size} 条`;
+      };
+    }
+    dialog.querySelectorAll("[data-close]").forEach(button => button.onclick = () => dialog.close());
+    dialog.querySelector("form").onsubmit = event => {
+      event.preventDefault();
+      const name = dialog.querySelector('[name="category_name"]').value.trim();
+      const description = dialog.querySelector('[name="description"]').value.trim();
+      const error = dialog.querySelector(".library-view-error");
+      if (!name) { error.textContent = "请输入分类名称。"; return; }
+      if (available().some(item => item.id !== id && item.label.toLocaleLowerCase() === name.toLocaleLowerCase())) { error.textContent = "已有同名分类，请换一个名称。"; return; }
+      const target = existing?.id || `custom-${crypto.randomUUID()}`;
+      try {
+        commit(items => {
+          let item = items.find(row => row.id === target);
+          if (!item) { item = { ...navigationDefaults()[0], id: target, content: "custom", icon: "folder", product: "", query: "" }; items.push(item); }
+          Object.assign(item, { label: name, description, visible: true, deleted: false });
+          if (manual) Object.assign(item, { libraryCategory: true, caseIds: [...members], product: "", query: "" });
+        }, baseline);
+        dialog.close();
+        window.LibraryViews.open(target);
+        toast(existing ? "分类已更新" : "分类已创建");
+      } catch (reason) { error.textContent = reason.message || "分类暂时无法保存，请重试。"; }
+    };
+    dialog.showModal(); dialog.querySelector('[name="category_name"]').focus();
+  }
+  function openManager() {
+    if (!editable()) return;
+    let dialog = $("#library-category-manager");
+    if (!dialog) { dialog = document.createElement("dialog"); dialog.id = "library-category-manager"; document.body.append(dialog); }
+    dialog.setAttribute("aria-labelledby", "library-category-manager-title");
+    let baseline = navigationStoredValue;
+    function render() {
+      const rows = available(true);
+      dialog.innerHTML = `<div class="dialog-heading"><div><h2 id="library-category-manager-title">管理自定义分类</h2><p>调整名称与收纳，删除的分类也可以恢复。</p></div><button type="button" class="icon-button" data-close aria-label="关闭分类管理">${icon("close")}</button></div><div class="library-category-manager-body">${rows.length ? rows.map(item => `<div class="library-category-manager-row" data-category-id="${esc(item.id)}"><div><strong>${esc(item.label)}</strong><small>${item.deleted ? "已删除，可恢复" : item.filters ? "按保存条件自动分类" : item.content === "custom" ? `已收纳 ${navigationCollectionCaseIds(item).length} 条案例` : "保留原有分类条件"}</small>${item.description ? `<p>${esc(item.description)}</p>` : ""}</div><div class="settings-actions">${item.deleted ? '<button type="button" class="secondary" data-restore-category>恢复</button>' : '<button type="button" class="secondary" data-edit-category>编辑</button><button type="button" class="subtle" data-delete-category>删除</button>'}</div></div>`).join("") : '<p class="context-note">还没有自定义分类，点击“新建分类”开始整理。</p>'}<p class="library-view-error" role="alert"></p></div><div class="dialog-footer"><span>删除分类不会删除案例，恢复后保留原有收纳。</span><button type="button" class="secondary" data-close>完成</button></div>`;
+      dialog.querySelectorAll("[data-close]").forEach(button => button.onclick = () => dialog.close());
+      dialog.querySelectorAll("[data-edit-category],[data-delete-category],[data-restore-category]").forEach(button => button.onclick = () => {
+        const id = button.closest("[data-category-id]").dataset.categoryId;
+        if (button.matches("[data-edit-category]")) { dialog.close(); openEditor(id); return; }
+        try {
+          commit(items => { const item = items.find(row => row.id === id); item.deleted = button.matches("[data-delete-category]"); if (!item.deleted) item.visible = true; }, baseline);
+          baseline = navigationStoredValue; render();
+        } catch (reason) { dialog.querySelector(".library-view-error").textContent = reason.message || "分类暂时无法保存，请重试。"; }
+      });
+    }
+    render(); dialog.showModal();
+  }
+  return { available, openEditor, openManager };
 })();

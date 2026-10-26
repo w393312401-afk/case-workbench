@@ -45,17 +45,27 @@ class VariantPickerBrowserTests(unittest.TestCase):
         self.server.app.resolve = SimpleNamespace(status=lambda: {"ok": False, "error": "隔离测试不连接达芬奇"})
         self.video_variants, self.photo_variants = variants(), carousels()
         self.posts = []
+        self.variant_reads = []
+        self.legacy_reads = []
 
     @staticmethod
     def reply(route, value, status=200):
         route.fulfill(status=status, content_type="application/json", body=json.dumps(value, ensure_ascii=False))
 
-    def picker(self, *, width=1280, height=800, carousel=False, production_status=200):
+    def picker(self, *, width=1280, height=800, carousel=False, production_status=200, table_status=200, script_status=200, variant_error=None, table_results=None):
         page = self.open_page(width=width)
         page.set_viewport_size({"width": width, "height": height})
-        path = "carousel-variants" if carousel else "variants"
-        items = self.photo_variants if carousel else self.video_variants
-        page.route(f"**/api/production/{path}?*", lambda route: self.reply(route, {"carousels" if carousel else "variants": items, "task_revision": 7}))
+        def candidate_variants(route):
+            self.variant_reads.append(route.request.url)
+            self.reply(route, {"error": variant_error} if variant_error else
+                       {"variants": self.video_variants, "task_revision": 7}, 409 if variant_error else 200)
+
+        def legacy_variants(route):
+            self.legacy_reads.append(route.request.url)
+            self.reply(route, {"error": "New candidate entry must use spoken variants"}, 422)
+
+        page.route("**/api/production/variants?*", candidate_variants)
+        page.route("**/api/production/carousel-variants?*", legacy_variants)
 
         def script(route):
             if route.request.method != "POST":
@@ -63,8 +73,25 @@ class VariantPickerBrowserTests(unittest.TestCase):
                 return
             body = route.request.post_data_json
             self.posts.append({"kind": "script", "body": body})
+            if script_status != 200:
+                self.reply(route, {"error": "fixture temporary adoption error"}, script_status)
+                return
             identifier = f"SCR-{len([item for item in self.posts if item['kind'] == 'script']):012x}"
-            self.reply(route, {"script": {"id": identifier}})
+            self.reply(route, {"script": {**body["script"], "id": identifier, "source": body["source"]}})
+
+        def table(route):
+            body = route.request.post_data_json
+            self.posts.append({"kind": "table", "body": body})
+            if table_status != 200:
+                self.reply(route, {"error": "fixture temporary table error"}, table_status)
+                return
+            selected = next(item["body"]["source"].get("variant_index", 0)
+                            for item in reversed(self.posts) if item["kind"] == "script")
+            result = {"id": "TBL-0123456789ab", "script_id": body["script_id"], "status": "completed", "carousels": [self.photo_variants[selected]]}
+            if table_results:
+                number = sum(item["kind"] == "table" for item in self.posts) - 1
+                result.update(table_results[min(number, len(table_results) - 1)])
+            self.reply(route, {"table": result})
 
         def production(route):
             body = route.request.post_data_json
@@ -76,14 +103,17 @@ class VariantPickerBrowserTests(unittest.TestCase):
                 self.reply(route, {kind: {"id": "CAR-0123456789ab" if carousel else "PRD-0123456789ab", "product": "202H"}})
 
         page.route("**/api/scripts", script)
+        page.route("**/api/production/carousel-tables", table)
+        page.route("**/api/production/carousel-tables?script_id=*", lambda route: self.reply(route, {"tables": []}))
         page.route("**/api/production/carousels" if carousel else "**/api/production/jobs", production)
         page.route("**/api/production/carousels/*" if carousel else "**/api/production/jobs/*",
                    lambda route: self.reply(route, {"error": "Temporary destination is not persisted"}, 404))
         page.evaluate("async ({task,round,carousel}) => {await window.CaseProduction[carousel ? 'fromCandidateCarousel' : 'fromCandidate'](task,round);}",
                       {"task": TASK, "round": ROUND, "carousel": carousel})
-        dialog = page.locator(".variant-picker-dialog[open]")
+        dialog = page.locator(".production-dialog[open]" if variant_error else ".variant-picker-dialog[open]")
         dialog.wait_for()
-        self.assertEqual(dialog.locator('input[name="variant"]').count(), 10)
+        if not variant_error:
+            self.assertEqual(dialog.locator('input[name="variant"]').count(), 10)
         return page, dialog
 
     def assert_first_script_visible(self, page, dialog):
@@ -156,8 +186,8 @@ class VariantPickerBrowserTests(unittest.TestCase):
                 options.evaluate("node => {node.scrollTop = node.scrollHeight;}")
                 dialog.locator('input[name="variant"][value="9"]').check()
                 self.assert_first_script_visible(page, dialog)
-                text = "Carousel 10 slide 01" if carousel else "Preview 10 sentence 01."
-                self.assertIn(text, dialog.locator("[data-variant-preview]").inner_text())
+                self.assertIn("Preview 10 sentence 01.", dialog.locator("[data-variant-preview]").inner_text())
+                self.assertEqual(self.legacy_reads, [])
                 self.screenshot(page, "mobile-carousel-10" if carousel else "mobile-video-10")
                 if os.environ.get("WORKBENCH_VARIANT_PICKER_QA"):
                     print(json.dumps({"carousel": carousel, "geometry": self.geometry(dialog)}))
@@ -185,6 +215,7 @@ class VariantPickerBrowserTests(unittest.TestCase):
         self.assertEqual(script["body"]["script"]["title"], "我的自定义标题")
         self.assertEqual(script["body"]["script"]["text"], "Edited selected variant.\nOnly current lines.")
         self.assertEqual(script["body"]["script"]["translation_zh"], "已编辑的选中版本。\n仅当前意群。")
+        self.assertEqual(script["body"]["source"]["variant_index"], 9)
         self.assertEqual(job["body"]["job"]["variant_index"], 9)
         self.assertEqual(job["body"]["job"]["script_id"], "SCR-000000000001")
         self.assertEqual(self.server.app.production.public()["jobs"], [])
@@ -208,7 +239,7 @@ class VariantPickerBrowserTests(unittest.TestCase):
         self.assertEqual(self.posts[4]["body"]["job"]["script_id"], "SCR-000000000002")
         self.assertNotEqual(self.posts[1]["body"]["request_id"], self.posts[4]["body"]["request_id"])
 
-    def test_carousel_switch_refreshes_slides_caption_and_adoption_index(self):
+    def test_carousel_selects_spoken_script_before_the_photo_skill_and_table_review(self):
         page, dialog = self.picker(carousel=True)
         dialog.locator('[name="title"]').fill("保留图文标题")
         content = dialog.locator("[data-variant-content]")
@@ -216,17 +247,123 @@ class VariantPickerBrowserTests(unittest.TestCase):
         dialog.locator('input[name="variant"][value="9"]').check()
         self.assertEqual(content.evaluate("node => node.scrollTop"), 0)
         preview = dialog.locator("[data-variant-preview]").inner_text()
-        self.assertIn("Carousel 10 slide 01", preview)
-        self.assertIn("Caption for carousel 10.", preview)
-        self.assertNotIn("Caption for carousel 1.", preview)
+        self.assertIn("Preview 10 sentence 01.", preview)
+        self.assertNotIn("Carousel 10 slide 01", preview)
         self.assertEqual(dialog.locator('[name="title"]').input_value(), "保留图文标题")
         dialog.locator("[data-submit]").click()
-        page.wait_for_function("() => !window.CaseProduction.modalOpen()")
-        self.assertEqual([item["kind"] for item in self.posts], ["script", "carousel"])
-        self.assertEqual(self.posts[0]["body"]["script"]["text"], "Carousel script 10.")
+        generation = page.get_by_role("dialog").filter(has=page.get_by_text("用图文技能生成逐张表", exact=True))
+        generation.wait_for()
+        self.assertEqual([item["kind"] for item in self.posts], ["script"])
+        self.assertEqual(self.posts[0]["body"]["script"]["text"], "\n".join(line["spoken"] for line in self.video_variants[9]["lines"]))
         self.assertEqual(self.posts[0]["body"]["script"]["title"], "保留图文标题")
-        self.assertEqual(self.posts[1]["body"]["carousel"]["variant_index"], 9)
+        self.assertEqual(self.posts[0]["body"]["source"]["variant_index"], 9)
+        self.assertIn("Preview 10 sentence 01.", generation.inner_text())
+        generation.locator('[name="instruction"]').fill("只做 4 张")
+        generation.locator("[data-submit]").click()
+        review = page.get_by_role("dialog").filter(has=page.get_by_text("核对图文逐张表", exact=True))
+        review.wait_for()
+        self.assertEqual([item["kind"] for item in self.posts], ["script", "table"])
+        self.assertIn("Carousel 10 slide 01", review.inner_text())
+        self.assertIn("Caption for carousel 10.", review.inner_text())
+        self.assertNotIn("Caption for carousel 1.", review.inner_text())
+        self.assertEqual(self.posts[1]["body"]["script_id"], "SCR-000000000001")
+        self.assertEqual(self.posts[1]["body"]["instruction"], "只做 4 张")
+        review.locator("[data-submit]").click()
+        page.wait_for_function("() => !window.CaseProduction.modalOpen()")
+        self.assertEqual([item["kind"] for item in self.posts], ["script", "table", "carousel"])
+        self.assertEqual(self.posts[2]["body"]["carousel"], {"script_id": "SCR-000000000001", "table_id": "TBL-0123456789ab"})
+        self.assertEqual(self.legacy_reads, [])
         self.assertEqual(self.server.app.production.public()["carousels"], [])
+
+    def test_carousel_adoption_retry_uses_the_same_request_and_new_selection_uses_a_new_request(self):
+        _, dialog = self.picker(carousel=True, script_status=503)
+        submit = dialog.locator("[data-submit]")
+        dialog.locator('input[name="variant"][value="9"]').check()
+        submit.click()
+        dialog.locator("[data-error]").get_by_text("fixture temporary adoption error", exact=False).wait_for()
+        submit.click()
+        dialog.locator("[data-error]").get_by_text("fixture temporary adoption error", exact=False).wait_for()
+        self.assertEqual([item["kind"] for item in self.posts], ["script", "script"])
+        self.assertEqual(self.posts[0]["body"], self.posts[1]["body"])
+        dialog.locator('input[name="variant"][value="8"]').check()
+        submit.click()
+        dialog.locator("[data-error]").get_by_text("fixture temporary adoption error", exact=False).wait_for()
+        self.assertEqual(self.posts[2]["body"]["source"]["variant_index"], 8)
+        self.assertNotEqual(self.posts[0]["body"]["request_id"], self.posts[2]["body"]["request_id"])
+        self.assertEqual(self.legacy_reads, [])
+
+    def test_carousel_manual_split_validates_lines_and_continues_the_same_photo_flow(self):
+        page, dialog = self.picker(carousel=True, variant_error="这轮找不到可配音的口播，请手动指定。")
+        self.assertIn("手动指定要制作的口播脚本", dialog.inner_text())
+        dialog.locator('[name="spoken"]').fill("Manually chosen first group.\nManually chosen second group.")
+        dialog.locator('[name="chinese"]').fill("只写了一行。")
+        dialog.locator("[data-submit]").click()
+        dialog.locator("[data-error]").get_by_text("中文 1 行，口播 2 行", exact=False).wait_for()
+        self.assertEqual(self.posts, [])
+        dialog.locator('[name="chinese"]').fill("手动选择的第一意群。\n手动选择的第二意群。")
+        dialog.locator("[data-submit]").click()
+        generation = page.get_by_role("dialog").filter(has=page.get_by_text("用图文技能生成逐张表", exact=True))
+        generation.wait_for()
+        self.assertEqual([item["kind"] for item in self.posts], ["script"])
+        self.assertNotIn("variant_index", self.posts[0]["body"]["source"])
+        self.assertIn("Manually chosen first group.", generation.inner_text())
+        self.assertEqual(self.legacy_reads, [])
+
+    def test_carousel_table_and_creation_retries_keep_one_adopted_script(self):
+        for table_status, creation_status in ((503, 200), (200, 503)):
+            with self.subTest(table_status=table_status):
+                self.posts.clear()
+                page, dialog = self.picker(carousel=True, table_status=table_status, production_status=creation_status)
+                dialog.locator('input[name="variant"][value="9"]').check()
+                dialog.locator("[data-submit]").click()
+                generation = page.get_by_role("dialog").filter(has=page.get_by_text("用图文技能生成逐张表", exact=True))
+                generation.wait_for()
+                generation.locator("[data-submit]").click()
+                target = generation
+                error = "fixture temporary table error"
+                kind = "table"
+                if table_status == 200:
+                    target = page.get_by_role("dialog").filter(has=page.get_by_text("核对图文逐张表", exact=True))
+                    target.wait_for()
+                    target.locator("[data-submit]").click()
+                    error = "fixture temporary creation error"
+                    kind = "carousel"
+                target.locator("[data-error]").get_by_text(error, exact=False).wait_for()
+                target.locator("[data-submit]").click()
+                target.locator("[data-error]").get_by_text(error, exact=False).wait_for()
+                retries = [item for item in self.posts if item["kind"] == kind]
+                self.assertEqual(len(retries), 2)
+                self.assertEqual(retries[0]["body"], retries[1]["body"])
+                self.assertEqual(sum(item["kind"] == "script" for item in self.posts), 1)
+                self.assertEqual(self.legacy_reads, [])
+
+    def test_terminal_photo_table_result_requires_an_explicit_new_request(self):
+        for status in ("failed", "interrupted", "cancelled"):
+            with self.subTest(status=status):
+                self.posts.clear()
+                page, dialog = self.picker(carousel=True, table_results=[
+                    {"id": "TBL-000000000001", "status": status, "error": f"fixture {status}"},
+                    {"id": "TBL-000000000002", "status": "completed"},
+                ])
+                dialog.locator("[data-submit]").click()
+                generation = page.get_by_role("dialog").filter(has=page.get_by_text("用图文技能生成逐张表", exact=True))
+                generation.wait_for()
+                generation.locator('[name="instruction"]').fill("第一版要求")
+                generation.locator("[data-submit]").click()
+                generation.locator("[data-error]").get_by_text(f"fixture {status}", exact=True).wait_for()
+                self.assertEqual([item["kind"] for item in self.posts], ["script", "table"])
+                generation.locator('[name="instruction"]').fill("明确重做的新要求")
+                generation.locator("[data-submit]").click()
+                review = page.get_by_role("dialog").filter(has=page.get_by_text("核对图文逐张表", exact=True))
+                review.wait_for()
+                table_calls = [item["body"] for item in self.posts if item["kind"] == "table"]
+                self.assertEqual(len(table_calls), 2)
+                self.assertEqual(table_calls[1]["instruction"], "明确重做的新要求")
+                self.assertNotEqual(table_calls[0]["request_id"], table_calls[1]["request_id"])
+                self.assertEqual(sum(item["kind"] == "script" for item in self.posts), 1)
+                review.locator("[data-submit]").click()
+                page.wait_for_function("() => !window.CaseProduction.modalOpen()")
+                self.assertEqual(self.posts[-1]["body"]["carousel"]["table_id"], "TBL-000000000002")
 
 
 if __name__ == "__main__":

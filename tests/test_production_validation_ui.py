@@ -6,6 +6,9 @@ import json
 import unittest
 
 import test_ui_regressions as browser
+from production_store import job_status
+from test_production_queue_ui import content_response
+from test_content_flow_ui import set_content_condition
 
 
 JOB_ID = "PRD-0123456789ab"
@@ -70,7 +73,7 @@ class ProductionValidationBrowserTests(unittest.TestCase):
             "models": [{"id": "claude-default", "name": "Claude 客户端默认", "available": True,
                         "reasoning_efforts": ["high", "xhigh", "max"]}], "skills": []}))))
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#production/{JOB_ID}")
-        page.get_by_role("heading", name="核验状态测试", exact=True).wait_for()
+        page.locator("[data-production-title]").wait_for()
         return page
 
     def test_end_states_show_issues_and_legacy_completion_requires_verification(self):
@@ -104,7 +107,7 @@ class ProductionValidationBrowserTests(unittest.TestCase):
         page.locator("#edit-runs .script-status").get_by_text("待人工审查", exact=True).wait_for()
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0]["body"], {})
-        page.get_by_text("读回并保存现有工程", exact=False).wait_for()
+        self.assertIn("读回并保存现有工程", page.get_by_role("button", name="重新核验", exact=True).get_attribute("title"))
 
     def test_low_coverage_invalid_missing_and_out_of_bounds_times_cannot_be_selected(self):
         good = {"number": 1, "start": 0, "end": 1, "coverage": .6}
@@ -198,33 +201,27 @@ class ProductionValidationBrowserTests(unittest.TestCase):
         self.assertEqual(page.get_by_role("button", name="恢复已取得的结果", exact=True).count(), 2)
         self.assertEqual(page.get_by_role("button", name="核对并恢复", exact=True).count(), 1)
 
-    def test_queue_does_not_promote_legacy_delivery_rows_without_verified_state(self):
-        page = self.open_page()
-        page.route("**/api/production/eleven", lambda route: route.fulfill(status=200,
-            content_type="application/json", body=json.dumps({"ok": True})))
-        base = {"kind": "video", "product": "202H", "title": "测试视频", "direction_id": "202H-S1",
-                "timeline_name": "Lab261011-202-1", "updated_at": "2026-10-11"}
-        rows = [
-            {**base, "id": "PRD-111111111111"},
-            {**base, "id": "PRD-222222222222", "status": "completed", "edit_id": "EDT-222222222222"},
-            {**base, "id": "PRD-333333333333", "status": "awaiting_review"},
-            {**base, "id": "PRD-444444444444", "status": "awaiting_review", "edit_id": "EDT-444444444444"}]
-        page.route("**/api/production/deliveries?*", lambda route: route.fulfill(status=200,
-            content_type="application/json", body=json.dumps({"items": rows}, ensure_ascii=False)))
+    def test_content_list_uses_verified_production_states_and_keeps_legacy_results_accessible(self):
         self.reviewable()
-        jobs = [{**copy.deepcopy(self.payload["job"]), "id": row["id"], "status": "awaiting_review",
-                 "edits": [self.edit("awaiting_review", row.get("edit_id", "EDT-0123456789ab"))]} for row in rows]
-        page.route("**/api/production?*", lambda route: route.fulfill(status=200, content_type="application/json",
-            body=json.dumps({"jobs": jobs, "carousels": [], "voices": [], "defaults": {}}, ensure_ascii=False)))
-        page.goto(f"http://127.0.0.1:{self.server.server_port}/#production")
-        page.locator('[data-delivery-item="PRD-444444444444"]').wait_for()
-        self.assertEqual(page.locator("#production-queue .production-card").count(), 4)
-        self.assertEqual(page.locator('[data-delivery-kind="video"]').count(), 1)
-        for identifier in ("PRD-111111111111", "PRD-222222222222", "PRD-333333333333"):
-            self.assertEqual(page.locator(f'[data-delivery-item="{identifier}"]').count(), 0)
-        page.locator('[data-production-id="PRD-444444444444"]').get_by_text("待人工审查", exact=True).wait_for()
-        page.locator("#production-status").select_option("awaiting_review")
-        self.assertEqual(page.locator("#production-queue .production-card").count(), 1)
+        page = self.open_page()
+        page.wait_for_load_state('networkidle')
+        jobs = []
+        for number, state in enumerate(('completed', 'needs_repair', 'verification_failed', 'awaiting_review'), 1):
+            job = {**copy.deepcopy(self.payload['job']), 'id': f'PRD-{number:012d}',
+                   'edits': [self.edit(state, f'EDT-{number:012d}') ]}
+            job['status'] = job_status(job)
+            jobs.append(job)
+        page.route('**/api/content?*', lambda route: route.fulfill(status=200, content_type='application/json',
+            body=json.dumps(content_response(self.server.app, jobs, [], route.request.url))))
+        page.goto(f'http://127.0.0.1:{self.server.server_port}/#/202H/content?view=all')
+        page.locator('[data-content-id="video:PRD-000000000004"]').get_by_text('待人工审查', exact=True).wait_for()
+        self.assertEqual(page.locator('.flow-row').count(), 4)
+        page.locator('[data-content-id="video:PRD-000000000001"]').get_by_text('旧记录待核验', exact=True).wait_for()
+        self.assertEqual(page.locator('.flow-row [download]').count(), 0)
+        set_content_condition(page, 'status', ['awaiting_review'])
+        page.locator('#content-flow-status').wait_for(state='hidden')
+        self.assertEqual(page.locator('.flow-row').count(), 1)
+        self.assertEqual(page.locator('[data-content-id="video:PRD-000000000004"]').count(), 1)
 
     def reviewable(self):
         self.payload["job"].update(selected_take="TAK-0123456789ab", timelines=[{"name": "Lab261011-202-1", "unique_id": "uid-own",
@@ -245,13 +242,29 @@ class ProductionValidationBrowserTests(unittest.TestCase):
         page = self.open_page(width=390)
         card = page.locator('[data-edit-id="EDT-0123456789ab"]')
         card.locator(".script-status").get_by_text("待人工审查", exact=True).wait_for()
-        card.get_by_text("工程核验未执行，素材去重已归档停用", exact=False).wait_for()
+        card.get_by_text("已按技能保存交付，工程核验未执行", exact=False).wait_for()
+        self.assertNotIn("素材去重", card.inner_text())
         self.assertNotIn("工程核验通过", card.inner_text())
         self.assertNotIn("画面全部覆盖", card.inner_text())
         self.assertNotIn("undefined", card.inner_text())
-        self.assertTrue(card.get_by_role("button", name="确认完成", exact=True).is_enabled())
+        self.assertTrue(card.get_by_role("button", name="确认完成", exact=True).is_disabled())
         self.assertEqual(self.calls, [])
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
+
+    def test_old_completed_skill_delivery_without_execution_field_keeps_manual_review_available(self):
+        edit = self.skill_delivery()
+        edit.pop("execution_status")
+        page = self.open_page()
+        card = page.locator('[data-edit-id="EDT-0123456789ab"]')
+        self.assertEqual(card.get_by_role("button", name="确认完成", exact=True).count(), 1)
+        self.assertNotIn("工程核验通过", card.inner_text())
+
+    def test_explicit_failed_execution_does_not_offer_skill_manual_review(self):
+        edit = self.skill_delivery()
+        edit["execution_status"] = "failed"
+        page = self.open_page()
+        card = page.locator('[data-edit-id="EDT-0123456789ab"]')
+        self.assertEqual(card.get_by_role("button", name="确认完成", exact=True).count(), 0)
 
     def test_skill_delivery_reported_gaps_show_as_waiting_for_material(self):
         edit = self.skill_delivery()
@@ -259,9 +272,60 @@ class ProductionValidationBrowserTests(unittest.TestCase):
         page = self.open_page()
         card = page.locator('[data-edit-id="EDT-0123456789ab"]')
         card.locator(".script-status").get_by_text("待补素材", exact=True).wait_for()
-        card.get_by_text("帧 [30, 60) · 锁紧旋钮特写", exact=True).wait_for()
+        card.get_by_text("1.00–2.00 秒 · 锁紧旋钮特写", exact=True).wait_for()
         self.assertNotIn("undefined", card.inner_text())
         self.assertEqual(card.get_by_role("button", name="确认完成", exact=True).count(), 0)
+
+    def test_unverified_empty_ranges_have_their_own_status_and_coverage_color(self):
+        edit = self.skill_delivery()
+        edit["report"]["gaps"] = [{"start": 30, "end": 60, "status": "unverified", "need": "需查看锁角动作"}]
+        self.payload["job"]["timelines"][0].update(fps="30", frames=90)
+        page = self.open_page(width=390)
+        card = page.locator('[data-edit-id="EDT-0123456789ab"]')
+        card.locator(".script-status").get_by_text("素材待核实", exact=True).wait_for()
+        self.assertEqual(card.locator(".edit-coverage-span.review").count(), 1)
+        self.assertEqual(card.locator(".edit-coverage-span.gap").count(), 0)
+        self.assertEqual(card.get_by_role("heading", name="缺素材", exact=True).count(), 0)
+        self.assertEqual(card.get_by_role("button", name="确认完成", exact=True).count(), 0)
+        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
+
+    def test_overlapping_gap_coverage_always_shows_missing_priority_regardless_of_report_order(self):
+        pending = {"start": 0, "end": 20, "status": "unverified", "need": "需查看"}
+        missing = {"start": 10, "end": 30, "status": "missing", "need": "缺动作"}
+        for declarations in ([pending, missing], [missing, pending]):
+            with self.subTest(order=declarations):
+                edit = self.skill_delivery()
+                edit["report"]["gaps"] = declarations
+                self.payload["job"]["timelines"][0].update(fps="30", frames=30)
+                page = self.open_page()
+                bar = page.locator(".edit-coverage-bar")
+                self.assertEqual(bar.locator(".review").count(), 1)
+                self.assertEqual(bar.locator(".gap").count(), 1)
+                self.assertEqual(bar.locator(".review").get_attribute("data-edit-frame"), "0")
+                self.assertEqual(bar.locator(".gap").get_attribute("data-edit-frame"), "10")
+                self.assertAlmostEqual(float(bar.locator(".review").get_attribute("data-coverage-width")), 100 / 3, places=3)
+                self.assertAlmostEqual(float(bar.locator(".gap").get_attribute("data-coverage-width")), 200 / 3, places=3)
+                self.assertIn("缺素材", bar.locator(".gap").get_attribute("aria-label"))
+
+    def test_refreshed_skill_delivery_uses_current_coverage_and_retains_original_gap_context(self):
+        edit = self.skill_delivery()
+        gap = {"start": 30, "end": 60, "need": "锁角动作"}
+        edit.update(status="awaiting_review", report={"shots": 1, "saved": True, "gaps": [gap]},
+            validation={"scope": "current_coverage", "status": "awaiting_review", "checked_at": "2026-10-14", "saved": True,
+                        "issues": [], "checks": {"baseline_comparison": None}},
+            summary={"shots": 2, "voice_seconds": 3, "voice_frames": 90, "fps": "30", "gaps": [], "uncovered": [],
+                     "picture_gaps": [], "group_markers": 1, "groups_expected": 1,
+                     "resolved_gaps": [{**gap, "name": gap["need"], "coverage_status": "covered"}]})
+        self.payload["job"]["timelines"][0].update(fps="30", frames=90)
+        page = self.open_page()
+        card = page.locator('[data-edit-id="EDT-0123456789ab"]')
+        card.get_by_text("当前时间线画面已全部覆盖", exact=False).wait_for()
+        self.assertEqual(card.locator(".resolved-gaps li").count(), 1)
+        self.assertEqual(card.locator(".edit-coverage-span.gap").count(), 0)
+        self.assertEqual(card.get_by_role("heading", name="缺素材", exact=True).count(), 0)
+        self.assertEqual(card.get_by_role("button", name="补齐核验依据", exact=True).count(), 0)
+        self.assertEqual(card.get_by_role("button", name="确认完成", exact=True).count(), 1)
+        self.assertNotIn("工程核验通过", card.inner_text())
 
     def test_skill_delivery_pending_result_recovers_without_requesting_verification(self):
         edit = self.skill_delivery()
@@ -291,14 +355,15 @@ class ProductionValidationBrowserTests(unittest.TestCase):
             route.fulfill(status=200, content_type="application/json", body=json.dumps({"approved": True, "edit": edit}))
 
         page = self.open_page(post=approve)
-        page.get_by_role("button", name="确认完成", exact=True).click()
-        dialog = page.locator("dialog.production-dialog")
-        dialog.get_by_text("仅登记你的人工审查，不自动读回工程核验或计算素材去重", exact=False).wait_for()
-        submit = dialog.get_by_role("button", name="确认人工审查完成", exact=True)
+        form = page.locator('[data-edit-review="EDT-0123456789ab"]')
+        form.wait_for()
+        self.assertIn("只登记你的人工审查，不会读回工程核验", form.locator(".production-hint-body").text_content())
+        submit = form.get_by_role("button", name="确认完成", exact=True)
         self.assertTrue(submit.is_disabled())
-        for box in dialog.locator('input[name="reviewed"]').all():
+        for box in form.locator('input[name="reviewed"]').all():
             box.check()
         submit.click()
+        self.assertEqual(page.locator('dialog.production-dialog[open]').count(), 0)
         card = page.locator('[data-edit-id="EDT-0123456789ab"]')
         card.locator(".script-status").get_by_text("已完成", exact=True).wait_for()
         card.get_by_text("工程核验未执行", exact=False).wait_for()
@@ -313,21 +378,22 @@ class ProductionValidationBrowserTests(unittest.TestCase):
         self.assertEqual(card.get_by_role("button", name="确认完成", exact=True).count(), 0)
         self.assertNotIn("已按技能完成保存交付", card.inner_text())
 
-    def test_skill_delivery_enters_review_queue_without_validation(self):
-        edit = self.skill_delivery()
+    def test_skill_delivery_enters_content_review_filter_without_validation(self):
+        self.skill_delivery()
+        self.payload['job']['status'] = job_status(self.payload['job'])
         page = self.open_page()
-        page.route("**/api/production?*", lambda route: route.fulfill(status=200, content_type="application/json",
-            body=json.dumps({"jobs": [self.payload["job"]], "carousels": [], "voices": [], "defaults": {}})))
-        row = {"kind": "video", "id": JOB_ID, "status": "awaiting_review", "edit_id": edit["id"]}
-        page.route("**/api/production/deliveries?*", lambda route: route.fulfill(status=200, content_type="application/json",
-            body=json.dumps({"items": [row]})))
-        page.goto(f"http://127.0.0.1:{self.server.server_port}/#production")
-        card = page.locator(f'[data-production-id="{JOB_ID}"]')
-        card.get_by_text("待人工审查", exact=True).wait_for()
-        card.get_by_text("按技能保存交付 · 工程核验未执行", exact=True).wait_for()
-        self.assertNotIn("工程核验通过", card.inner_text())
-        page.locator("#production-status").select_option("awaiting_review")
-        self.assertEqual(page.locator("#production-queue .production-card").count(), 1)
+        page.wait_for_load_state('networkidle')
+        page.route('**/api/content?*', lambda route: route.fulfill(status=200, content_type='application/json',
+            body=json.dumps(content_response(self.server.app, [self.payload['job']], [], route.request.url))))
+        page.goto(f'http://127.0.0.1:{self.server.server_port}/#/202H/content?view=all')
+        card = page.locator(f'[data-content-id="video:{JOB_ID}"]')
+        card.get_by_text('待人工审查', exact=True).wait_for()
+        self.assertNotIn('工程核验通过', card.inner_text())
+        set_content_condition(page, 'status', ['awaiting_review'])
+        page.locator('#content-flow-status').wait_for(state='hidden')
+        self.assertEqual(page.locator('.flow-row').count(), 1)
+        card.locator('.flow-title').click()
+        page.locator('[data-edit-id="EDT-0123456789ab"]').get_by_text('工程核验未执行', exact=False).wait_for()
 
     def test_completion_needs_every_manual_check_and_then_shows_done(self):
         self.reviewable()
@@ -339,18 +405,18 @@ class ProductionValidationBrowserTests(unittest.TestCase):
                 {"approved": True, "edit": self.payload["job"]["edits"][0]}, ensure_ascii=False))
 
         page = self.open_page(width=390, post=approve)
-        page.get_by_role("button", name="确认完成", exact=True).click()
-        dialog = page.locator("dialog.production-dialog")
-        submit = dialog.get_by_role("button", name="读回核验并确认完成", exact=True)
+        form = page.locator('[data-edit-review="EDT-0123456789ab"]')
+        submit = form.get_by_role("button", name="确认完成", exact=True)
         self.assertTrue(submit.is_disabled())
-        boxes = dialog.locator('input[name="reviewed"]')
+        boxes = form.locator('input[name="reviewed"]')
         self.assertEqual(boxes.count(), 3)
         boxes.nth(0).check()
         boxes.nth(1).check()
         self.assertTrue(submit.is_disabled())
         boxes.nth(2).check()
-        dialog.locator('textarea[name="note"]').fill("已导出")
+        form.locator('textarea[name="review_note"]').fill("已导出")
         submit.click()
+        self.assertEqual(page.locator('dialog.production-dialog[open]').count(), 0)
         card = page.locator('[data-edit-id="EDT-0123456789ab"]')
         card.locator(".script-status").get_by_text("已完成", exact=True).wait_for()
         card.get_by_role("button", name="撤销完成", exact=True).wait_for()

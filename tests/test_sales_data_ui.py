@@ -87,7 +87,7 @@ class SalesDataBrowserTests(unittest.TestCase):
 
         page.route("**/api/**", response)
         page.goto(f"http://127.0.0.1:{self.server.server_port}/{hash_route}")
-        page.locator("#connection-text").get_by_text("已连接本地案例库").wait_for()
+        page.locator("#connection-text").get_by_text("案例库同步").wait_for()
         return page
 
     def add_direction(self, identifier):
@@ -145,6 +145,8 @@ class SalesDataBrowserTests(unittest.TestCase):
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#case/{self.identifier}")
         page.locator('.detail-tabs [data-tab="data"]').click()
         section = page.locator("#detail-section-performance")
+        self.assertFalse(section.locator('.detail-data-method').evaluate('node => node.open'))
+        section.locator('.detail-data-method > summary').click()
         section.get_by_text("中间有缺口，仅显示已覆盖的实际数据。", exact=True).wait_for()
         section.locator(".facts-grid").get_by_text("42", exact=True).wait_for()
         section.locator(".facts-grid").get_by_text("40", exact=True).wait_for()
@@ -162,6 +164,11 @@ class SalesDataBrowserTests(unittest.TestCase):
                 self.assertEqual(section.locator(".facts-grid").count(), 0)
                 self.assertEqual(section.get_by_text("0.94%", exact=True).count(), 0)
                 self.assertEqual(section.get_by_role("link", name="查看销售数据表").count(), 1)
+                # One line: the reason stays behind the ⓘ instead of a standing note.
+                self.assertEqual(section.locator(".context-note").count(), 0)
+                self.assertEqual(section.locator(".performance-empty-row").count(), 1)
+                self.assertIn("编辑案例" if status == "missing_video_id" else "导入或同步",
+                              section.locator(".production-hint-body").text_content())
                 page.close()
 
     def test_collect_from_sales_table_prefills_only_video_identity_and_publish_date(self):
@@ -170,7 +177,7 @@ class SalesDataBrowserTests(unittest.TestCase):
                  "product": "SHARPAL 202H", "account": "sales_account", "posted_on": "2026-10-01", "posted_at": "2026-10-01",
                  "views": 100001, "items": 42, "gmv": 3210, "ctor_pct": 4.2, "status": "follow", "status_label": "跟进",
                  "window_views": 5000, "this_week_gmv": 0, "review_comments": 0}
-        page.route("**/api/performance/videos", lambda route: route.fulfill(status=200, content_type="application/json",
+        page.route(re.compile(r"/api/performance/videos(\?shop=[a-z]+)?$"), lambda route: route.fulfill(status=200, content_type="application/json",
                                                                            body=json.dumps({"videos": [video]})))
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#videos?video={video['video_id']}")
         page.get_by_role("button", name="收为案例", exact=True).click()
@@ -200,7 +207,11 @@ class SalesDataBrowserTests(unittest.TestCase):
         page.evaluate("refresh(true)")
         page.locator("#detail-section-performance").get_by_text("200002", exact=True).wait_for()
         page.locator("#detail-section-release").get_by_text("2026-10-08", exact=True).wait_for()
-        page.locator("#detail-section-consistency").get_by_text("销售数据表当前为 200002", exact=False).wait_for()
+        consistency = page.locator('#detail-section-conclusion .consistency-note')
+        self.assertEqual(consistency.count(), 1)
+        self.assertFalse(consistency.evaluate('node => node.open'))
+        self.assertIn('结论保留当时的记录与判断', consistency.text_content())
+        self.assertNotIn('销售数据表当前为 200002', consistency.text_content())
         self.assertTrue(page.evaluate("window.savedPlayer === document.querySelector('#case-player')"))
         page.locator("#release-edit").click()
         page.locator('[name="publish_published_on"]').wait_for()

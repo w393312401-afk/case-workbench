@@ -5,6 +5,7 @@ voiceover take stores its audio, the exact text sent and the timing of every mea
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import copy
 from datetime import datetime
 import difflib
@@ -13,16 +14,19 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import threading
+import time
 from uuid import uuid4
 
 from creation_store import CreationError
 from direction_store import fingerprint, now, product_key
 from elevenlabs_client import DEFAULT_MODEL, MODELS, VOICE_ID, VoiceError, clean_settings, model
 from production_operations import ProductionOperations, durable_json
-from production_store import FRAME_RATES, JOB_ID, TAKE_ID, apply_readings, take_quality, job_status
-from task_activity import record_activity, safe_error
+from production_store import FRAME_RATES, JOB_ID, TAKE_ID, apply_readings, supplement_markdown, take_quality, job_status
+from task_activity import activity_label, record_activity, safe_error, settle_resolved_activity
 from variant_parse import parse_variants, same_lines, spoken_lines, variant_script
 
 MAX_LINES = 80
@@ -30,6 +34,67 @@ MAX_LINE_CHARS = 1000
 MIN_COVERAGE = 0.6
 MARKER_COLOR = "Blue"  # Red stays reserved for the editing skill's missing-footage markers.
 VOICE_TRACK = 2  # Existing timelines keep source audio on A1 (stereo) and the voiceover on A2 (mono).
+MAX_LEAD_SECONDS = 10
+QUEUE_GRACE = 5  # Brief DaVinci holds (status reads, clip reveals) end before a build is reported as queued.
+TIMELINE_WAIT = 150 * 60  # As long as an AI edit may hold DaVinci.
+OPTION_KEYS = {"code", "name", "fps", "width", "height", "lead_seconds", "markers"}
+
+
+class QueueCancelled(VoiceError):
+    """A queued build the user withdrew before DaVinci was touched."""
+
+
+def timeline_location(record):
+    """Where a built timeline's DaVinci project lives: its creator's folder and the project id, when they were recorded.
+
+    The same project name exists once per channel folder, so the name alone cannot say which project holds a timeline."""
+    return {key: record[key] for key in ("creator", "folder", "project_id") if record.get(key)}
+
+
+def creator_project_base(project, creator):
+    """Keep a creator-prefixed rename in the same project family as its previous name."""
+    name, prefix = str(project or ""), str(creator or "") + "-"
+    return name[len(prefix):] if creator and name.casefold().startswith(prefix.casefold()) else name
+
+
+def same_creator_project(first, second, creator):
+    return creator_project_base(first, creator).casefold() == creator_project_base(second, creator).casefold()
+
+
+def known_location(data, creator, project):
+    """The folder and project id of the newest timeline built for this creator in a project of this name."""
+    built = [item for job in data["jobs"] for item in job.get("timelines", [])
+             if item.get("creator") == creator and same_creator_project(item.get("project"), project, creator) and item.get("project_id")]
+    newest = max(built, key=lambda item: item.get("built_at", ""), default=None)
+    return {key: newest[key] for key in ("folder", "project_id") if newest and newest.get(key)}
+
+
+def timeline_options(value, config):
+    """One build's overrides of the product's DaVinci settings; anything left out keeps the product setting."""
+    value = {} if value is None else value
+    if not isinstance(value, dict) or set(value) - OPTION_KEYS:
+        raise VoiceError(400, "建线选项格式无效。")
+    code = value.get("code", config["code"])
+    if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z0-9]{1,20}", code):
+        raise VoiceError(400, "时间线编号只能是 1–20 位字母或数字。")
+    name = value.get("name", "")
+    if not isinstance(name, str) or len(name.strip()) > 120 or any(ord(char) < 32 for char in name):
+        raise VoiceError(400, "自定义时间线名称须是 120 字以内的一行文字。")
+    fps = value.get("fps", config["fps"])
+    if fps not in FRAME_RATES:
+        raise VoiceError(400, "帧率无效。")
+    size = [value.get(key, config[key]) for key in ("width", "height")]
+    if any(type(item) is not int or not 16 <= item <= 8192 for item in size):
+        raise VoiceError(400, "分辨率须是 16–8192 之间的整数。")
+    lead = value.get("lead_seconds", 0)
+    if type(lead) not in (int, float) or not math.isfinite(lead) or not 0 <= lead <= MAX_LEAD_SECONDS:
+        raise VoiceError(400, f"配音前留白须在 0–{MAX_LEAD_SECONDS} 秒之间。")
+    markers = value.get("markers", True)
+    if type(markers) is not bool:
+        raise VoiceError(400, "意群标记选项无效。")
+    numerator, denominator = FRAME_RATES[fps]
+    return {"code": code, "name": name.strip(), "fps": fps, "width": size[0], "height": size[1],
+            "lead_frames": int(round(lead * numerator / denominator)), "markers": markers}
 
 
 def _triples_tts(alignment):
@@ -74,10 +139,11 @@ def _short(value, limit):
     return value if len(value) <= limit else value[:limit - 1].rstrip() + "…"
 
 
-def meaning_markers(job, take, fps, legacy=False):
+def meaning_markers(job, take, fps, legacy=False, lead_frames=0):
     """One range marker per meaning group, tiling the voiceover: [this group's start, next group's start).
 
-    The first marker starts at frame 0 so the opening shot is covered; pauses after a line belong to that line.
+    The first marker starts at frame 0 so the opening shot is covered, including any `lead_frames` of silence
+    placed before the voiceover; pauses after a line belong to that line.
     The note carries only the bare Chinese line and what the shot must prove; legacy=True rebuilds the fuller note
     that timelines built before 2026-10-12 carry.
     """
@@ -86,12 +152,12 @@ def meaning_markers(job, take, fps, legacy=False):
     numerator, denominator = FRAME_RATES[fps]
     rate = numerator / denominator
     groups = take["groups"]
-    starts = [int(round(group["start"] * rate)) for group in groups]
+    starts = [int(round(group["start"] * rate)) + lead_frames for group in groups]
     starts[0] = 0
     for index in range(1, len(starts)):
         starts[index] = max(starts[index], starts[index - 1] + 1)
     seconds = take.get("duration") or max(group["end"] for group in groups)
-    ends = starts[1:] + [max(int(math.floor(seconds * rate)), starts[-1] + 1)]
+    ends = starts[1:] + [max(lead_frames + int(math.floor(seconds * rate)), starts[-1] + 1)]
     markers = []
     for line, group, start, end in zip(job["lines"], groups, starts, ends):
         proof = line.get("proof") or "待补"
@@ -149,8 +215,47 @@ class ProductionWorkbenchMixin:
             self._voicing_jobs = set()
         return self._voicing_jobs
 
+    def _voice_live(self):
+        if not hasattr(self, "_voicing_progress"):
+            self._voicing_progress = {}
+        return self._voicing_progress
+
+    def _timeline_live(self):
+        """Job id → the build waiting for or driving DaVinci; one per job, as the job's file lock allows."""
+        if not hasattr(self, "_timeline_building"):
+            self._timeline_building = {}
+        return self._timeline_building
+
+    def _timeline_state(self, job, recovery, detail=False):
+        """Call with self.lock held. Only a build that may have changed DaVinci is a recovery case: a queued one is
+        shown as waiting, and one that ended before the worker journaled anything is the last unfinished build."""
+        live = self._timeline_live().get(job["id"])
+        job["timeline_building"] = {key: value for key, value in live.items() if key != "cancel"} if live else None
+        recovery = [item for item in recovery if item["kind"] != "timeline" or
+                    (item.get("has_journal") and not (live and item["request_id"] == live["request_id"]))]
+        if not detail:
+            return recovery
+        failure = self._production_operations().latest(job["id"], "timeline")
+        built = max((item.get("built_at") or "" for item in job.get("timelines", [])), default="")
+        ended = failure and (failure.get("state") == "safe_failed" or (failure.get("state") != "committed" and
+            not (live and failure["request_id"] == live["request_id"]) and
+            not self._production_operations().recovery_file(failure).exists()))
+        job["timeline_failure"] = ({"request_id": failure["request_id"], "at": failure["updated_at"],
+                                    "error": failure.get("error", ""), "cancelled": bool(failure.get("cancelled"))}
+                                   if ended and failure["updated_at"] > built else None)
+        return recovery
+
+    def _voice_progress(self, identifier, stage, message):
+        with self.lock:
+            current = self._voice_live().get(identifier)
+            if current is not None:
+                current.update(stage=stage, progress=message, updated_at=now())
+
     def _production_operations(self):
-        return ProductionOperations(self.production.root, on_saved=self._production_operation_activity)
+        operations = getattr(self, "_operations_reader", None)
+        if operations is None:
+            operations = self._operations_reader = ProductionOperations(self.production.root, on_saved=self._production_operation_activity)
+        return operations
 
     def _production_operation_activity(self, record, *, pending=False):
         """Mirror only durable phase boundaries, never provider responses or prompts."""
@@ -162,7 +267,7 @@ class ProductionWorkbenchMixin:
             phases = {"prepared": "已准备", "inflight": "正在生成配音" if kind == "voice" else "正在建立时间线",
                       "response_saved": "配音已返回，正在对齐", "result_ready": "结果已保存，正在登记",
                       "committed": "已登记", "safe_failed": "执行失败", "uncertain": "待核实外部结果"}
-            status = "running"
+            status = "queued" if kind == "timeline" and state == "prepared" else "running"
             message = phases.get(state, "正在处理")
             if state == "committed":
                 result = record.get("result") or {}
@@ -171,18 +276,21 @@ class ProductionWorkbenchMixin:
                 status = "needs_attention" if attention else "completed"
                 message = ("配音已生成，意群对齐待核对" if attention else "配音已生成") if kind == "voice" else (
                           "时间线已建立，待核对工程" if attention else "时间线已建立")
+            elif state == "safe_failed" and record.get("cancelled"):
+                status, message = "cancelled", record.get("error") or "已取消，达芬奇里没有改动。"
             elif state == "safe_failed":
-                status, message = "failed", "配音请求未完成。" + safe_error(record.get("error", ""))
+                status, message = "failed", ("配音请求未完成。" + safe_error(record.get("error", "")) if kind == "voice" else
+                                             "建线没有完成，达芬奇里没有改动：" + _short(record.get("error") or "原因未知", 200))
             elif state == "uncertain":
                 status, message = "needs_attention", "外部结果待核实，请恢复原请求"
             if pending:
                 status, message = "needs_attention", "结果已取得，资料尚未登记；请恢复原请求"
             record_activity(self, run_id, kind=kind, owner_id=job["id"], product=job.get("product", ""),
-                            case_id=job.get("case_id"), title=("生成配音" if kind == "voice" else "建立时间线") + " · " + (job.get("title") or job["id"]),
+                            case_id=job.get("case_id"), title=("生成配音" if kind == "voice" else "建立时间线") + " · " + activity_label(job),
                             source_id=record.get("take_id") or (record.get("result") or {}).get("unique_id") or record["request_id"],
-                            step=kind, status=status, phase=phases.get(state, "处理中"), message=message,
+                            step=kind, status=status, phase="已取消" if status == "cancelled" else phases.get(state, "处理中"), message=message,
                             result_count=1 if state == "committed" else 0,
-                            event_key=f"{state}:{'pending' if pending else status}" if status != "running" else None)
+                            event_key=f"{state}:{'pending' if pending else status}" if status not in {"queued", "running"} else None)
         except Exception:
             pass
 
@@ -222,11 +330,19 @@ class ProductionWorkbenchMixin:
         result = self.production.public(product)
         result["models"] = copy.deepcopy(MODELS)
         result["default_model"] = DEFAULT_MODEL
+        recoveries = {}
+        if result["jobs"]:
+            for operation in self._production_operations().public():
+                recoveries.setdefault(operation["job_id"], []).append(operation)
         for job in result["jobs"]:
             job["voicing"] = job["id"] in self._voicing()
-            job["recovery_operations"] = self._production_operations().public(job["id"])
+            job["voicing_live"] = copy.deepcopy(self._voice_live().get(job["id"]))
+            with self.lock:
+                job["recovery_operations"] = self._timeline_state(job, recoveries.get(job["id"], []))
             self._production_edit_state(job)
         for item in result.get("carousels", []):
+            with self.lock:
+                item["clip_picking_live"] = copy.deepcopy(getattr(self, "_clip_ai_live", {}).get(item["id"]))
             if item.get("archived"):
                 continue
             # Resolve persisted running records after a restart. Idle image and
@@ -239,7 +355,7 @@ class ProductionWorkbenchMixin:
                                   for output in slide.get("outputs", []) for run in output.get("review_runs", []))
             if hasattr(self, "carousel_images_live") and (running_images or running_reviews):
                 self.carousel_images_live(item)
-        return result
+        return self.attach_content_publications(result) if hasattr(self, "attach_content_publications") else result
 
     def _production_edit_state(self, job):
         """Show ended-but-unsaved edits as recoverable, instead of an endless running task."""
@@ -253,7 +369,8 @@ class ProductionWorkbenchMixin:
                 if live:
                     edit["live"] = live
                 else:
-                    edit.update(status="interrupted", error="这次剪辑的进程已不在运行，结果可能不完整；请先到达芬奇里核对并重新核验。")
+                    edit.update(status="interrupted", error=("等待原建线时任务已中断，AI 剪辑尚未开始；请先恢复原建线，再重新提交剪辑。"
+                        if edit.get("waiting_timeline") else "这次剪辑的进程已不在运行，结果可能不完整；请先到达芬奇里核对并重新核验。"))
         job["status"] = job_status(job)
 
     def _tts(self, job, readings):
@@ -264,6 +381,7 @@ class ProductionWorkbenchMixin:
     def production_job(self, identifier):
         if not JOB_ID.fullmatch(str(identifier)):
             raise VoiceError(404, "这张制作单不存在。")
+        self._settle_job_fill(identifier)
         with self.lock:
             catalog = self.production.public()
             job = next((item for item in catalog["jobs"] if item["id"] == identifier), None)
@@ -274,15 +392,25 @@ class ProductionWorkbenchMixin:
                 full = self.creation.get_script(job["script_id"])
                 script = {key: full.get(key) for key in ("id", "title", "status", "version", "product", "direction_id")}
                 index = (job.get("source") or {}).get("variant_index")
-                markdown = variant_script((full.get("source") or {}).get("candidate_text") or "", index)
-                variant = {"label": job.get("variant_label", ""), "markdown": markdown} if markdown else None
+                candidate = (full.get("source") or {}).get("candidate_text") or ""
+                chosen = next((item for item in parse_variants(candidate) if type(index) is int and item["index"] == index), None)
+                # A derived script keeps its candidate provenance, but the production order uses its own frozen words.
+                matching = chosen and same_lines([line["spoken"] for line in chosen["lines"]],
+                                                 [line["spoken"] for line in job["lines"]])
+                markdown = job.get("fill_markdown") or (variant_script(candidate, index) if matching else "")
+                manual = not markdown
+                if manual and (job.get("supplement") or candidate):
+                    markdown = supplement_markdown(job)
+                variant = {"label": job.get("variant_label", ""), "markdown": markdown, "manual": manual} if markdown else None
             except CreationError:
                 script, variant = None, None
             job["voicing"] = identifier in self._voicing()
-            recovery = self._production_operations().public(identifier)
+            job["voicing_live"] = copy.deepcopy(self._voice_live().get(identifier))
+            recovery = self._timeline_state(job, self._production_operations().public(identifier), detail=True)
             job["recovery_operations"] = recovery
             job.setdefault("timelines", [])
             self._production_edit_state(job)
+            settle_resolved_activity(self, "job", job)
             return {"job": job, "revision": catalog["revision"], "readings": readings, "tts": self._tts(job, readings),
                     "historical_baseline_restore": True,
                     "recovery_operations": recovery,
@@ -347,25 +475,50 @@ class ProductionWorkbenchMixin:
                 raise VoiceError(400, f"口播超过 {MAX_LINES} 行或单行超过 {MAX_LINE_CHARS} 字，请先核对正文。")
             source = script.get("source") or {}
             variants = parse_variants(source.get("candidate_text") or "")
-            index = value.get("variant_index")
-            chosen = variants[index] if type(index) is int and 0 <= index < len(variants) else None
-            if not chosen or not same_lines([line["spoken"] for line in chosen["lines"]], lines):
-                chosen = next((item for item in variants if same_lines([line["spoken"] for line in item["lines"]], lines)), None)
+            index = source["variant_index"] if "variant_index" in source else value.get("variant_index")
+            hinted = next((item for item in variants if type(index) is int and item["index"] == index), None)
+            matches = lambda item: same_lines([line["spoken"] for line in item["lines"]], lines)
+            chosen = hinted if hinted and matches(hinted) else None
+            if chosen is None and "variant_index" not in source:
+                chosen = next((item for item in variants if matches(item)), None)
+            chinese = [line.strip() for line in str(script.get("translation_zh") or "").splitlines() if line.strip()]
             if chosen:
-                records, problems, label = chosen["lines"], chosen["problems"], chosen["label"]
+                records, problems, label = copy.deepcopy(chosen["lines"]), chosen["problems"], chosen["label"]
+                # New selected variants preserve an explicit empty translation; old blank scripts keep their candidate Chinese.
+                if "variant_index" in source or chinese:
+                    for position, record in enumerate(records):
+                        record["zh"] = chinese[position] if len(chinese) == len(records) else ""
             else:
-                chinese = [line.strip() for line in str(script.get("translation_zh") or "").splitlines() if line.strip()]
                 records = [{"number": number, "spoken": line, "zh": chinese[number - 1] if len(chinese) == len(lines) else "",
                             "proof": "", "tags": "", "evidence": ""} for number, line in enumerate(lines, 1)]
-                problems = ["来源候选里没有逐行一致的意群表，画面要求请在制作单里补填。" if variants else
+                problems = ["口播行与所选变体的意群表不一致，未沿用原画面要求，请在制作单里补填。" if "variant_index" in source else
+                            "来源候选里没有逐行一致的意群表，画面要求请在制作单里补填。" if variants else
                             "这条脚本没有附带意群表，画面要求请在制作单里补填。"]
                 label = ""
             resolved = {"product": product_key(script["product"]), "direction_id": script.get("direction_id", ""),
                         "script_id": script["id"], "script_version": script["version"], "script_family": script["family_id"],
                         "title": script["title"], "variant_label": label, "lines": copy.deepcopy(records), "problems": problems,
                         "source": {"task_id": source.get("task_id", ""), "round_id": source.get("round_id", ""),
-                                   "variant_index": chosen["index"] if chosen else None}}
+                                   "variant_index": source["variant_index"] if "variant_index" in source else chosen["index"] if chosen else None}}
             return self.production.mutate("job", body, resolved)
+
+    def _settle_job_fill(self, identifier):
+        """A fill round that ended while nobody was listening (e.g. across a restart) is written back on the next read."""
+        try:
+            fill = self.production.job(identifier).get("ai_fill") or {}
+        except VoiceError:
+            return
+        if fill.get("status") != "running":
+            return
+        try:
+            status = self.ai.get(fill["task_id"])["status"]
+        except Exception:
+            status = "missing"
+        if status == "missing":
+            self.production.mutate("job_fill_finish", {"request_id": "fill-" + uuid4().hex, "job_id": identifier,
+                                                       "task_id": fill["task_id"], "error": "找不到这轮写稿任务，可以再点一次补全。"})
+        elif status not in ("queued", "running"):
+            self._job_fill_finished(fill["task_id"])
 
     def save_job_lines(self, identifier, body):
         if not isinstance(body, dict):
@@ -375,12 +528,32 @@ class ProductionWorkbenchMixin:
     def archive_job(self, identifier, body):
         if not isinstance(body, dict):
             raise VoiceError(400, "归档参数格式无效。")
-        return self.production.mutate("job_archive", {**body, "job_id": identifier})
+        result = self.production.mutate("job_archive", {**body, "job_id": identifier})
+        activity = getattr(self, "activity", None)
+        if activity is not None:
+            activity.archive_owner(identifier, result["job"].get("archived", False))
+        return result
 
     def select_take(self, identifier, body):
         if not isinstance(body, dict):
             raise VoiceError(400, "选用参数格式无效。")
         return self.production.mutate("select_take", {**body, "job_id": identifier})
+
+    def archive_timeline(self, identifier, body):
+        if not isinstance(body, dict):
+            raise VoiceError(400, "时间线归档参数格式无效。")
+        return self.production.mutate("timeline_archive", {**body, "job_id": identifier})
+
+    def set_timeline_task_status(self, identifier, body):
+        if not isinstance(body, dict):
+            raise VoiceError(400, "时间线任务状态参数格式无效。")
+        return self.production.mutate("timeline_task_status", {**body, "job_id": identifier})
+
+    def complete_production_job(self, identifier, body):
+        """Record manual step-four success without launching or fabricating an AI edit."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "成功标记参数格式无效。")
+        return self.production.mutate("job_completion", {**body, "job_id": identifier})
 
     def _forced_alignment(self, lines, audio_path):
         """Cache the external alignment response; an unknown attempt is never billed again."""
@@ -468,6 +641,7 @@ class ProductionWorkbenchMixin:
                 raise VoiceError(503, "这次配音的结果不确定，请先核对 ElevenLabs 的生成记录或已保存音频；工作台不会再次发送该请求，以免重复扣费。")
             with self.lock:
                 self._voicing().add(identifier)
+                self._voice_live()[identifier] = {"started_at": now(), "stage": "request", "progress": "正在请求配音", "updated_at": now()}
             try:
                 if response:
                     self._production_operation_activity(record)
@@ -502,7 +676,9 @@ class ProductionWorkbenchMixin:
                         operations.best_effort_uncertain(record, exc)
                         raise VoiceError(503, "配音请求已发出，但没有完整保存返回结果。请先核对 ElevenLabs 的生成记录；工作台不会自动重发，以免重复扣费。") from exc
                     response = operations.speech_response(record)
+                self._voice_progress(identifier, "alignment", "已取得音频，正在对齐意群")
                 groups, alignment_source, warnings = self._timing(tts["lines"], response, mp3)
+                self._voice_progress(identifier, "saving", "正在保存音频和配音时间")
                 written, duration = convert_wav(mp3, folder / "voiceover.wav")
                 if not written:
                     warnings.append("没有转出 WAV（需要本机 ffmpeg），只保存了 MP3。")
@@ -534,6 +710,7 @@ class ProductionWorkbenchMixin:
             finally:
                 with self.lock:
                     self._voicing().discard(identifier)
+                    self._voice_live().pop(identifier, None)
 
     def production_audio(self, identifier, take_id, kind):
         if not JOB_ID.fullmatch(identifier) or not TAKE_ID.fullmatch(take_id) or kind not in {"mp3", "wav"}:
@@ -544,6 +721,9 @@ class ProductionWorkbenchMixin:
         return path
 
     def resolve_status(self):
+        # A closed DaVinci answers at once; asking its scripting API would first wait several seconds.
+        if self.resolve.closed():
+            return {"ok": False, "busy": self.resolve.busy(), "error": "达芬奇没有打开：请先打开 DaVinci Resolve，再回来刷新。"}
         try:
             return {"ok": True, **{key: value for key, value in self.resolve.run("status", timeout=30).items() if key != "ok"}}
         except VoiceError as exc:
@@ -554,11 +734,96 @@ class ProductionWorkbenchMixin:
         return {**result, "catalog": self.production_catalog()}
 
     def build_timeline(self, identifier, body):
+        """Build on a worker thread. The reply is the built timeline, or a queued notice when DaVinci stays busy;
+        a queued build then waits its turn with AI edits and records its outcome in the task activity."""
         if not isinstance(body, dict):
             raise VoiceError(400, "时间线参数格式无效。")
         body = {**body, "job_id": identifier}
+        self._production_operations().validate("timeline", body)
+        outcome, reported = {}, threading.Event()
+
+        def report(**value):
+            if not reported.is_set():
+                outcome.update(value)
+                reported.set()
+
+        def run():
+            try:
+                report(result=self._build_timeline(body, report))
+            except BaseException as exc:
+                report(error=exc)
+
+        threading.Thread(target=run, name=f"timeline-{identifier}", daemon=True).start()
+        reported.wait()
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["result"]
+
+    def cancel_timeline(self, identifier, body):
+        """Withdraw a build still waiting for DaVinci; one already running is left to finish."""
+        request_id = body.get("request_id") if isinstance(body, dict) else None
+        with self.lock:
+            live = self._timeline_live().get(identifier)
+            if not live or (request_id is not None and request_id != live["request_id"]):
+                raise VoiceError(404, "这张制作单没有排队中的建线。")
+            if live["stage"] != "waiting":
+                raise VoiceError(409, "建线已经开始，不能取消；建好后如不需要，可在达芬奇里删除这条时间线。")
+            live["cancel"].set()
+        return {"ok": True}
+
+    @contextmanager
+    def _timeline_turn(self, identifier, request_id, creator, report, snapshot=None):
+        """Wait for DaVinci in the same first-come line as AI edits, then hold it for the build."""
+        lock = getattr(self.resolve, "lock", None)
+        cancel, ticket, acquired, queued = threading.Event(), object(), False, False
+        live = {"request_id": request_id, "creator": creator, "stage": "waiting", "since": now(), "cancel": cancel}
+        if snapshot:
+            payload = snapshot["payload"]
+            live.update(take_id=snapshot["take_id"], name=payload.get("name") or payload["prefix"] + "序号",
+                        group_markers=bool(snapshot["markers"]), project=snapshot["config"]["project"],
+                        materials=list(snapshot.get("materials") or snapshot["config"].get("material_timelines") or []))
+        with self.lock:
+            self._timeline_live()[identifier] = live
+            if not hasattr(self, "_edit_resolve_waiters"):
+                self._edit_resolve_waiters = []
+            if lock is not None:
+                self._edit_resolve_waiters.append(ticket)
+        started = time.monotonic()
+        try:
+            while lock is not None:
+                with self.lock:
+                    if cancel.is_set():
+                        raise QueueCancelled(409, "已取消排队，没有建时间线，达芬奇里没有改动。")
+                    if self._edit_resolve_waiters[0] is ticket and lock.acquire(blocking=False):
+                        acquired = True
+                        self._edit_resolve_waiters.pop(0)
+                        live["stage"] = "building"
+                        break
+                waited = time.monotonic() - started
+                if waited >= TIMELINE_WAIT:
+                    raise VoiceError(409, "等待达芬奇超时，没有建时间线；请在达芬奇空闲后重新建线。")
+                if not queued and waited >= QUEUE_GRACE:
+                    queued = True
+                    message = "建线已排队，达芬奇空闲后自动开始；现在可以先提交剪辑，建好后自动接着剪。" if live.get("group_markers") else "建线已排队，达芬奇空闲后自动开始。"
+                    record_activity(self, f"timeline:{identifier}:{request_id}", status="queued", phase="等待达芬奇", message=message)
+                    report(result={"queued": True, "request_id": request_id, "message": message,
+                                   "can_submit_edit": live.get("group_markers") is True})
+                cancel.wait(.2)
+            with self.lock:
+                live["stage"] = "building"
+            yield
+        finally:
+            if acquired:
+                lock.release()
+            with self.lock:
+                if ticket in self._edit_resolve_waiters:
+                    self._edit_resolve_waiters.remove(ticket)
+                if self._timeline_live().get(identifier) is live:
+                    self._timeline_live().pop(identifier)
+
+    def _build_timeline(self, body, report):
+        identifier = body["job_id"]
         operations = self._production_operations()
-        operations.validate("timeline", body)
         with operations.guard("timeline", body) as operation:
             prior = self.production.replay("timeline", body)
             if prior:
@@ -569,7 +834,7 @@ class ProductionWorkbenchMixin:
                 return self._commit_production_operation(operations, operation)
             if not operation:
                 with self.lock:
-                    data = self.production.read()
+                    data = self.production.records()
                     job = next((item for item in data["jobs"] if item["id"] == identifier), None)
                     if not job:
                         raise VoiceError(404, "这张制作单不存在。")
@@ -584,31 +849,60 @@ class ProductionWorkbenchMixin:
                     if creator not in data["settings"]["creators"]:
                         raise VoiceError(400, "请选择达人；达人名在「制作视频」页的达芬奇设置里维护。")
                     config = self.production.product_settings(data, job["product"])
+                    options = timeline_options(body.get("options"), config)
                     audio = self.production.audio / (take["wav"] or take["audio"])
                     if not audio.is_file():
                         raise VoiceError(409, "配音文件不见了，请重新生成配音。")
-                    markers = meaning_markers(job, take, config["fps"])
-                    prefix = f"{creator}{datetime.now().strftime('%y%m%d')}-{config['code']}-"
-                    payload = {"project": config["project"], "audio": str(audio), "prefix": prefix, "clip_suffix": "_配音",
-                        "audio_bin": config["audio_bin"], "timeline_bin": config["timeline_bin"], "fps": config["fps"],
-                        "width": config["width"], "height": config["height"], "track_index": VOICE_TRACK, "track_name": "配音",
+                    markers = (meaning_markers(job, take, options["fps"], lead_frames=options["lead_frames"])
+                               if options["markers"] else [])
+                    prefix = f"{creator}{datetime.now().strftime('%y%m%d')}-{options['code']}-"
+                    payload = {"project": config["project"], "creator": creator, **known_location(data, creator, config["project"]),
+                        "audio": str(audio), "prefix": prefix, "clip_suffix": "_配音",
+                        "audio_bin": config["audio_bin"], "timeline_bin": config["timeline_bin"], "fps": options["fps"],
+                        "width": options["width"], "height": options["height"], "track_index": VOICE_TRACK, "track_name": "配音",
+                        "lead_frames": options["lead_frames"], "name": options["name"],
                         "marker_color": MARKER_COLOR, "markers": markers}
+                previous = max((item for record in data["jobs"] for item in record.get("timelines", [])
+                                if item.get("creator") == creator and same_creator_project(item.get("project"), config["project"], creator) and item.get("materials")),
+                               key=lambda item: item.get("built_at", ""), default=None)
                 operation = operations.prepare("timeline", body, {"payload": payload, "config": config,
-                    "creator": creator, "take_id": take["id"], "markers": markers})
+                    "creator": creator, "take_id": take["id"], "markers": markers,
+                    "materials": list((previous or {}).get("materials") or config.get("material_timelines") or [])})
             snapshot = operation["snapshot"]
             config, markers, creator = snapshot["config"], snapshot["markers"], snapshot["creator"]
             payload = {**snapshot["payload"], "operation_key": operation["operation_key"],
                        "recovery_file": str(operations.recovery_file(operation).resolve())}
-            operation = operations.update(operation, "inflight", error="")
+            started = False
             try:
-                result = self.resolve.run("build", payload)
+                with self._timeline_turn(identifier, body["request_id"], creator, report, snapshot):
+                    operation = operations.update(operation, "inflight", error="")
+                    started = True
+                    result = self.resolve.run("build", payload, held=True)
+            except Exception as exc:
+                # The worker journals its identity before it changes anything in DaVinci. Without that journal
+                # nothing was built, so the request ends cleanly instead of blocking the job as uncertain.
+                if not operations.recovery_file(operation).exists():
+                    try:
+                        operations.update(operation, "safe_failed", error=str(exc)[:1000],
+                                          cancelled=isinstance(exc, QueueCancelled))
+                    except OSError:
+                        pass
+                elif started:
+                    operations.best_effort_uncertain(operation, exc)
+                raise
+            try:
                 warnings = list(result.get("warnings") or [])
                 if len(result.get("markers") or []) != len(markers):
                     warnings.append(f"读回 {len(result.get('markers') or [])} 个意群标记，应有 {len(markers)} 个，请在达芬奇里核对。")
-                record = {"name": result["name"], "unique_id": result["unique_id"], "project": config["project"], "creator": creator,
-                          "take_id": snapshot["take_id"], "fps": config["fps"], "frames": result["end_frame"] - result["start_frame"],
+                record = {"name": result["name"], "unique_id": result["unique_id"], "project": result.get("project") or config["project"], "creator": creator,
+                          "take_id": snapshot["take_id"], "fps": payload["fps"], "width": payload["width"], "height": payload["height"],
+                          "lead_frames": payload.get("lead_frames", 0), "group_markers": bool(markers),
+                          "frames": result["end_frame"] - result["start_frame"],
                           "markers": len(result.get("markers") or []), "warnings": warnings, "built_at": now(),
-                          "operation_key": operation["operation_key"], "saved": result.get("saved") is True}
+                          "operation_key": operation["operation_key"], "saved": result.get("saved") is True,
+                          "build_request_id": body["request_id"],
+                          **{key: result[key] for key in ("folder", "project_id") if result.get(key)},
+                          "materials": [name for name in result.get("materials") or [] if isinstance(name, str)]}
                 operation = operations.update(operation, "result_ready", result=record, error="")
             except Exception as exc:
                 operations.best_effort_uncertain(operation, exc)
@@ -618,9 +912,16 @@ class ProductionWorkbenchMixin:
     def open_timeline(self, identifier, body):
         if not isinstance(body, dict):
             raise VoiceError(400, "参数格式无效。")
+        if "frame" in body and (type(body["frame"]) is not int or body["frame"] < 0):
+            raise VoiceError(400, "帧位置必须是从第 0 帧算起的非负整数。")
         job = self.production.job(identifier)
         record = next((item for item in job.get("timelines", []) if item["unique_id"] == body.get("unique_id")), None)
         if not record:
             raise VoiceError(404, "这张制作单没有这条时间线。")
+        payload = {"project": record["project"], "unique_id": record["unique_id"], "name": record["name"], **timeline_location(record)}
+        if "frame" in body:
+            # Relative to the timeline start, matching edit report and engineering-summary gaps.
+            # The worker checks the live duration; the saved build record may predate manual trimming.
+            payload["frame"] = body["frame"]
         return {"ok": True, **{key: value for key, value in self.resolve.run(
-            "open", {"project": record["project"], "unique_id": record["unique_id"], "name": record["name"]}, timeout=30).items() if key != "ok"}}
+            "open", payload, timeout=30).items() if key != "ok"}}

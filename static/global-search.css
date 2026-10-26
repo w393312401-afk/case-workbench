@@ -3,10 +3,10 @@
   max-height: min(760px, calc(100dvh - 72px));
   margin: 8vh auto auto;
   padding: 0;
-  border: 1px solid var(--line, #dde1e8);
+  border: 1px solid var(--line);
   border-radius: 16px;
-  color: var(--ink, #202b3b);
-  background: var(--surface, #fff);
+  color: var(--ink);
+  background: var(--surface);
   box-shadow: 0 24px 80px #00000038;
   overflow: hidden;
 }
@@ -14,31 +14,31 @@
 .global-search-dialog::backdrop { background: var(--overlay); backdrop-filter: blur(3px); }
 .global-search-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 22px 14px; gap: 12px; }
 .global-search-header h2 { margin: 0; font-size: 18px; font-weight: 700; }
-.global-search-header p { margin: 5px 0 0; font-size: 12px; color: var(--muted, #68778a); }
+.global-search-header p { margin: 5px 0 0; font-size: 12px; color: var(--muted); }
 .global-search-close { padding: 8px; min-height: 36px; }
 .global-search-close svg, .global-search-input-wrap > svg, .global-search-result-icon svg { width: 20px; height: 20px; flex-shrink: 0; }
-.global-search-input-wrap { display: flex; align-items: center; gap: 10px; margin: 0 22px; border: 1px solid var(--line, #dde1e8); border-radius: 9px; padding: 0 13px; color: var(--muted, #68778a); background: var(--surface-alt, #f8fafc); }
-.global-search-input-wrap:focus-within { outline: 2px solid var(--accent, #2469df); outline-offset: 1px; }
+.global-search-input-wrap { display: flex; align-items: center; gap: 10px; margin: 0 22px; border: 1px solid var(--line); border-radius: 9px; padding: 0 13px; color: var(--muted); background: var(--surface-alt); }
+.global-search-input-wrap:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
 .global-search-input-wrap input { flex: 1; min-width: 0; padding: 13px 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; outline: 0; box-shadow: none; }
-.global-search-status { margin: 12px 22px; color: var(--muted, #68778a); font-size: 12px; line-height: 1.5; }
+.global-search-status { margin: 12px 22px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .global-search-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 10px 12px; }
-.global-search-group { display: flex; gap: 8px; align-items: center; padding: 12px 12px 7px; font-size: 12px; font-weight: 650; color: var(--muted, #68778a); }
+.global-search-group { display: flex; gap: 8px; align-items: center; padding: 12px 12px 7px; font-size: 12px; font-weight: 650; color: var(--muted); }
 .global-search-group span { font-size: 12px; font-weight: 400; opacity: .8; }
 .global-search-result { display: flex; align-items: flex-start; gap: 11px; padding: 12px; border: 1px solid transparent; border-radius: 9px; text-decoration: none; color: inherit; }
-.global-search-result[aria-selected="true"], .global-search-result:hover { color: inherit; background: var(--surface-tint, #edf3fc); border-color: var(--line, #dbe7f9); text-decoration: none; }
-.global-search-result-icon { display: flex; color: var(--link); padding-top: 2px; }
+.global-search-result[aria-selected="true"], .global-search-result:hover { color: inherit; background: var(--surface-tint); border-color: var(--line); text-decoration: none; }
+.global-search-result-icon { display: flex; color: var(--accent-text); padding-top: 2px; }
 .global-search-result-copy { min-width: 0; flex: 1; }
 .global-search-result-copy strong { display: block; font-size: 14px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
-.global-search-result-copy small { display: block; margin-top: 3px; color: var(--muted, #68778a); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
-.global-search-result-copy mark { color: var(--warm-ink, #765234); background: var(--surface-warm, #f9e5a0); border-radius: 2px; }
-.global-search-result-hint { display: block; margin-top: 4px; font-size: 12px; color: var(--muted-soft, #647a95); }
-.global-search-result-arrow { padding-top: 4px; color: var(--muted-soft, #6c86a7); opacity: 0; }
+.global-search-result-copy small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.global-search-result-copy mark { color: var(--warm-ink); background: var(--surface-warm); border-radius: 2px; }
+.global-search-result-hint { display: block; margin-top: 4px; font-size: 12px; color: var(--muted-soft); }
+.global-search-result-arrow { padding-top: 4px; color: var(--muted-soft); opacity: 0; }
 .global-search-result[aria-selected="true"] .global-search-result-arrow { opacity: 1; }
-.global-search-feedback { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 22px 10px; padding: 9px 12px; background: var(--surface-warm, #fff8e7); color: var(--warm-ink, #805710); border-radius: 8px; font-size: 12px; line-height: 1.5; }
+.global-search-feedback { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 22px 10px; padding: 9px 12px; background: var(--surface-warm); color: var(--warm-ink); border-radius: 8px; font-size: 12px; line-height: 1.5; }
 .global-search-feedback[hidden] { display: none; }
 .global-search-feedback button { flex-shrink: 0; }
-.global-search-footer { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line, #dde1e8); padding: 12px 22px; font-size: 12px; color: var(--muted, #68778a); }
-.global-search-footer kbd { display: inline-block; border: 1px solid var(--line, #dce2e9); border-radius: 4px; padding: 1px 5px; margin-right: 3px; font: inherit; background: var(--surface-alt, #f8fafc); }
+.global-search-footer { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding: 12px 22px; font-size: 12px; color: var(--muted); }
+.global-search-footer kbd { display: inline-block; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; margin-right: 3px; font: inherit; background: var(--surface-alt); }
 @media (max-width: 560px) {
   .global-search-dialog { margin-top: 24px; max-height: calc(100dvh - 48px); }
   .global-search-header { padding: 17px 16px 12px; }
@@ -48,3 +48,5 @@
   .global-search-footer { padding: 11px 16px; }
 }
 button.global-search-result { width: 100%; text-align: left; background: none; font: inherit; cursor: pointer; }
+.global-search-result.is-command{align-items:center;padding-top:7px;padding-bottom:7px;min-height:38px}
+.global-search-result.is-command .global-search-result-icon{padding-top:0}

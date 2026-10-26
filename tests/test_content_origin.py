@@ -78,7 +78,7 @@ class ContentOriginTests(unittest.TestCase):
         })
         self.assertEqual(status, 200, result)
         identifier = result["case"]["case_id"]
-        script = fixture.SERVER.Path(fixture.SERVER.DEFAULT_CONFIG["skill_root"]) / "scripts" / "case_store.py"
+        script = fixture.APP_ROOT / "scripts" / "case_store.py"
         command = subprocess.run([sys.executable, "-X", "utf8", str(script), "--root", str(self.skill), "show", identifier],
                                  capture_output=True, text=True, encoding="utf-8", check=True)
         self.assertEqual(json.loads(command.stdout)["current"]["content_origin"], "overseas_creator")

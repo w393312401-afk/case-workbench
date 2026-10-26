@@ -3,10 +3,14 @@
 "use strict";
 
 (() => {
-  const MEDIA_SELECTOR = "img,image,video,audio,source,picture,iframe,object,embed,track";
+  const guestMedia = window.WorkbenchGuest === true;
+  // The same-domain guest uses the media allowlist supplied by its server. The
+  // separately exported text site still strips every media element as before.
+  const MEDIA_SELECTOR = guestMedia ? "iframe,object,embed" : "img,image,video,audio,source,picture,iframe,object,embed,track";
   const MEDIA_ATTRIBUTES = new Set(["src", "srcset", "poster", "preload", "data-src", "data", "href", "xlink:href"]);
   const WRITE_SELECTOR = [
     "#task-activity-open", ".task-activity-logs", ".activity-settings",
+    "[data-followup-edit]", "[data-test-edit]", "[data-test-result]", "#direction-test-create", ".rev-quick a[href*='tab=opportunities']",
     "#add-top", "#import-video-top", "#library-video-import", "#detail-video-import",
     "#edit-case", "#archive-case", "#delete-case", "#release-edit", "[data-inline-edit]",
     "#bulk-archive", "#bulk-restore", "#bulk-delete", ".bulk-actions", "[data-move-case]",
@@ -21,6 +25,8 @@
     "[data-home-plan-write]", "[data-home-plan]", "[data-direction-plan]",
     "#direction-write", "#direction-edit", "#direction-add-variant", "[data-edit-point]", "[data-use-point]",
     "#script-new", "#script-manual-open", "#script-derive", "#script-case", "#script-release", "#script-write-source",
+    "[data-script-archive]", "#script-archive", ".ai-task-management",
+    "[data-adopted-copy]", "[data-adopted-edit]",
     "#script-use-selection", "#ai-start-blank", "[data-ai-action]", "#ai-cancel-task",
     "#ai-delete-selected", "[data-adopt-script]", "[data-write-case]", "#ai-check-service",
     "#ai-continue-form", ".ai-continue-card", ".ai-selection-toolbar", ".ai-task-select",
@@ -34,9 +40,10 @@
     "#direction-discard-dialog", "#selling-point-dialog", "#script-editor-dialog",
     "#script-discard-dialog", "#material-hook-dialog", "#material-theme-dialog",
   ].join(",");
-  const READ_LABEL_SELECTOR = "[data-video-direction],.timestamp-chip[data-native-seek],.cue-time";
-  const PLAYBACK_SELECTOR = ".native-play-actions,[data-native-seek]:not(.timestamp-chip),#toggle-transcript-follow,.segment-controls,.player-follow";
+  const READ_LABEL_SELECTOR = guestMedia ? "[data-video-direction]" : "[data-video-direction],.timestamp-chip[data-native-seek],.cue-time";
+  const PLAYBACK_SELECTOR = guestMedia ? "" : ".native-play-actions,[data-native-seek]:not(.timestamp-chip),#toggle-transcript-follow,.segment-controls,.player-follow";
   const BROWSE_SELECTOR = [
+    ".product-combo-trigger",
     ".nav-item[data-page]:not([data-page='settings'])", "[data-view]", "[data-library-preset]",
     "[data-layout]", "[data-native-mode]", "[data-sort]", "[data-sort-header]", "[data-status-filter]",
     "[data-perf-tab]", "[data-direction-tab]", "[data-tier-filter]", "[data-direction-section]",
@@ -49,6 +56,9 @@
   // Removing media from HTML before it enters the live DOM prevents a transient
   // fetch. The observer below also handles nodes inserted through DOM methods.
   function textOnlyMarkup(value) {
+    if (guestMedia) return String(value)
+      .replace(/<(iframe|object)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+      .replace(/<\/?(?:iframe|object|embed)\b[^>]*>/gi, "");
     return String(value)
       .replace(/<(video|audio|picture|iframe|object)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
       .replace(/<\/?(?:img|image|video|audio|source|picture|iframe|object|embed|track)\b[^>]*>/gi, "")
@@ -82,6 +92,7 @@
     [window.HTMLTrackElement, ["src"]],
   ]) {
     if (!constructor) continue;
+    if (guestMedia && ![window.HTMLIFrameElement, window.HTMLObjectElement, window.HTMLEmbedElement].includes(constructor)) continue;
     for (const name of names) {
       const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, name);
       if (!descriptor?.set || !descriptor.configurable) continue;
@@ -97,7 +108,7 @@
       node.removeAttribute("autoplay");
       node.remove();
     }
-    root.querySelectorAll("link[rel='preload'][as='image'],link[rel='preload'][as='video'],link[rel='preload'][as='audio'],link[rel='icon']").forEach(node => node.remove());
+    if (!guestMedia) root.querySelectorAll("link[rel='preload'][as='image'],link[rel='preload'][as='video'],link[rel='preload'][as='audio'],link[rel='icon']").forEach(node => node.remove());
   }
   for (const method of ["appendChild", "insertBefore", "replaceChild"]) {
     const original = Node.prototype[method];
@@ -107,7 +118,7 @@
       return original.call(this, node, ...args);
     };
   }
-  if (window.HTMLMediaElement) {
+  if (!guestMedia && window.HTMLMediaElement) {
     HTMLMediaElement.prototype.load = function() {};
     HTMLMediaElement.prototype.play = function() { return Promise.resolve(); };
   }
@@ -131,8 +142,8 @@
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url, location.href);
     if (!["GET", "HEAD"].includes(method) || url.origin !== location.origin ||
         /^\/(?:media|attachments?)\//i.test(url.pathname) || /^\/api\/activity(?:\/|$)/.test(url.pathname) ||
-        /\/(?:thumbnail|stream)(?:\/|$)/i.test(url.pathname)) {
-      return Promise.resolve(new Response(JSON.stringify({error: "文字浏览版仅供查看，修改请在本机工作台完成。"}), {
+        /\/stream(?:\/|$)/i.test(url.pathname) || !guestMedia && /\/thumbnail(?:\/|$)/i.test(url.pathname)) {
+      return Promise.resolve(new Response(JSON.stringify({error: guestMedia ? "访客浏览仅供查看，请登录后操作。" : "文字浏览版仅供查看，修改请在本机工作台完成。"}), {
         status: 403, headers: {"Content-Type": "application/json; charset=utf-8"},
       }));
     }
@@ -142,16 +153,22 @@
   function isWriteControl(node) {
     if (!node?.matches) return false;
     if (node.matches(WRITE_SELECTOR) || node.closest(WRITE_DIALOG_SELECTOR)) return true;
+    // A saved record's title may begin with an action verb. Its canonical
+    // content link still navigates to read-only details, never a write action.
+    if (node.matches("a.case-card,a.script-card") &&
+        /^#(?:\/[^/?]+\/)?(?:case\/PVR-[a-f0-9]{12}|(?:scripts|content)\/SCR-[a-f0-9]{12})(?:$|[/?])/.test(node.getAttribute("href") || "")) return false;
     if (node.matches(BROWSE_SELECTOR) || node.matches(READ_LABEL_SELECTOR)) return false;
     if (node.matches("[data-completion-section]")) return node.closest(".is-missing") !== null;
     if (!node.matches("button,a,input[type='submit']")) return false;
     return ACTION_TEXT.test((node.textContent || node.value || "").trim());
   }
   function hideWrite(node) {
-    node.dataset.publicHidden = "true";
-    node.setAttribute("aria-hidden", "true");
-    node.tabIndex = -1;
-    if ("disabled" in node) node.disabled = true;
+    // These attributes are also observed by the sidebar rail. Reassigning an
+    // unchanged value would wake its observer, whose hidden writes wake ours.
+    if (node.dataset.publicHidden !== "true") node.dataset.publicHidden = "true";
+    if (node.getAttribute("aria-hidden") !== "true") node.setAttribute("aria-hidden", "true");
+    if (node.tabIndex !== -1) node.tabIndex = -1;
+    if ("disabled" in node && !node.disabled) node.disabled = true;
   }
   function exportedTime() {
     const value = window.PUBLIC_EXPORT_META?.exported_at || window.PUBLIC_EXPORT_META?.generated_at ||
@@ -167,7 +184,7 @@
   const READING_FILTER_SELECTOR = [
     "#case-search", "#library-saved-view", "#product-filter", "#direction-filter",
     "#archive-filter", "#category-filter", "#source-filter", "#origin-filter", "#variant-filter",
-    "#perf-q", "#perf-range", "#perf-period", "#perf-account", "#perf-status",
+    "#perf-q", "#perf-account", "#perf-status",
     "#rev-q", "#rev-brand", "#rev-empty", "#rev-irrelevant", "#rev-language", "#rev-rating",
     "#rev-replied", "#rev-role", "#rev-sku", "#rev-sort", "#rev-video", "#ai-group-by",
     "#script-status-filter", "#script-query", "#direction-filters input[name]:not([type='hidden'])",
@@ -301,12 +318,14 @@
   });
   function setText(node, value) { if (node && node.textContent !== value) node.textContent = value; }
   function publicCopy() {
-    setText(document.getElementById("connection-text"), "公网文字 · 自动同步");
+    const guest = window.WorkbenchGuest === true;
+    setText(document.getElementById("connection-text"), guest ? "访客浏览 · 仅供查看" : "公网文字 · 自动同步");
     const connection = document.querySelector(".connection");
-    if (connection) connection.title = "文字浏览版 · 数据截至导出时间：" + exportedTime();
-    setText(document.getElementById("sync-detail"), "每 30 秒检查新发布的文字；修改在本机完成。");
+    const connectionTitle = (guest ? "访客浏览 · 仅供查看 · 数据时间：" : "文字浏览版 · 数据截至导出时间：") + exportedTime();
+    if (connection && connection.title !== connectionTitle) connection.title = connectionTitle;
+    setText(document.getElementById("sync-detail"), guest ? "仅供查看；登录后操作。" : "每 30 秒检查新发布的文字；修改在本机完成。");
     document.querySelectorAll(".perf-sources").forEach(node => setText(node, "自动同步已发布文字；数据时间以本次导出记录为准。"));
-    setText(document.querySelector(".sidebar-bottom > p:last-of-type"), "浏览与复制文字；修改在本机工作台完成。");
+    setText(document.querySelector(".sidebar-bottom > p:last-of-type"), guest ? "仅供查看；登录后操作。" : "浏览与复制文字；修改在本机工作台完成。");
     const total = document.querySelector(".total-note");
     if (total) setText(total, total.textContent.replace(/本地保存/g, "文字快照"));
     const aiNav = document.getElementById("ai-nav");
@@ -329,14 +348,14 @@
     const heading = document.querySelector(".page-heading");
     if (heading?.querySelector(".eyebrow")?.textContent === "WRITING WORKSPACE") {
       setText(heading.querySelector("h1"), "写稿记录");
-      setText(heading.querySelector("p"), "查看已导出的协作任务与脚本版本，复制需要的文字。");
+      setText(heading.querySelector("p"), guest ? "查看已发布的协作记录与脚本版本；登录后操作。" : "查看已导出的协作任务与脚本版本，复制需要的文字。");
     }
     for (const node of document.querySelectorAll(".scripts-start-actions a")) {
       if (node.textContent.trim() === "从方向开始") setText(node, "查看方向");
       if (node.textContent.trim() === "从案例开始") setText(node, "查看案例");
     }
     setText(document.querySelector(".ai-candidate-note:not(#ai-create-dialog .ai-candidate-note)"),
-      "以下为导出时保存的候选文字。继续修改、采纳和写回请在本机工作台完成。");
+      guest ? "以下为已发布的候选文字，仅供查看；登录后操作。" : "以下为导出时保存的候选文字。继续修改、采纳和写回请在本机工作台完成。");
     const banner = document.getElementById("public-text-banner");
     if (banner) {
       setText(banner.querySelector("[data-public-export-time]"), `数据截至导出时间：${exportedTime()}`);
@@ -349,13 +368,15 @@
     scanning = true;
     try {
       stripMedia(document);
-      document.body.classList.add("public-text-mode");
-      document.querySelectorAll(WRITE_SELECTOR + "," + WRITE_DIALOG_SELECTOR + "," + PLAYBACK_SELECTOR).forEach(hideWrite);
+      if (!document.body.classList.contains("public-text-mode")) document.body.classList.add("public-text-mode");
+      if (guestMedia && !document.body.classList.contains("public-guest-media")) document.body.classList.add("public-guest-media");
+      document.querySelectorAll([WRITE_SELECTOR, WRITE_DIALOG_SELECTOR, PLAYBACK_SELECTOR].filter(Boolean).join(",")).forEach(hideWrite);
       document.querySelectorAll("button,a,input[type='submit']").forEach(node => { if (isWriteControl(node)) hideWrite(node); });
       document.querySelectorAll(READ_LABEL_SELECTOR).forEach(node => {
-        node.dataset.publicReadLabel = "true";
-        node.disabled = true;
-        node.title = "文字浏览版保留记录，不播放媒体或更改关联";
+        if (node.dataset.publicReadLabel !== "true") node.dataset.publicReadLabel = "true";
+        if (!node.disabled) node.disabled = true;
+        const title = "文字浏览版保留记录，不播放媒体或更改关联";
+        if (node.title !== title) node.title = title;
       });
       document.querySelectorAll("[draggable='true']").forEach(node => node.draggable = false);
       publicCopy();
@@ -398,7 +419,7 @@
   safeRoute();
   window.addEventListener("hashchange", safeRoute, true);
   function start() {
-    document.title = "案例工作台 · 自动同步文字版";
+    document.title = "TK工作台 · 自动同步文字版";
     if (!document.getElementById("public-text-banner")) {
       const banner = document.createElement("div");
       banner.id = "public-text-banner";

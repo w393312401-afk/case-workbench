@@ -130,13 +130,14 @@ class SkillRuntimeTests(unittest.TestCase):
         self.assertEqual([skill["name"] for skill in review["skills"]], [WRITING])
         self.assertNotIn("native-scoring.md", {Path(item["path"]).name for item in review["references"]})
         self.assertNotIn("默认做简明原生度文本评估", review["instructions"])
-        self.assertIn("意群表", review["instructions"])
+        # Writing rules come from the attached writing references; instructions only point to them.
+        self.assertIn("交付格式见其“交付”", review["instructions"])
         self.assertNotIn("visual-handoff.md", {Path(item["path"]).name for item in review["references"] + draft["references"]})
         self.assertNotIn("review-guide.md", {Path(item["path"]).name for item in review["references"]})
         self.assertIn("review-guide.md", {Path(item["path"]).name for item in diagnostic["references"]})
-        self.assertIn("保留画面留白和指代悬念", review["instructions"])
         self.assertIn("不是审稿诊断", review["instructions"])
-        self.assertIn("评价力度不得低于初稿", review["instructions"])
+        self.assertIn("按写作参考“成稿后的独立复核”执行", review["instructions"])
+        self.assertNotIn("评价力度不得低于初稿", review["instructions"])
         self.assertNotIn("自动重写", review["instructions"])
         self.assertNotIn("不是审稿诊断", draft["instructions"])
         self.assertIn("交付正文无需重复", review["instructions"])
@@ -338,6 +339,25 @@ class SkillRuntimeTests(unittest.TestCase):
             with self.assertRaises(SkillRuntimeError) as error:
                 self.runtime.prepare("review", REVIEW)
             self.assertEqual(error.exception.status, 413)
+
+
+INSTALLED_WRITING = Path.home() / "Desktop" / "skill" / WRITING / "references" / "writing-and-native.md"
+
+
+@unittest.skipUnless(INSTALLED_WRITING.is_file(), "installed writing skill not present")
+class WritingReferencePointerTests(unittest.TestCase):
+    """Prompts point to writing-skill sections by name; a renamed section must not leave a dangling pointer."""
+
+    def test_every_pointed_section_exists_in_the_installed_writing_reference(self):
+        import re
+        text = INSTALLED_WRITING.read_text(encoding="utf-8")
+        names = set()
+        for source in ("ai_tasks.py", "ai_skills.py"):
+            names.update(re.findall(r"写作参考[里]?“([^”]+)”", (APP / source).read_text(encoding="utf-8")))
+        self.assertTrue({"交付", "成稿后的独立复核", "先理解这条内容怎样说话", "开头、中段与收口"} <= names, names)
+        for name in sorted(names):
+            with self.subTest(name=name):
+                self.assertIn(name, text)
 
 
 if __name__ == "__main__":

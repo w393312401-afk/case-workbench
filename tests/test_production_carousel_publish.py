@@ -95,7 +95,9 @@ class CarouselPublishTests(unittest.TestCase):
     def another_carousel(self, *, same_script=False):
         saved_item = self.item
         if same_script:
-            other = self.bench.create_carousel(self.body(carousel={"script_id": saved_item["script_id"]}))["carousel"]
+            # This fixture exercises generated-image publication; new real tasks default to local lettering.
+            other = self.bench.create_carousel(self.body(carousel={"script_id": saved_item["script_id"]},
+                requirements={"mode": "photo_preserving"}))["carousel"]
         else:
             other = self.carousel()
         self.item = other
@@ -113,16 +115,19 @@ class CarouselPublishTests(unittest.TestCase):
         with patch.object(http_fixture.SERVER, "CockpitImageBridge", return_value=self.generator):
             self.bench = http_fixture.SERVER.Workbench(previous.store.root, previous.runtime,
                 allow_open=False, ai_bridge=FakeBridge(), performance_sources=[])
+        self.bench.image_reviewer = self.generator
         self.bench.carousel_image_root = previous.carousel_image_root
         self.bench.performance = self.performance
         self.bench.sales = SalesDataResolver(self.performance)
         self.server.app = self.bench
         self.token = self.bench.token
 
-    def test_historical_delivery_is_frozen_as_actual_publication_and_script_is_published(self):
+    def test_published_source_stays_frozen_after_new_package_replaces_old_zip_and_registration_is_edited(self):
         old_delivery = copy.deepcopy(self.delivery)
-        old_zip = self.bench.carousel_delivery_file(self.item["id"], old_delivery["id"]).read_bytes()
+        old_path = self.bench.carousel_delivery_file(self.item["id"], old_delivery["id"])
         script_before = self.script()
+        initial = self.publish()["publication"]
+        frozen = copy.deepcopy(initial["delivery_snapshot"])
         self.bench.start_image_generation(self.item["id"], self.body(slides=[1]))
         self.wait_worker()
         slide = self.current()["slides"][0]
@@ -130,19 +135,69 @@ class CarouselPublishTests(unittest.TestCase):
         new_delivery = self.bench.create_carousel_delivery(self.item["id"], self.body())["delivery"]
         self.assertNotEqual(new_delivery["slides"][0]["output_id"], old_delivery["slides"][0]["output_id"])
         self.pick_new_base(1)
-        result = self.publish()
+        result = self.publish(self.publication_body(note="纠正原发布备注，保持实际发布来源"))
         publication = result["publication"]
         self.assertEqual((publication["delivery_id"], publication["post_id"], publication["published_on"]),
                          (old_delivery["id"], POST, DAY))
         self.assertEqual(publication["delivery_sha256"], old_delivery["sha256"])
+        self.assertEqual(publication["delivery_snapshot"], frozen)
+        self.assertEqual(publication["delivery_snapshot"]["slides"][0]["output_id"], old_delivery["slides"][0]["output_id"])
+        self.assertNotEqual(publication["delivery_id"], new_delivery["id"])
+        self.assertEqual(publication["note"], "纠正原发布备注，保持实际发布来源")
         current = self.current()
         self.assertEqual(current["publication"], publication)
-        self.assertEqual(next(item for item in current["deliveries"] if item["id"] == old_delivery["id"]), old_delivery)
-        self.assertEqual(self.bench.carousel_delivery_file(self.item["id"], old_delivery["id"]).read_bytes(), old_zip)
+        self.assertEqual([entry["id"] for entry in current["deliveries"]], [new_delivery["id"]])
+        self.assertIn(initial, current["publication_history"])
+        self.assertFalse(old_path.exists())
+        self.assert_error(404, self.bench.carousel_delivery_file, self.item["id"], old_delivery["id"])
         script = self.script()
         self.assertEqual((script["status"], script["video_id"], script["published_on"]), ("published", POST, DAY))
         self.assertEqual((script["text"], script["translation_zh"], script["version"]),
                          (script_before["text"], script_before["translation_zh"], script_before["version"]))
+
+    def test_retired_unpublished_package_cannot_be_registered_or_rebound_to_the_newest_one(self):
+        old_delivery = copy.deepcopy(self.delivery)
+        self.bench.start_image_generation(self.item["id"], self.body(slides=[1]))
+        self.wait_worker()
+        output = self.current()["slides"][0]["outputs"][-1]
+        self.bench.approve_carousel_output(self.item["id"], self.body(slide=1, output_id=output["id"], approved=True))
+        new_delivery = self.bench.create_carousel_delivery(self.item["id"], self.body())["delivery"]
+        before = self.stored_bytes()
+        self.assert_error(404, self.publish, self.publication_body(delivery_id=old_delivery["id"]))
+        self.assertEqual(self.stored_bytes(), before)
+        self.assertFalse(self.current().get("publication"))
+        self.assertEqual(self.script()["status"], "adopted")
+        self.assertEqual([entry["id"] for entry in self.current()["deliveries"]], [new_delivery["id"]])
+
+    def test_calendar_mark_defaults_to_not_uploaded_and_must_be_a_boolean(self):
+        before = self.stored_bytes()
+        for value in ("1", 1, None):
+            with self.subTest(value=value):
+                self.assert_error(400, self.publish, self.publication_body(calendar_uploaded=value))
+        self.assertEqual(self.stored_bytes(), before)
+        self.assertIs(self.publish()["publication"]["calendar_uploaded"], False)
+        second = self.publish(self.publication_body(post_id=OTHER_POST, calendar_uploaded=True))["publication"]
+        self.assertIs(second["calendar_uploaded"], True)
+
+    def test_calendar_mark_flips_in_place_without_a_new_registration(self):
+        publication = self.publish()["publication"]
+        history = copy.deepcopy(self.current()["publication_history"])
+        result = self.bench.set_carousel_calendar_status(self.item["id"], {
+            "request_id": "calendar-" + uuid4().hex, "publication_id": publication["id"], "calendar_uploaded": True})
+        self.assertIs(result["calendar_uploaded"], True)
+        item = self.current()
+        self.assertIs(item["publication"]["calendar_uploaded"], True)
+        self.assertEqual(item["publication"]["id"], publication["id"])
+        self.assertEqual(len(item["publication_history"]), len(history))
+        self.assertIs(item["publication_history"][-1]["calendar_uploaded"], True)
+        self.assertEqual(item["publication"]["delivery_id"], publication["delivery_id"])
+        self.assertEqual((self.script()["video_id"], self.script()["status"]), (POST, "published"))
+        self.assert_error(409, self.bench.set_carousel_calendar_status, self.item["id"], {
+            "request_id": "calendar-" + uuid4().hex, "publication_id": "PUB-000000000000", "calendar_uploaded": False})
+        self.assert_error(400, self.bench.set_carousel_calendar_status, self.item["id"], {
+            "request_id": "calendar-" + uuid4().hex, "publication_id": publication["id"], "calendar_uploaded": "no"})
+        self.assert_error(400, self.bench.set_carousel_calendar_status, self.item["id"], {
+            "request_id": "calendar-" + uuid4().hex, "publication_id": publication["id"], "calendar_uploaded": True, "post_id": OTHER_POST})
 
     def test_correcting_same_carousel_keeps_prior_publication_and_delivery_history(self):
         first = self.publish()["publication"]
@@ -229,13 +284,13 @@ class CarouselPublishTests(unittest.TestCase):
         self.assertEqual(self.stored_bytes(), before)
         self.assertFalse(self.bench.production.carousel(other["id"]).get("publication"))
 
-    def test_same_script_in_two_carousels_cannot_bind_two_different_posts(self):
+    def test_same_script_in_two_carousels_can_register_two_posts_and_keeps_the_first_link(self):
         other, delivery = self.another_carousel(same_script=True)
         self.publish()
-        before = self.stored_bytes()
-        self.assert_error(409, self.publish, self.publication_body(delivery_id=delivery["id"], post_id=OTHER_POST), other["id"])
-        self.assertEqual(self.stored_bytes(), before)
+        saved = self.publish(self.publication_body(delivery_id=delivery["id"], post_id=OTHER_POST), other["id"])
+        self.assertEqual(saved["publication"]["post_id"], OTHER_POST)
         self.assertEqual(self.script()["video_id"], POST)
+        self.assertEqual(self.bench.script_registrations(self.item["script_id"]), [POST, OTHER_POST])
 
     def test_existing_case_product_and_direction_guards_are_preserved(self):
         video = self.bench.runtime / "case-fixture.mp4"
@@ -244,10 +299,11 @@ class CarouselPublishTests(unittest.TestCase):
         current["metrics"]["video_id"] = POST
         case = self.bench.store.add({"title": "其他产品案例", "product": "103N", "original": {"text": "Original."},
             "feedback": {"kind": "editorial", "text": "隔离测试"}, "current": current})
+        product_before = self.bench.store.read_case(case["case_id"])["product"]
         before = self.stored_bytes()
         self.assert_error(409, self.publish)
         self.assertEqual(self.stored_bytes(), before)
-        self.assertEqual(self.bench.store.read_case(case["case_id"])["product"], "103N")
+        self.assertEqual(self.bench.store.read_case(case["case_id"])["product"], product_before)
         # A separate post already assigned to another direction must also keep its guard.
         with patch.object(self.bench.directions, "find_link", return_value={"direction_id": "202H-S1"}):
             self.assert_error(409, self.publish, self.publication_body(post_id=OTHER_POST))

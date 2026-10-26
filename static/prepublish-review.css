@@ -1,0 +1,29 @@
+.prepublish-form {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end;margin-top:12px;}
+.prepublish-meta {font-size:13px;color:var(--muted);overflow-wrap:anywhere;margin:6px 0;}
+.prepublish-summary {margin:6px 0 10px;}
+.prepublish-clear {color:var(--success-ink);margin:6px 0;}
+.prepublish-findings {list-style:none;padding:0;margin:8px 0;display:grid;gap:6px;}
+.prepublish-finding {border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--surface);}
+.prepublish-finding.is-must {border-left:3px solid var(--danger);}
+.prepublish-finding.is-confirm {border-left:3px solid var(--warn);}
+.prepublish-finding.is-resolved {opacity:.72;}
+.prepublish-finding p {margin:4px 0 0;line-height:1.55;overflow-wrap:anywhere;}
+.prepublish-finding-head {display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.prepublish-finding-head small {color:var(--muted);}
+.prepublish-finding-actions {margin-left:auto;display:flex;align-items:center;gap:6px;}
+.prepublish-chip {font-size:12px;font-weight:600;padding:1px 7px;border-radius:999px;background:var(--fill);color:var(--muted);}
+.prepublish-chip.is-must {background:var(--surface-danger);color:var(--danger-ink);}
+.prepublish-chip.is-confirm {background:var(--surface-warm);color:var(--warm-ink);}
+.prepublish-consequence {color:var(--muted);}
+.prepublish-fix {color:var(--muted);font-size:13px;}
+.prepublish-resolved {font-size:12px;color:var(--success-ink);}
+.prepublish-premortem {background:var(--surface-alt);border-radius:8px;padding:8px 10px;line-height:1.6;}
+.prepublish-premortem strong {margin-right:8px;}
+.prepublish-premortem small {display:block;color:var(--muted);margin-top:4px;}
+.prepublish-sheets,.prepublish-history {margin:10px 0;font-size:13px;}
+.prepublish-sheets summary,.prepublish-history summary {cursor:pointer;color:var(--muted);}
+.prepublish-sheets a {margin-right:12px;}
+@media(max-width:640px) {.prepublish-form {grid-template-columns:minmax(0,1fr);}.prepublish-finding-actions {margin-left:0;}}
+.prepublish-kill {font-size:14px;margin:12px 0 4px;}
+.prepublish-ab {font-size:13px;margin:8px 0;}
+.prepublish-ab ul {margin:4px 0 0;padding-left:18px;}

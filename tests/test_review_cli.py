@@ -1,4 +1,4 @@
-"""The read-only review search the writing and review skills use (scripts/review_search.py in the case-library skill)."""
+"""The bundled read-only review search used by writing and review workflows."""
 from __future__ import annotations
 
 import json
@@ -13,8 +13,7 @@ from review_store import ReviewStore
 from test_review_store import build_digest_sources, build_sources
 
 APP = Path(__file__).resolve().parents[1]
-CONFIG = json.loads((APP / "config.json").read_text(encoding="utf-8"))
-CLI = Path(CONFIG["skill_root"]) / "scripts" / "review_search.py"
+CLI = APP / "scripts" / "review_search.py"
 
 
 class ReviewCliTests(unittest.TestCase):

@@ -7,6 +7,7 @@ and, on request, to put its playhead on a clip.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -22,11 +23,16 @@ from uuid import uuid4
 from datetime import datetime, timezone
 
 from edit_candidates import LABEL_STATUS, _bigrams, build_candidates
+from carousel_lineage import lineage_context, slide_lineage
 from elevenlabs_client import VoiceError
+from task_activity import activity_label, record_activity, safe_error
+from workbench_editing import live_step
+from workbench_carousel_stills import lineage_handoff
 
 CLIP_KEY = re.compile(r"[A-Za-z0-9]+-[0-9a-f]{8}")
 CACHE_LIMIT = 8
 LISTING_LIFETIME = 30 * 60
+CLIP_WAIT_TIMEOUT = 90 * 60
 SUGGESTED = 3
 CLIP_PROMPT_LIMIT = 240
 STRIP_TILES = 6
@@ -156,19 +162,24 @@ class CarouselClipsMixin:
         return self._clip_cache, self._clip_lock
 
     @staticmethod
-    def _slide_wanted(slide):
+    def _slide_wanted(slide, item=None):
+        lineage = slide_lineage(slide)
+        records = [record for record in lineage_context(item or {}).get("records", [])
+                   if record.get("number") in lineage.get("source_lines", [])]
         return " ".join(str(value or "") for value in (
             slide.get("role"), " ".join(slide.get("title_lines") or []), slide.get("body"), slide.get("title_zh"),
-            slide.get("body_zh"), slide.get("source")))
+            slide.get("body_zh"), slide.get("source"), lineage.get("proof_goal"), lineage.get("visual_method"),
+            lineage.get("evidence_requirement"),
+            " ".join(str(record.get(key) or "") for record in records for key in ("spoken", "zh", "proof", "tags", "evidence"))))
 
-    def carousel_clips(self, identifier, materials, refresh=False):
+    def carousel_clips(self, identifier, materials, refresh=False, *, on_resolve_state=None):
         """Clips of the chosen material timelines, ranked per slide by how much their labels share with the slide's words."""
         if not isinstance(materials, list) or not materials or len(materials) > 30 or any(
                 not isinstance(name, str) or not name.strip() or len(name) > 200 for name in materials):
             raise VoiceError(400, "请至少选一条素材时间线。")
         materials = sorted({name.strip() for name in materials})
         with self.lock:
-            data = self.production.read()
+            data = self.production.records()
             item = self.production.carousel(identifier)
             config = self.production.product_settings(data, item["product"])
         project = config["project"]
@@ -177,24 +188,36 @@ class CarouselClipsMixin:
         with guard:
             entry = cache.get(slot)
         if refresh or not entry or time.time() - entry["at"] > LISTING_LIFETIME:
-            listing = self.resolve.run("candidates", {"project": project, "materials": materials,
-                                                       "deduplicate_source_ranges": True}, timeout=180)
-            if not isinstance(listing.get("materials"), list):
-                raise VoiceError(502, "达芬奇没有返回素材片段清单。")
-            missing = [name for name in listing.get("missing") or []]
-            clips = {}
-            fps_by_timeline = {material["unique_id"]: (material.get("fps"), material.get("drop"))
-                               for material in listing["materials"]}
-            for clip in build_candidates(listing, deduplicate_source_ranges=True):
-                if not clip["media_path"] or clip["source"][1] <= clip["source"][0]:
-                    continue
-                fps, drop = fps_by_timeline.get(clip["timeline_uid"], (None, False))
-                clips[clip["key"]] = {**clip, "timeline_fps": fps, "drop": bool(drop)}
-            entry = {"at": time.time(), "project": project, "materials": materials, "clips": clips, "missing": missing}
-            with guard:
-                cache[slot] = entry
-                while len(cache) > CACHE_LIMIT:
-                    cache.pop(min(cache, key=lambda name: cache[name]["at"]))
+            # AI requests wait for Resolve; ordinary clip browsing keeps its
+            # existing short request behavior. A warm cache needs neither.
+            access = (self.resolve.access(timeout=CLIP_WAIT_TIMEOUT,
+                      on_wait=lambda: on_resolve_state("waiting_resolve"))
+                      if on_resolve_state is not None else nullcontext())
+            with access:
+                with guard:
+                    entry = cache.get(slot)
+                if refresh or not entry or time.time() - entry["at"] > LISTING_LIFETIME:
+                    if on_resolve_state is not None:
+                        on_resolve_state("clip_materials")
+                    listing = self.resolve.run("candidates", {"project": project, "materials": materials,
+                                                               "deduplicate_source_ranges": True}, timeout=180,
+                                               held=on_resolve_state is not None)
+                    if not isinstance(listing.get("materials"), list):
+                        raise VoiceError(502, "达芬奇没有返回素材片段清单。")
+                    missing = [name for name in listing.get("missing") or []]
+                    clips = {}
+                    fps_by_timeline = {material["unique_id"]: (material.get("fps"), material.get("drop"))
+                                       for material in listing["materials"]}
+                    for clip in build_candidates(listing, deduplicate_source_ranges=True):
+                        if not clip["media_path"] or clip["source"][1] <= clip["source"][0]:
+                            continue
+                        fps, drop = fps_by_timeline.get(clip["timeline_uid"], (None, False))
+                        clips[clip["key"]] = {**clip, "timeline_fps": fps, "drop": bool(drop)}
+                    entry = {"at": time.time(), "project": project, "materials": materials, "clips": clips, "missing": missing}
+                    with guard:
+                        cache[slot] = entry
+                        while len(cache) > CACHE_LIMIT:
+                            cache.pop(min(cache, key=lambda name: cache[name]["at"]))
         clips = entry["clips"]
         rows = [{"key": key, "label": clip["label"] or "（无标签）", "timeline": clip["timeline"], "frames": clip["source"][1] - clip["source"][0],
                  "label_status": clip["label_status"], "label_status_text": LABEL_STATUS[clip["label_status"]],
@@ -202,7 +225,7 @@ class CarouselClipsMixin:
                 for order, (key, clip) in enumerate(clips.items())]
         suggested = {}
         for slide in item["slides"]:
-            wanted = _bigrams(self._slide_wanted(slide))
+            wanted = _bigrams(self._slide_wanted(slide, item))
             scored = sorted(((-len(_bigrams(re.sub(r"[A-Za-z]+\d+", "", row["label"])) & wanted), row["order"], row["key"])
                              for row in rows if row["label_status"] != "none"))
             suggested[str(slide["number"])] = [key for score, _, key in scored if score < 0][:SUGGESTED]
@@ -251,24 +274,57 @@ class CarouselClipsMixin:
             wanted = [slide["number"] for slide in item["slides"] if not slide.get("base")] or numbers
         if not isinstance(wanted, list) or not wanted or any(number not in numbers for number in wanted):
             raise VoiceError(400, "要挑片段的张号无效。")
-        busy = getattr(self, "_clip_ai_busy", None)
-        if busy is None:
-            busy = self._clip_ai_busy = set()
-        if identifier in busy:
-            raise VoiceError(409, "这张制作单正在让 AI 挑片段，请等它结束。")
-        busy.add(identifier)
+        pick_id = "PCK-" + uuid4().hex[:12]
+        run_id = f"clips:{identifier}:{pick_id}"
+        started = datetime.now(timezone.utc).isoformat()
+        with self.lock:
+            busy = getattr(self, "_clip_ai_busy", None)
+            if busy is None:
+                busy = self._clip_ai_busy = set()
+            if identifier in busy:
+                raise VoiceError(409, "这张制作单正在让 AI 挑片段，请等它结束。")
+            busy.add(identifier)
+            live = getattr(self, "_clip_ai_live", None)
+            if live is None:
+                live = self._clip_ai_live = {}
+            live[identifier] = {"id": pick_id, "status": "running", "started_at": started,
+                                "stage": "clip_materials", "progress": "正在读取素材片段清单…", "updated_at": started}
+
+        def update_live(stage, message):
+            with self.lock:
+                current = live.get(identifier)
+                if current and current.get("id") == pick_id:
+                    current.update(stage=stage, progress=message, updated_at=datetime.now(timezone.utc).isoformat())
+
+        def progress(message):
+            line = live_step(message)
+            if line:
+                update_live("clip_choice", line)
+                record_activity(self, run_id, message=line)
+
+        def material_state(stage):
+            waiting = stage == "waiting_resolve"
+            message = "等待达芬奇：其他任务完成后自动读取素材清单。" if waiting else "正在读取素材片段清单…"
+            update_live(stage, message)
+            record_activity(self, run_id, phase="等待达芬奇" if waiting else "读取素材清单", message=message)
         try:
-            listing = self.carousel_clips(identifier, body.get("materials"), refresh=body.get("refresh") is True)
+            record_activity(self, run_id, kind="clips", owner_id=identifier, source_id=pick_id, product=item.get("product", ""),
+                            case_id=item.get("case_id"), title="AI 挑片段 · " + activity_label(item, identifier), step="stills",
+                            status="running", phase="读取素材清单", message=f"正在为第 {'、'.join(map(str, wanted))} 张读取候选片段")
+            listing = self.carousel_clips(identifier, body.get("materials"), refresh=body.get("refresh") is True,
+                                          on_resolve_state=material_state)
             clips = {row["key"]: row for row in listing["clips"]}
             if not clips:
                 raise VoiceError(409, "所选素材时间线里没有可用的片段。")
             slides = [slide for slide in item["slides"] if slide["number"] in wanted]
-            prompt = self._pick_prompt(slides, listing, per_slide, instruction.strip())
+            prompt = self._pick_prompt(slides, listing, per_slide, instruction.strip(), item=item)
             settings = self.ai.resolve_default_settings({}, effort_key="effort")
             model, effort = settings["model"], settings["effort"]
             scratch = tempfile.mkdtemp(prefix="clip-pick-")
             try:
-                output = self.ai.bridge.run(prompt, cwd=scratch, cancel_event=threading.Event(), on_progress=lambda message: None,
+                update_live("clip_choice", "AI 正在按标签挑选候选片段…")
+                record_activity(self, run_id, phase="AI 按标签挑片段", message="AI 正在按标签挑选候选片段")
+                output = self.ai.bridge.run(prompt, cwd=scratch, cancel_event=threading.Event(), on_progress=progress,
                                             model=model, reasoning_effort=effort, skills=[], on_event=lambda event: None)
             except VoiceError:
                 raise
@@ -288,15 +344,24 @@ class CarouselClipsMixin:
             temporary = target.with_suffix(".tmp")
             temporary.write_text(json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
             os.replace(temporary, target)
-            return {"picks": picks, "gaps": gaps, "model": record["model"], "at": record["at"], "count": sum(len(v) for v in picks.values())}
+            count = sum(len(v) for v in picks.values())
+            record_activity(self, run_id, status="needs_attention" if gaps else "completed", phase="候选片段已保存", result_count=count,
+                            message=f"已挑 {count} 个候选片段" + (f"，{len(gaps)} 张缺合适画面" if gaps else "") + "，待逐张取帧")
+            return {"picks": picks, "gaps": gaps, "model": record["model"], "at": record["at"], "count": count}
+        except Exception as exc:
+            # The workbench's own refusals are shown as written; anything else is classified, not forwarded.
+            own = isinstance(exc, VoiceError) and exc.status < 500
+            record_activity(self, run_id, status="failed", phase="挑片段未完成", message=str(exc)[:300] if own else safe_error(exc))
+            raise
         finally:
-            busy.discard(identifier)
+            with self.lock:
+                busy.discard(identifier)
+                if live.get(identifier, {}).get("id") == pick_id:
+                    live.pop(identifier, None)
 
     @staticmethod
-    def _pick_prompt(slides, listing, per_slide, instruction):
-        wanted = [_bigrams(" ".join(str(value or "") for value in (slide.get("role"), " ".join(slide.get("title_lines") or []),
-                                                                      slide.get("body"), slide.get("title_zh"), slide.get("body_zh"),
-                                                                      slide.get("source")))) for slide in slides]
+    def _pick_prompt(slides, listing, per_slide, instruction, *, item=None):
+        wanted = [_bigrams(CarouselClipsMixin._slide_wanted(slide, item)) for slide in slides]
         scored = []
         for row in listing["clips"]:
             labels = _bigrams(re.sub(r"[A-Za-z]+\d+", "", row["label"]))
@@ -319,7 +384,9 @@ class CarouselClipsMixin:
                      "：".join(part for part in (slide.get("title_zh"), slide.get("body_zh")) if part), slide.get("source") or "待补",
                      slide.get("forbidden") or ""]
             lines.append("| " + " | ".join(cell.replace("|", "／").replace("\n", " ") for cell in cells) + " |")
-        lines += ["", f"## 片段清单（{len(chosen)} 个）", "", "| key | 标签 | 时间线 | 标签核对 | 已被用过 |", "|---|---|---|---|---|"]
+        lines += ["", lineage_handoff(item or {}, slides),
+                  "标签选片只提供候选线索，不能宣布本张证据已满足；reason 写明对应本张任务的动作和待取帧确认之处。",
+                  "", f"## 片段清单（{len(chosen)} 个）", "", "| key | 标签 | 时间线 | 标签核对 | 已被用过 |", "|---|---|---|---|---|"]
         for row in chosen:
             lines.append(f"| {row['key']} | {row['label'].replace('|', '／')} | {row['timeline']} | {row['label_status_text']} | "
                          f"{'、'.join(row['used_by']) or '否'} |")

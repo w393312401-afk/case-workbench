@@ -99,6 +99,7 @@ class SearchHistoryBrowserTests(unittest.TestCase):
         self.assertTrue(folder.is_dir())
         self.app.archive_carousel(self.carousel["id"], {"request_id": uuid4().hex, "revision": self.app.production.public()["revision"], "archived": True})
         page = self.open_page(f"#production/{self.carousel['id']}")
+        page.locator(".production-more-actions > summary").click()
         page.locator("#carousel-delete").click()
         dialog = page.locator("dialog[open]")
         expect(dialog).to_contain_text("永久删除制作单")
@@ -113,7 +114,7 @@ class SearchHistoryBrowserTests(unittest.TestCase):
 
     def test_unarchived_order_can_be_deleted_without_archiving_first(self):
         page = self.open_page(f"#production/{self.carousel['id']}")
-        page.locator("#carousel-archive").wait_for()
+        page.locator("#carousel-archive").wait_for(state="attached")
         self.assertEqual(page.locator("#carousel-delete").count(), 1)
 
 
