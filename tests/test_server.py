@@ -84,7 +84,9 @@ class WorkbenchHTTPTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="case-workbench-test-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Hosted Windows runners may expose TEMP through an 8.3 alias (RUNNER~1).
+        # The application stores canonical paths, so comparisons need the same form.
+        self.root = Path(self.temp.name).resolve()
         self.skill = self.root / "skill"
         self.runtime = self.root / "runtime"
         self.video = self.root / "source video.mp4"
