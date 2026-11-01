@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import re
 import subprocess
 import threading
@@ -72,8 +73,11 @@ class PrepareError(RuntimeError):
     pass
 
 
-def _run(*args, timeout=600):
-    return subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+def _run(*args, timeout=600, text=True):
+    # The desktop service has no console; each media child must also start without one.
+    return subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=text,
+                          encoding="utf-8" if text else None, errors="replace" if text else None, timeout=timeout,
+                          creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
 
 
 def words(text):
@@ -94,10 +98,14 @@ def _sheet(tiles, path, width=TILE_W, height=TILE_H, cols=COLS):
         inputs += ["-i", str(frame)]
         labels.append(f"[{index}:v]scale={width}:{height},drawtext={FONT}:text='{label}':x=4:y=4:fontsize=20:"
                       f"fontcolor=yellow:box=1:boxcolor=black@0.7[v{index}]")
+    if not tiles:
+        raise PrepareError("拼图没有画面。")
     layout = "|".join(f"{(i % cols) * width}_{(i // cols) * height}" for i in range(len(tiles)))
-    stack = "".join(f"[v{i}]" for i in range(len(tiles))) + f"xstack=inputs={len(tiles)}:layout={layout}:fill=black"
-    result = _run("ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", ";".join(labels) + ";" + stack,
-                  "-frames:v", "1", "-q:v", "4", str(path))
+    # xstack needs two inputs at least; a page holding one leftover tile is that tile alone.
+    stack = (";" + "".join(f"[v{i}]" for i in range(len(tiles))) + f"xstack=inputs={len(tiles)}:layout={layout}:fill=black[out]"
+             if len(tiles) > 1 else "")
+    result = _run("ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex", ";".join(labels) + stack,
+                  "-map", "[out]" if len(tiles) > 1 else "[v0]", "-frames:v", "1", "-q:v", "4", str(path))
     if result.returncode or not path.is_file():
         raise PrepareError("拼图生成失败：" + (result.stderr or "")[-300:])
 
@@ -221,8 +229,8 @@ def label_shots(video, timeline, candidates, fps, cancel=None):
     visible.sort(key=lambda clip: clip["start"])
 
     def vector(path, seconds):
-        done = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{max(seconds, 0):.3f}", "-i", str(path), "-frames:v", "1",
-                               "-vf", "scale=72:128,format=gray", "-f", "rawvideo", "-"], capture_output=True, timeout=60)
+        done = _run("ffmpeg", "-v", "error", "-ss", f"{max(seconds, 0):.3f}", "-i", str(path), "-frames:v", "1",
+                    "-vf", "scale=72:128,format=gray", "-f", "rawvideo", "-", timeout=60, text=False)
         if done.returncode or len(done.stdout) != 72 * 128:
             return None
         value = numpy.frombuffer(done.stdout, dtype=numpy.uint8).astype(numpy.float32)
@@ -317,11 +325,15 @@ _CARD = ("在两行结尾之前，另交一个工作台画卡片用的结果块�
          "卡片只是正文的摘要，不要写正文里没有的判断；漏斗数字由工作台自己画，卡片里不用重复。\n")
 # The lines the workbench fills the review form with; shared with the text-only retrospective prompt in ai_tasks.
 DRAFT_ENDING = ("全文最后单独写两行，工作台据此填表：\n"
-                "结论：一两句、不超过 60 字的中文判断——这条好或不好的主因，下一条保留或避开什么；不罗列数字，不写套话。\n"
+                "结论：人群：……；S：……；A：……；B：……\n"
+                "结论这一行只写两件事，从上面的完整分析得出：这条成片实际圈到的人群（不超过 20 字，以开头和口播实际对谁说为准，"
+                "不照抄方向登记的人群）；它实际讲到的卖点，按卖点清单的编号分 S、A、B 三级列出，每个写编号加不超过 10 字的简称，"
+                "多个用顿号隔开，某一级没讲到写「无」。清单里没有的卖点不编号、不写进这一行。不写评价、原因、数字和建议。"
+                "例：结论：人群：守不住角度的徒手磨石用户；S：S1 定角不用猜；A：A2 双夹具、A3 一次装夹翻面；B：无\n"
                 "参考价值：高、中等、弱、无四选一，括号里用不超过 20 字说依据\n"
                 "参考价值的选法：高＝高流量、高销量，值得复用；中等＝高流量但个位数销量；弱＝流量不高、个位数销量；"
                 "无＝没流量、没成交，也没有可借鉴的发现。流量高低和同类对照比，不按固定数字划档；失败案例有可借鉴的发现时不选无。"
-                "这只是推荐，由用户确认。closing_allowed 为 false（未满14天或数据不全）时照样写这两行，结论里点明是按不完整数据下的阶段判断。")
+                "这只是推荐，由用户确认。closing_allowed 为 false（未满14天或数据不全）时照样写这两行。")
 _CLOSING = ("根据冻结的发布后14天观察数据判断行动边界。" + DRAFT_ENDING +
             "只有 closing_allowed 为 true 且需要明确安排后续时才另写一行：\n建议动作：加码、换执行、停测三选一\n"
             "动作可省略；用户确认结论、选择参考价值即可保存复盘，不需要选择下一轮动作。"
@@ -329,6 +341,17 @@ _CLOSING = ("根据冻结的发布后14天观察数据判断行动边界。" + D
             "说明依据与局限，不要求用户另填表现或证据等级。加码＝值得复制验证的候选，不代表方向已验证；"
             "换执行＝保留待验证假设，改动具体执行；停测＝结束本条复盘，不要求下一轮方向，不创建下一轮计划，不能从单条结果认定整个方向不成立；"
             "建议动作要和数据一致。")
+
+# A video with no orders and too little exposure (or no figures yet): the conclusion line adds where it stuck and one
+# suspicion to test, and the reference value follows from that. Shared with the text-only prompt in ai_tasks.
+THIN_ENDING = ("\n这条没有销量、曝光也不足以判断，结论那一行在人群和 S、A、B 之后再接两段，仍写成一行：\n"
+               "结论：人群：……；S：……；A：……；B：……；卡点：……；待验证：……\n"
+               "卡点二选一：「数据未到」＝还没有销售数据，或未满14天、首14天数据不全；「曝光不足」＝数据已覆盖，但观察窗播放不到 "
+               f"{LOW_EXPOSURE}。后面括号里写事实：观察窗播放、订单、是否满14天，例如「曝光不足（播放 312 · 0 单 · 已满14天）」。"
+               "待验证只写一条最可能让它没跑起来的内容问题，落到秒数，明确是推测，例如「开头 0–3 秒没出现刀和人群词」；"
+               "没有把握就写「无」，不硬凑原因，也不把低曝光直接归因于内容。\n"
+               "参考价值按下面的规则推荐，优先于上面的选法：卡点是数据未到时写「参考价值：待定（数据未到）」；"
+               "曝光不足且待验证是「无」时推荐无；曝光不足但待验证里有能用到下一条的具体发现时推荐弱。\n")
 
 
 def draft_mode(orders, window_views):
@@ -340,7 +363,16 @@ def draft_mode(orders, window_views):
     return "unsold"
 
 
-def draft_prompt(lines, report, *, source, review_text, figures, mode="sold"):
+def _points_material(points, audience):
+    """The product's graded selling points and the direction's registered audience, for the conclusion line."""
+    rows = [f"{row['code']} {row['title']}" for row in points or [] if row.get("code") and row.get("title")]
+    if not rows:
+        return "本产品还没有登记卖点分级，结论行的 S、A、B 都写「未登记」。\n\n"
+    return ("本产品卖点分级（S 是主购买理由，A 是支撑 S 的具体证据，B 是附加信息）：\n" + "\n".join(rows) + "\n"
+            + (f"方向登记的目标人群（只作对照）：{audience}\n" if audience else "") + "\n")
+
+
+def draft_prompt(lines, report, *, source, review_text, figures, mode="sold", points=None, audience=""):
     """Retrospective draft of a posted video, read from the footage and the figures.
 
     A video that sold is explained (why it sold, what to copy). One that did not is attacked with the review framework,
@@ -348,7 +380,7 @@ def draft_prompt(lines, report, *, source, review_text, figures, mode="sold"):
     Too little exposure gets the same attack with the plain warning that most rates cannot be judged."""
     material = (MATERIAL_RULES + "\n\n" + f"成片来源：{source}。" + _materials(lines, report, review_text) + "\n\n"
                 "表现数据（比率按每周导出原值读，不要相加或平均；同类对照是每条视频播放最多那一周的中位数）：\n"
-                + json.dumps(figures, ensure_ascii=False, indent=1) + "\n\n")
+                + json.dumps(figures, ensure_ascii=False, indent=1) + "\n\n" + _points_material(points, audience))
     if mode == "sold":
         return (
             "你在复盘一条已经发布、已经出过单的 TikTok 带货视频。结果已经由数据给出，任务是解释这个结果：它为什么出单，"
@@ -381,7 +413,7 @@ def draft_prompt(lines, report, *, source, review_text, figures, mode="sold"):
         "## 值得保留的（不比同类差的那几步，保留什么）\n"
         "## 下一轮（只改最先掉下去的那一步，做 A/B）\n"
         "不写合规、限流风险，也不列杀手清单。卡片的 reasons 写最先掉下去那一步的原因。\n" + _CARD + _CLOSING
-        + ("播放太少时，明确样本有限；已完成观察且数据覆盖齐全的，可以结束本条，但不能把低曝光直接归因于内容失败。" if thin else "")
+        + ("播放太少时，明确样本有限；已完成观察且数据覆盖齐全的，可以结束本条，但不能把低曝光直接归因于内容失败。" + THIN_ENDING if thin else "")
     )
 
 

@@ -123,6 +123,88 @@ class VideoPublicationTests(unittest.TestCase):
         self.assertFalse(detail["can_register"])
         self.error(409, self.save)
 
+    # ---- one order, several timelines: each is reviewed, registered and posted on its own
+    def add_second_timeline(self, completed=True):
+        def change(job):
+            job["timelines"].append({"unique_id": "timeline-2", "name": "Second", "take_id": TAKE, "saved": True})
+            if completed:
+                job["manual_completions"] = {"timeline-1": job.pop("manual_completion"),
+                                             "timeline-2": {"at": "2026-10-02", "take_id": TAKE, "timeline_uid": "timeline-2", "basis": "human_review"}}
+                job["manual_completion"] = job["manual_completions"].pop("timeline-2")
+        self.edit_job(change)
+
+    def body_for(self, uid, **kwargs):
+        detail = self.bench.video_publication_detail(JOB, uid)
+        return {"revision": detail["revision"], "source_signature": detail["source_signature"], "timeline_uid": uid,
+                "request_id": uuid4().hex, "post_id": POST, "published_on": "2026-10-01", "account": "fixture", **kwargs}
+
+    def test_each_timeline_is_registered_on_its_own_and_keeps_its_post(self):
+        self.add_second_timeline()
+        first = self.bench.save_video_publication(JOB, self.body_for("timeline-1"))["publication"]
+        second = self.bench.save_video_publication(JOB, self.body_for("timeline-2", post_id=OTHER, published_on="2026-10-03"))["publication"]
+        self.assertEqual((first["source"]["timeline"]["unique_id"], second["source"]["timeline"]["unique_id"]), ("timeline-1", "timeline-2"))
+        one, two = (self.bench.video_publication_detail(JOB, uid) for uid in ("timeline-1", "timeline-2"))
+        # Registering the second did not turn the first into history: both stand, each with its own post.
+        self.assertEqual((one["publication"]["id"], one["history"], one["publication"]["source_current"]), (first["id"], [], True))
+        self.assertEqual((two["publication"]["id"], two["history"], two["publication"]["source_current"]), (second["id"], [], True))
+        self.assertEqual([(row["unique_id"], row["post_id"], row["registered"], row["source_current"]) for row in two["timelines"]],
+                         [("timeline-2", OTHER, True, True), ("timeline-1", POST, True, True)])
+        # The script keeps its first post; both posts count as registrations of it.
+        self.assertEqual(self.bench.creation.get_script(SCRIPT)["video_id"], POST)
+        self.assertEqual(self.bench.script_registrations(SCRIPT), [POST, OTHER])
+        # Without a timeline named, the current (latest) one is shown, as before.
+        self.assertEqual(self.bench.video_publication_detail(JOB)["publication"]["id"], second["id"])
+
+    def test_an_unregistered_timeline_never_shows_another_timelines_post(self):
+        self.add_second_timeline()
+        self.bench.save_video_publication(JOB, self.body_for("timeline-1"))
+        detail = self.bench.video_publication_detail(JOB)
+        self.assertEqual((detail["timeline_uid"], detail["publication"], detail["history"]), ("timeline-2", None, []))
+
+    def test_registering_a_timeline_again_replaces_only_its_own_post(self):
+        self.add_second_timeline()
+        first = self.bench.save_video_publication(JOB, self.body_for("timeline-1"))["publication"]
+        second = self.bench.save_video_publication(JOB, self.body_for("timeline-2", post_id=OTHER))["publication"]
+        corrected = self.bench.save_video_publication(JOB, self.body_for("timeline-1", post_id="7999999999999999903"))["publication"]
+        one = self.bench.video_publication_detail(JOB, "timeline-1")
+        self.assertEqual((one["publication"]["id"], [item["id"] for item in one["history"]]), (corrected["id"], [first["id"]]))
+        two = self.bench.video_publication_detail(JOB, "timeline-2")
+        self.assertEqual((two["publication"]["id"], two["history"]), (second["id"], []))
+
+    def test_one_post_cannot_belong_to_two_timelines_of_the_order(self):
+        self.add_second_timeline()
+        self.bench.save_video_publication(JOB, self.body_for("timeline-1"))
+        self.error(409, self.bench.save_video_publication, JOB, self.body_for("timeline-2"))
+
+    def test_a_timeline_without_its_own_review_cannot_register_even_when_another_is_completed(self):
+        self.add_second_timeline(completed=False)
+        done, open_ = (self.bench.video_publication_detail(JOB, uid) for uid in ("timeline-1", "timeline-2"))
+        self.assertEqual((done["can_register"], open_["can_register"]), (True, False))
+        self.assertEqual([(row["unique_id"], row["can_register"]) for row in open_["timelines"]], [("timeline-2", False), ("timeline-1", True)])
+        self.error(409, self.bench.save_video_publication, JOB, {**self.body_for("timeline-2"), "timeline_uid": "timeline-2"})
+        self.bench.save_video_publication(JOB, self.body_for("timeline-1"))
+        # An unknown or archived timeline is refused outright rather than falling back to another.
+        self.error(409, self.bench.save_video_publication, JOB, {**self.body_for("timeline-1"), "timeline_uid": "nope"})
+        self.error(400, self.bench.save_video_publication, JOB, {**self.body_for("timeline-1"), "timeline_uid": 5})
+
+    def test_calendar_mark_and_verification_work_for_a_timeline_that_is_not_the_latest(self):
+        self.add_second_timeline()
+        first = self.bench.save_video_publication(JOB, self.body_for("timeline-1", file_path=str(self.video), file_confirmed=True))["publication"]
+        self.bench.save_video_publication(JOB, self.body_for("timeline-2", post_id=OTHER))
+        marked = self.bench.set_video_calendar_status(JOB, {"publication_id": first["id"], "calendar_uploaded": True})
+        self.assertTrue(marked["calendar_uploaded"])
+        self.assertTrue(self.bench.verify_video_publication(JOB, {"publication_id": first["id"]})["matches"])
+        # A registration that was replaced is history, not something to mark.
+        self.bench.save_video_publication(JOB, self.body_for("timeline-1", post_id="7999999999999999903"))
+        self.error(409, self.bench.set_video_calendar_status, JOB, {"publication_id": first["id"], "calendar_uploaded": False})
+
+    def test_a_running_edit_on_another_timeline_does_not_block_this_registration(self):
+        self.add_second_timeline()
+        self.edit_job(lambda job: job["edits"].append({"id": "EDT-111111111111", "timeline_uid": "timeline-2", "status": "running"}))
+        self.assertTrue(self.bench.video_publication_detail(JOB, "timeline-1")["can_register"])
+        self.assertFalse(self.bench.video_publication_detail(JOB, "timeline-2")["can_register"])
+        self.bench.save_video_publication(JOB, self.body_for("timeline-1"))
+
     def test_timeline_management_keeps_existing_publication_current(self):
         record = self.save()["publication"]
         self.edit_job(lambda job: job["timelines"][0].update(archived=False, task_status="completed"))
@@ -158,7 +240,7 @@ class VideoPublicationTests(unittest.TestCase):
         self.assertEqual(detail["publication"]["source"], record["source"])
 
     def test_live_edit_or_archived_order_cannot_register(self):
-        for change in ({"archived": True}, {"edits": [{"id": "EDT-111111111111", "status": "running"}]}):
+        for change in ({"archived": True}, {"edits": [{"id": "EDT-111111111111", "timeline_uid": "timeline-1", "status": "running"}]}):
             with self.subTest(change=change):
                 self.edit_job(lambda job: job.update(archived=False, edits=[]))
                 self.edit_job(lambda job: job.update(change))

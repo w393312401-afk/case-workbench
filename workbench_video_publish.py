@@ -22,7 +22,8 @@ from creation_store import CreationError
 from direction_store import fingerprint, now
 from elevenlabs_client import VoiceError
 from production_operations import durable_json, file_lock
-from production_store import JOB_ID, current_timeline, manual_completion_current, skill_delivery_reviewable, text
+from production_store import (JOB_ID, active_timelines, current_timeline, skill_delivery_reviewable, text, timeline_manual_receipt,
+                              timeline_running)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 CHUNK_BYTES = 8 * 1024 * 1024
@@ -52,8 +53,9 @@ def remap_publication_document(original, mapped, stamp, revisions):
                     "at": stamp, "reason": "full_backup_path_restore", "previous_source_signature": before,
                     "source_signature": after}]
         if "publication" in original and "history" in original:
-            old_entry = {key: original[key] for key in ("publication", "history")}
-            new_entry = {key: mapped[key] for key in ("publication", "history")}
+            # An order's entry also keeps the posts refused for it; its revision covers them.
+            old_entry = {key: original[key] for key in ("publication", "history", "dismissed") if key in original}
+            new_entry = {key: mapped[key] for key in ("publication", "history", "dismissed") if key in mapped}
             revisions[fingerprint(old_entry)] = fingerprint(new_entry)
     return mapped
 
@@ -72,18 +74,39 @@ def remap_publication_revisions(value, revisions):
     return value
 
 
-def reviewed_source(job):
-    """Require review of the latest timeline of the selected take, never an older edit."""
+def title_headline(line):
+    """A 🔴 title line without its marker and hashtags."""
+    return re.sub(r"^🔴\s*", "", str(line or "")).split("#", 1)[0].strip()
+
+
+def record_timeline(record):
+    """The timeline a registration was made for, read from its frozen review version."""
+    return (((record or {}).get("source") or {}).get("timeline") or {}).get("unique_id")
+
+
+def timeline_records(entry, timeline_uid):
+    """Registrations of one timeline, oldest first; the last one stands. Registering another timeline leaves them be."""
+    return [record for record in (*entry.get("history", []), entry.get("publication")) if record and record_timeline(record) == timeline_uid]
+
+
+def reviewed_source(job, timeline_uid=None):
+    """Require review of the chosen timeline of the selected take (the latest by default), never an older edit."""
     if job.get("archived"):
         raise VoiceError(409, "制作单已归档，请恢复后再登记发布。")
-    if any(edit.get("status") == "running" for edit in job.get("edits", [])):
-        raise VoiceError(409, "剪辑仍在运行，请完成当前版本的人工审查后登记。")
     take = next((item for item in job.get("takes", []) if item.get("id") == job.get("selected_take")), None)
-    timeline = current_timeline(job)
+    if timeline_uid is None:
+        timeline = current_timeline(job)
+    else:
+        timeline = next((row for row in active_timelines(job) if row.get("unique_id") == timeline_uid), None)
+        if not timeline:
+            raise VoiceError(409, "这条时间线已变化、已归档或不属于当前选用的配音，请刷新后重新选择。")
+    # Another timeline's running edit does not hold this one back.
+    if (timeline_running(job, timeline) if timeline else any(edit.get("status") == "running" for edit in job.get("edits", []))):
+        raise VoiceError(409, "剪辑仍在运行，请完成当前版本的人工审查后登记。")
     if not take or not timeline or timeline.get("saved") is False:
         raise VoiceError(409, "请先选用配音、保存对应时间线并完成人工审查。")
     edit = next((item for item in reversed(job.get("edits", [])) if item.get("timeline_uid") == timeline.get("unique_id")), None)
-    receipt = copy.deepcopy(job.get("manual_completion")) if manual_completion_current(job) else None
+    receipt = copy.deepcopy(timeline_manual_receipt(job, timeline))
     if not receipt:
         valid = bool(edit and edit.get("approval") and edit.get("status") in {"completed", "awaiting_review"})
         if valid and edit.get("completion_policy") == "skill_delivery":
@@ -100,7 +123,7 @@ def reviewed_source(job):
             # signatures compatible with snapshots saved before these fields
             # existed, including archive/restore and public readback defaults.
             "timeline": {key: copy.deepcopy(value) for key, value in timeline.items()
-                         if key not in {"archived", "task_status"}},
+                         if key not in {"archived", "task_status", "manual_completion", "manual_completion_blocked"}},
             "edit": copy.deepcopy(edit), "manual_completion": receipt}
 
 
@@ -302,22 +325,30 @@ class VideoPublishMixin:
         for entry in self._video_publications().read().get("jobs", {}).values():
             for record in (*entry.get("history", []), entry.get("publication")):
                 note(record)
-        for carousel in self.production.public().get("carousels", []):
-            for record in (*carousel.get("publication_history", []), carousel.get("publication")):
-                note(record)
         return [post for post, _ in sorted(first.items(), key=lambda pair: (pair[1], pair[0]))]
 
-    def video_publication_detail(self, identifier):
+    def video_publication_detail(self, identifier, timeline_uid=None):
+        """The registration of one timeline (the current one unless another is named) and a line for each timeline of the order."""
         job = self.production.job(identifier)
         store = self._video_publications()
         entry = copy.deepcopy(store.entry(store.read(), identifier))
         revision = store.revision(entry)
+        if timeline_uid is not None and (not isinstance(timeline_uid, str) or not timeline_uid.strip() or len(timeline_uid) > 500):
+            raise VoiceError(400, "时间线标识无效。")
+        uid = timeline_uid or (current_timeline(job) or {}).get("unique_id")
         try:
-            source, reason = reviewed_source(job), ""
+            source, reason = reviewed_source(job, timeline_uid), ""
         except VoiceError as exc:
             source, reason = None, str(exc)
         signature = fingerprint(source) if source else ""
-        current = entry.get("publication")
+        records = timeline_records(entry, uid) if uid else []
+        # With several timelines, each stands on its own: one without a registration shows none, never another timeline's.
+        if records or timeline_uid is not None or len(active_timelines(job)) > 1:
+            shown = {"publication": records[-1] if records else None, "history": records[:-1]}
+        else:
+            # Nothing is registered for the current timeline: the order's latest registration shows as an earlier version.
+            shown = {"publication": entry.get("publication"), "history": list(entry.get("history", []))}
+        current, entry = shown["publication"], shown
         if current:
             current["source_current"] = current["source_signature"] == signature
             if not current.get("file"):
@@ -328,14 +359,43 @@ class VideoPublishMixin:
                     current["file_available"] = path.is_file() and path.stat().st_size == current["file"]["size"]
                 except (VoiceError, OSError):
                     current["file_available"] = False
+        candidates = []
+        if source and not records and hasattr(self, "publication_candidates"):
+            try:
+                candidates = self.publication_candidates(identifier, source["timeline"].get("unique_id"))
+            except (VoiceError, OSError, ValueError, KeyError):
+                candidates = []
+        publish_copy = self._video_publish_copy(job)
+        if publish_copy:
+            saved = self._title_translations()
+            publish_copy["titles_zh"] = [saved.get(title_headline(line), "") for line in publish_copy["titles"]]
         # Revision excludes presentation-only readback fields.
-        return {"revision": revision, "source_signature": signature, "can_register": bool(source),
-                "blocked_reason": reason, "source": source, "copy": self._video_publish_copy(job),
+        return {"revision": revision, "source_signature": signature, "timeline_uid": uid, "can_register": bool(source),
+                "blocked_reason": reason, "source": source, "copy": publish_copy, "candidates": candidates,
+                "timelines": self._video_publication_timelines(job, store.entry(store.read(), identifier)),
                 "script_registrations": self.script_registrations(job["script_id"]), **entry}
+
+    @staticmethod
+    def _video_publication_timelines(job, entry):
+        """One line per timeline that can be published: whether it can be registered yet, and what stands for it."""
+        lines = []
+        for row in reversed(active_timelines(job)):
+            uid = row["unique_id"]
+            try:
+                signature, ready, reason = fingerprint(reviewed_source(job, uid)), True, ""
+            except VoiceError as exc:
+                signature, ready, reason = "", False, str(exc)
+            records = timeline_records(entry, uid)
+            current = records[-1] if records else None
+            lines.append({"unique_id": uid, "name": row.get("name", ""), "can_register": ready, "blocked_reason": reason,
+                          "post_id": (current or {}).get("post_id"), "published_on": (current or {}).get("published_on"),
+                          "registered": bool(current), "source_current": bool(current and ready and current.get("source_signature") == signature)})
+        return lines
 
     def _video_publish_copy(self, job):
         """Title-and-hashtag lines, Chinese text and English voice-over of the adopted script, for pasting at publish time."""
-        from variant_parse import publish_titles
+        from variant_parse import parse_variants, publish_titles, same_lines, screen_copy, variant_script
+        from production_store import supplement_markdown
         try:
             script = self.creation.get_script(job["script_id"])
         except (CreationError, KeyError):
@@ -345,19 +405,55 @@ class VideoPublishMixin:
         titles = (publish_titles(job.get("fill_markdown") or "", 0)
                   or publish_titles((script.get("source") or {}).get("candidate_text") or "", index)
                   or [line for line in (job.get("supplement") or {}).get("captions", []) if line.strip()])
+        candidate = (script.get("source") or {}).get("candidate_text") or ""
+        chosen = next((item for item in parse_variants(candidate) if type(index) is int and item["index"] == index), None)
+        matching = chosen and same_lines([line["spoken"] for line in chosen["lines"]],
+                                         [line["spoken"] for line in job["lines"]])
+        markdown = job.get("fill_markdown") or (variant_script(candidate, index) if matching else "")
+        if not markdown and (job.get("supplement") or candidate):
+            markdown = supplement_markdown(job)
+        screen_en, screen_zh = screen_copy(markdown)
         return {"script_id": script.get("id"), "version": script.get("version"),
                 "titles": titles,
+                "screen_en": screen_en, "screen_zh": screen_zh,
                 "zh": script.get("translation_zh") or ("\n".join(line["zh"] for line in job["lines"]) if all(line.get("zh") for line in job["lines"]) else ""),
                 "en": script.get("text") or ""}
 
-    def _video_publication_links(self, data, job, post):
-        """一张制作单可以绑定多个视频，但同一个帖子只能绑定一张制作单。"""
+    def _title_translations(self):
+        """Saved Chinese readings of title headlines, shared across orders. Regenerable, so an unreadable file counts as empty."""
+        try:
+            saved = json.loads((self._video_publications().root / "title-translations.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return saved if isinstance(saved, dict) else {}
+
+    def translate_video_titles(self, identifier, body=None):
+        """Chinese reading of each title's headline, for the eye only: tags stay out and the copied line stays foreign."""
+        from case_breakdown_runner import translate_lines
+        titles = (self._video_publish_copy(self.production.job(identifier)) or {}).get("titles") or []
+        headlines = [title_headline(line) for line in titles]
+        saved = self._title_translations()
+        missing = list(dict.fromkeys(line for line in headlines if line and line not in saved))
+        if missing:
+            with tempfile.TemporaryDirectory() as workdir:
+                chinese = translate_lines(self, missing, workdir)
+            if not chinese:
+                raise VoiceError(502, "标题的中文对照没生成成功，可以稍后重新打开这张制作单再试。")
+            root = self._video_publications().root
+            with file_lock(root / "title-translations.lock", "标题中文对照正在保存，请稍后再试。"):
+                saved = {**self._title_translations(), **dict(zip(missing, chinese))}
+                durable_json(root / "title-translations.json", saved)
+        return {"titles_zh": [saved.get(line, "") for line in headlines]}
+
+    def _video_publication_links(self, data, job, post, timeline_uid=None):
+        """一张制作单可以绑定多个视频，但同一个帖子只能绑定一张制作单；同一张制作单里一个帖子也只属于一条时间线。"""
+        for record in (*data["jobs"].get(job["id"], {}).get("history", []), (data["jobs"].get(job["id"]) or {}).get("publication")):
+            if record and record.get("post_id") == post and timeline_uid and record_timeline(record) != timeline_uid:
+                name = ((record.get("source") or {}).get("timeline") or {}).get("name") or "另一条时间线"
+                raise VoiceError(409, f"这条帖子已登记在本制作单的时间线「{name}」上，同一个帖子只能属于一条时间线，请核对原登记。")
         for job_id, entry in data["jobs"].items():
             if job_id != job["id"] and any(record.get("post_id") == post for record in (entry.get("publication"), *entry.get("history", [])) if record):
                 raise VoiceError(409, f"这条帖子已绑定到另一视频制作单（{job_id}）。一张制作单可以绑定多个视频，但同一个帖子只能绑定一张制作单，请先核对原登记。")
-        for carousel in self.production.public().get("carousels", []):
-            if any(record.get("post_id") == post for record in (carousel.get("publication"), *carousel.get("publication_history", [])) if record):
-                raise VoiceError(409, "该帖子已绑定到图文制作单，请先核对原登记。")
 
     @staticmethod
     def _video_post_fields(body):
@@ -395,11 +491,12 @@ class VideoPublishMixin:
         return file_lock(self._video_publications().root / "job-locks" / (identifier + ".lock"),
                          "这张制作单正在登记发布或清理成片，请稍后重试。")
 
-    def save_video_publication(self, identifier, body):
+    def save_video_publication(self, identifier, body, auto=None):
+        """auto: set only by the post matcher (never from a request), so the registration can be undone later."""
         with self._video_publication_job_guard(identifier):
-            return self._save_video_publication(identifier, body)
+            return self._save_video_publication(identifier, body, auto)
 
-    def _save_video_publication(self, identifier, body):
+    def _save_video_publication(self, identifier, body, auto=None):
         if not JOB_ID.fullmatch(str(identifier)) or not isinstance(body, dict):
             raise VoiceError(400, "发布登记参数无效。")
         request_id = body.get("request_id")
@@ -409,6 +506,9 @@ class VideoPublishMixin:
             request_hash = fingerprint([identifier, body])
         except (TypeError, ValueError) as exc:
             raise VoiceError(400, "发布登记参数无效。") from exc
+        timeline_uid = body.get("timeline_uid")
+        if timeline_uid is not None and (not isinstance(timeline_uid, str) or not timeline_uid.strip() or len(timeline_uid) > 500):
+            raise VoiceError(400, "时间线标识无效。")
         store = self._video_publications()
         operation_path = store.root / "operations" / (hashlib.sha256(request_id.encode()).hexdigest() + ".json")
         with file_lock(operation_path.with_suffix(".lock"), "这次发布登记正在处理，请稍后用原请求重试。"):
@@ -436,11 +536,11 @@ class VideoPublishMixin:
                     if open_findings:
                         raise VoiceError(409, f"发布前审查还有 {len(open_findings)} 条「必须修」没有确认，"
                                               "请在审查结果里逐条标记「已修改」或「接受风险」后再登记。")
-                    source = reviewed_source(job)
+                    source = reviewed_source(job, timeline_uid)
                     entry = store.entry(data, identifier)
                     if body.get("revision") != store.revision(entry) or body.get("source_signature") != fingerprint(source):
                         raise VoiceError(409, "制作版本或发布记录已变化，请刷新后重新核对。")
-                    self._video_publication_links(data, job, fields["post_id"])
+                    self._video_publication_links(data, job, fields["post_id"], source["timeline"].get("unique_id"))
             # Copy/hash large files without holding the workbench or production catalog lock.
             if operation is None:
                 media = store.capture(body.get("file_path"), identifier) if str(body.get("file_path") or "").strip() else None
@@ -452,11 +552,12 @@ class VideoPublishMixin:
                 entry = store.entry(data, identifier)
                 job = self.production.job(identifier)
                 if operation is None:
-                    source = reviewed_source(job)
+                    source = reviewed_source(job, timeline_uid)
                     if body.get("revision") != store.revision(entry) or body.get("source_signature") != fingerprint(source):
                         raise VoiceError(409, "复制成片期间制作版本或发布记录发生变化，请刷新后重新核对。")
                     script = self.creation.get_script(job["script_id"])
-                    previous = entry.get("publication") or {}
+                    # Only this timeline's own earlier registration is the one being replaced.
+                    previous = (timeline_records(entry, source["timeline"].get("unique_id")) or [{}])[-1]
                     # A script may be registered again under another post; its own post link keeps the first one.
                     repeat = script.get("video_id") not in {"", fields["post_id"], previous.get("post_id")}
                     if script.get("version") != job.get("script_version"):
@@ -464,6 +565,9 @@ class VideoPublishMixin:
                     record = {"id": "VPU-" + uuid4().hex[:12], "job_id": identifier, "script_id": job["script_id"],
                               "script_version": job["script_version"], "source": source, "source_signature": fingerprint(source),
                               "file": media, **fields, "registered_at": now()}
+                    if auto:
+                        record["auto"] = {**auto, "script_updated": not repeat,
+                                          "script_before": {key: script.get(key) for key in ("video_id", "published_on", "status")}}
                     operation = {"request_hash": request_hash, "request_id": request_id, "repeat": repeat,
                                  "expected_entry": store.revision(entry), "publication": record,
                                  "expected_script_state": {key: script.get(key) for key in ("video_id", "published_on", "status")},
@@ -472,12 +576,12 @@ class VideoPublishMixin:
                                                  "script_status": {"status": "published", "video_id": fields["post_id"],
                                                                    "published_on": fields["published_on"],
                                                                    "note": f"登记视频发布；制作单 {identifier}，成片 {record['id']}"}}}
-                    self._video_publication_links(data, job, record["post_id"])
+                    self._video_publication_links(data, job, record["post_id"], record_timeline(record))
                     durable_json(operation_path, operation)
                 record = operation["publication"]
                 if operation["expected_entry"] != store.revision(entry):
                     raise VoiceError(409, "发布记录已被另一操作修改，本次未覆盖，请核对最新登记。")
-                self._video_publication_links(data, job, record["post_id"])
+                self._video_publication_links(data, job, record["post_id"], record_timeline(record))
                 if not operation.get("repeat"):
                     script_body = operation["script_body"]
                     replay_body = {**script_body, "script_status": {**script_body["script_status"], "script_id": record["script_id"]}}
@@ -500,13 +604,22 @@ class VideoPublishMixin:
                 history = copy.deepcopy(entry["history"])
                 if entry.get("publication"):
                     history.append(entry["publication"])
-                updated = {"publication": record, "history": history}
+                updated = {**entry, "publication": record, "history": history}
                 data["jobs"][identifier] = updated
                 result = {**copy.deepcopy(updated), "revision": store.revision(updated)}
                 data["requests"][request_id] = {"hash": request_hash, "result": result}
                 store.write(data)
                 self.state_cache = None
                 return copy.deepcopy(result)
+
+    @staticmethod
+    def _standing_publication(entry, publication_id):
+        """The registration with this ID, if it is the one standing for its timeline (a replaced one is history)."""
+        for record in (entry.get("publication"), *entry.get("history", [])):
+            if record and record.get("id") == publication_id:
+                standing = (timeline_records(entry, record_timeline(record)) or [None])[-1]
+                return record if standing is record or (standing and standing.get("id") == publication_id) else None
+        return None
 
     def set_video_calendar_status(self, identifier, body):
         """Flip the publish-calendar mark of the current registration in place; the registration itself stays as saved."""
@@ -518,8 +631,8 @@ class VideoPublishMixin:
             with self.lock, file_lock(store.root / "catalog.lock", "发布资料正在保存，请稍后重试。"):
                 self.production.job(identifier)
                 data = store.read()
-                record = store.entry(data, identifier).get("publication")
-                if not record or body.get("publication_id") != record["id"]:
+                record = self._standing_publication(store.entry(data, identifier), body.get("publication_id"))
+                if not record:
                     raise VoiceError(409, "发布记录已变化，请刷新后再标记发布日历。")
                 if record.get("calendar_uploaded") is not flag:
                     record["calendar_uploaded"] = flag
@@ -534,8 +647,8 @@ class VideoPublishMixin:
             raise VoiceError(400, "核对参数无效。")
         self.production.job(identifier)
         store = self._video_publications()
-        record = store.entry(store.read(), identifier).get("publication")
-        if not record or body.get("publication_id") != record["id"]:
+        record = self._standing_publication(store.entry(store.read(), identifier), body.get("publication_id"))
+        if not record:
             raise VoiceError(409, "发布记录已变化，请刷新后再核对成片。")
         if not record.get("file"):
             raise VoiceError(409, "这条发布登记只记了视频 ID，没有绑定成片文件。")

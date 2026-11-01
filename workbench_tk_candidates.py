@@ -37,7 +37,7 @@ class TKCandidateWorkbenchMixin:
                     script_id = script_id or job.get("script_id") or ""
                     if not script_id:
                         raise CandidateError(409, "原制作单没有采用稿编号，暂时无法补齐关联。")
-                    links = [row for row in self.creation.read()["variant_links"]
+                    links = [row for row in self.creation.variant_links()
                              if row.get("kind") == "production" and row.get("record_id") == job_id]
                     if len(links) > 1:
                         raise CandidateError(409, "原制作单存在重复变体关联，请先核对原记录。")

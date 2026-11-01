@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shutil
 import threading
+import time
 from uuid import uuid4
 
 from campaign_impact import product_weekly, ratio, weekly_impact
@@ -24,7 +25,7 @@ from prepublish_review import (DRAFT_MODES, REVIEW_MODEL, PrepareError, draft_mo
                                prompt)
 from production_validation import rate
 from production_operations import durable_json, file_lock
-from production_store import JOB_ID
+from production_store import JOB_ID, current_timeline
 from task_activity import activity_label, record_activity, safe_error
 from workbench_video_publish import _local_video
 
@@ -32,6 +33,9 @@ REVIEW_ID = re.compile(r"PPR-[0-9a-f]{12}")
 ELIGIBLE = {"approved", "awaiting_review"}
 RESOLUTIONS = {"fixed": "已修改", "accepted": "接受风险"}
 REVIEW_TIMEOUT = 20 * 60
+RESOLVE_WAIT_TIMEOUT = 90 * 60
+RENDER_TIMEOUT = 30 * 60
+RENDER_POLL = 2  # seconds between looks at the render job
 
 
 def _sha256(path):
@@ -118,7 +122,13 @@ class PrepublishWorkbenchMixin:
         request_id = body.get("request_id")
         if not isinstance(request_id, str) or not re.fullmatch(r"[\w-]{10,100}", request_id):
             raise VoiceError(400, "缺少有效的请求标识，请刷新后重试。")
-        video = _local_video(body.get("file_path"))
+        typed = str(body.get("file_path") or "").strip()
+        video = _local_video(typed) if typed else None
+        timeline_id = body.get("timeline") or ""
+        if not isinstance(timeline_id, str) or len(timeline_id) > 200:
+            raise VoiceError(400, "时间线选择无效。")
+        if video is None and getattr(self, "resolve", None) is None:
+            raise VoiceError(503, "没有可用的达芬奇连接，请填已导出成片的路径。")
         if self._claude_ready():
             model, effort = REVIEW_MODEL, None
         else:
@@ -139,16 +149,22 @@ class PrepublishWorkbenchMixin:
             if job.get("archived"):
                 raise VoiceError(409, "制作单已归档，不能发起审查。")
             if job.get("status") not in ELIGIBLE:
-                raise VoiceError(409, "制作单还没完成剪辑审查，导出成片后再发起发布前审查。")
+                raise VoiceError(409, "制作单还没完成剪辑审查，完成后再发起发布前审查。")
             lines = [row for row in job.get("lines") or [] if str(row.get("spoken") or "").strip()]
             if not lines:
                 raise VoiceError(409, "制作单没有口播原稿，无法对照审查。")
-            timeline = next((row for row in reversed(job.get("timelines") or []) if not row.get("archived")), {}) or {}
-            stat = video.stat()
+            if video is None:
+                timeline = self._review_timeline(job, timeline_id)
+                file = {"path": "", "name": f"达芬奇时间线「{timeline.get('name') or timeline['unique_id']}」", "size": 0, "mtime": None,
+                        "source": "timeline", "timeline_uid": timeline["unique_id"]}
+            else:
+                timeline = next((row for row in reversed(job.get("timelines") or []) if not row.get("archived")), {}) or {}
+                stat = video.stat()
+                file = {"path": str(video), "name": video.name, "size": stat.st_size, "mtime": stat.st_mtime}
             review_id = "PPR-" + uuid4().hex[:12]
             record = {"id": review_id, "job_id": identifier, "request_id": request_id, "status": "running", "phase": "排队中",
                       "created_at": now(), "finished_at": None, "provider": provider, "model": model, "reasoning_effort": effort,
-                      "file": {"path": str(video), "name": video.name, "size": stat.st_size, "mtime": stat.st_mtime},
+                      "file": file,
                       "timeline": timeline.get("name") or "", "creator": timeline.get("creator") or "",
                       "folder": timeline.get("folder") or "", "findings": [], "premortem": "", "summary": "", "error": ""}
             live = {"cancel": threading.Event(), "phase": "排队中"}
@@ -162,11 +178,27 @@ class PrepublishWorkbenchMixin:
                 raise
         record_activity(self, "prepublish:" + review_id, kind="prepublish", owner_id=identifier, source_id=review_id,
                         product=job.get("product", ""), case_id=job.get("case_id"), title="发布前审查 · " + activity_label(job, identifier),
-                        step="publish", status="running", phase="准备材料", message="正在抽帧和转写成片")
+                        step="publish", status="running", phase="准备材料",
+                        message="正在抽帧和转写成片" if video else "等待达芬奇渲染时间线")
         worker = threading.Thread(target=self._run_prepublish, args=(identifier, review_id, job, lines, video, bridge, model, effort),
-                                  name="prepublish-" + review_id, daemon=True)
+                                  kwargs={"timeline": None if video else timeline}, name="prepublish-" + review_id, daemon=True)
         worker.start()
         return {"review": self._prepublish_public(record)}
+
+    @staticmethod
+    def _review_timeline(job, timeline_id):
+        """The timeline to review in DaVinci: the one asked for, else the selected voiceover's, else the latest not archived."""
+        rows = [row for row in job.get("timelines") or [] if row.get("unique_id")]
+        if timeline_id:
+            chosen = next((row for row in rows if row["unique_id"] == timeline_id), None)
+            if not chosen:
+                raise VoiceError(400, "请选择这张制作单建过的时间线。")
+            return chosen
+        chosen = current_timeline(job)
+        chosen = chosen if chosen and chosen.get("unique_id") else next((row for row in reversed(rows) if not row.get("archived")), None)
+        if not chosen:
+            raise VoiceError(409, "这张制作单还没有达芬奇时间线，请填已导出成片的路径。")
+        return chosen
 
     def _claude_ready(self):
         try:
@@ -204,13 +236,68 @@ class PrepublishWorkbenchMixin:
                 live["phase"] = phase
         record_activity(self, "prepublish:" + review_id, phase=phase, message=phase)
 
-    def _run_prepublish(self, job_id, review_id, job, lines, video, bridge, model, effort):
+    def _render_timeline(self, review_id, job, timeline, folder, cancel):
+        """Have DaVinci render the job's timeline to a scratch MP4 (what the viewer will see and hear, grade and titles
+        included) so no manual export is needed. The user's open timeline and render format are put back before returning."""
+        project = self.production.product_settings(self.production.records(), job.get("product"))["project"]
+        where = {"project": project, **{key: timeline[key] for key in ("creator", "folder", "project_id") if timeline.get(key)}}
+        target = {**where, "unique_id": timeline["unique_id"], "name": timeline.get("name")}
+        with self.resolve.access(cancel_event=cancel, timeout=RESOLVE_WAIT_TIMEOUT,
+                                 on_wait=lambda: self._prepublish_phase(review_id, "等待达芬奇")):
+            status = self.resolve.run("status", target, timeout=60, held=True)
+            # The worker already checked that the open project holds this timeline; its name may carry a creator prefix.
+            previous = {"unique_id": status.get("current_timeline_uid", ""), "name": status.get("current_timeline", ""),
+                        "timecode": status.get("current_timecode", "")}
+            self._prepublish_phase(review_id, "达芬奇正在渲染时间线")
+            started = None
+            try:
+                if cancel.is_set():
+                    raise BridgeCancelled()
+                started = self.resolve.run("render_start", {**target, "render_dir": str(folder)}, timeout=120, held=True)
+                job_ref = {**target, "job_id": started["job_id"]}
+                deadline = time.monotonic() + RENDER_TIMEOUT
+                while True:
+                    if cancel.wait(RENDER_POLL):
+                        raise BridgeCancelled()
+                    info = self.resolve.run("render_poll", job_ref, timeout=60, held=True)
+                    if info["state"] == "Complete":
+                        break
+                    if info["state"] in ("Failed", "Cancelled", "Background Render Cancelled"):
+                        raise PrepareError("达芬奇渲染没有完成：" + (info.get("error") or info["state"])[:200])
+                    if time.monotonic() > deadline:
+                        raise PrepareError("达芬奇渲染超时，已停止；请到达芬奇渲染页查看原因。")
+                    self._prepublish_phase(review_id, f"达芬奇正在渲染时间线 {int(info.get('percent') or 0)}%")
+            finally:
+                if started:
+                    try:
+                        done = self.resolve.run("render_finish", {**target, "job_id": started["job_id"], "render_dir": str(folder),
+                                                                  "previous_format": started.get("previous_format"),
+                                                                  "previous_codec": started.get("previous_codec")}, timeout=60, held=True)
+                    except VoiceError:
+                        done = {"files": []}
+                else:
+                    done = {"files": []}
+                try:
+                    if previous.get("unique_id"):
+                        self.resolve.run("restore", {**where, **previous}, timeout=60, held=True)
+                except VoiceError:
+                    pass
+        rendered = next((Path(path) for path in done.get("files") or [] if Path(path).is_file()), None)
+        if rendered is None:
+            raise PrepareError("达芬奇没有留下渲染文件。")
+        return rendered
+
+    def _run_prepublish(self, job_id, review_id, job, lines, video, bridge, model, effort, timeline=None):
         live = self._prepublish_state()[review_id]
         cancel = live["cancel"]
         folder = self._prepublish_root(job_id) / review_id
         record = next(row for row in self._prepublish_records(job_id) if row["id"] == review_id)
         status, error = "failed", ""
+        render = folder / "render"
         try:
+            if video is None:
+                video = self._render_timeline(review_id, job, timeline, render, cancel)
+                record["file"]["size"] = video.stat().st_size
             record["file"]["sha256"] = _sha256(video)
             self._prepublish_phase(review_id, "准备材料")
             report = prepare(video, [row["spoken"] for row in lines], folder, cancel, on_step=lambda text: self._prepublish_phase(review_id, text))
@@ -233,10 +320,13 @@ class PrepublishWorkbenchMixin:
             status = "completed"
         except (BridgeCancelled, PrepareError) as exc:
             status, error = ("cancelled", "本次审查已取消。") if cancel.is_set() else ("failed", str(exc)[:500])
+        except VoiceError as exc:  # A ValueError subclass: keep it out of the reply-format branch below.
+            error = str(exc)
         except ValueError as exc:
             error = f"审查回复格式不符，未保存结果：{exc}"
         except Exception as exc:
-            error = safe_error(exc) if not isinstance(exc, VoiceError) else str(exc)
+            error = safe_error(exc)
+        shutil.rmtree(render, ignore_errors=True)  # The scratch render is not kept; frames and sheets stay with the review.
         record.update(status=status, error=error, finished_at=now(), phase="")
         try:
             self._prepublish_write(record)
@@ -430,6 +520,7 @@ class PrepublishWorkbenchMixin:
         review_text = self._comment_digest(video.get("product") or task["snapshot"].get("product"))
         figures = self._draft_figures(context, video_id)
         mode = draft_mode(video.get("orders"), video.get("window_views"))
+        graded = {"points": context.get("selling_points") or [], "audience": (context.get("direction") or {}).get("audience") or ""}
         try:
             if not valid:
                 raise PrepareError("没有视频编号")
@@ -441,10 +532,10 @@ class PrepublishWorkbenchMixin:
             reason = str(exc)[:300] or type(exc).__name__
             folder.mkdir(parents=True, exist_ok=True)
             return {"status": "unavailable", "reason": reason, "folder": str(folder), "mode": DRAFT_MODES[mode],
-                    "prompt": draft_prompt(lines, None, source=f"没能取得成片（{reason}）", review_text=review_text, figures=figures, mode=mode)}
+                    "prompt": draft_prompt(lines, None, source=f"没能取得成片（{reason}）", review_text=review_text, figures=figures, mode=mode, **graded)}
         images = [(f"第 {n} 张：{sheet['label']}", folder / sheet["file"]) for n, sheet in enumerate(report["sheets"], 1)]
         return {"status": "attached", "source": label, "images": images, "folder": str(folder), "mode": DRAFT_MODES[mode],
-                "prompt": draft_prompt(lines, report, source=label, review_text=review_text, figures=figures, mode=mode)}
+                "prompt": draft_prompt(lines, report, source=label, review_text=review_text, figures=figures, mode=mode, **graded)}
 
     def delete_prepublish_reviews(self, identifier):
         """Order deletion removes its review folders too."""

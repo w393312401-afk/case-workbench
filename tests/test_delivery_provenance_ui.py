@@ -131,6 +131,8 @@ class DeliveryProvenanceBrowserTests(unittest.TestCase):
         }""", {"current": current, "old": old})
         expect(self.page.locator(".delivery-provenance")).to_have_count(2)
         self.page.locator(".video-publication-history > summary").click()
+        self.assertEqual(self.page.locator(".video-publication-history > summary").inner_text(), "旧版登记 1 条")
+        self.page.locator(".video-publication-superseded > summary").click()
         self.page.locator(".delivery-provenance > summary").evaluate_all("nodes=>nodes.forEach(node=>node.click())")
         old_receipt = self.page.locator('[data-provenance-record="VPU-222222222222"]')
         self.assertIn("TAK-333333333333", old_receipt.inner_text())
@@ -161,6 +163,7 @@ class DeliveryProvenanceBrowserTests(unittest.TestCase):
         self.assertNotIn("a" * 64, body.inner_text())
         self.assertEqual(body.locator(f'[title="{"a" * 64}"]').count(), 1)
         self.page.locator(".video-publication-history > summary").click()
+        self.page.locator(".video-publication-superseded > summary").click()
         old = self.page.locator('.video-publication-history .video-publication-receipt')
         self.assertEqual(old.locator(".video-publication-aside", has_text="未绑定成片").count(), 1)
         self.assertEqual(old.locator(".context-note", has_text="只登记了视频 ID").count(), 0)
@@ -179,68 +182,6 @@ class DeliveryProvenanceBrowserTests(unittest.TestCase):
         page.locator(".delivery-provenance > summary").click()
         stamp = page.locator('.delivery-provenance-id[title="2026-10-24T02:05:00.123456+00:00"]')
         self.assertEqual(stamp.inner_text(), "2026/10/24 10:05")
-
-    def test_cleaned_carousel_publication_uses_its_frozen_package_and_image_selection(self):
-        old, newest = delivery(), delivery("DLV-222222222222", "OUT-222222222222", 2)
-        post = {"id": "PUB-111111111111", "delivery_id": old["id"], "delivery_sha256": old["sha256"],
-                "script_id": OLD_SCRIPT, "script_version": 1, "post_id": "7654986913497009441", "delivery_snapshot": old}
-        owner = {"id": CAROUSEL, "product": "202H", "script_id": NEW_SCRIPT, "script_version": 2,
-                 "deliveries": [newest], "slides": [{"number": 1, "output_id": "OUT-222222222222"}]}
-        self.mount("carousel", post, owner)
-        self.assertEqual(self.links("script").get_attribute("href"), f"#/202H/content/{OLD_SCRIPT}")
-        self.assertEqual(self.links("image").get_attribute("href"), f"#/202H/production/{CAROUSEL}?step=images&run={OLD_OUTPUT}")
-        self.assertIn("成图第 2 版", self.links("image").inner_text())
-        self.assertEqual(self.links("delivery").count(), 0, "A frozen source is not a downloadable historical package.")
-        self.assertIn(OLD_DELIVERY, self.page.locator(".delivery-provenance").inner_text())
-        self.assertIn("原发布来源，文件已清理", self.page.locator(".delivery-provenance").inner_text())
-        self.assertNotIn("OUT-222222222222", self.page.locator(".delivery-provenance").inner_text())
-        copy = self.page.locator(".delivery-provenance-text").filter(has=self.page.get_by_text("查看保存时的逐张文案", exact=True))
-        copy.locator("summary").click()
-        expect(copy.locator("pre")).to_have_text("第 1 张\nSaved headline.\nSaved body.")
-        caption = self.page.locator(".delivery-provenance-text").filter(has=self.page.get_by_text("查看这包保存的发布文案", exact=True))
-        caption.locator("summary").click()
-        expect(caption.locator("pre")).to_have_text("Saved caption.")
-        self.assertFalse(self.page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth"))
-
-    def test_missing_or_wrong_package_bytes_do_not_borrow_the_current_images(self):
-        old = delivery()
-        post = {"id": "PUB-111111111111", "delivery_id": old["id"], "delivery_sha256": "wrong-checksum",
-                "script_id": OLD_SCRIPT, "script_version": 1, "post_id": "7654986913497009441"}
-        self.mount("carousel", post, {"id": CAROUSEL, "product": "202H", "deliveries": [old]})
-        self.assertEqual(self.links("image").count(), 0)
-        self.assertIn("图片版本未能核对", self.page.locator(".delivery-provenance").inner_text())
-        self.assertIn("wrong-checksum", self.page.locator(".delivery-provenance").inner_text())
-
-    def test_a_snapshot_with_the_wrong_identity_or_bytes_never_borrows_the_newest_sources(self):
-        for field, value in (("id", "DLV-333333333333"), ("sha256", "incorrect-bytes")):
-            with self.subTest(field=field):
-                old = delivery()
-                snapshot = {**old, field: value}
-                post = {"id": "PUB-111111111111", "delivery_id": old["id"], "delivery_sha256": old["sha256"],
-                        "script_id": OLD_SCRIPT, "script_version": 1, "post_id": "7654986913497009441", "delivery_snapshot": snapshot}
-                self.mount("carousel", post, {"id": CAROUSEL, "product": "202H",
-                    "deliveries": [delivery("DLV-222222222222", "OUT-222222222222", 2)]})
-                self.assertEqual(self.links("image").count(), 0)
-                self.assertEqual(self.links("delivery").count(), 0)
-                self.assertIn("图片版本未能核对", self.page.locator(".delivery-provenance").inner_text())
-                self.assertNotIn("OUT-222222222222", self.page.locator(".delivery-provenance").inner_text())
-
-    def test_a_new_package_does_not_inherit_the_old_packages_publication_annotation(self):
-        new = delivery("DLV-222222222222", "OUT-222222222222", 2)
-        post = {"id": "PUB-111111111111", "delivery_id": OLD_DELIVERY, "delivery_sha256": "a" * 64,
-                "post_id": "7654986913497009441"}
-        self.mount("carousel", new, {"id": CAROUSEL, "product": "202H"}, publication=post)
-        self.assertNotIn("实际发布", self.page.locator(".delivery-provenance").inner_text())
-        self.assertNotIn(OLD_DELIVERY, self.page.locator(".delivery-provenance").inner_text())
-
-    def test_legacy_package_keeps_exact_ids_without_inventing_the_image_ordinal(self):
-        record = delivery()
-        record.pop("source")
-        self.mount("carousel", record, {"id": CAROUSEL, "product": "202H",
-                                       "slides": [{"number": 1, "outputs": [{"id": OLD_OUTPUT}]}]})
-        self.assertIn(OLD_OUTPUT, self.links("image").inner_text())
-        self.assertNotIn("成图第", self.links("image").inner_text())
-        self.assertEqual(self.links("script").get_attribute("href"), f"#/202H/content/{OLD_SCRIPT}")
 
     def test_saved_titles_and_text_are_escaped(self):
         record = publication()

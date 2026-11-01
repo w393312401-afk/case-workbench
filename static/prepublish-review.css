@@ -1,4 +1,8 @@
 .prepublish-form {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end;margin-top:12px;}
+.prepublish-source {display:grid;gap:8px;min-width:0;}
+.prepublish-target {font-weight:600;overflow-wrap:anywhere;}
+.prepublish-file summary {cursor:pointer;color:var(--muted);font-size:13px;}
+.prepublish-file .field {margin-top:6px;}
 .prepublish-meta {font-size:13px;color:var(--muted);overflow-wrap:anywhere;margin:6px 0;}
 .prepublish-summary {margin:6px 0 10px;}
 .prepublish-clear {color:var(--success-ink);margin:6px 0;}

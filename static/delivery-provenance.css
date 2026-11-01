@@ -6,7 +6,7 @@
 .delivery-provenance-body dd{margin:0;min-width:0;overflow-wrap:anywhere}
 .delivery-provenance-body a{line-height:1.5}
 .delivery-provenance-id,.delivery-provenance-body dd>small{display:block;margin-top:3px;font-size:11px;color:var(--muted);overflow-wrap:anywhere}
-.delivery-provenance-slides{padding-left:18px;margin:0;display:grid;gap:8px}
+
 .delivery-provenance-text{margin:12px 0}
 .delivery-provenance-text>summary{font-size:12px;cursor:pointer}
 .delivery-provenance-text pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:12px;line-height:1.7;background:var(--surface-alt);padding:10px;border-radius:7px}

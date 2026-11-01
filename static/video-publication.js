@@ -27,11 +27,13 @@ window.VideoPublication = (() => {
   // Takes read as the version number the order shows; the raw ID stays in the tooltip.
   const takeLabel = (job,take,historical = false) => take?.version ? `配音第 ${take.version} 版` : take?.id ? historical ? '当时选用配音' : '本次选用配音' : '配音版本未保留';
   // 发布日历 is kept outside the workbench; the mark only reminds you which posts still need uploading.
-  function calendarLine(item,current) {
+  // The state itself is the switch: one chip that reads 未上传/已上传 and flips on click.
+  const uploadChip = (uploaded,attributes = '') => `<button type="button" class="video-publication-upload${uploaded ? ' is-uploaded' : ''}" aria-label="${uploaded ? '改回未上传' : '标记为已上传'}" title="${uploaded ? '已上传到发布日历，点一下改回未上传' : '点一下标记为已上传'}"${attributes}>${uploaded ? '已上传' : '未上传'}</button>`;
+  function calendarLine(item,current,{inline = false} = {}) {
     const uploaded = item.calendar_uploaded;
-    const state = uploaded === true ? '<span class="script-status published">已上传</span>' : uploaded === false ? '<span class="script-status">未上传</span>' : '<span class="context-note">未记录</span>';
-    const toggle = current ? ` <button type="button" class="secondary compact" data-calendar-toggle="${uploaded === true ? '0' : '1'}" data-publication-id="${esc(item.id)}">${uploaded === true ? '改回未上传' : '标记为已上传'}</button>` : '';
-    return `<p class="video-publication-calendar">发布日历 ${state}${toggle}</p>`;
+    const state = current ? uploadChip(uploaded === true,` data-calendar-toggle="${uploaded === true ? '0' : '1'}" data-publication-id="${esc(item.id)}"`)
+      : uploaded === true ? '<span class="script-status published">已上传</span>' : uploaded === false ? '<span class="script-status">未上传</span>' : '<small class="video-publication-unmarked" title="这条登记早于发布日历标记，没有记录是否上传">未记录上传</small>';
+    return inline ? `<span class="video-publication-calendar">${state}</span>` : `<p class="video-publication-calendar">发布日历 ${state}</p>`;
   }
   // The mark is set by the calendar line (before posting) or the receipt toggle; the form only carries it along.
   const calendarChoice = uploaded => `<input type="hidden" name="calendar_uploaded" value="${uploaded === true ? '1' : '0'}">`;
@@ -51,12 +53,14 @@ window.VideoPublication = (() => {
     const line = host.querySelector('[data-calendar-plan]');
     if (!line) return;
     const url = `/api/content/calendar`, save = body => api(url,{method:'POST',body:{id:contentId,...body}});
-    const show = state => {
+    let current = {};
+    const show = (state,keepDate = false) => {
+      current = state;
       const day = state.calendar_date || localDate(), uploaded = state.calendar_uploaded === true;
-      line.innerHTML = `发布日历 ${uploaded ? '<span class="script-status published">已上传</span>' : '<span class="script-status">未上传</span>'} <label class="video-publication-calendar-date">发布日期 <input type="date" value="${esc(day)}"></label> <button type="button" class="secondary compact">${uploaded ? '改回未上传' : '标记为已上传'}</button>`;
+      line.innerHTML = `<label class="video-publication-calendar-date">发布日期 <input type="date" value="${esc(day)}"></label> ${uploadChip(uploaded)}`;
       // The registration below carries the planned day as its posting day.
       const field = form?.elements.published_on;
-      if (field && !form._postDate?.picked()) field.value = day;
+      if (field && !keepDate && !form._postDate?.picked()) field.value = day;
       const input = line.querySelector('input'), button = line.querySelector('button');
       input.onchange = async () => {
         if (!input.value) {input.value = day;return;}
@@ -70,22 +74,36 @@ window.VideoPublication = (() => {
         catch (problem) {button.disabled = false;toast(problem.message || '没能更新发布日历状态。',true);}
       };
     };
+    // A pasted post link proves the video is up: the registration form calls this to flip the mark without a click.
+    if (form) form._markUploaded = async () => {
+      if (current.calendar_uploaded === true || !line.querySelector('button')) return;
+      const day = line.querySelector('input')?.value || current.calendar_date || localDate();
+      try {await save({calendar_uploaded:true,calendar_date:day});show({...current,calendar_uploaded:true,calendar_date:day},true);await after?.();}
+      catch (problem) {toast(problem.message || '没能更新发布日历状态。',true);}
+    };
     try {show(await api(`${url}?id=${encodeURIComponent(contentId)}`));}
     catch {line.innerHTML = '发布日历 <span class="context-note">暂时读不到状态</span>';}
   }
+  // One line says what was posted (account, day, post, script) with the calendar chip at its end; the frozen source sits under it.
   function receipt(job,item,current = false) {
     const jobId = job.id, source = item.source || {}, audio = source.take || {}, timeline = source.timeline || {};
-    return `<article class="video-publication-receipt"><div class="video-publication-title"><strong>${esc(item.account)} · ${esc(item.published_on)}</strong><span class="script-status published">已登记发布</span></div>
-      <p>帖子 <a href="${esc(tiktokUrl(item,'video'))}" target="_blank" rel="noopener noreferrer" title="在 TikTok 打开">${esc(item.post_id)} ↗</a>${typeof copyIdButton === 'function' ? copyIdButton(item.post_id,'视频 ID') : ''} · 脚本 v${esc(item.script_version)}${registrationTag(scriptPosts,item.post_id)}${item.file ? '' : '<small class="video-publication-aside" title="只登记了视频 ID，没有绑定成片文件">未绑定成片</small>'}</p>
-      <p><span title="${esc(audio.id)}">${esc(takeLabel(job,audio,true))}</span> · ${esc(timeline.name || timeline.unique_id)}${source.manual_completion?.at ? ' · 人工完成' : source.edit ? ` · <span title="${esc(source.edit.id)}">AI 剪辑</span>` : ' · 完成方式未保留'}</p>
-      ${item.file ? `<p>${esc(item.file.name)} · ${size(item.file.size)} <a href="${base(jobId)}/${encodeURIComponent(item.id)}/download">领取登记成片</a></p>` : ''}
+    return `<article class="video-publication-receipt"><div class="video-publication-head"><strong>${esc(item.account)} · ${esc(item.published_on)}</strong>
+      <span class="id-row">帖子 ${esc(item.post_id)}${typeof copyIdButton === 'function' ? copyIdButton(item.post_id,'视频 ID',{icon:true}) + openLinkButton(tiktokUrl(item,'video'),'原视频') : ''}</span><span class="video-publication-meta">脚本 v${esc(item.script_version)}${registrationTag(scriptPosts,item.post_id)}${item.file ? '' : '<small class="video-publication-aside" title="只登记了视频 ID，没有绑定成片文件">未绑定成片</small>'}${autoTag(item,current)}</span>${calendarLine(item,current,{inline:true})}</div>
+      <p class="video-publication-sub"><span title="${esc(audio.id)}">${esc(takeLabel(job,audio,true))}</span> · ${esc(timeline.name || timeline.unique_id)}${source.manual_completion?.at ? ' · 人工完成' : source.edit ? ` · <span title="${esc(source.edit.id)}">AI 剪辑</span>` : ' · 完成方式未保留'}${item.file ? ` · ${esc(item.file.name)} · ${size(item.file.size)} <a href="${base(jobId)}/${encodeURIComponent(item.id)}/download">领取登记成片</a>` : ''}</p>
       ${current && !item.source_current ? '<p class="video-publication-warning">当前制作版本或审查状态已变化；这条发布记录仍保留当时的成片、配音和审查依据。</p>' : ''}
       ${current && item.file && !item.file_available ? '<p class="video-publication-warning">托管成片缺失或大小有变化，请从完整备份恢复。</p>' : ''}
-      ${calendarLine(item,current)}
-      ${item.note ? `<p>${esc(item.note)}</p>` : ''}
+      ${item.note ? `<p class="video-publication-sub">${esc(item.note)}</p>` : ''}
       ${window.DeliveryProvenance?.render({kind:'video',record:item,owner:job,copyTake:true,
         rows:`<dt>登记时间</dt><dd>${esc(localTime(item.registered_at))}</dd>${item.file ? `<dt>原成片路径</dt><dd>${esc(item.file.original_path)}</dd>` : ''}<dt>审查依据</dt><dd>${esc(localTime((source.manual_completion || source.edit?.approval)?.at) || '未保留')}</dd>`}) || ''}
       ${current && item.file ? '<button type="button" class="secondary" data-verify-video>核对保存的成片</button><p class="context-note" data-verification role="status"></p>' : ''}</article>`;
+  }
+  // Registered by the post matcher (TK 看板 push or a Shop export): the standing one can be taken back in one click.
+  const autoTag = (item,current) => item.auto ? `<small class="video-publication-aside" title="${esc(`按发布文案标题自动对上（来源：${{tk_lens:'TK 看板',shop_export:'Shop 导出'}[item.auto.source] || '自动匹配'}）${item.auto.title ? `：${item.auto.title}` : ''}`)}">自动登记</small>${current ? '<button type="button" class="subtle compact" data-undo-auto title="不是这条视频：撤销登记，这个帖子以后不再自动登记到这条时间线">撤销</button>' : ''}` : '';
+  // Posts that fit this timeline but were not registered by themselves (another order shares the title, or the account
+  // has not posted for this creator before): one click registers, 不是 never offers it here again.
+  function candidateRows(list) {
+    if (!list?.length) return '';
+    return `<div class="video-publication-candidates" role="group" aria-label="检测到的帖子">${list.map(post => `<div class="video-publication-candidate"><span class="context-note">检测到</span><strong>@${esc(post.account || '账号未知')} · ${esc(post.published_on)}</strong><span class="video-publication-candidate-title" title="${esc(post.title)}">${esc(String(post.title || '').split('#')[0].replace(/^\W+/,''))}</span>${post.also?.length ? `<small class="video-publication-aside" title="${esc(post.also.join('、'))}">也对得上另 ${post.also.length} 条</small>` : post.account_known ? '' : '<small class="video-publication-aside" title="这个达人还没有用这个账号登记过，请核对">账号待核对</small>'}<button type="button" class="primary compact" data-candidate-use="${esc(post.post_id)}">登记</button><button type="button" class="subtle compact" data-candidate-dismiss="${esc(post.post_id)}">不是</button></div>`).join('')}</div>`;
   }
   // What gets pasted at publish time (Notion, then TikTok): the adopted script's 🔴 title lines, Chinese and English text.
   const copyIcon = () => typeof icon === 'function' ? icon('copy') : '';
@@ -97,14 +115,49 @@ window.VideoPublication = (() => {
       ${copy.zh || copy.en ? `<details><summary>查看文案</summary>${copy.zh ? `<p>${esc(copy.zh)}</p>` : ''}${copy.en ? `<p>${esc(copy.en)}</p>` : ''}</details>` : ''}</section>`;
     return collapsed ? `<div class="video-publish-copy-compact">${copy.zh || copy.en ? `<button type="button" class="subtle compact" data-copy-publish="text">${copyIcon()}复制文案</button>` : ''}<details class="video-publish-copy-fold"><summary>发布文案 · 展开标题与全文</summary>${body}</details></div>` : body;
   }
+  // The video panel's copy is a short list in the order it is pasted at publish time: hook screen text, a title, then the text.
+  // A line shows the foreign words with their Chinese under them; what gets copied is the foreign words alone.
+  function copyRow(copy) {
+    if (!copy || !(copy.titles?.length || copy.zh || copy.en || copy.screen_en || copy.screen_zh)) return '';
+    const flat = value => String(value || '').replace(/\s*\n\s*/g,' ');
+    const item = (attributes,main,under,hint) => `<button type="button" class="ai-title-line video-publish-copy-item" ${attributes} title="${esc(hint)}"><span><span class="video-publish-copy-main">${esc(main)}</span>${under}</span>${copyIcon()}</button>`;
+    const reading = value => value ? `<small>${esc(value)}</small>` : '';
+    const screen = copy.screen_en ? item('data-copy-screen',copy.screen_en,reading(copy.screen_zh),'复制外文屏显')
+      : copy.screen_zh ? `<p class="video-publish-copy-note">${esc(copy.screen_zh)} <small>没有外文屏显可复制</small></p>` : '';
+    const titles = (copy.titles || []).map((line,index) => item(`data-copy-title="${esc(line)}"`,line,`<small data-title-zh="${index}">${esc(copy.titles_zh?.[index] || '中文生成中…')}</small>`,line)).join('');
+    const hasText = copy.zh || copy.en;
+    const text = hasText ? `${item('data-copy-publish="text"',flat(copy.en || copy.zh),copy.en ? reading(flat(copy.zh)) : '','复制中文和外文文案')}<details class="video-publish-copy-fold"><summary>查看全文${copy.version ? ` · 脚本第 ${esc(copy.version)} 版` : ''}</summary><div class="video-publish-copy">${copy.zh ? `<p>${esc(copy.zh)}</p>` : ''}${copy.en ? `<p>${esc(copy.en)}</p>` : ''}</div></details>` : '';
+    const line = (label,body) => body ? `<span class="video-publish-copy-label">${label}</span><div class="video-publish-copy-lines">${body}</div>` : '';
+    return `<div class="video-publish-copy-row">${line('钩子屏显',screen)}${line('标题',titles)}${line('文案',text)}</div>`;
+  }
+  // Titles are written without Chinese, so their reading is made on first opening and saved; copying never waits for it.
+  const titleRuns = new Map();
+  async function fillTitleChinese(host,job,api,copy) {
+    if (!copy?.titles?.length || copy.titles_zh?.every(Boolean)) return;
+    const run = titleRuns.get(job.id) || api(`${base(job.id)}/title-zh`,{method:'POST',body:{}}).finally(() => titleRuns.delete(job.id));
+    titleRuns.set(job.id,run);
+    let chinese = [];
+    try {chinese = (await run).titles_zh || [];} catch {}
+    host.querySelectorAll('[data-title-zh]').forEach(node => {
+      const value = chinese[Number(node.dataset.titleZh)];
+      if (value) node.textContent = value;
+      else if (node.textContent === '中文生成中…') node.textContent = '中文对照暂时没生成';
+    });
+  }
   function bindCopy(host,copy) {
-    const write = (text,message) => typeof copyText === 'function' ? copyText(text,message) : navigator.clipboard.writeText(text);
+    const write = (button,text,message) => {
+      if (typeof copyText === 'function') copyText(text,message); else navigator.clipboard.writeText(text);
+      button.classList.add('copied');setTimeout(() => button.classList.remove('copied'),1200);
+    };
     host.querySelectorAll('[data-copy-title]').forEach(button => button.addEventListener('click',() => {
-      write(button.dataset.copyTitle,'标题与主题标签已复制');button.classList.add('copied');setTimeout(() => button.classList.remove('copied'),1200);
+      write(button,button.dataset.copyTitle,'标题与主题标签已复制');
     }));
     host.querySelectorAll('[data-copy-publish]').forEach(button => button.addEventListener('click',() => {
       // One button for the copy pasted at publish time: Chinese, a blank line, then English.
-      write([copy.zh,copy.en].filter(Boolean).join('\n\n'),copy.zh && copy.en ? '中英文案已复制' : '文案已复制');
+      write(button,[copy.zh,copy.en].filter(Boolean).join('\n\n'),copy.zh && copy.en ? '中英文案已复制' : '文案已复制');
+    }));
+    host.querySelectorAll('[data-copy-screen]').forEach(button => button.addEventListener('click',() => {
+      write(button,copy.screen_en,'屏显外文已复制');
     }));
   }
   // Only the video ID needs typing: a pasted link also gives the account, the account defaults to the last one used,
@@ -137,7 +190,15 @@ window.VideoPublication = (() => {
       if (day) date.value = day;
       return day;
     };
+    // A valid post link or ID means the post is up, so the registration carries 已上传 and the order's calendar mark follows.
+    const markUploaded = () => {
+      const value = String(field.value || '').trim();
+      if (!fromLink(value) && !/^\d{15,25}$/.test(value)) return;
+      if (form.elements.calendar_uploaded) form.elements.calendar_uploaded.value = '1';
+      void form._markUploaded?.();
+    };
     field.addEventListener('input',sync);
+    field.addEventListener('input',markUploaded);
     return form._postDate = {sync,picked:() => picked};
   }
   function normalize(values,path = 'video') {
@@ -172,90 +233,27 @@ window.VideoPublication = (() => {
       hint.textContent = notes.join('，');
     });
   }
-  // 转成图文: frames of this finished video → AI 逐张表 + picked frames + composites → a linked 图文制作单.
-  const effortNames = {none:'不启用',minimal:'最低',low:'低',medium:'中',high:'高',xhigh:'很高',max:'最高',ultra:'极致'};
-  let aiOptions = null;
-  async function loadAiOptions(api) {
-    if (aiOptions) return aiOptions;
-    try {const result = await api('/api/ai/options');aiOptions = {models:Array.isArray(result.models) ? result.models : [],defaults:result.default_settings || {}};}
-    catch {aiOptions = {models:[],defaults:{}};}
-    return aiOptions;
-  }
-  const carouselURL = (id,product) => window.WorkbenchShell?.url?.(`#production/${encodeURIComponent(id)}`,product) || `#production/${encodeURIComponent(id)}`;
-  const tableURL = run => window.WorkbenchShell?.url?.(`#content/${encodeURIComponent(run.script_id)}?table=${encodeURIComponent(run.id)}`,run.product) || `#content/${encodeURIComponent(run.script_id)}?table=${encodeURIComponent(run.id)}`;
-  function runCard(run) {
-    const canDownload = run.delivery_id && run.delivery_available === true;
-    const waiting = run.status === 'running' && (run.phase === '等待达芬奇' || String(run.progress || '').startsWith('等待达芬奇'));
-    if (run.status === 'running') return `<div class="video-carousel-run is-running"><p><strong>${waiting ? '等待达芬奇' : run.autopilot ? 'AI 正在全程制作图文' : '⏳ 正在转图文'}</strong> ${esc(run.progress || '请稍候')}</p><p class="context-note">${esc(run.video_source || '')}${run.frames ? ` · 留下 ${run.frames} 帧不同画面` : ''} · 可以离开这页，后台继续。</p><button type="button" class="secondary compact" data-video-carousel-stop="${esc(run.id)}">${waiting ? '取消排队' : '停止'}</button></div>`;
-    if (!run.carousel_id && run.has_result && run.script_id) return `<div class="video-carousel-run"><p><strong>原逐张表已保留</strong></p><p class="context-note">${run.carousel_missing ? '关联的图文制作单已不存在，可查看保存的原表。' : '后续制作未完成，可查看保存的原表。'}${run.slide_count ? ` · ${run.slide_count} 张` : ''} · ${esc(readable(run.finished_at || run.started_at))}</p><a class="secondary compact" href="${esc(tableURL(run))}">查看原逐张表</a></div>`;
-    if (run.status === 'needs_attention' && run.carousel_id) return `<div class="video-carousel-run"><p><strong>已建单，部分张需要人看</strong> ${esc(run.summary || '')}</p><a class="primary compact" href="${esc(carouselURL(run.carousel_id,run.product))}">打开图文制作单</a></div>`;
-    if (run.status === 'completed' && run.carousel_id) return `<div class="video-carousel-run is-done"><p><strong>${run.autopilot && run.delivery_id ? '图文成品已完成' : '已转成图文'}</strong> ${esc(run.summary || '')}</p><p class="context-note">${esc(readable(run.finished_at))} · ${esc(run.video_source || '')}${run.frames ? ` · ${run.frames} 帧` : ''}</p>${run.problems?.length ? `<details><summary>需要留意（${run.problems.length}）</summary><ul>${run.problems.map(item => `<li>${esc(item)}</li>`).join('')}</ul></details>` : ''}${canDownload ? `<a class="primary compact" download href="/api/production/carousels/${encodeURIComponent(run.carousel_id)}/deliveries/${encodeURIComponent(run.delivery_id)}/download">下载成品包</a> ` : ''}<a class="${canDownload ? 'secondary' : 'primary'} compact" href="${esc(carouselURL(run.carousel_id,run.product))}">${canDownload ? '查看图文成品' : '打开图文制作单'}</a></div>`;
-    return `<div class="video-carousel-run is-failed"><p><strong>${run.status === 'cancelled' ? '已停止' : run.carousel_id ? '这次制作未完成' : '这次没有转成'}</strong> ${esc(run.error || '')}</p><p class="context-note">${esc(readable(run.finished_at || run.started_at))}</p>${run.carousel_id ? `<p class="context-note">逐张表、候选画面和已完成图片已保留，可以从当前进度继续。</p><a class="primary compact" href="${esc(carouselURL(run.carousel_id,run.product))}">继续完成这组图文</a>` : ''}</div>`;
-  }
   const readable = value => value ? String(value).replace('T',' ').slice(0,16) : '';
   // Registration and review times are stored in UTC; show them in local time, as the source fold does.
   const localTime = value => value ? window.DeliveryProvenance?.when?.(value) || readable(value) : '';
-  function formMarkup(state,options) {
-    const d = options.defaults || {}, name = id => options.models.find(m => m.id === id)?.name || id;
-    const fallback = d.model ? `${name(d.model)}${d.reasoning_effort ? ` · ${effortNames[d.reasoning_effort] || d.reasoning_effort}` : ''}` : '本机自动选择';
-    const provider = m => m.provider || (String(m.id).startsWith('claude-') ? 'claude' : 'codex');
-    const groups = [['claude','Claude'],['codex','Codex']].map(([key,label]) => {
-      const list = options.models.filter(m => provider(m) === key);
-      return list.length ? `<optgroup label="${label}">${list.map(m => `<option value="${esc(m.id)}" ${m.available === false ? 'disabled' : ''}>${esc(m.name || m.id)}${m.available === false ? ' · 未就绪' : ''}</option>`).join('')}</optgroup>` : '';
-    }).join('');
-    const fromTimeline = state.source.kind === 'timeline', timelines = state.source.timelines || [];
-    return `<form class="video-carousel-form"><p class="context-note">${state.source.available ? `成片：${esc(state.source.label)}。${fromTimeline ? '达芬奇忙时会排队等待；取帧时短暂占用（约一分钟），结束后自动切回你原来的时间线和位置。' : ''}` : '还没有可用的成片：先建达芬奇时间线，或填下面的本地成片路径，或在上面登记视频 ID（会从 TikTok 下载）。'}</p>
-      ${fromTimeline && timelines.length > 1 ? `<label class="field"><span>从哪条时间线取帧</span><select name="timeline">${timelines.map(item => `<option value="${esc(item.unique_id)}" ${item.unique_id === state.source.timeline ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}</select></label>` : ''}
-      <details class="video-publication-more" ${state.source.available ? '' : 'open'}><summary>${fromTimeline ? '不用达芬奇，改用成片文件（选填）' : '换一个成片文件（选填）'}</summary><label class="field"><span>本地成片完整路径</span><input name="video_path" maxlength="2000" placeholder="C:\\Videos\\最终成片.mp4"></label></details>
-      <div class="form-row video-carousel-options"><label class="field"><span>张数</span><select name="slides"><option value="">AI 按内容定</option>${[3,4,5,6,7,8].map(n => `<option value="${n}">${n} 张</option>`).join('')}</select></label><label class="field"><span>模型</span><select name="model"><option value="">全局默认（${esc(fallback)}）</option>${groups}</select></label><label class="field"><span>思考强度</span><select name="effort" disabled><option value="">全局默认</option></select></label></div>
-      <label class="field"><span>补充要求（选填）</span><textarea name="instruction" rows="2" maxlength="2000" placeholder="例如：首图用切纸那一下；最后一张放整套。"></textarea></label>
-      <label class="ai-check"><input type="checkbox" name="autopilot" checked> AI 全程制作：选图、出图、核对并整理成品包</label><p class="context-note">取消勾选时，只写逐张表并放入候选帧，后续可自行调整。</p>
-      <div class="video-publication-actions"><button type="submit" class="primary">AI 全程制作图文</button></div><p class="ai-error" data-video-carousel-error role="alert" hidden></p></form>`;
+  function historyFold(job,history,current) {
+    if (!history?.length) return '';
+    const records = [...history,...(current ? [current] : [])];
+    const day = value => localTime(value).slice(0,10) || '日期未保留';
+    const rows = [...history].reverse().map(old => {
+      const next = records.slice(records.indexOf(old) + 1).find(record => record.post_id === old.post_id);
+      if (!next) return receipt(job,old);
+      const post = current && old.post_id === current.post_id ? '' : `帖子 ${esc(old.post_id)} · `;
+      return `<details class="video-publication-superseded"><summary>${post}${esc(day(old.registered_at))} 登记 · 发布日期 ${esc(old.published_on)} · 已被 ${esc(day(next.registered_at))} 的登记取代</summary>${receipt(job,old)}</details>`;
+    });
+    const others = rows.filter(row => row.startsWith('<article')).length, versions = rows.length - others;
+    return `<details class="video-publication-history"><summary>${[others ? `其他视频 ${others} 个` : '',versions ? `旧版登记 ${versions} 条` : ''].filter(Boolean).join(' · ')}</summary>${rows.join('')}</details>`;
   }
-  async function mountCarousel(box,{job,api}) {
-    if (!box) return;
-    const token = Symbol('video-carousel');box._token = token;
-    clearTimeout(box._timer);
-    let state;
-    try {state = await api(`/api/production/jobs/${encodeURIComponent(job.id)}/video-carousel`);}
-    catch (error) {if (box._token === token) box.innerHTML = `<h3>转成图文</h3><p class="context-note">${esc(error.message || '暂时读不到转图文记录。')}</p>`;return;}
-    if (!Array.isArray(state?.runs) || !state.source) {if (box._token === token) box.remove();return;}
-    const options = await loadAiOptions(api);
-    if (box._token !== token || !box.isConnected) return;
-    const latest = state.runs[0], hasCarousel = Boolean(latest?.carousel_id);
-    const older = state.runs.slice(1).filter(run => run.carousel_id || (run.has_result && run.script_id));
-    box.innerHTML = `<h3>转成图文<details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">工作台从成片取帧并去重，AI 按口播和画面写逐张表、挑选画面。默认由 AI 继续选图、出图、核对并整理成品包；完成后直接领取，也可在制作单里查看与调整。</div></details></h3>
-      ${latest ? runCard(latest) : ''}
-      ${older.length ? `<p class="context-note">之前转过：${older.map(run => `<a href="${esc(run.carousel_id ? carouselURL(run.carousel_id,run.product) : tableURL(run))}">${esc([run.carousel_id ? '图文制作单' : '原逐张表',!run.carousel_id && run.slide_count ? `${run.slide_count} 张` : '',readable(run.finished_at || run.started_at)].filter(Boolean).join(' · '))}</a>`).join('、')}</p>` : ''}
-      ${state.running ? '' : `<details class="video-carousel-again" ${!hasCarousel && latest && ['failed','interrupted','cancelled','needs_attention'].includes(latest.status) ? 'open' : ''}><summary>${hasCarousel ? '再转一套' : '开始制作图文'}</summary>${formMarkup(state,options)}</details>`}`;
-    box.querySelector('[data-video-carousel-stop]')?.addEventListener('click',async event => {
-      event.currentTarget.disabled = true;
-      try {await api(`/api/production/carousel-tables/${encodeURIComponent(event.currentTarget.dataset.videoCarouselStop)}/cancel`,{method:'POST',body:{}});}
-      catch (error) {toast(error.message,true);}
-      void mountCarousel(box,{job,api});
-    });
-    if (state.running) {box._timer = setTimeout(() => {if (box._token === token && box.isConnected) void mountCarousel(box,{job,api});},3000);return;}
-    const form = box.querySelector('form');
-    if (!form) return;
-    const model = form.elements.model, effort = form.elements.effort;
-    form.elements.autopilot.addEventListener('change',() => {form.querySelector('[type="submit"]').textContent = form.elements.autopilot.checked ? 'AI 全程制作图文' : '生成逐张表和候选帧';});
-    model.addEventListener('change',() => {
-      const list = (options.models.find(m => m.id === model.value)?.reasoning_efforts || []).filter(v => typeof v === 'string');
-      effort.innerHTML = `<option value="">${model.value ? '模型默认' : '全局默认'}</option>` + list.map(v => `<option value="${esc(v)}">${esc(effortNames[v] || v)}</option>`).join('');
-      effort.disabled = !model.value || !list.length;
-    });
-    form.addEventListener('submit',async event => {
-      event.preventDefault();
-      const error = form.querySelector('[data-video-carousel-error]'), button = form.querySelector('[type="submit"]');
-      const values = Object.fromEntries(new FormData(form));
-      const body = {request_id:crypto.randomUUID(),instruction:String(values.instruction || '').trim(),file_path:String(values.video_path || '').trim(),autopilot:form.elements.autopilot.checked};
-      if (values.timeline) body.timeline = String(values.timeline);
-      if (values.slides) body.slides = Number(values.slides);
-      if (model.value) {body.model = model.value;body.effort = effort.value || null;}
-      button.disabled = true;error.hidden = true;
-      try {await api(`/api/production/jobs/${encodeURIComponent(job.id)}/video-carousel`,{method:'POST',body});toast(body.autopilot ? 'AI 已开始全程制作，完成后可直接领取成品。' : '已开始生成逐张表和候选帧。');void mountCarousel(box,{job,api});}
-      catch (problem) {error.textContent = problem.message || '没能开始转图文。';error.hidden = false;button.disabled = false;}
-    });
+  // Only orders with several timelines get the switch; each button carries that timeline's state.
+  function timelinePicker(lines,chosen) {
+    if (!lines || lines.length < 2) return '';
+    const state = line => line.registered ? `已登记${line.source_current ? '' : '（版本已变）'}` : line.can_register ? '待登记' : '待完成审查';
+    return `<div class="video-publication-lines" role="group" aria-label="登记哪条时间线的发布">${lines.map(line => `<button type="button" class="video-publication-line${line.unique_id === chosen ? ' is-current' : ''}" data-publication-timeline="${esc(line.unique_id)}" aria-pressed="${line.unique_id === chosen}"${line.post_id ? ` title="帖子 ${esc(line.post_id)}"` : ''}>${esc(line.name || line.unique_id)} <small>${esc(state(line))}</small></button>`).join('')}</div>`;
   }
   async function mount(host,{job,api,onSaved,onLoaded} = {}) {
     if (!host || !job || !api) return;
@@ -263,36 +261,48 @@ window.VideoPublication = (() => {
     host.classList.add('video-publication');
     host.innerHTML = '<h2>成片与发布</h2><p class="context-note">正在读取发布记录…</p>';
     let data;
-    try {data = await api(base(job.id));}
+    try {data = await api(base(job.id) + (host._videoPublicationTimeline ? `?timeline=${encodeURIComponent(host._videoPublicationTimeline)}` : ''));}
     catch (error) {if (host._videoPublicationToken === token) host.innerHTML = `<h2>成片与发布</h2><p class="ai-error" role="alert">${esc(error.message || '发布记录暂时无法读取。')}</p><button type="button" class="secondary" data-retry-load>重新读取</button>`;host.querySelector('[data-retry-load]')?.addEventListener('click',() => mount(host,{job,api,onSaved,onLoaded}));return;}
     if (host._videoPublicationToken !== token || !host.isConnected) return;
     const item = data.publication, source = data.source || {};
-    onLoaded?.(item || null);
+    // One registration stands for each timeline. With several, a saved-but-unconfirmed request is kept per timeline, and the
+    // order's header follows the current timeline only, never the one just being looked at.
+    const lines = data.timelines || [], multi = lines.length > 1, key = multi ? `${job.id}:${data.timeline_uid}` : job.id;
+    if (!multi || !host._videoPublicationTimeline || host._videoPublicationTimeline === lines[0].unique_id) onLoaded?.(item || null);
     let savedRequest;
-    try {savedRequest = requests.get(job.id) || JSON.parse(sessionStorage.getItem(storageKey(job.id)) || 'null');} catch {}
+    try {savedRequest = requests.get(key) || JSON.parse(sessionStorage.getItem(storageKey(key)) || 'null');} catch {}
     const draft = savedRequest?.body || item || {};
     scriptPosts = (data.script_registrations || []).map(String);
-    host.innerHTML = `<h2>成片与发布<details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">登记发布后的视频 ID，并保存对应脚本、配音和人工审查版本。以后导入销售表时，会按这个 ID 自动关联到这张制作单和它的变体。成片文件可选绑定，绑定后会复制到工作台，随完整备份保存。</div></details></h2>
-      ${item ? receipt(job,item,true) : ''}
-      ${copyBlock(data.copy,{collapsed:Boolean(item)})}
-      ${item ? '' : calendarPlanMarkup()}${item ? '' : data.can_register || savedRequest ? '' : '<p class="context-note">这张制作单尚未登记发布成片。</p>'}
-      ${data.history?.length ? `<details class="video-publication-history"><summary>已绑定的其他视频与历次登记（${data.history.length} 条）</summary>${[...data.history].reverse().map(old => receipt(job,old)).join('')}</details>` : ''}
-      ${data.can_register || savedRequest ? `<details class="video-publication-editor" ${!item || savedRequest ? 'open' : ''}><summary>${item ? '绑定另一个视频 / 修正当前登记' : '登记发布视频 ID'}</summary>
-      <p class="context-note">${savedRequest ? '上次登记尚未确认，可用原请求恢复。' : `将绑定脚本 v${esc(source.script?.script_version)}、${esc(takeLabel(job,source.take))}、时间线 ${esc(source.timeline?.name || source.timeline?.unique_id)}。`}</p>${item || savedRequest ? '' : registrationHint(scriptPosts)}${item && !savedRequest ? '<p class="context-note">一张制作单可以绑定多个视频：填新的视频 ID 会再绑定一个，原登记保留；填原 ID 是修正当前登记。</p>' : ''}
-      <form><div class="form-row video-publication-identity"><label class="field"><span>视频 ID（也可以直接粘贴视频链接）</span><input name="post_id" required maxlength="2000" inputmode="url" autocomplete="off" placeholder="7561234567890123456 或视频链接" value="${esc(draft.post_id || '')}"></label><input type="hidden" name="published_on" value="${esc(draft.published_on || localDate())}"><small data-account-hint></small></div>
-      <details class="video-publication-more" ${draft.file_path || item?.file ? 'open' : ''}><summary>账号、帖子链接、备注与成片文件（都可不填）</summary><div class="form-row"><label class="field"><span>发布账号</span><input name="account" maxlength="200" list="video-publication-accounts" value="${esc(draft.account || '')}" autocomplete="off"><datalist id="video-publication-accounts"></datalist></label><label class="field"><span>帖子链接（不填按账号和 ID 生成）</span><input name="post_url" type="url" maxlength="2000" value="${esc(draft.post_url || '')}"></label></div><label class="field"><span>备注</span><textarea name="note" rows="2" maxlength="2000">${esc(draft.note || '')}</textarea></label>
-      <label class="field"><span>绑定成片文件：本地完整路径</span><input name="file_path" maxlength="2000" placeholder="C:\\Videos\\最终成片.mp4" value="${esc(draft.file_path || item?.file?.original_path || '')}"></label>
-      <label class="video-publication-confirm"><input name="file_confirmed" type="checkbox">我已核对：该文件就是以上审查版本实际发布的成片。</label></details>
-      ${calendarChoice(draft.calendar_uploaded)}
-      <div class="video-publication-actions"><button class="primary" type="submit">${savedRequest ? '恢复发布登记' : item ? '保存修正并保留原登记' : '保存发布登记'}</button><button class="secondary" type="button" data-refresh-publication>读取最新版本</button></div>
-      <p class="context-note" data-save-status role="status"></p><p class="ai-error" data-publication-error role="alert" hidden></p></form></details>` : `<p class="context-note">${esc(data.blocked_reason)}</p>`}`;
+    const canEdit = data.can_register || savedRequest;
+    // What the 登记 button binds (and which registration of the script this is) shows on hover instead of as standing notes.
+    const binds = `将绑定脚本 v${source.script?.script_version ?? ''}、${takeLabel(job,source.take)}、时间线 ${source.timeline?.name || source.timeline?.unique_id || ''}。${!item && scriptPosts.length ? `此脚本已登记 ${scriptPosts.length} 次，本次将是第 ${scriptPosts.length + 1} 次登记。` : ''}`;
+    // One bar: (planned day and upload chip,) the video ID and the button; everything optional folds beneath it.
+    const formMarkup = lead => `<form class="video-publication-form"><div class="video-publication-bar">${lead}<input name="post_id" required maxlength="2000" inputmode="url" autocomplete="off" aria-label="视频 ID（也可以直接粘贴视频链接）" placeholder="视频 ID 或视频链接" value="${esc(draft.post_id || '')}"><button class="primary compact" type="submit" title="${esc(binds)}">${savedRequest ? '恢复发布登记' : item ? '保存' : '登记'}</button></div>
+      <input type="hidden" name="published_on" value="${esc(draft.published_on || localDate())}">${calendarChoice(draft.calendar_uploaded)}
+      <small data-account-hint></small><p class="context-note" data-save-status role="status">${savedRequest ? '上次登记尚未确认，可用原请求恢复。' : ''}</p><p class="ai-error" data-publication-error role="alert" hidden></p><button class="subtle compact" type="button" data-refresh-publication hidden>读取最新版本</button>
+      <details class="video-publication-more" ${draft.file_path || item?.file ? 'open' : ''}><summary>账号、帖子链接、备注与成片文件</summary><div class="form-row"><label class="field"><span>发布账号</span><input name="account" maxlength="200" list="video-publication-accounts" value="${esc(draft.account || '')}" autocomplete="off"><datalist id="video-publication-accounts"></datalist></label><label class="field"><span>帖子链接（不填按账号和 ID 生成）</span><input name="post_url" type="url" maxlength="2000" value="${esc(draft.post_url || '')}"></label></div><label class="field"><span>备注</span><textarea name="note" rows="2" maxlength="2000">${esc(draft.note || '')}</textarea></label>
+      <label class="field"><span>绑定成片文件：本地完整路径</span><input name="file_path" maxlength="2000" placeholder="C:\Videos\最终成片.mp4" value="${esc(draft.file_path || item?.file?.original_path || '')}"></label>
+      <label class="video-publication-confirm"><input name="file_confirmed" type="checkbox">我已核对：该文件就是以上审查版本实际发布的成片。</label></details></form>`;
+    host.innerHTML = `<h2>成片与发布<details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">登记发布后的视频 ID，并保存对应脚本、配音和人工审查版本。以后导入销售表时，会按这个 ID 自动关联到这张制作单和它的变体。成片文件可选绑定，绑定后会复制到工作台，随完整备份保存。发布后在浏览器打开自己账号的主页，TK 看板会把新帖推给工作台，按发布文案标题自动登记；对不上唯一一条时间线的帖子会列在这里，点一下登记。</div></details></h2>
+      ${timelinePicker(lines,data.timeline_uid)}
+      ${item ? receipt(job,item,true) : canEdit ? candidateRows(data.candidates) + formMarkup(calendarPlanMarkup()) : `<div class="video-publication-bar">${calendarPlanMarkup()}<span class="context-note">${esc(data.blocked_reason)}</span></div>`}
+      ${copyRow(data.copy)}
+      <div class="video-publication-folds">
+      ${item && canEdit ? `<details class="video-publication-editor" ${savedRequest ? 'open' : ''}><summary>绑定另一个视频 / 修正当前登记</summary><p class="context-note">填新的视频 ID 会再绑定一个，原登记保留；填原 ID 是修正当前登记。</p>${formMarkup('')}</details>` : ''}
+      ${item && !canEdit ? `<p class="context-note">${esc(data.blocked_reason)}</p>` : ''}
+      ${historyFold(job,data.history,item)}
+      </div>`;
     bindCopy(host,data.copy);
+    void fillTitleChinese(host,job,api,data.copy);
+    host.querySelectorAll('[data-publication-timeline]').forEach(button => button.addEventListener('click',() => {
+      if (button.classList.contains('is-current')) return;
+      host._videoPublicationTimeline = button.dataset.publicationTimeline;
+      void mount(host,{job,api,onSaved,onLoaded});
+    }));
     host.querySelectorAll('[data-copy-take]').forEach(button => button.addEventListener('click',() => {
       if (typeof copyText === 'function') copyText(button.dataset.copyTake,'配音编号已复制');else navigator.clipboard.writeText(button.dataset.copyTake);
     }));
-    const carouselBox = document.createElement('section');carouselBox.className = 'video-carousel';host.append(carouselBox);
-    void mountCarousel(carouselBox,{job,api});
-    host.querySelector('[data-refresh-publication]')?.addEventListener('click',() => {clearPending(job.id);mount(host,{job,api,onSaved,onLoaded});});
+    host.querySelector('[data-refresh-publication]')?.addEventListener('click',() => {clearPending(key);mount(host,{job,api,onSaved,onLoaded});});
     host.querySelector('[data-calendar-toggle]')?.addEventListener('click',async event => {
       const button = event.currentTarget;button.disabled = true;
       try {
@@ -300,6 +310,19 @@ window.VideoPublication = (() => {
         if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded});
       } catch (problem) {button.disabled = false;toast(problem.message || '没能更新发布日历状态。',true);}
     });
+    host.querySelector('[data-undo-auto]')?.addEventListener('click',async event => {
+      const button = event.currentTarget;button.disabled = true;
+      try {
+        const result = await api(`${base(job.id)}/undo-auto`,{method:'POST',body:{publication_id:item.id}});
+        toast(result.warning || '已撤销自动登记，这个帖子不会再自动登记到这条时间线。',Boolean(result.warning));
+        if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded});
+      } catch (problem) {button.disabled = false;toast(problem.message || '没能撤销自动登记。',true);}
+    });
+    host.querySelectorAll('[data-candidate-dismiss]').forEach(button => button.addEventListener('click',async () => {
+      button.disabled = true;
+      try {await api(`${base(job.id)}/dismiss`,{method:'POST',body:{post_id:button.dataset.candidateDismiss,timeline_uid:data.timeline_uid}});await mount(host,{job,api,onSaved,onLoaded});}
+      catch (problem) {button.disabled = false;toast(problem.message || '没能忽略这条帖子。',true);}
+    }));
     const verify = host.querySelector('[data-verify-video]');
     if (verify) verify.addEventListener('click',async () => {
       verify.disabled = true;
@@ -308,12 +331,14 @@ window.VideoPublication = (() => {
       catch (error) {message.textContent = error.message || '核对暂未完成。';}
       finally {verify.disabled = false;}
     });
-    const form = host.querySelector('.video-publication-editor form');
-    if (!item) void bindCalendarPlan(host,`video:${job.id}`,api,{form,after:onSaved});
+    const form = host.querySelector('.video-publication-form');
+    // Each timeline keeps its own calendar mark and day. The newest keeps the order's own entry, which the content list reads.
+    const timelineKey = multi && data.timeline_uid !== lines[0].unique_id ? String(data.timeline_uid || '').replace(/[^A-Za-z0-9-]/g,'').slice(0,120) : '';
+    if (!item) void bindCalendarPlan(host,`video:${job.id}${timelineKey ? `_tl_${timelineKey}` : ''}`,api,{form,after:onSaved});
     if (!form) return;
     const lockUncertain = () => {
       const uncertain = savedRequest && savedRequest.uncertain !== false;
-      form.querySelectorAll('input,textarea,select,[data-refresh-publication]').forEach(node => node.disabled = Boolean(uncertain));
+      form.querySelectorAll('input[name],textarea,select,[data-refresh-publication]').forEach(node => node.disabled = Boolean(uncertain));
       if (uncertain) {
         form.elements.file_confirmed.checked = true;
         form.querySelector('[type="submit"]').textContent = '重试同一登记';
@@ -322,6 +347,16 @@ window.VideoPublication = (() => {
     };
     lockUncertain();
     void assistIdentity(form,api);
+    // 登记 on a detected post fills the form as a pasted link would, then saves through the same path.
+    host.querySelectorAll('[data-candidate-use]').forEach(button => button.addEventListener('click',() => {
+      const post = (data.candidates || []).find(item => item.post_id === button.dataset.candidateUse);
+      if (!post || form.dataset.busy || form.elements.post_id.disabled) return;
+      form.elements.post_id.value = post.post_id;form.elements.published_on.value = post.published_on;
+      if (post.account) {form.elements.account.value = post.account;form.elements.post_url.value = tiktokUrl({post_id:post.post_id,account:post.account});}
+      if (form.elements.calendar_uploaded) form.elements.calendar_uploaded.value = '1';
+      void form._markUploaded?.();
+      form.requestSubmit();
+    }));
     form.addEventListener('submit',async event => {
       event.preventDefault();
       if (form.dataset.busy) return;
@@ -332,27 +367,26 @@ window.VideoPublication = (() => {
         if (String(values.file_path || '').trim() && !form.elements.file_confirmed.checked) {error.textContent = '绑定成片文件时，请先勾选核对。';error.hidden = false;return;}
         if (values.account) try {localStorage.setItem('video-publication:account',values.account);} catch {}
       }
-      const body = {...values,revision:data.revision,source_signature:data.source_signature,file_confirmed:form.elements.file_confirmed.checked,calendar_uploaded:values.calendar_uploaded === '1'};
+      const body = {...values,revision:data.revision,source_signature:data.source_signature,file_confirmed:form.elements.file_confirmed.checked,calendar_uploaded:values.calendar_uploaded === '1',...(multi ? {timeline_uid:data.timeline_uid} : {})};
       // A saved request remains exactly reproducible after a lost response or page reload.
       const old = savedRequest?.body;
-      const sameInput = old && ['file_path','account','post_id','published_on','post_url','note','calendar_uploaded'].every(key => String(old[key] || '') === String(body[key] || ''));
-      const request = (savedRequest && savedRequest.uncertain !== false) || sameInput ? old : pending(job.id,body);
-      savedRequest = requests.get(job.id) || savedRequest;
-      savedRequest.uncertain = true;remember(job.id,savedRequest);
+      const sameInput = old && ['file_path','account','post_id','published_on','post_url','note','calendar_uploaded','timeline_uid'].every(key => String(old[key] || '') === String(body[key] || ''));
+      const request = (savedRequest && savedRequest.uncertain !== false) || sameInput ? old : pending(key,body);
+      savedRequest = requests.get(key) || savedRequest;
+      savedRequest.uncertain = true;remember(key,savedRequest);
       lockUncertain();
       form.dataset.busy = '1';error.hidden = true;
       form.querySelectorAll('button').forEach(button => button.disabled = true);
       form.querySelector('[data-save-status]').textContent = '正在保存发布登记…';
-      try {await api(base(job.id),{method:'POST',body:request});clearPending(job.id);if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded});}
+      try {await api(base(job.id),{method:'POST',body:request});clearPending(key);if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded});}
       catch (problem) {
         const definitive = Number.isInteger(problem.status) && problem.status >= 400 && problem.status < 500;
-        savedRequest.uncertain = !definitive;remember(job.id,savedRequest);
+        savedRequest.uncertain = !definitive;remember(key,savedRequest);
         error.textContent = (problem.message || '结果尚未确认；重试会恢复同一登记。') + (definitive ? ' 可读取最新版本，核对现有登记后再修改。' : ' 输入已保留，请重试同一登记。');
-        error.hidden = false;form.querySelector('[data-save-status]').textContent = '';
+        error.hidden = false;form.querySelector('[data-save-status]').textContent = '';form.querySelector('[data-refresh-publication]').hidden = !definitive;
       }
       finally {delete form.dataset.busy;form.querySelectorAll('button').forEach(button => button.disabled = false);lockUncertain();}
     });
   }
-  // The 图文 order's registration reuses the same fields and the same ID/link handling.
   return {mount,normalize,localDate,postedOn,followPostDate,copyBlock,bindCopy,calendarLine,calendarChoice,calendarPlanMarkup,bindCalendarPlan,registrationTag,registrationHint,tiktokUrl};
 })();

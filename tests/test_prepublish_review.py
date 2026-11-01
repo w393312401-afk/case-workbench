@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from creation_store import CreationStore
 from elevenlabs_client import VoiceError
-from prepublish_review import (DRAFT_FRAMEWORK, FRAMEWORK, MATERIAL_RULES, REVIEW_MODEL, _shot_list, draft_mode, draft_prompt, label_shots, parse,
+from prepublish_review import (DRAFT_FRAMEWORK, FRAMEWORK, MATERIAL_RULES, REVIEW_MODEL, _sheet, _shot_list, draft_mode, draft_prompt, label_shots, parse,
                                parse_card, prepare)
 from production_store import ProductionStore
 import workbench_prepublish
@@ -260,6 +260,110 @@ class GateTests(unittest.TestCase):
         self.assertEqual("interrupted", self.bench.prepublish_reviews(JOB)["reviews"][0]["status"])
 
 
+class FakeResolveRunner:
+    """Stands in for resolve_worker.py: records each command and renders a file when the job finishes."""
+
+    def __init__(self, final="Complete"):
+        self.commands, self.final, self.polls, self.refuse = [], final, 0, False
+
+    def __call__(self, args, input=None, **kwargs):
+        request = json.loads(input.decode("utf-8"))
+        self.commands.append(request)
+        command, reply = request["command"], {"ok": True}
+        if command == "status":
+            reply.update(project="Lab-202H", current_timeline="其他时间线", current_timeline_uid="other-uid", current_timecode="01:00:00:00")
+        elif command == "render_start":
+            reply = {"ok": False, "error": "达芬奇没能开始渲染"} if self.refuse else {
+                "ok": True, "job_id": "job-1", "previous_format": "mov", "previous_codec": "ProRes"}
+        elif command == "render_poll":
+            self.polls += 1
+            reply.update(state="Rendering" if self.polls < 2 else self.final, percent=50 * self.polls, error="Disk full")
+        elif command == "render_finish":
+            folder = Path(request["render_dir"])
+            if self.final == "Complete":
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "timeline.mp4").write_bytes(VIDEO)
+            reply["files"] = [str(path) for path in folder.glob("timeline.*")]
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(reply).encode("utf-8"), stderr=b"")
+
+
+class TimelineReviewTests(unittest.TestCase):
+    def setUp(self):
+        GateTests.setUp(self)
+        from resolve_bridge import ResolveBridge
+        self.runner = FakeResolveRunner()
+        self.bench.resolve = ResolveBridge(runner=self.runner)
+        self.seen = []
+
+        def prepare_and_note(video, spoken, folder, cancel=None, on_step=None):
+            self.seen.append((Path(video).name, Path(video).is_file()))
+            return fake_prepare(video, spoken, folder, cancel, on_step)
+
+        patcher = patch.object(workbench_prepublish, "prepare", prepare_and_note)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        poll = patch.object(workbench_prepublish, "RENDER_POLL", 0.01)
+        poll.start()
+        self.addCleanup(poll.stop)
+
+    def timeline_review(self, **body):
+        started = self.bench.start_prepublish_review(JOB, {"request_id": uuid4().hex, **body})
+        wait(started["review"]["id"])
+        return self.bench.prepublish_reviews(JOB)["reviews"][0]
+
+    def test_reviews_the_timeline_by_rendering_it_in_davinci(self):
+        review = self.timeline_review()
+        self.assertEqual("completed", review["status"], review["error"])
+        self.assertEqual("达芬奇时间线「Lab261022-202-3」", review["file"]["name"])
+        self.assertEqual([("timeline.mp4", True)], self.seen)
+        self.assertEqual(["status", "render_start", "render_poll", "render_poll", "render_finish", "restore"],
+                         [row["command"] for row in self.runner.commands])
+        start = self.runner.commands[1]
+        self.assertEqual(("202H", "timeline-1", "A本土店渠道号-Lab"), (start["project"], start["unique_id"], start["folder"]))
+        finish, restore = self.runner.commands[-2:]
+        self.assertEqual(("mov", "ProRes"), (finish["previous_format"], finish["previous_codec"]))
+        self.assertEqual("other-uid", restore["unique_id"])
+        self.assertFalse((self.bench._prepublish_root(JOB) / review["id"] / "render").exists())
+        self.assertEqual(1, self.bench.prepublish_reviews(JOB)["blocking"])
+
+    def test_a_failed_render_is_reported_and_davinci_is_put_back(self):
+        self.runner.final = "Failed"
+        review = self.timeline_review()
+        self.assertEqual("failed", review["status"])
+        self.assertIn("Disk full", review["error"])
+        self.assertEqual([], self.seen)
+        self.assertEqual(["render_finish", "restore"], [row["command"] for row in self.runner.commands[-2:]])
+
+    def test_a_refused_render_is_not_called_a_format_error(self):
+        self.runner.refuse = True
+        review = self.timeline_review()
+        self.assertEqual("failed", review["status"])
+        self.assertEqual("达芬奇没能开始渲染", review["error"])
+        self.assertEqual("restore", self.runner.commands[-1]["command"])
+
+    def test_typed_path_still_wins_and_never_touches_davinci(self):
+        review = self.timeline_review(file_path=str(self.video))
+        self.assertEqual("completed", review["status"])
+        self.assertEqual(self.video.name, review["file"]["name"])
+        self.assertEqual([], self.runner.commands)
+
+    def test_timeline_choice_and_missing_timeline(self):
+        pick = PrepublishWorkbenchMixin._review_timeline
+        job = {"selected_take": TAKE, "timelines": [{"unique_id": "a", "take_id": TAKE}, {"unique_id": "b", "take_id": "other"},
+                                                    {"unique_id": "c", "take_id": "other", "archived": True}]}
+        self.assertEqual("a", pick(job, "")["unique_id"])
+        self.assertEqual("b", pick(job, "b")["unique_id"])
+        job["selected_take"] = ""
+        self.assertEqual("b", pick(job, "")["unique_id"])
+        with self.assertRaises(VoiceError) as unknown:
+            pick(job, "zzz")
+        self.assertEqual(400, unknown.exception.status)
+        with self.assertRaises(VoiceError) as missing:
+            pick({"timelines": []}, "")
+        self.assertEqual(409, missing.exception.status)
+        self.assertIn("路径", str(missing.exception))
+
+
 @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
 class PrepareTests(unittest.TestCase):
     def test_real_preparation_on_generated_clip(self):
@@ -278,6 +382,16 @@ class PrepareTests(unittest.TestCase):
             self.assertEqual("", report["transcript"])
             # Full-resolution opening frames go out on their own, beside the small-tile sheets.
             self.assertIn("detail01.jpg", [sheet["file"] for sheet in report["sheets"]])
+
+    def test_a_sheet_page_with_one_leftover_tile_still_renders(self):
+        # 8n+1 shot tiles leave one tile on the last page; ffmpeg's xstack refuses a single input.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            frame = root / "frame.jpg"
+            subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "color=c=blue:s=270x480", "-frames:v", "1", str(frame)], check=True)
+            for count in (1, 2):
+                _sheet([(frame, f"#{n} 0.5s") for n in range(count)], root / f"sheet{count}.jpg")
+                self.assertTrue((root / f"sheet{count}.jpg").is_file())
 
     def test_labels_stand_only_where_the_export_still_shows_that_footage(self):
         with tempfile.TemporaryDirectory() as temporary:

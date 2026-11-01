@@ -82,6 +82,23 @@ class CandidateCreationAssociationTests(unittest.TestCase):
         result["candidate_direction"]["variant_ref"]["snapshot"]["concern"] = "外部修改"
         self.assertEqual(self.store.read(), saved)
 
+    def test_already_linked_card_is_rechecked_without_cloning_the_whole_catalog(self):
+        """Start-up re-checks every card; an unchanged one must not pay for a full catalog copy."""
+        first = self.associate()
+        with patch.object(self.store, "read", side_effect=AssertionError("full copy")),                 patch.object(self.store, "write", side_effect=AssertionError("write")):
+            self.assertEqual(self.associate(), first)
+            self.assertEqual(self.associate(dry_run=True), first)
+        # A conflict found on the narrow look is still raised by the full check.
+        with self.assertRaises(CreationError):
+            self.associate(direction_id="202H-S2")
+
+    def test_variant_links_returns_copies_of_only_the_links(self):
+        self.associate()
+        links = self.store.variant_links()
+        self.assertEqual(links, self.store.read()["variant_links"])
+        links[0]["kind"] = "changed"
+        self.assertEqual(self.store.variant_links()[0]["kind"], "script")
+
     def test_matching_manual_link_is_reused_in_full_despite_annotation_or_index_changes(self):
         manual_ref = annotation_change()
         self.data["scripts"][0]["source"]["variant_ref"] = copy.deepcopy(manual_ref)

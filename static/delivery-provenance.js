@@ -47,46 +47,10 @@ window.DeliveryProvenance = (() => {
     const lines = list(script.lines).map(line => line.spoken || '').filter(Boolean).join('\n');
     return {id:record.id,rows:rows.join(''),extra:lines ? `<details class="delivery-provenance-text"><summary>查看这版口播正文</summary><pre>${esc(lines)}</pre></details>` : ''};
   }
-  function carousel(record,owner,publication) {
-    const post = record.delivery_id ? record : publication?.delivery_id === record.id && (!publication.delivery_sha256 || publication.delivery_sha256 === record.sha256) ? publication : null;
-    let packageRecord = record;
-    if (record.delivery_id) {
-      // A cleaned ZIP can still have a read-only source snapshot on its publication.
-      // Match both identity and bytes; never borrow the newest package's sources.
-      const snapshot = object(record.delivery_snapshot);
-      packageRecord = snapshot.id === record.delivery_id && snapshot.sha256 === record.delivery_sha256 ? snapshot
-        : list(owner.deliveries).find(item => item.id === record.delivery_id && (!record.delivery_sha256 || item.sha256 === record.delivery_sha256)) || {};
-    }
-    const source = object(packageRecord.source), script = object(source.script);
-    const product = script.product || owner.product || 'all', id = source.carousel_id || owner.id;
-    const frozen = packageRecord.id ? packageRecord : record;
-    const rows = [scriptRow(script,frozen,product)];
-    const deliveryId = packageRecord.id || record.delivery_id;
-    const available = list(owner.deliveries).some(item => item.id === deliveryId && (!record.delivery_sha256 || item.sha256 === record.delivery_sha256));
-    if (deliveryId && id) rows.push(row('成品包',(record.delivery_id && !available ? `${esc(deliveryId)}<small>原发布来源，文件已清理。</small>`
-      : link('delivery',deliveryId,production(id,product,'delivery',deliveryId)))+code(packageRecord.filename)));
-    else rows.push(row('成品包','未保留成品包标识'));
-    if (post?.delivery_id) rows.push(row('实际发布',`${esc(post.post_id || '已登记帖子')} · 使用 ${esc(post.delivery_id)}`));
-    const slides = list(packageRecord.slides);
-    rows.push(row('图片版本',slides.length ? `<ol class="delivery-provenance-slides">${slides.map(slide => {
-      const snapshot = list(source.slides).find(item => item.number === slide.number) || {}, output = object(snapshot.output);
-      const label = `第 ${slide.number} 张${output.version ? ` · 成图第 ${output.version} 版` : ''} · ${slide.output_id || '版本未保留'}`;
-      return `<li>${slide.output_id && id ? link('image',label,production(id,product,'images',slide.output_id)) : esc(label)}${code(slide.sha256)}</li>`;
-    }).join('')}</ol>` : '<span>这份发布记录的成品包快照不可读，图片版本未能核对。</span>'));
-    if (packageRecord.sha256 || record.delivery_sha256) rows.push(row('成品包指纹',code(packageRecord.sha256 || record.delivery_sha256)));
-    const caption = packageRecord.caption_en;
-    const copy = list(source.slides).map(slide => [
-      `第 ${slide.number} 张`,list(slide.title_lines).join(' / '),slide.body || ''
-    ].filter(Boolean).join('\n')).join('\n\n');
-    return {id:record.id,rows:rows.join(''),extra:[
-      copy ? `<details class="delivery-provenance-text"><summary>查看保存时的逐张文案</summary><pre>${esc(copy)}</pre></details>` : '',
-      caption ? `<details class="delivery-provenance-text"><summary>查看这包保存的发布文案</summary><pre>${esc(caption)}</pre></details>` : ''
-    ].join('')};
-  }
   // rows: caller facts about the registration itself (when, from which file), kept in the same single fold.
-  function render({kind,record,owner = {},publication = null,rows = '',copyTake = false} = {}) {
-    if (!record || (kind !== 'video' && kind !== 'carousel')) return '';
-    const data = kind === 'video' ? video(record,owner,copyTake) : carousel(record,owner,publication);
+  function render({kind,record,owner = {},rows = '',copyTake = false} = {}) {
+    if (!record || kind !== 'video') return '';
+    const data = video(record,owner,copyTake);
     return `<details class="delivery-provenance" data-provenance-record="${esc(data.id || '')}"><summary>查看这份成品的来源版本</summary><div class="delivery-provenance-body"><p class="context-note">以下按保存成品时的记录显示，后续选择不会改变这份来源。</p><dl>${data.rows}${rows}</dl>${data.extra}</div></details>`;
   }
   function mount(host,options) {if (host) host.innerHTML = render(options);}

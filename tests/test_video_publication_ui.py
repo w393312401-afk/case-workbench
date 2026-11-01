@@ -37,6 +37,7 @@ class VideoPublicationBrowserTests(unittest.TestCase):
         self.page.add_script_tag(path=str(SCRIPT))
         self.page.evaluate("""async (setup) => {
           window.calls = [];
+          window.calendarCalls = [];
           window.responseStatus = 503;
           window.saved = false;
           window.publicationDetail = {revision:'revision-one',source_signature:'source-one',can_register:true,history:[],
@@ -46,6 +47,7 @@ class VideoPublicationBrowserTests(unittest.TestCase):
           const api = async (url,options) => {
             if (!options && url.startsWith('/api/performance/videos')) return {videos:structuredClone(window.salesVideos)};
             if (!options) return structuredClone(window.publicationDetail);
+            if (url === '/api/content/calendar') {window.calendarCalls.push(structuredClone(options.body));return {};}
             window.calls.push(structuredClone(options.body));
             if (window.responseStatus) throw Object.assign(new Error('测试响应'),{status:window.responseStatus});
             return {};
@@ -62,41 +64,48 @@ class VideoPublicationBrowserTests(unittest.TestCase):
         self.page.locator('[name="post_id"]').fill('7999999999999999901')
         self.page.locator('[name="file_confirmed"]').check()
 
-    def mount_carousel_runs(self, runs):
-        self.page.evaluate("""async runs => {
-          const api = async url => {
-            if (url.endsWith('/video-carousel')) return {runs,source:{available:false,timelines:[]},running:false};
-            if (url === '/api/ai/options') return {models:[]};
-            return structuredClone(window.publicationDetail);
-          };
-          await VideoPublication.mount(document.querySelector('#publication'),{job:{id:'PRD-111111111111'},api});
-        }""", runs)
-        self.page.locator('.video-carousel h3').wait_for()
+    def test_screen_copy_and_full_text(self):
+        self.assertEqual(self.page.locator('[data-copy-screen]').count(), 0)
+        self.mount("""window.publicationDetail.copy = {version: 1, titles: ['🔴Title #tag'], titles_zh: ['中文标题'],
+          zh: '中文口播', en: 'English speech', screen_en: 'ONE KIT\\nALL STAGES',
+          screen_zh: '一套工具\\n覆盖全阶段'};
+          window.copyText = text => {window.copiedText = text;};""")
+        row = self.page.locator('.video-publish-copy-row')
+        # Top to bottom is the order they are pasted at publish time.
+        self.assertEqual(row.locator('.video-publish-copy-label').all_inner_texts(), ['钩子屏显', '标题', '文案'])
+        # Chinese sits beside the foreign words but stays out of the clipboard.
+        self.assertIn('一套工具', row.locator('[data-copy-screen]').inner_text())
+        row.locator('[data-copy-screen]').click()
+        self.assertEqual(self.page.evaluate('window.copiedText'), 'ONE KIT\nALL STAGES')
+        self.assertIn('中文标题', row.locator('[data-copy-title]').inner_text())
+        row.locator('[data-copy-title]').click()
+        self.assertEqual(self.page.evaluate('window.copiedText'), '🔴Title #tag')
+        row.locator('[data-copy-publish]').click()
+        self.assertEqual(self.page.evaluate('window.copiedText'), '中文口播\n\nEnglish speech')
+        row.locator('summary').click()
+        full = row.locator('.video-publish-copy').text_content()
+        self.assertIn('中文口播', full)
+        self.assertIn('English speech', full)
+        self.assertEqual(self.page.evaluate('window.calls'), [])
 
-    def test_video_saved_original_remains_accessible_after_its_order_is_missing(self):
-        self.mount_carousel_runs([{
-            "id": "TBL-0123456789ab", "script_id": "SCR-0123456789ab", "product": "202H",
-            "status": "needs_attention", "has_result": True, "slide_count": 6,
-            "carousel_id": "", "carousel_missing": True, "finished_at": "2026-10-21T21:07:32+08:00"}])
-        box = self.page.locator('.video-carousel')
-        self.assertIn('关联的图文制作单已不存在', box.inner_text())
-        self.assertIn('6 张', box.inner_text())
-        link = box.get_by_role('link', name='查看原逐张表', exact=True)
-        self.assertEqual(link.get_attribute('href'), '#content/SCR-0123456789ab?table=TBL-0123456789ab')
-        self.assertEqual(box.locator('a[href*="#production/"]').count(), 0)
+    def test_missing_title_chinese_fills_in_and_failure_leaves_copy_working(self):
+        self.mount("""window.publicationDetail.copy = {titles: ['🔴Title #tag'], titles_zh: ['']};
+          window.copyText = text => {window.copiedText = text;};""")
+        title = self.page.locator('[data-copy-title]')
+        title.locator('small', has_text='中文对照暂时没生成').wait_for()
+        title.click()
+        self.assertEqual(self.page.evaluate('window.copiedText'), '🔴Title #tag')
+        self.page.evaluate("""window.responseStatus = 0""")
+        self.page.evaluate("""async () => {
+          await VideoPublication.mount(document.querySelector('#publication'),{job:{id:'PRD-111111111111'},
+            api:async (url,options) => options ? {titles_zh:['后来的中文']} : structuredClone(window.publicationDetail)});
+        }""")
+        title.locator('small', has_text='后来的中文').wait_for()
 
-    def test_empty_latest_failure_does_not_hide_an_older_saved_original(self):
-        self.mount_carousel_runs([
-            {"id": "TBL-abcdef012345", "status": "failed", "has_result": False, "carousel_id": "",
-             "error": "没有找到来源时间线。", "finished_at": "2026-10-22T16:13:44+08:00"},
-            {"id": "TBL-0123456789ab", "script_id": "SCR-0123456789ab", "product": "202H",
-             "status": "needs_attention", "has_result": True, "slide_count": 6,
-             "carousel_id": "", "carousel_missing": True, "finished_at": "2026-10-21T21:07:32+08:00"}])
-        links = self.page.locator('.video-carousel a')
-        self.assertEqual(links.count(), 1)
-        self.assertIn('原逐张表 · 6 张', links.inner_text())
-        self.assertIn('TBL-0123456789ab', links.get_attribute('href'))
-        self.assertNotIn('TBL-abcdef012345', links.get_attribute('href'))
+    def test_screen_chinese_alone_is_visible_but_not_copyable_as_foreign_text(self):
+        self.mount("window.publicationDetail.copy = {screen_en:'', screen_zh:'中文屏显'};")
+        self.assertEqual(self.page.locator('[data-copy-screen]').count(), 0)
+        self.assertIn('中文屏显', self.page.locator('.video-publish-copy-row').inner_text())
 
     def test_post_id_fills_its_posting_day_and_a_hand_picked_date_stays(self):
         post, date = self.page.locator('[name="post_id"]'), self.page.locator('[name="published_on"]')
@@ -161,23 +170,58 @@ class VideoPublicationBrowserTests(unittest.TestCase):
         self.assertEqual(first, self.page.evaluate('window.calls[0]'))
         self.assertIsNone(self.page.evaluate(f'sessionStorage.getItem("video-publication:{JOB}")'))
 
-    def test_calendar_choice_defaults_to_not_uploaded_and_is_sent_as_a_boolean(self):
+    def test_calendar_choice_defaults_to_not_uploaded_until_a_post_id_is_given(self):
         self.assertEqual(self.page.locator('[name="calendar_uploaded"]').input_value(), '0')
+        self.page.locator('[name="post_id"]').fill('12345')
+        self.assertEqual(self.page.locator('[name="calendar_uploaded"]').input_value(), '0')
+        self.page.locator('[name="post_id"]').fill('7999999999999999901')
+        self.assertEqual(self.page.locator('[name="calendar_uploaded"]').input_value(), '1')
         self.fill()
         self.page.evaluate('window.responseStatus = 0')
-        self.page.locator('[type="submit"]').click()
-        self.page.wait_for_function('window.saved')
-        self.assertIs(self.page.evaluate('window.calls[0].calendar_uploaded'), False)
-
-        # The real page remounts after a save; do the same for a fresh form.
-        self.page.reload()
-        self.mount()
-        self.page.evaluate('window.responseStatus = 0')
-        self.fill()
-        self.page.locator('[name="calendar_uploaded"]').evaluate("node => { node.value = '1'; }")
         self.page.locator('[type="submit"]').click()
         self.page.wait_for_function('window.saved')
         self.assertIs(self.page.evaluate('window.calls[0].calendar_uploaded'), True)
+
+    def test_pasting_the_post_link_marks_the_order_calendar_as_uploaded(self):
+        line = self.page.locator('[data-calendar-plan]')
+        line.get_by_role('button', name='标记为已上传').wait_for()
+        self.page.locator('[name="post_id"]').fill('https://www.tiktok.com/@fixture/video/7698015486365273375')
+        line.get_by_role('button', name='改回未上传').wait_for()
+        self.assertIn('已上传', line.inner_text())
+        calls = self.page.evaluate('window.calendarCalls')
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0]['calendar_uploaded'], True)
+        self.assertEqual(self.page.locator('[name="published_on"]').input_value(), '2026-10-18')
+        self.page.locator('[name="post_id"]').fill('7698015486365273376')
+        self.assertEqual(len(self.page.evaluate('window.calendarCalls')), 1)
+
+    def test_each_timeline_saves_its_planned_day_on_its_own(self):
+        # The newest timeline keeps the order's entry; an older one has its own, so changing one day leaves the other.
+        lines = "[{unique_id:'tl-new',name:'New'},{unique_id:'tl:old',name:'Old'}]"
+        for uid, expected in (('tl-new', f'video:{JOB}'), ('tl:old', f'video:{JOB}_tl_tlold')):
+            self.mount(f"window.publicationDetail = {{...window.publicationDetail,timelines:{lines},timeline_uid:'{uid}'}}")
+            date = self.page.locator('[data-calendar-plan] input[type="date"]')
+            date.fill('2026-11-12')
+            self.page.wait_for_function('window.calendarCalls.length === 1')
+            self.assertEqual(self.page.evaluate('window.calendarCalls[0]'), {'id': expected, 'calendar_date': '2026-11-12'})
+
+    def test_older_versions_of_the_same_post_fold_to_one_line_and_other_videos_keep_a_receipt(self):
+        self.mount("""const record = (id, post, day, at) => ({id, post_id:post, published_on:day, account:'fixture', script_version:1,
+            registered_at:at, source:{take:{id:'TAK-1'},timeline:{name:'Reviewed'}}});
+          window.publicationDetail.publication = {...record('VPU-333333333333','7698015486365273375','2026-10-18','2026-10-29T06:33:10'),
+            calendar_uploaded:true, source_current:true};
+          window.publicationDetail.history = [record('VPU-000000000000','7698015486365273999','2026-10-10','2026-10-10T01:00:00'),
+            record('VPU-111111111111','7698015486365273375','2026-10-19','2026-10-19T05:27:48'),
+            {...record('VPU-222222222222','7698015486365273375','2026-10-18','2026-10-23T01:05:51'), calendar_uploaded:true}];""")
+        history = self.page.locator('.video-publication-history')
+        self.assertEqual(history.locator('> summary').inner_text(), '其他视频 1 个 · 旧版登记 2 条')
+        history.locator('> summary').click()
+        lines = history.locator('.video-publication-superseded > summary').all_inner_texts()
+        self.assertEqual(lines, ['2026-10-23 登记 · 发布日期 2026-10-18 · 已被 2026-10-29 的登记取代',
+                                 '2026-10-19 登记 · 发布日期 2026-10-19 · 已被 2026-10-23 的登记取代'])
+        self.assertEqual(history.locator(':scope > .video-publication-receipt').count(), 1)
+        self.assertIn('7698015486365273999', history.locator(':scope > .video-publication-receipt').inner_text())
+        self.assertIn('未记录上传', history.locator('.video-publication-superseded').nth(1).text_content())
 
     def test_receipt_shows_the_calendar_mark_and_toggles_it_in_place(self):
         self.page.add_script_tag(path=str(COPY_ID))
@@ -204,6 +248,52 @@ class VideoPublicationBrowserTests(unittest.TestCase):
         call = self.page.evaluate('window.calls[0]')
         self.assertTrue(call['url'].endswith('/publication/calendar'))
         self.assertEqual(call['body'], {'publication_id': 'VPU-111111111111', 'calendar_uploaded': True})
+
+    def test_a_detected_post_registers_in_one_click_and_another_can_be_refused(self):
+        self.mount("""window.responseStatus = 0;window.publicationDetail.timeline_uid = 'timeline-1';
+          window.publicationDetail.candidates = [
+            {post_id:'7700962284323065118',account:'sharpaledgelab',title:'🔴Give Your Wrist a Guide#SHARPAL202H',published_on:'2026-10-26',
+             source:'tk_lens',source_label:'TK 看板',account_known:true,also:['PRD-222222222222 · Lab261025-202-1']},
+            {post_id:'7701324000684805406',account:'zackontheedge',title:'🔴Give Your Wrist a Guide#x',published_on:'2026-10-27',
+             source:'shop_export',source_label:'Shop 导出',account_known:false,also:[]}];""")
+        rows = self.page.locator('.video-publication-candidate')
+        self.assertEqual(rows.count(), 2)
+        self.assertIn('Give Your Wrist a Guide', rows.nth(0).inner_text())
+        self.assertIn('也对得上另 1 条', rows.nth(0).inner_text())
+        self.assertIn('账号待核对', rows.nth(1).inner_text())
+        rows.nth(1).get_by_role('button', name='不是').click()
+        self.page.wait_for_function('window.calls.length === 1')
+        self.assertEqual(self.page.evaluate('window.calls[0]'), {'post_id': '7701324000684805406', 'timeline_uid': 'timeline-1'})
+        self.page.locator('.video-publication-candidate').first.get_by_role('button', name='登记').click()
+        self.page.wait_for_function('window.saved')
+        body = self.page.evaluate('window.calls[1]')
+        self.assertEqual((body['post_id'], body['account'], body['published_on'], body['calendar_uploaded']),
+                         ('7700962284323065118', 'sharpaledgelab', '2026-10-26', True))
+        self.assertEqual(body['post_url'], 'https://www.tiktok.com/@sharpaledgelab/video/7700962284323065118')
+
+    def test_an_automatic_registration_is_marked_and_can_be_undone(self):
+        self.page.evaluate("""async () => {
+          window.toast = message => { window.toasted = message; };
+          window.calls = [];window.saved = false;
+          window.publicationDetail = {...window.publicationDetail,can_register:true,
+            publication:{id:'VPU-111111111111',account:'sharpaledgelab',published_on:'2026-10-26',post_id:'7700962284323065118',script_version:1,
+              calendar_uploaded:true,source_current:true,source:{take:{id:'TAK-1'},timeline:{name:'Reviewed'}},registered_at:'2026-10-26',
+              auto:{source:'tk_lens',title:'🔴Give Your Wrist a Guide#SHARPAL202H'}}};
+          const api = async (url,options) => {
+            if (!options) return structuredClone(window.publicationDetail);
+            window.calls.push({url,body:structuredClone(options.body)});
+            return {warning:''};
+          };
+          await VideoPublication.mount(document.querySelector('#publication'),{job:{id:'PRD-111111111111'},api,onSaved:async () => {window.saved = true;}});
+        }""")
+        receipt = self.page.locator('.video-publication-receipt')
+        self.assertIn('自动登记', receipt.inner_text())
+        receipt.get_by_role('button', name='撤销').click()
+        self.page.wait_for_function('window.saved')
+        call = self.page.evaluate('window.calls[0]')
+        self.assertTrue(call['url'].endswith('/publication/undo-auto'))
+        self.assertEqual(call['body'], {'publication_id': 'VPU-111111111111'})
+        self.assertIn('不会再自动登记', self.page.evaluate('window.toasted'))
 
     def test_definitive_conflict_can_refresh_version_before_new_submission(self):
         self.fill()

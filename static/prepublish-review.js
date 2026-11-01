@@ -9,6 +9,9 @@ window.PrepublishReview = (() => {
   const confidence = {high:'高',medium:'中',low:'低'};
   const timers = new WeakMap();
   const eligible = job => ['approved','awaiting_review'].includes(job.status) && !job.archived;
+  const timelines = job => (job.timelines || []).filter(row => row.unique_id && !row.archived);
+  // Same pick as the server's default: the selected voiceover's timeline, else the latest.
+  const defaultTimeline = (job,rows) => ([...rows].reverse().find(row => job.selected_take && row.take_id === job.selected_take) || rows[rows.length - 1]).unique_id;
   const when = value => {const date = new Date(value || '');return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});};
 
   function finding(review,item) {
@@ -40,11 +43,17 @@ window.PrepublishReview = (() => {
   function render(host,job,data,state) {
     const reviews = data.reviews || [], running = reviews.find(row => row.status === 'running');
     const latest = reviews.find(row => row.id === data.latest_id), lastFailed = reviews[0] && reviews[0].status !== 'completed' && reviews[0].status !== 'running' ? reviews[0] : null;
-    const path = state.path ?? (reviews[0]?.file?.path || '');
-    const form = eligible(job) ? `<form class="prepublish-form"><label class="field"><span>导出成片的完整路径</span><input name="file_path" required maxlength="2000" autocomplete="off" value="${esc(path)}" placeholder="D:\\导出\\Lab261022-202-3.mp4"></label><button class="primary" type="submit" ${running ? 'disabled' : ''}>${latest ? '重新审查' : '开始审查'}</button></form>`
-      : '<p class="context-note">剪辑审查完成、导出成片后可以发起。</p>';
+    const path = state.path || '', lines = timelines(job);
+    const source = lines.length
+      ? `<div class="field"><span>审查对象</span>${lines.length > 1
+        ? `<select name="timeline">${lines.map(row => `<option value="${esc(row.unique_id)}"${row.unique_id === (state.timeline || defaultTimeline(job,lines)) ? ' selected' : ''}>达芬奇时间线 · ${esc(row.name || row.unique_id)}</option>`).join('')}</select>`
+        : `<strong class="prepublish-target">达芬奇时间线 · ${esc(lines[0].name || lines[0].unique_id)}</strong>`}</div>`
+      : '';
+    const file = `<${lines.length ? 'details' : 'div'} class="prepublish-file"${path ? ' open' : ''}>${lines.length ? '<summary>改用已导出的成片</summary>' : ''}<label class="field"><span>导出成片的完整路径</span><input name="file_path" maxlength="2000" autocomplete="off" value="${esc(path)}" placeholder="D:\\导出\\Lab261022-202-3.mp4"${lines.length ? '' : ' required'}></label></${lines.length ? 'details' : 'div'}>`;
+    const form = eligible(job) ? `<form class="prepublish-form"><div class="prepublish-source">${source}${file}</div><button class="primary" type="submit" ${running ? 'disabled' : ''}>${latest ? '重新审查' : '开始审查'}</button></form>`
+      : '<p class="context-note">剪辑审查完成后可以发起。</p>';
     host.innerHTML = `<div class="section-title-row"><h2>发布前审查 <small>开头3秒 · 为什么要买 · 会不会被封 · 事前验尸</small></h2></div>
-      <p class="context-note">用没参与制作的视角攻击导出的成片；不看表现数据。「必须修」逐条确认前不能登记发布。</p>
+      <p class="context-note">用没参与制作的视角攻击成片，直接由达芬奇渲染时间线审查，无需先导出；不看表现数据。「必须修」逐条确认前不能登记发布。</p>
       ${running ? `<p class="production-busy">正在审查 ${esc(running.file?.name)} · ${esc(running.phase || '处理中')} <button type="button" class="subtle compact" data-cancel="${esc(running.id)}">取消</button></p>` : ''}
       ${lastFailed ? `<p class="ai-error">上次审查${lastFailed.status === 'cancelled' ? '已取消' : '没有完成'}：${esc(lastFailed.error || '原因未记录')}</p>` : ''}
       ${latest ? completed(job,latest,data.blocking) : ''}
@@ -70,10 +79,12 @@ window.PrepublishReview = (() => {
     const {job,api} = options, reload = () => load(host,options,state);
     const form = host.querySelector('.prepublish-form');
     form?.addEventListener('input',() => {state.path = form.elements.file_path.value;});
+    form?.addEventListener('change',() => {if (form.elements.timeline) state.timeline = form.elements.timeline.value;});
     form?.addEventListener('submit',async event => {
       event.preventDefault();
       const button = form.querySelector('button');button.disabled = true;
-      try {await api(base(job.id),{method:'POST',body:{request_id:crypto.randomUUID(),file_path:form.elements.file_path.value.trim()}});await reload();}
+      const filePath = form.elements.file_path.value.trim(), timeline = form.elements.timeline?.value || '';
+      try {await api(base(job.id),{method:'POST',body:{request_id:crypto.randomUUID(),file_path:filePath,...(timeline && !filePath ? {timeline} : {})}});await reload();}
       catch (problem) {button.disabled = false;toast(problem.message || '没能发起审查。',true);}
     });
     host.querySelector('[data-cancel]')?.addEventListener('click',async event => {
