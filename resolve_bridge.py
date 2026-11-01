@@ -65,6 +65,48 @@ def resolve_process_running(image="resolve.exe"):
         return None
 
 
+def resolve_window_ready(image="resolve.exe"):
+    """Whether Resolve's main window is up: its title then reads "DaVinci Resolve ... - <project>"."""
+    if os.name != "nt":
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        user32, kernel32 = ctypes.WinDLL("user32", use_last_error=True), ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        user32.IsWindowVisible.argtypes = user32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
+        user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+        user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+        found = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def visit(hwnd, _):
+            if user32.IsWindowVisible(hwnd) and user32.GetWindowTextLengthW(hwnd):
+                title = ctypes.create_unicode_buffer(300)
+                user32.GetWindowTextW(hwnd, title, 300)
+                if title.value.startswith("DaVinci Resolve") and " - " in title.value:
+                    pid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+                    if handle:
+                        try:
+                            path, size = ctypes.create_unicode_buffer(520), wintypes.DWORD(520)
+                            if kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)) and path.value.lower().endswith("\\" + image):
+                                found.append(hwnd)
+                        finally:
+                            kernel32.CloseHandle(handle)
+            return True
+
+        user32.EnumWindows(visit, 0)
+        return bool(found)
+    except (OSError, AttributeError, ctypes.ArgumentError):
+        return True
+
+
 def focus_resolve_window(image="resolve.exe"):
     """Bring the main Resolve window to the foreground; best effort, returns whether a window was raised."""
     if os.name != "nt":
@@ -120,11 +162,33 @@ def focus_resolve_window(image="resolve.exe"):
         return False
 
 
+def open_resolve():
+    """Start DaVinci Resolve detached from the workbench; False when its executable cannot be found or started."""
+    folders = [Path(path).parent for path in (os.environ.get("RESOLVE_MCP"), *MCP_FILES) if path]
+    exe = next((folder / "Resolve.exe" for folder in folders if (folder / "Resolve.exe").is_file()), None)
+    if exe is None or os.name != "nt":
+        return False
+    try:
+        subprocess.Popen([str(exe)], cwd=str(exe.parent), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         close_fds=True, creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    except OSError:
+        return False
+    return True
+
+
+LAUNCH_WAIT = 180  # seconds Resolve gets to start and accept scripting calls
+LAUNCH_POLL = 3
+LAUNCH_QUIET = 60  # seconds without scripting calls while waiting for the main window, in case its title never shows
+
+
 class ResolveBridge:
-    def __init__(self, *, runner=subprocess.run, python=sys.executable, worker=WORKER, probe=None):
+    def __init__(self, *, runner=subprocess.run, python=sys.executable, worker=WORKER, probe=None, launch=None, launch_wait=LAUNCH_WAIT, window_ready=None):
         self.runner, self.python, self.worker = runner, python, worker
-        # A substituted runner (tests, previews) has no real DaVinci process to look for.
+        # A substituted runner (tests, previews) has no real DaVinci process to look for or to start.
         self.probe = probe or (resolve_process_running if runner is subprocess.run else (lambda: None))
+        self.window_ready = window_ready or (resolve_window_ready if runner is subprocess.run else (lambda: True))
+        self.launch = launch if launch is not None else (open_resolve if runner is subprocess.run else None)
+        self.launch_wait = launch_wait
         self.lock = threading.Lock()
         self._access_lock = threading.Lock()
         self._access_waiters = []
@@ -178,10 +242,7 @@ class ResolveBridge:
                 if ticket in self._access_waiters:
                     self._access_waiters.remove(ticket)
 
-    def run(self, command, payload=None, timeout=180, held=False):
-        """`held` means the caller already holds the lock, as a running editing task does for its whole run."""
-        if not held and not self.lock.acquire(blocking=False):
-            raise VoiceError(409, "达芬奇正在执行另一项工作台操作（可能是 AI 剪辑），请完成后再试。")
+    def _call(self, command, payload, timeout):
         try:
             completed = self.runner([self.python, "-X", "utf8", "-I", str(self.worker)],
                                     input=json.dumps({**(payload or {}), "command": command}, ensure_ascii=False).encode("utf-8"),
@@ -191,13 +252,48 @@ class ResolveBridge:
             raise VoiceError(504, "达芬奇长时间没有响应，本次操作已停止。请到达芬奇里核对时间线是否已经建好，再决定是否重试。") from exc
         except OSError as exc:
             raise VoiceError(503, "无法启动达芬奇操作进程。") from exc
+        try:
+            return json.loads(completed.stdout.decode("utf-8"))
+        except (ValueError, UnicodeError, AttributeError) as exc:
+            raise VoiceError(502, "达芬奇操作没有返回可读结果，请到达芬奇里核对。") from exc
+
+    def _open_if_closed(self):
+        """Start DaVinci when it is known not to be running, then wait until it accepts scripting calls."""
+        if self.launch is None or self.probe() is not False:
+            return
+        try:  # The process list can miss a Resolve that is running; one answered call proves it is.
+            if self._call("ping", None, 30).get("ok"):
+                return
+        except VoiceError:
+            pass
+        if not self.launch():
+            raise VoiceError(503, "达芬奇没有打开，也没有找到 Resolve.exe，请手动打开 DaVinci Resolve 后重试。")
+        started = time.monotonic()
+        deadline = started + self.launch_wait
+        while time.monotonic() < deadline:
+            time.sleep(LAUNCH_POLL)
+            if self.probe() is False:
+                continue
+            # A scripting call while Resolve starts up can break its script server until the next restart.
+            if time.monotonic() < started + LAUNCH_QUIET and not self.window_ready():
+                continue
+            try:
+                if self._call("ping", None, 30).get("ok"):
+                    return
+            except VoiceError:
+                continue
+        raise VoiceError(504, "已替你打开达芬奇，但等了 3 分钟还没连上。请确认它已启动，并在偏好设置 → 系统 → 常规里把“外部脚本使用”设为“本地”。")
+
+    def run(self, command, payload=None, timeout=180, held=False):
+        """`held` means the caller already holds the lock, as a running editing task does for its whole run."""
+        if not held and not self.lock.acquire(blocking=False):
+            raise VoiceError(409, "达芬奇正在执行另一项工作台操作（可能是 AI 剪辑），请完成后再试。")
+        try:
+            self._open_if_closed()
+            result = self._call(command, payload, timeout)
         finally:
             if not held:
                 self.lock.release()
-        try:
-            result = json.loads(completed.stdout.decode("utf-8"))
-        except (ValueError, UnicodeError, AttributeError) as exc:
-            raise VoiceError(502, "达芬奇操作没有返回可读结果，请到达芬奇里核对。") from exc
         if not result.get("ok"):
             raise VoiceError(409, result.get("error") or "达芬奇操作没有完成。")
         if command == "open" and self.runner is subprocess.run:

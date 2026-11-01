@@ -301,7 +301,8 @@ def write_task_files(folder, found, index, entries, listing, *, deduplicate_sour
     (Path(folder) / "candidates.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     lines = ["# 候选画面", "",
              f"每行一个素材片段：候选编号｜标签｜标签状态｜素材时间线位置（帧，半开）｜时长｜{'使用次数' if count_usage else '可用范围'}｜对照图｜画面描述。",
-             "「已核标签」是打标签技能看过画面后写的，可直接按标签选材；其余状态的片段，选用前先看对照图或已有描述。",
+             "「已核标签」是打标签技能看过画面后写的，可直接按标签选片段；其余状态的片段，选用前先看对照图或已有描述。"
+             "标签不说明动作在第几秒，只截取片段的一部分时，都要按技能「定入出点」看画面。",
              ("可用范围按实时工程里其他成片时间线算出，源帧坐标；已被用尽的片段没有列出。"
               if deduplicate_source_ranges else
               "按完整素材源区间提供候选；每行注明这个片段已被几条成片用过（同一成片里用几次都算 1 次），同一素材时间线内按用过次数从少到多排列。"

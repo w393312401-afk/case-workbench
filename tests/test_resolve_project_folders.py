@@ -32,6 +32,21 @@ class Project:
         return Timeline(f"tl-{self.folder}")
 
 
+class BlankProject(Project):
+    """The empty project Resolve starts with; saving it would open a naming dialog that blocks scripting."""
+
+    def __init__(self):
+        super().__init__("", "Untitled Project")
+
+    def GetTimelineCount(self):
+        return 0
+
+    def GetMediaPool(self):
+        pool = type("Pool", (), {})()
+        pool.GetRootFolder = lambda: type("Root", (), {"GetClipList": lambda self: [], "GetSubFolderList": lambda self: []})()
+        return pool
+
+
 class Manager:
     def __init__(self, folder, name):
         self.current, self.at, self.calls = Project(folder, name), "", []
@@ -98,6 +113,21 @@ class RequestProjectTests(unittest.TestCase):
         project = worker.request_project(resolve, {"project": "202H", "creator": "Zack"})
         self.assertEqual(project.folder, "B跨境店渠道号-zack")
         self.assertEqual(worker.located(project), {"project_id": "id-zack", "folder": "B跨境店渠道号-zack"})
+        self.assertEqual([call[0] for call in resolve.manager.calls if call[0] in {"save", "close", "load"}], ["save", "close", "load"])
+
+    def test_a_blank_untitled_project_is_neither_saved_nor_closed_on_the_way(self):
+        resolve = Resolve("A本土店渠道号-Lab")
+        resolve.manager.current = BlankProject()
+        project = worker.request_project(resolve, {"project": "202H", "creator": "Zack"})
+        self.assertEqual(project.folder, "B跨境店渠道号-zack")
+        self.assertEqual([call[0] for call in resolve.manager.calls if call[0] in {"save", "close", "load"}], ["load"])
+
+    def test_an_untitled_project_that_holds_a_timeline_is_still_saved_first(self):
+        resolve = Resolve("A本土店渠道号-Lab")
+        blank = BlankProject()
+        blank.GetTimelineCount = lambda: 1
+        resolve.manager.current = blank
+        worker.request_project(resolve, {"project": "202H", "creator": "Zack"})
         self.assertEqual([call[0] for call in resolve.manager.calls if call[0] in {"save", "close", "load"}], ["save", "close", "load"])
 
     def test_known_project_id_keeps_the_open_project_untouched(self):

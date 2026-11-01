@@ -25,9 +25,10 @@ from creation_store import CreationError
 from direction_store import fingerprint, now, product_key
 from elevenlabs_client import DEFAULT_MODEL, MODELS, VOICE_ID, VoiceError, clean_settings, model
 from production_operations import ProductionOperations, durable_json
-from production_store import FRAME_RATES, JOB_ID, TAKE_ID, apply_readings, supplement_markdown, take_quality, job_status
+from production_store import (FRAME_RATES, JOB_ID, TAKE_ID, apply_readings, current_manual_receipt, skill_delivery_reviewable,
+                              supplement_markdown, take_quality, job_status)
 from task_activity import activity_label, record_activity, safe_error, settle_resolved_activity
-from variant_parse import parse_variants, same_lines, spoken_lines, variant_script
+from variant_parse import parse_variants, same_lines, spoken_lines, variant_directions, variant_script
 
 MAX_LINES = 80
 MAX_LINE_CHARS = 1000
@@ -38,6 +39,14 @@ MAX_LEAD_SECONDS = 10
 QUEUE_GRACE = 5  # Brief DaVinci holds (status reads, clip reveals) end before a build is reported as queued.
 TIMELINE_WAIT = 150 * 60  # As long as an AI edit may hold DaVinci.
 OPTION_KEYS = {"code", "name", "fps", "width", "height", "lead_seconds", "markers"}
+
+
+def _reviewable_video_edit(edit):
+    """Skill delivery and legacy engineering checks both require a saved, complete result."""
+    if edit.get("completion_policy") == "skill_delivery":
+        return skill_delivery_reviewable(edit)
+    return (edit.get("status") == "awaiting_review" and
+            (edit.get("validation") or {}).get("status") == "awaiting_review")
 
 
 class QueueCancelled(VoiceError):
@@ -316,6 +325,19 @@ class ProductionWorkbenchMixin:
         return (self.generate_take(identifier, original) if body["kind"] == "take" else
                 self.build_timeline(identifier, original))
 
+    def abandon_timeline(self, identifier, body):
+        """Give up an unfinished build that cannot be recovered, so the job can build again."""
+        operations = self._production_operations()
+        request_id = body.get("request_id") if isinstance(body, dict) else None
+        original = operations.recovery_body(identifier, {"request_id": request_id, "kind": "timeline"})
+        with operations.guard("timeline", original) as record:
+            if record.get("state") == "committed" or record.get("result"):
+                raise VoiceError(409, "这次建线已有结果，请恢复现有结果，不能放弃。")
+            if record.get("state") != "safe_failed":
+                operations.update(record, "safe_failed", cancelled=True,
+                                  error="已放弃这次建线。达芬奇里如有名字带 __WB_ 的半成品时间线，可以直接删除。")
+        return {"ok": True}
+
     def _commit_production_operation(self, operations, record):
         # Result is already durable. A catalog write failure leaves it available for a restart/retry.
         try:
@@ -340,22 +362,43 @@ class ProductionWorkbenchMixin:
             with self.lock:
                 job["recovery_operations"] = self._timeline_state(job, recoveries.get(job["id"], []))
             self._production_edit_state(job)
-        for item in result.get("carousels", []):
-            with self.lock:
-                item["clip_picking_live"] = copy.deepcopy(getattr(self, "_clip_ai_live", {}).get(item["id"]))
-            if item.get("archived"):
-                continue
-            # Resolve persisted running records after a restart. Idle image and
-            # package integrity is checked by the separate deliveries read, so
-            # ordinary list reads need not scan every finished image twice.
-            if hasattr(self, "carousel_live") and any(run.get("status") == "running" for run in item.get("searches", [])):
-                self.carousel_live(item)
-            running_images = any(run.get("status") == "running" for run in item.get("generations", []))
-            running_reviews = any(run.get("status") == "running" for slide in item.get("slides", [])
-                                  for output in slide.get("outputs", []) for run in output.get("review_runs", []))
-            if hasattr(self, "carousel_images_live") and (running_images or running_reviews):
-                self.carousel_images_live(item)
         return self.attach_content_publications(result) if hasattr(self, "attach_content_publications") else result
+
+    def production_deliveries(self, product=None):
+        with self.lock:
+            catalog = self.production.public(product)
+        rows = []
+        for job in catalog.get("jobs", []):
+            if job.get("archived"):
+                continue
+            if receipt := current_manual_receipt(job):
+                rows.append({"kind": "video", **{key: job.get(key, "") for key in
+                            ("id", "product", "title", "direction_id", "updated_at")},
+                            "timeline_name": receipt["timeline_name"], "timeline_uid": receipt["timeline_uid"],
+                            "edit_id": None, "status": "approved", "approved_at": receipt["at"],
+                            "completion_basis": "human_review"})
+                continue
+            timelines = {entry.get("unique_id"): entry for entry in job.get("timelines", []) if not entry.get("archived")}
+            # A later attempt supersedes the earlier result for that same
+            # timeline, including a running or failed repair. Never revive
+            # a previous pass by filtering failures out before selecting.
+            latest = {}
+            for entry in job.get("edits", []):
+                latest[entry.get("timeline_uid")] = entry
+            edit = next((entry for entry in reversed(job.get("edits", []))
+                         if latest.get(entry.get("timeline_uid")) is entry and
+                         _reviewable_video_edit(entry) and
+                         entry.get("timeline_uid") in timelines and entry.get("timeline_name") and
+                         job.get("selected_take") and
+                         timelines[entry["timeline_uid"]].get("take_id") == job["selected_take"]), None)
+            if edit:
+                rows.append({"kind": "video", **{key: job.get(key, "") for key in
+                            ("id", "product", "title", "direction_id", "updated_at")},
+                            "timeline_name": edit["timeline_name"], "timeline_uid": edit["timeline_uid"],
+                            "edit_id": edit.get("id"), "status": "awaiting_review",
+                            "approved_at": (edit.get("approval") or {}).get("at", "")})
+        rows.sort(key=lambda value: (value.get("updated_at", ""), value["id"]), reverse=True)
+        return {"items": rows}
 
     def _production_edit_state(self, job):
         """Show ended-but-unsaved edits as recoverable, instead of an endless running task."""
@@ -429,6 +472,8 @@ class ProductionWorkbenchMixin:
         variants = parse_variants(turn["output"])
         if not variants:
             raise VoiceError(409, "这一轮候选里没有识别到可配音的口播：既没有「口播（配音用）」代码块，也没有可识别的 English/口播 段落。")
+        picked = variant_directions(turn["output"])
+        variants = [{**variant, "suggested_direction": picked[position] if position < len(picked) else ""} for position, variant in enumerate(variants)]
         return {"task_id": task_id, "round_id": round_id, "task_revision": task.get("revision"), "variants": variants}
 
     def eleven_status(self):
@@ -840,7 +885,9 @@ class ProductionWorkbenchMixin:
                         raise VoiceError(404, "这张制作单不存在。")
                     if job["archived"]:
                         raise VoiceError(409, "制作单已归档，请恢复后再建时间线。")
-                    take = next((item for item in job["takes"] if item["id"] == job["selected_take"]), None)
+                    # A recut keeps the voiceover of the timeline it compares with; any other build uses the selected one.
+                    take_id = body.get("take_id") or job["selected_take"]
+                    take = next((item for item in job["takes"] if item["id"] == take_id), None)
                     if not take:
                         raise VoiceError(409, "请先选用一版配音，再建时间线。")
                     if not take_quality(take, len(job["lines"])):
@@ -901,6 +948,7 @@ class ProductionWorkbenchMixin:
                           "markers": len(result.get("markers") or []), "warnings": warnings, "built_at": now(),
                           "operation_key": operation["operation_key"], "saved": result.get("saved") is True,
                           "build_request_id": body["request_id"],
+                          **({"recut_of": body["recut_of"]} if body.get("recut_of") else {}),
                           **{key: result[key] for key in ("folder", "project_id") if result.get(key)},
                           "materials": [name for name in result.get("materials") or [] if isinstance(name, str)]}
                 operation = operations.update(operation, "result_ready", result=record, error="")
@@ -923,5 +971,12 @@ class ProductionWorkbenchMixin:
             # Relative to the timeline start, matching edit report and engineering-summary gaps.
             # The worker checks the live duration; the saved build record may predate manual trimming.
             payload["frame"] = body["frame"]
-        return {"ok": True, **{key: value for key, value in self.resolve.run(
-            "open", payload, timeout=30).items() if key != "ok"}}
+        result = self.resolve.run("open", payload, timeout=30)
+        location = {key: result[key] for key in ("project_id", "folder") if result.get(key) and not record.get(key)}
+        if location:
+            try:
+                self.production.mutate("timeline_location", {"request_id": "location-" + uuid4().hex, "job_id": identifier,
+                                                             "timeline_uid": record["unique_id"]}, location)
+            except Exception:
+                pass  # The timeline is open; pinning it is retried on the next open.
+        return {"ok": True, **{key: value for key, value in result.items() if key not in {"ok", "project_id", "folder"}}}

@@ -222,6 +222,14 @@ class WorkerTests(unittest.TestCase):
                          [(["夹具 BK001"], ["夹具 BK001"]), (["手写 推磨"], [])])
         self.assertEqual([(item["timeline_name"], item["source_start"]) for item in reply["used"]], [("Lab261008-202-1", 70)])
 
+    def test_compared_cuts_are_left_out_of_the_use_count(self):
+        material = Timeline("Buck110折刀成品素材", "mat-1", [Item("i1", 0, 60, 0, ["夹具 BK001"], "material_index_v1:i1")])
+        rival = Timeline("Lab261008-202-1", "e1", [Item("x", 0, 20, 0)])
+        other = Timeline("Lab261008-202-2", "e2", [Item("y", 0, 20, 0)])
+        reply = resolve_worker.candidates(Resolve(Project([material, rival, other])),
+                                          {"project": "202H", "materials": [], "target_uid": "t1", "count_usage": True, "ignore_usage": ["e1"]})
+        self.assertEqual([item["timeline_name"] for item in reply["used"]], ["Lab261008-202-2"])
+
     def test_default_candidates_never_read_other_edits(self):
         material = Timeline("Buck110折刀成品素材", "mat-1", [Item("i1", 0, 60, 0, ["夹具 BK001"], "material_index_v1:i1")])
         edit = Timeline("Lab261008-202-1", "e1", [])

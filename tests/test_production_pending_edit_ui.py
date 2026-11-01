@@ -230,5 +230,62 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+    def recut_setup(self, state="needs_material"):
+        edit = fixture.ProductionValidationBrowserTests.edit(self, state, validated=False)
+        edit.update(take_id=TAKE_ID, effective_model="gpt-6.1-terra", finished_at="" if state == "running" else edit["finished_at"])
+        self.payload["job"].update(status="editing" if state == "running" else "needs_material", timeline_building=None, edits=[edit], timelines=[
+            {"unique_id": "uid-own", "name": "Lab261011-202-1", "creator": "Lab", "markers": 1, "frames": 60, "fps": "29.97",
+             "take_id": TAKE_ID, "built_at": "2026-10-11"}])
+        page = self.open_page()
+        foldable = page.locator("#edit-panel summary", has_text="再进行一次 AI 剪辑")
+        if foldable.count():
+            foldable.first.click()
+        return page, self.form(page)
+
+    def test_a_timeline_with_a_cut_is_recut_on_a_new_timeline_by_default(self):
+        page, form = self.recut_setup()
+        expect(form.locator("[data-recut-row]")).to_be_visible()
+        submit = form.locator('button[type="submit"]')
+        expect(submit).to_have_text("另建时间线并开始剪辑")
+        expect(form.locator("[data-copy-handoff]")).to_be_disabled()
+        expect(submit).to_be_enabled()
+        submit.click()
+        expect(page.locator("#toast")).to_contain_text("已另建时间线")
+        body = self.calls[0]["body"]
+        self.assertEqual(body["recut_from"], "uid-own")
+        self.assertNotIn("timeline", body)
+
+    def test_the_user_can_still_revise_the_cut_in_place(self):
+        page, form = self.recut_setup()
+        form.locator('[name="recut"]').uncheck()
+        submit = form.locator('button[type="submit"]')
+        expect(submit).to_have_text("开始 AI 剪辑")
+        expect(form.locator("[data-copy-handoff]")).to_be_enabled()
+        submit.click()
+        expect(page.locator("#toast")).to_be_visible()
+        body = self.calls[0]["body"]
+        self.assertEqual(body["timeline"], "uid-own")
+        self.assertNotIn("recut_from", body)
+
+    def test_a_running_timeline_can_only_be_recut_so_models_can_run_side_by_side(self):
+        _, form = self.recut_setup("running")
+        expect(form.locator('[name="recut"]')).to_be_checked()
+        expect(form.locator('[name="recut"]')).to_be_disabled()
+        expect(form.locator('button[type="submit"]')).to_have_text("另建时间线并开始剪辑")
+
+    def test_an_uncut_timeline_asks_nothing(self):
+        self.payload["job"].update(status="timeline", timeline_building=None, timelines=[
+            {"unique_id": "uid-own", "name": "Lab261011-202-1", "creator": "Lab", "markers": 1, "frames": 60, "fps": "29.97",
+             "take_id": TAKE_ID, "built_at": "2026-10-11"}])
+        form = self.form(self.open_page())
+        expect(form.locator("[data-recut-row]")).to_be_hidden()
+        expect(form.locator('button[type="submit"]')).to_have_text("开始 AI 剪辑")
+
+    def test_the_timeline_card_names_the_model_that_cut_it(self):
+        page, _ = self.recut_setup()
+        page.locator('.production-steps [data-step="timeline"]').click()
+        expect(page.locator('[data-timeline-id="uid-own"] [data-timeline-model]')).to_contain_text("gpt-6.1-terra")
+
+
 if __name__ == "__main__":
     unittest.main()

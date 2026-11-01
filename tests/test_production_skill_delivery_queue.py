@@ -13,7 +13,7 @@ sys.path.insert(0, str(APP))
 
 import test_production_manual_completion as manual_fixture
 from production_store import ProductionStore
-from workbench_carousel_delivery import CarouselDeliveryMixin
+from workbench_production import ProductionWorkbenchMixin
 
 
 class SkillDeliveryQueueTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class SkillDeliveryQueueTests(unittest.TestCase):
         self.store.write(data)
         before = self.store.path.read_bytes()
         with patch.object(self.store, "mutate", side_effect=AssertionError("queue must stay read-only")):
-            rows = CarouselDeliveryMixin.production_deliveries(self.bench)["items"]
+            rows = ProductionWorkbenchMixin.production_deliveries(self.bench)["items"]
         self.assertEqual(self.store.path.read_bytes(), before)
         return rows
 

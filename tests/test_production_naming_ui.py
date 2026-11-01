@@ -19,7 +19,6 @@ class ProductionNamingQueueBrowserTests(unittest.TestCase):
     request = queue.ProductionQueueBrowserTests.request
     make_playable_video = queue.ProductionQueueBrowserTests.make_playable_video
     job = queue.ProductionQueueBrowserTests.job
-    carousel = queue.ProductionQueueBrowserTests.carousel
     catalog = queue.ProductionQueueBrowserTests.catalog
     open_queue = queue.ProductionQueueBrowserTests.open_queue
     row = queue.ProductionQueueBrowserTests.row
@@ -54,22 +53,6 @@ class ProductionNamingQueueBrowserTests(unittest.TestCase):
         expect(page.locator(".flow-row")).to_have_count(2)
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 
-    def test_unbuilt_video_and_carousel_share_the_topic_and_format_rule(self):
-        draft = self.named_job(1, "未建时间线也能看到这条视频的主题")
-        draft["timelines"] = []
-        carousel = self.carousel(1, current=False)
-        carousel["title"] = "202H-S2 图文保留原标题"
-        escaped = self.named_job(2, "")
-        escaped["title"] = "202H-S2 <img src=x onerror=window.__namingExecuted=1>"
-        page = self.open_queue(width=390)
-        expect(self.row(page, draft).locator(".flow-title")).to_have_text("未建时间线也能看到这条视频的主题｜视频方案 1")
-        expect(self.row(page, carousel).locator(".flow-title")).to_have_text("图文保留原标题｜图文")
-        self.assertIn("<img", self.row(page, escaped).locator(".flow-title").inner_text())
-        self.assertEqual(page.locator(".flow-record-title img").count(), 0)
-        self.assertFalse(page.evaluate("Boolean(window.__namingExecuted)"))
-        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
-
-
 class ProductionNamingDetailBrowserTests(unittest.TestCase):
     setUpClass = classmethod(detail.ProductionValidationBrowserTests.setUpClass.__func__)
     tearDownClass = classmethod(detail.ProductionValidationBrowserTests.tearDownClass.__func__)
@@ -90,7 +73,7 @@ class ProductionNamingDetailBrowserTests(unittest.TestCase):
         expected = "Zack261021-202-4｜一块石头只是开始"
         expect(page.locator("[data-production-title]")).to_have_text(expected)
         page.route("**/api/content?*", lambda route: route.fulfill(status=200, content_type="application/json",
-            body=json.dumps(queue.content_response(self.server.app, [job], [], route.request.url), ensure_ascii=False)))
+            body=json.dumps(queue.content_response(self.server.app, [job], route.request.url), ensure_ascii=False)))
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#/202H/content?view=all")
         expect(page.locator(".flow-title")).to_have_text("一块石头只是开始｜视频方案 B")
         expect(page.locator(".flow-record-meta")).to_contain_text("Zack261021-202-4")

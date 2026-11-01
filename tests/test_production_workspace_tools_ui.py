@@ -17,7 +17,7 @@ class ProductionWorkspaceToolsBrowserTests(unittest.TestCase):
 
     def setUp(self):
         browser.WorkbenchBrowserTests.setUp(self)
-        self.data = {"revision": 1, "jobs": [], "carousels": [], "voices": [{"voice_id": "fixtureVoice1234567890", "name": "Fixture", "note": "旧备注"}],
+        self.data = {"revision": 1, "jobs": [], "voices": [{"voice_id": "fixtureVoice1234567890", "name": "Fixture", "note": "旧备注"}],
                      "defaults": {}, "readings": [], "settings": {"creators": ["Lab"]},
                      "product_settings": {"project": "202H", "code": "202", "fps": "30", "width": 1080, "height": 1920,
                                           "audio_bin": "配音", "timeline_bin": "制作"}}
@@ -169,33 +169,6 @@ class ProductionWorkspaceToolsBrowserTests(unittest.TestCase):
         held.pop().fulfill(status=200, content_type='application/json', body=json.dumps(self.data))
         expect(page.locator('#production-settings')).to_have_count(0)
         self.assert_workspace_retained(page)
-
-    def test_batch_delete_preserves_per_order_failures_and_refreshes_content_callback(self):
-        page = self.open_content()
-        sent = []
-        def remove(route):
-            body = route.request.post_data_json
-            sent.append(body)
-            route.fulfill(status=200, content_type='application/json', body=json.dumps({
-                "changed": 1, "failed": 1, "skipped": 0, "results": [
-                    {"id": "PRD-000000000001", "kind": "job", "ok": True, "warnings": []},
-                    {"id": "CAR-000000000002", "kind": "carousel", "ok": False, "error": "仍有任务在运行", "warnings": []}]}))
-        page.route('**/api/production/orders/batch', remove)
-        page.evaluate("""() => {window.__deletedResult=null;void CaseProduction.deleteContentOrders([
-            {id:'PRD-000000000001',kind:'video'},{id:'CAR-000000000002',kind:'carousel'},
-            {id:'PRD-000000000001',kind:'video'}],{onComplete:result => {window.__deletedResult=result;}});} """)
-        dialog = page.locator('.production-dialog')
-        expect(dialog).to_contain_text('所选 2 张制作单')
-        expect(dialog).to_contain_text('仍有任务在运行的制作单会被跳过并说明原因')
-        dialog.locator('[name="sure"]').check()
-        dialog.locator('[data-submit]').click()
-        page.wait_for_function('window.__deletedResult!==null')
-        expect(dialog).to_have_count(0)
-        self.assertEqual(sent[0]['items'], [{'id': 'PRD-000000000001', 'kind': 'job'}, {'id': 'CAR-000000000002', 'kind': 'carousel'}])
-        self.assertEqual(page.evaluate('window.__deletedResult.failed'), 1)
-        expect(page.locator('#toast')).to_contain_text('仍有任务在运行')
-        self.assert_workspace_retained(page)
-
 
 if __name__ == '__main__':
     unittest.main()

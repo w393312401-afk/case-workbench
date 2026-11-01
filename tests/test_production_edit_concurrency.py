@@ -197,66 +197,6 @@ class EditConcurrencyTests(unittest.TestCase):
         self.assertEqual(events[2][2], [job["timelines"][0]["name"]])
         self.assertEqual([row["status"] for row in self.bench.production.job(job["id"])["edits"]], ["completed", "completed"])
 
-    def test_a_later_edit_snapshots_before_a_planned_edit_still_waiting_to_place_shots(self):
-        job = self.two_timelines()
-        events, lock = [], threading.Lock()
-        hold, held = threading.Event(), threading.Event()
-        original = fixture.Runner.__call__
-
-        def log(*event):
-            with lock:
-                events.append(event)
-
-        def runner(runner_self, args, input, **options):
-            request = json.loads(input.decode("utf-8"))
-            if request["command"] == "candidates":
-                log("snapshot", request["target_uid"])
-            return original(runner_self, args, input, **options)
-
-        def foreign():
-            # Another project's edit or a carousel step holds DaVinci while the first edit finishes planning.
-            with self.bench.resolve.access(timeout=5):
-                held.set()
-                hold.wait(5)
-
-        def plan(edit_id, folder, *args):
-            log("plan", edit_id)
-            if len([event for event in events if event[0] == "plan"]) == 1:
-                threading.Thread(target=foreign, daemon=True).start()
-                if not held.wait(5):
-                    raise RuntimeError("the foreign task never got DaVinci")
-            return {"workers": 1, "completed": 1, "failed": 0}
-
-        def write(prompt, *, cwd, **options):
-            log("place", Path(cwd).name)
-            return fixture.REPORT
-
-        def until(condition):
-            deadline = time.monotonic() + 5
-            while not condition():
-                if time.monotonic() > deadline:
-                    raise AssertionError("timed out")
-                time.sleep(.01)
-
-        try:
-            with patch.object(fixture.Runner, "__call__", runner), patch.object(self.bench, "_plan_edit", side_effect=plan), \
-                 patch.object(self.editor, "run", side_effect=write):
-                first = self.start(job, timeline="uid-1")["edit"]
-                # Nobody waited at the gate, so the first edit queues to place shots behind the foreign task.
-                until(lambda: getattr(self.bench, "_edit_editing_places", {}) and len(self.bench.resolve._access_waiters) == 1)
-                second = self.start(job, timeline="uid-2")["edit"]
-                # The second snapshot is queued ahead of the first edit's waiting request.
-                until(lambda: len(self.bench.resolve._access_waiters) == 2)
-                hold.set()
-                self.wait(job["id"])
-        finally:
-            hold.set()
-        order = [event[:2] for event in events]
-        self.assertEqual(order[:3], [("snapshot", "uid-1"), ("plan", first["id"]), ("snapshot", "uid-2")])
-        self.assertLess(order.index(("snapshot", "uid-2")), order.index(("place", first["id"])))
-        self.assertIn(("place", second["id"]), order)
-        self.assertEqual(getattr(self.bench, "_edit_editing_places", {}), {})
-
     def test_handover_waits_only_for_the_next_edit_to_take_its_place(self):
         self.bench._reserve("EDT-handover")
         self.addCleanup(self.bench._forget, "EDT-handover")

@@ -7,8 +7,6 @@ import unittest
 from unittest.mock import patch
 
 from test_production_validation_ui import ProductionValidationBrowserTests
-from test_production_carousel_images_ui import CarouselImageBrowserTests
-from test_production_queue_ui import ProductionQueueBrowserTests
 
 
 class VoiceRefreshBrowserTests(ProductionValidationBrowserTests):
@@ -90,7 +88,7 @@ class VoiceRefreshBrowserTests(ProductionValidationBrowserTests):
         page.locator('[data-step="voice"]').click()
         page.locator('[data-take-id="TAK-first"] details > summary').click()
         page.locator('[data-select-take="TAK-second"]').click()
-        page.locator('[data-take-id="TAK-second"] .take-head .script-status').get_by_text('已选用',exact=True).wait_for()
+        page.locator('[data-take-id="TAK-second"] .take-head .script-status').get_by_text('当前使用',exact=True).wait_for()
         self.assertTrue(page.evaluate("window.__originalAudio===document.querySelector('[data-take-id=TAK-first] audio')"))
         self.assertTrue(page.locator('[data-take-id="TAK-first"] details').evaluate('node=>node.open'))
         self.assertTrue(page.evaluate("window.__originalForm===document.querySelector('#edit-panel #edit-form')"))
@@ -102,48 +100,11 @@ class VoiceRefreshBrowserTests(ProductionValidationBrowserTests):
         self.assertEqual([call['body']['revision'] for call in self.calls],[1,2])
 
 
-class CarouselRefreshBrowserTests(CarouselImageBrowserTests):
-    def test_unpick_keeps_image_form_and_card_selection(self):
-        page = self.open_images()
-        page.locator('#carousel-image-form textarea[name="instruction"]').fill('Keep this image draft.')
-        page.locator('#carousel-requirements-toggle > summary').click()
-        page.locator('[data-redo-pick="2"]').uncheck()
-        page.evaluate("window.__imageForm=document.querySelector('#carousel-image-form')")
-        page.locator('[data-step="pick"]').click()
-        page.locator('[data-unpick="1"]').click()
-        page.locator('.production-steps [data-step="pick"] small').get_by_text('2/3 已选',exact=True).wait_for()
-        self.assertTrue(page.evaluate("window.__imageForm===document.querySelector('#carousel-image-form')"))
-        self.assertEqual(page.locator('#carousel-image-form textarea[name="instruction"]').input_value(),'Keep this image draft.')
-        self.assertTrue(page.locator('#carousel-requirements-toggle').evaluate('node=>node.open'))
-        self.assertFalse(page.locator('[data-redo-pick="2"]').is_checked())
-        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-step'),'pick')
-        self.assertIn('无底图',page.locator('[data-overview-slide="1"]').get_attribute('aria-label') or '')
-
-
-class QueueProgressBrowserTests(ProductionQueueBrowserTests):
-    def test_running_video_and_carousel_show_concise_live_progress_on_mobile(self):
-        job = self.job(1, 'editing')
-        job['edits'] = [{'id':'EDT-live', 'status':'running', 'live':{'progress':'正在核对 4 / 12 个片段'}}]
-        carousel = self.carousel(1, current=False)
-        carousel['generations'] = [{'id':'GEN-live', 'status':'running', 'progress':'已生成 2 / 5 张图片'}]
-        page = self.open_queue(width=390)
-        page.locator('[data-flow-view="running"]').click()
-        self.row(page, job).locator('.flow-progress').get_by_text('正在核对 4 / 12 个片段', exact=True).wait_for()
-        self.row(page, carousel).locator('.flow-progress').get_by_text('已生成 2 / 5 张图片', exact=True).wait_for()
-        self.assertEqual(page.locator('.flow-row').count(), 2)
-        self.assertEqual(page.locator('.production-queue-progress, .production-queue-thumb').count(), 0)
-        job['edits'][0]['live']['progress'] = '正在挑选镜头'
-        self.row(page, job).locator('.flow-progress').get_by_text('正在挑选镜头', exact=True).wait_for(timeout=10000)
-        self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 391)
-
-
-for case,base in ((VoiceRefreshBrowserTests,ProductionValidationBrowserTests),
-                  (CarouselRefreshBrowserTests,CarouselImageBrowserTests),
-                  (QueueProgressBrowserTests,ProductionQueueBrowserTests)):
+for case,base in ((VoiceRefreshBrowserTests,ProductionValidationBrowserTests),):
     for name in dir(base):
         if name.startswith('test_') and name not in case.__dict__:
             setattr(case,name,None)
-del ProductionValidationBrowserTests,CarouselImageBrowserTests,ProductionQueueBrowserTests,case,base,name
+del ProductionValidationBrowserTests,case,base,name
 
 if __name__ == '__main__':
     unittest.main()

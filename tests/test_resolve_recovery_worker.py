@@ -160,6 +160,61 @@ class RecoverableWorkerTests(unittest.TestCase):
         self.assertEqual(target.GetTrackName("audio", 2), "人工声音")
         self.assertEqual(len(target.GetMarkers()), 1)
 
+    def imported_path(self):
+        return Path(self.project.pool.clips[0].GetClipProperty()["File Path"])
+
+    def test_each_build_imports_the_voice_under_its_own_name(self):
+        worker.build(self.resolve, self.request)
+        first = self.imported_path()
+        self.assertEqual(first.name, "build-" + "a" * 16 + ".wav")
+        self.assertEqual(first.read_bytes(), self.audio.read_bytes())
+        self.assertEqual(json.loads(Path(self.request["recovery_file"]).read_text())["import_path"], str(first))
+        again = {**self.request, "operation_key": "b" * 64, "recovery_file": str(self.root / "other.json")}
+        worker.build(self.resolve, again)
+        self.assertEqual(len({Path(clip.GetClipProperty()["File Path"]).name for clip in self.project.pool.clips}), 2)
+        self.assertTrue(self.audio.is_file())
+
+    def test_journal_from_before_own_names_keeps_a_clip_imported_under_the_take_name(self):
+        def import_original(paths):
+            return original([str(self.audio)])
+        original = self.project.pool.ImportMedia
+        write = worker.durable_json
+        def crashed(path, value):
+            if value.get("stage") == "imported":
+                raise OSError("lost import response")
+            return write(path, {key: item for key, item in value.items() if key != "import_path"})
+        with patch.object(self.project.pool, "ImportMedia", side_effect=import_original), patch.object(worker, "durable_json", side_effect=crashed):
+            with self.assertRaises(OSError):
+                worker.build(self.resolve, self.request)
+        worker.build(self.resolve, self.request)
+        self.assert_one_build()
+        self.assertEqual(self.imported_path(), self.audio)
+
+    def test_copy_is_used_when_the_voice_cannot_be_linked(self):
+        with patch.object(worker.os, "link", side_effect=OSError("no hard links here")):
+            worker.build(self.resolve, self.request)
+        self.assertEqual(self.imported_path().read_bytes(), self.audio.read_bytes())
+        self.assert_one_build()
+
+    def test_import_interrupted_before_the_clip_landed_imports_again(self):
+        with patch.object(self.project.pool, "ImportMedia", return_value=None):
+            with self.assertRaisesRegex(worker.WorkerError, "导入结果未确认"):
+                worker.build(self.resolve, self.request)
+        self.assertEqual(json.loads(Path(self.request["recovery_file"]).read_text())["stage"], "importing")
+        worker.build(self.resolve, self.request)
+        self.assert_one_build()
+
+    def test_import_interrupted_after_the_clip_landed_uses_that_clip(self):
+        import_media = self.project.pool.ImportMedia
+        def crashed(paths):
+            import_media(paths)
+            raise RuntimeError("Resolve closed during import")
+        with patch.object(self.project.pool, "ImportMedia", side_effect=crashed):
+            with self.assertRaises(RuntimeError):
+                worker.build(self.resolve, self.request)
+        worker.build(self.resolve, self.request)
+        self.assert_one_build()
+
     def test_ambiguous_create_without_original_timeline_does_not_create_another(self):
         with patch.object(self.project.pool, "CreateEmptyTimeline", side_effect=RuntimeError("lost response")):
             with self.assertRaises(RuntimeError):
@@ -239,7 +294,7 @@ class RecoverableWorkerTests(unittest.TestCase):
         self.assertEqual((result["fps"], result["width"], result["height"]), ("29.97", "1080", "1920"))
         self.assertEqual((voice["enabled"], voice["locked"], item["source_start"], item["source_end"]), (True, False, 0, 179))
         self.assertTrue(item["media_id"])
-        self.assertEqual(item["media_path"], str(self.audio))
+        self.assertEqual(item["media_path"], str(self.imported_path()))
         self.assertEqual(self.resolve.saved, saved)
         self.assertNotIn("saved", result)
 

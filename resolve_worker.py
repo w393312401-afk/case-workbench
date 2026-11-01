@@ -11,13 +11,16 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
+import time
 import tempfile
 
 API_DIRS = (os.environ.get("RESOLVE_SCRIPT_API"), r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting")
 LIB_FILES = (os.environ.get("RESOLVE_SCRIPT_LIB"), r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll",
              r"D:\DaVinci Resolve\fusionscript.dll")
 MARKER_PREFIX = "workbench-group:"
+CONNECT_TRIES, CONNECT_WAIT = 3, 2
 
 
 class WorkerError(Exception):
@@ -32,10 +35,14 @@ def connect():
     os.environ["RESOLVE_SCRIPT_API"], os.environ["RESOLVE_SCRIPT_LIB"] = api, lib
     sys.path.append(str(Path(api, "Modules")))
     import DaVinciResolveScript
-    resolve = DaVinciResolveScript.scriptapp("Resolve")
-    if not resolve:
-        raise WorkerError("连不上达芬奇：请先打开 DaVinci Resolve，并在偏好设置 → 系统 → 常规里把“外部脚本使用”设为“本地”。")
-    return resolve
+    # A running Resolve can refuse one connection for a moment, so a single miss is not yet an answer.
+    for attempt in range(CONNECT_TRIES):
+        resolve = DaVinciResolveScript.scriptapp("Resolve")
+        if resolve:
+            return resolve
+        if attempt + 1 < CONNECT_TRIES:
+            time.sleep(CONNECT_WAIT)
+    raise WorkerError("连不上达芬奇：请先打开 DaVinci Resolve，并在偏好设置 → 系统 → 常规里把“外部脚本使用”设为“本地”。已经设好的话，稍等几秒再试；还连不上就关掉达芬奇重开，等主窗口出来后再试。")
 
 
 def current_project(resolve, expected=None):
@@ -101,6 +108,21 @@ def project_matches(project, request):
     return bool(uid) and any(item.GetUniqueId() == uid for item in timelines(project))
 
 
+BLANK_PROJECT = re.compile(r"(?:Untitled Project|未命名项目)(?: \d+)?")
+
+
+def blank_project(project):
+    """The empty, never-saved project Resolve opens with. Saving it asks the user for a name in a dialog that blocks
+    every script call, and there is nothing in it to keep, so a switch leaves it alone."""
+    try:
+        if not BLANK_PROJECT.fullmatch(project.GetName() or "") or project.GetTimelineCount():
+            return False
+        root = project.GetMediaPool().GetRootFolder()
+        return not (root.GetClipList() or root.GetSubFolderList())
+    except Exception:
+        return False
+
+
 def request_project(resolve, request):
     """The DaVinci project a request is about.
 
@@ -146,7 +168,7 @@ def request_project(resolve, request):
     if len(candidates) != 1:
         raise WorkerError(f"达芬奇文件夹「{'/'.join(path)}」里有多个匹配项目「{' / '.join(names)}」，无法判断用哪个，没有切换项目。")
     actual_name = candidates[0][1]
-    if current:
+    if current and not blank_project(current):
         if not manager.SaveProject():
             raise WorkerError("达芬奇没能保存当前项目，没有切换项目。")
         if not manager.CloseProject(current):
@@ -291,6 +313,21 @@ def guard_build_setup(target, journal, request):
         raise WorkerError("原请求时间线的设置或配音轨已被修改或无法核实，请先核实；未覆盖用户修改或重复建线。")
 
 
+def build_audio(source, key, create=False):
+    """This build's own name for the take's audio. Importing a name starting with voiceover hung Resolve for good
+    in a project holding such clips, wherever the file was; other names imported at once (2026-10-31, Lab-202H)."""
+    target = source.with_name(f"build-{key[:16]}{source.suffix}")
+    if create and not (target.is_file() and target.stat().st_size == source.stat().st_size):
+        target.unlink(missing_ok=True)
+        try:
+            os.link(source, target)
+        except OSError:
+            partial = target.with_name(target.name + ".tmp")
+            shutil.copyfile(source, partial)
+            os.replace(partial, target)
+    return target
+
+
 def build_recoverable(resolve, request):
     """A request has a durable, unique timeline identity, including across worker crashes."""
     key, recovery_file = request.get("operation_key"), request.get("recovery_file")
@@ -343,13 +380,22 @@ def build_recoverable(resolve, request):
     if target and existing:
         guard_build_setup(target, journal, request)
 
-    audio = Path(request["audio"])
-    if not audio.is_file():
+    source = Path(request["audio"])
+    if not source.is_file():
         raise WorkerError("配音文件不存在，未重复生成或建线。")
+    audio = Path(journal.get("import_path") or source)  # Journals from before import_path used the take's own file.
     imported = next((clip for clip in pool_clips(media_pool) if
                      optional(clip, "GetUniqueId") == journal.get("audio_uid") and journal.get("audio_uid")), None)
     if not imported and journal.get("stage") == "importing":
-        raise WorkerError("上次导入配音结果尚未确认，请核实媒体池，未重复导入或建线。")
+        # Resolve hung or closed during the import: the file is in the audio bin or it is not. No timeline
+        # exists yet, so taking that clip or importing again cannot build twice.
+        wanted_paths = {os.path.normcase(str(item)) for item in (source, build_audio(source, key))}
+        imported = next((clip for clip in optional(folder(media_pool, request["audio_bin"]), "GetClipList") or [] if
+                         os.path.normcase(str((optional(clip, "GetClipProperty") or {}).get("File Path") or "")) in wanted_paths), None)
+        if imported:
+            audio = Path(optional(imported, "GetClipProperty")["File Path"])
+            journal.update(stage="imported", audio_uid=optional(imported, "GetUniqueId"), import_path=str(audio))
+            durable_json(path, journal)
     if not imported and journal.get("stage") not in {"prepared", "importing"}:
         # Fakes and old APIs may not expose pool UIDs; a placed item provides the exact imported clip.
         candidates = target.GetItemListInTrack("audio", request["track_index"]) if target else []
@@ -357,7 +403,8 @@ def build_recoverable(resolve, request):
         if not imported:
             raise WorkerError("原请求的配音媒体无法核实，未重复导入或建线。")
     if not imported:
-        journal["stage"] = "importing"
+        audio = build_audio(source, key, create=True)
+        journal.update(stage="importing", import_path=str(audio))
         durable_json(path, journal)
         media_pool.SetCurrentFolder(folder(media_pool, request["audio_bin"]))
         clips = media_pool.ImportMedia([str(audio)]) or []
@@ -551,6 +598,8 @@ def open_timeline(resolve, request):
     if not project.SetCurrentTimeline(timeline):
         raise WorkerError("达芬奇没能切换到这条时间线。")
     resolve.OpenPage("edit")
+    # Reported so an older record that lacks them can be pinned to this project from now on.
+    result = {"name": timeline.GetName(), **{key: value for key, value in located(project).items() if value}}
     if wanted_timecode is not None:
         if not timeline.SetCurrentTimecode(wanted_timecode):
             raise WorkerError("达芬奇已切到这条时间线，但没能把播放头放到这个位置。")
@@ -558,8 +607,8 @@ def open_timeline(resolve, request):
         # Resolve may render the same frame with ':' instead of ';' for its final separator.
         if not actual_timecode or actual_timecode.replace(";", ":") != wanted_timecode.replace(";", ":"):
             raise WorkerError("达芬奇已切到这条时间线，但播放头没有到达指定位置。")
-        return {"name": timeline.GetName(), "frame": frame, "timecode": actual_timecode}
-    return {"name": timeline.GetName()}
+        result.update(frame=frame, timecode=actual_timecode)
+    return result
 
 
 def inspect_item(item, *, minimal=False):
@@ -709,7 +758,7 @@ def candidates(resolve, request):
                 media_paths.add(os.path.normcase(value["media_path"]))
         materials.append({"name": timeline.GetName(), "unique_id": timeline.GetUniqueId(), "start_frame": timeline.GetStartFrame(),
                           "fps": str(timeline.GetSetting("timelineFrameRate")), "drop": drop_frame(timeline), "clips": clips})
-    excluded = {item.GetUniqueId() for item in chosen} | {request.get("target_uid")}
+    excluded = {item.GetUniqueId() for item in chosen} | {request.get("target_uid")} | set(request.get("ignore_usage") or [])
     dedup_enabled = request.get("deduplicate_source_ranges") is True
     # Use counting reads the same finished timelines as the archived deduplication, but never removes a candidate.
     scan = dedup_enabled or request.get("count_usage") is True
@@ -907,44 +956,65 @@ def frames(resolve, request):
     return {"shots": results}
 
 
-def timeline_stills(resolve, request):
-    """Export evenly spaced stills of a finished timeline exactly as it plays (grade, reframing and titles included).
+RENDER_NAME = "timeline"
 
-    request: step_seconds, max_stills, folder. Frames whose playhead did not land are skipped and counted."""
+
+def render_start(resolve, request):
+    """Start rendering a timeline to one MP4 in request['render_dir'] and return at once with the job id.
+
+    Used to review a finished timeline without a manual export. The caller polls render_poll and ends with
+    render_finish, which puts the project's render format back; other render settings are only overwritten."""
     project = request_project(resolve, request)
     timeline = find_timeline(project, request)
     current = project.GetCurrentTimeline()
     if (not current or current.GetUniqueId() != timeline.GetUniqueId()) and not project.SetCurrentTimeline(timeline):
         raise WorkerError("达芬奇没能切换到这条时间线。")
-    fps, drop = timeline.GetSetting("timelineFrameRate"), drop_frame(timeline)
-    start, end = timeline.GetStartFrame(), timeline.GetEndFrame()
-    if end <= start:
-        raise WorkerError("这条时间线是空的。")
-    step_seconds, limit = float(request.get("step_seconds") or 0.5), int(request.get("max_stills") or 120)
-    step = max(1, round(float(fps) * step_seconds))
-    step = max(step, -(-(end - start) // max(1, limit)))
-    folder = Path(request["folder"])
+    if timeline.GetEndFrame() <= timeline.GetStartFrame():
+        raise WorkerError("这条时间线是空的，没有可渲染的内容。")
+    folder = Path(request["render_dir"])
     folder.mkdir(parents=True, exist_ok=True)
-    opened, files, skipped = False, [], 0
-    for frame in range(start, end, step):
-        landed = False
-        for text in dict.fromkeys((timecode(frame, fps, drop), timecode(frame, fps, False))):
-            if timeline.SetCurrentTimecode(text):
-                landed = True
-                break
-        path = folder / f"{frame - start:07d}.png"
-        exported = landed and project.ExportCurrentFrameAsStill(str(path))
-        if landed and not exported and not opened:
-            opened = True
-            resolve.OpenPage("edit")
-            exported = project.ExportCurrentFrameAsStill(str(path))
-        if exported and path.is_file():
-            files.append({"offset": frame - start, "file": str(path)})
-        else:
-            skipped += 1
-    if not files:
-        raise WorkerError("静帧没有导出成功，请确认达芬奇在剪辑页并且时间线不是空的。")
-    return {"name": timeline.GetName(), "fps": float(fps), "start_frame": start, "end_frame": end, "files": files, "skipped": skipped}
+    previous = optional(project, "GetCurrentRenderFormatAndCodec") or {}
+    if not project.SetCurrentRenderFormatAndCodec("mp4", "H264"):
+        raise WorkerError("达芬奇没能切到 MP4 / H.264 渲染格式。")
+    settings = {"SelectAllFrames": True, "TargetDir": str(folder), "CustomName": RENDER_NAME, "UseUniqueFilenames": False,
+                "ExportVideo": True, "ExportAudio": True}
+    # VideoQuality is left alone: Resolve 21 rejects every value for H264 here, and failing the whole dict made the review unusable.
+
+    def restore_format():
+        if previous.get("format") and previous.get("codec"):
+            optional(project, "SetCurrentRenderFormatAndCodec", previous["format"], previous["codec"])
+
+    if not project.SetRenderSettings(settings):
+        restore_format()
+        raise WorkerError("达芬奇没能设置渲染参数。")
+    job = project.AddRenderJob()
+    if not job:
+        restore_format()
+        raise WorkerError("达芬奇没能把这条时间线加入渲染队列。")
+    if not project.StartRendering(job):
+        project.DeleteRenderJob(job)
+        restore_format()
+        raise WorkerError("达芬奇没能开始渲染，请确认渲染队列没有被占用。")
+    return {"job_id": job, "name": timeline.GetName(), "previous_format": previous.get("format") or "",
+            "previous_codec": previous.get("codec") or ""}
+
+
+def render_poll(resolve, request):
+    project = request_project(resolve, request)
+    info = project.GetRenderJobStatus(request["job_id"]) or {}
+    return {"state": info.get("JobStatus") or "", "percent": info.get("CompletionPercentage") or 0, "error": info.get("Error") or ""}
+
+
+def render_finish(resolve, request):
+    """Stop a render still running, delete its job, restore the render format, and report the file it wrote."""
+    project = request_project(resolve, request)
+    if optional(project, "IsRenderingInProgress"):
+        optional(project, "StopRendering")
+    optional(project, "DeleteRenderJob", request["job_id"])
+    if request.get("previous_format") and request.get("previous_codec"):
+        optional(project, "SetCurrentRenderFormatAndCodec", request["previous_format"], request["previous_codec"])
+    found = sorted(Path(request["render_dir"]).glob(RENDER_NAME + ".*"))
+    return {"files": [str(path) for path in found]}
 
 
 def reveal(resolve, request):
@@ -969,8 +1039,9 @@ def reveal(resolve, request):
     return {"name": timeline.GetName(), "timecode": reached}
 
 
-COMMANDS = {"status": status, "build": build, "open": open_timeline, "inspect": inspect, "restore": restore,
-            "candidates": candidates, "frames": frames, "timeline_stills": timeline_stills, "reveal": reveal, "mark_usage": mark_usage}
+COMMANDS = {"ping": lambda resolve, request: {}, "status": status, "build": build, "open": open_timeline, "inspect": inspect, "restore": restore,
+            "candidates": candidates, "frames": frames, "reveal": reveal, "mark_usage": mark_usage,
+            "render_start": render_start, "render_poll": render_poll, "render_finish": render_finish}
 
 
 def main():

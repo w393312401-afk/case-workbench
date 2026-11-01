@@ -22,8 +22,6 @@ test('stale approval on a failed or revised edit cannot hide its current gaps',(
   assert.equal(collect(record)[0].key,'gap-edit-0');assert.equal(collect(record).length,2);
 });
 test('existing selected image works without a base and a stale image requires that specific slide',()=>{
-  const record={id:'CAR-0123456789ab',product:'202H',slides:[{number:1,output_id:'one',outputs:[{id:'one',approved:true,stale:false}]},{number:2,base:{id:'base'},output_id:'two',outputs:[{id:'two',approved:true,stale:true}]},{number:3,outputs:[]}]};
-  const needs=collect(record,'carousel');assert.equal(needs.length,2);assert.match(needs[0].label,/第 2 张.*失效/);assert.match(needs[0].href,/step=images&slide=2/);assert.match(needs[1].href,/step=pick&slide=3/);
 });
 test('publication is the next step, never listed again as a gap',()=>{
   const record=job();record.status='approved';record.manual_completion={take_id:'TAK-current',timeline_uid:'current'};

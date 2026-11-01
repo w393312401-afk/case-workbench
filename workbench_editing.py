@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 from contextlib import contextmanager
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -92,7 +93,9 @@ def candidates_section(stats=None, error=""):
              *([f"- 有 {stats['problems']} 个片段没能导出对照图。"] if stats.get("problems") else []),
              *(reuse_rules(stats) if stats.get("unused") is not None else []),
              "- 按交接明确选择的画面模式与本次当前个人技能选材。已核标签或已有描述已支持的信息可直接使用；"
-             "只有依据未覆盖且影响理解的细节需要再看图，标签未写细节不等于缺素材。",
+             "只有依据未覆盖且影响理解的细节需要再看图，标签未写细节不等于缺素材。"
+             "这只针对选片段；只截取片段的一部分时，入出点按技能「定入出点」看画面后再定，动作镜头按技能「动作完整」取。"
+             "入出点拿不准或动作看不出是否完整时，放最接近的一段并写进 questions，不因此留空。",
              "- 看过对照图的片段，把描述写入当前目录 visual-notes.json（一个 JSON 数组，覆盖写入完整数组），工作台会存下来供以后复用。格式：",
              "", "```json", NOTES_EXAMPLE, "```", ""]
     return "\n".join(lines)
@@ -282,6 +285,42 @@ def handoff_markdown(job, take, timeline, config, *, mode, instruction, material
     return "\n".join(lines)
 
 
+def recut_rivals(job, timeline_uid):
+    """The other cuts of one script being compared; footage they used must not count against this cut."""
+    timelines = job.get("timelines", [])
+    root = lambda item: item.get("recut_of") or item.get("unique_id")
+    own = next((item for item in timelines if item.get("unique_id") == timeline_uid), None)
+    return [item for item in timelines if own and item is not own and root(item) == root(own)]
+
+
+def edit_retryable(edit):
+    """A failed run, or a finished one whose report did not confirm the project save (its status may show gaps instead)."""
+    if edit.get("result_pending") or edit.get("status") == "running" or edit.get("waiting_timeline"):
+        return False
+    if edit.get("status") in {"needs_repair", "failed"}:
+        return True
+    return (edit.get("completion_policy") == "skill_delivery" and edit.get("execution_status") == "completed"
+            and (edit.get("report") or {}).get("saved") is not True)
+
+
+def retry_section(previous):
+    """Handoff section for an in-place retry: the timeline already holds the earlier attempt's work."""
+    report = previous.get("report") if isinstance(previous.get("report"), dict) else {}
+    why = str(previous.get("error") or "").strip() or "上一次剪辑没有以已保存的状态结束"
+    facts = [f"- 上一次（{previous['id']}）结束原因：{why}"]
+    if isinstance(report.get("shots"), int):
+        facts.append(f"- 上一次报告镜头数：{report['shots']}")
+    questions = [str(item) for item in report.get("questions") or [] if str(item).strip()]
+    if questions:
+        facts += ["- 上一次留下的待确认事项：", *[f"  - {item}" for item in questions[:10]]]
+    return "\n".join(["", "## 原地重试（接着上一次剪）", "", *facts, "",
+        "- 目标时间线上现在是上一次剪辑留下的结果，可能完整、不完整，也可能被用户手动动过；不要清空重来，也不要新建时间线。",
+        "- 开始前先确认当前打开的项目就是上面写的达芬奇项目，目标时间线（按 UniqueId）就是当前时间线；用户可能中途切走了，"
+        "不是就先切回，再继续。",
+        "- 先读取目标时间线现有内容，对照口播和意群表，保留仍然合适的镜头，只补齐缺口、修正不合适的部分。",
+        "- 剪完务必保存工程，并确认保存成功后，最终回复里的 json 才填 saved: true。", ""])
+
+
 class EditingWorkbenchMixin:
     """Needs self.production, self.resolve, self.editor, self.edit_codex, self.creation, self.lock,
     self.edit_skill_dir and self.ledger_dir from the workbench."""
@@ -430,6 +469,33 @@ class EditingWorkbenchMixin:
                   f"模式「{MODES[mode]}」。完全按当前个人技能剪辑并保存工程后结束，字幕和声音由我处理。")
         return {"path": str(path), "prompt": prompt}
 
+    def _recut_build(self, identifier, body):
+        """Build an empty twin of a timeline for this edit, or join the build an earlier try of this same request began.
+
+        Returns the new timeline's id, or None with the build's request id while it waits for DaVinci. The request id
+        derives from the edit's, so a retried submission never builds a second timeline."""
+        job = self.production.job(identifier)
+        if job["archived"]:
+            raise VoiceError(409, "制作单已归档，请恢复后再剪辑。")
+        source = self._edit_context(job, body["recut_from"])[0]
+        # Older records may carry no format of their own; those settings then follow the product, as the original build did.
+        options = {key: source[key] for key in ("fps", "width", "height") if source.get(key)}
+        if source.get("lead_frames") and str(source.get("fps")) in FRAME_RATES:
+            numerator, denominator = FRAME_RATES[str(source["fps"])]
+            options["lead_seconds"] = source["lead_frames"] * denominator / numerator
+        # The numbering code sits in the source's automatic name; a custom name falls back to the product's code.
+        code = re.fullmatch(re.escape(source.get("creator") or "") + r"\d{6}-([A-Za-z0-9]{1,20})-\d+", source["name"])
+        if code:
+            options["code"] = code.group(1)
+        build = {"request_id": "recut-" + hashlib.sha256(body["request_id"].encode("utf-8")).hexdigest()[:40], "job_id": identifier,
+                 "creator": source.get("creator"), "take_id": source["take_id"], "options": options,
+                 "recut_of": source.get("recut_of") or source["unique_id"]}
+        operation = self._production_operations().read("timeline", build)
+        if operation and operation.get("state") != "committed":
+            return None, build["request_id"]
+        result = self.build_timeline(identifier, build)
+        return (None, build["request_id"]) if result.get("queued") else (result["timeline"]["unique_id"], None)
+
     def start_edit(self, identifier, body):
         if not isinstance(body, dict):
             raise VoiceError(400, "参数格式无效。")
@@ -439,12 +505,18 @@ class EditingWorkbenchMixin:
             if (not isinstance(body["timeline_request_id"], str) or
                     not re.fullmatch(r"[\w-]{10,100}", body["timeline_request_id"]) or body.get("timeline")):
                 raise VoiceError(400, "请选择目标时间线或一个待接续的建线请求。")
+        if body.get("recut_from") is not None and (not isinstance(body["recut_from"], str) or body.get("timeline") or
+                                                   body.get("timeline_request_id") or body.get("retry_of")):
+            raise VoiceError(400, "请选择目标时间线或一条要另建对比的时间线。")
         if self.recover_edit_results()["problems"]:
             raise VoiceError(503, "已有剪辑结果尚未写入工作台，请先恢复制作资料后再发起任务；本次没有重复剪辑。")
         prior = self.production.replay("edit_start", body)
         if prior:
             return prior
         mode, instruction, materials = self._edit_options(body)
+        retry_of = body.get("retry_of")
+        if retry_of is not None and (not isinstance(retry_of, str) or not re.fullmatch(r"EDT-[0-9a-f]{12}", retry_of) or body.get("timeline_request_id")):
+            raise VoiceError(400, "要重试的剪辑记录无效。")
         try:
             provider, model, effort = self._edit_settings(body)
         except (AITaskError, VoiceError):
@@ -457,6 +529,10 @@ class EditingWorkbenchMixin:
         if not (Path(self.edit_skill_dir) / "SKILL.md").is_file():
             raise VoiceError(503, f"没有找到剪辑技能 {SKILL_NAME}（{self.edit_skill_dir}），无法发起 AI 剪辑。")
         mcp = locate_mcp()
+        # Everything above can refuse without touching DaVinci, so a refused edit leaves no spare timeline.
+        timeline_id, build_request = body.get("timeline"), body.get("timeline_request_id")
+        if body.get("recut_from"):
+            timeline_id, build_request = self._recut_build(identifier, body)
         with self.lock:
             # Replay and reservation share one short critical section. A retry
             # must receive its original task even if other tasks are now live.
@@ -470,8 +546,8 @@ class EditingWorkbenchMixin:
             if job["archived"]:
                 raise VoiceError(409, "制作单已归档，请恢复后再剪辑。")
             pending = None
-            if body.get("timeline_request_id"):
-                operation = self._edit_build_request(identifier, body["timeline_request_id"])
+            if build_request:
+                operation = self._edit_build_request(identifier, build_request)
                 snapshot = operation["snapshot"]
                 payload = snapshot["payload"]
                 config = copy.deepcopy(snapshot["config"])
@@ -489,7 +565,7 @@ class EditingWorkbenchMixin:
                            "job": frozen_job, "notes": notes, "voice_label": voice_label}
             else:
                 config = self.production.product_settings(data, job["product"])
-                timeline, take, notes, voice_label = self._edit_context(job, body.get("timeline"))
+                timeline, take, notes, voice_label = self._edit_context(job, timeline_id)
             config = with_location(config, timeline)
             target_uid = (operation.get("result") or {}).get("unique_id") if pending else timeline["unique_id"]
             if any(edit.get("status") == "running" and (edit.get("timeline_uid") in {timeline["unique_id"], target_uid} or
@@ -502,6 +578,13 @@ class EditingWorkbenchMixin:
                              (pending and edit.get("timeline_operation_key") == timeline["operation_key"])), None)
             if previous and previous.get("status") == "interrupted" and not previous.get("waiting_timeline"):
                 raise VoiceError(409, "这条时间线的上次剪辑结果尚未确认，请先重新核验；本次没有重复剪辑。")
+            retried = None
+            if retry_of:
+                retried = next((edit for edit in job.get("edits", []) if edit["id"] == retry_of), None)
+                if not retried or retried.get("timeline_uid") != timeline["unique_id"]:
+                    raise VoiceError(404, "要重试的剪辑记录不存在，或不是这条时间线的。")
+                if not edit_retryable(retried):
+                    raise VoiceError(409, "这次剪辑不需要原地重试；结果待恢复的请先恢复结果。")
             edit_id = "EDT-" + uuid4().hex[:12]
             try:
                 folder = self.production.root / "edits" / edit_id
@@ -512,6 +595,8 @@ class EditingWorkbenchMixin:
                 handoff = ("# 待建线后自动剪辑\n\n等待建线请求 " + pending["request_id"] + " 完成；尚未启动 AI 剪辑。\n" if pending else
                     handoff_markdown(job, take, timeline, config, mode=mode, instruction=instruction, materials=materials,
                                      notes=notes, voice_label=voice_label))
+                if retried:
+                    handoff += retry_section(retried)
                 (folder / "handoff.md").write_text(handoff, encoding="utf-8")
                 record = {"id": edit_id, "timeline_uid": timeline["unique_id"], "timeline_name": timeline["name"], "take_id": take["id"],
                           "mode": mode, "instruction": instruction, "materials": materials, "model": model, "effort": effort,
@@ -522,6 +607,8 @@ class EditingWorkbenchMixin:
                           "execution_status": "running", "validation": None, "completion_policy": "skill_delivery"}
                 if timeline.get("operation_key"):
                     record["timeline_operation_key"] = timeline["operation_key"]
+                if retried:
+                    record["retry_of"] = retried["id"]
                 if pending:
                     record.update(timeline_request_id=pending["request_id"], timeline_request_hash=pending["request_hash"],
                                   waiting_timeline=True, timeline_build_snapshot=copy.deepcopy(pending["snapshot"]))
@@ -780,10 +867,11 @@ class EditingWorkbenchMixin:
         return len(spans), sum(not isinstance(row.get("picks"), list) or (not row["picks"] and bool(row.get("unknown_picks")))
                                for row in finished)
 
-    def _occupied_by_others(self, edit_id, project):
+    def _occupied_by_others(self, edit_id, project, rivals=()):
+        ignored = {item["name"] for item in rivals}
         with self.lock:
             held = getattr(self, "_edit_occupied", {}).get(project, {})
-            return {entry["timeline"]: entry["spans"] for key, entry in held.items() if key != edit_id}
+            return {entry["timeline"]: entry["spans"] for key, entry in held.items() if key != edit_id and entry["timeline"] not in ignored}
 
     def _release_occupied(self, edit_id):
         with self.lock:
@@ -962,7 +1050,7 @@ class EditingWorkbenchMixin:
     def _visual_index(self, project):
         return VisualIndex(getattr(self, "visual_index_dir", None) or Path(self.ledger_dir).parent / INDEX_DIR, project)
 
-    def _prepare_candidates(self, edit_id, folder, config, timeline, materials, wanted_text="", project=None):
+    def _prepare_candidates(self, edit_id, folder, config, timeline, materials, wanted_text="", project=None, rivals=()):
         """List material clips and make contact images for the ones not seen before; Resolve's view is put back afterwards.
 
         Returns the handoff section and what was prepared. Only a stop request is raised; any other problem leaves the
@@ -972,8 +1060,8 @@ class EditingWorkbenchMixin:
                  "seconds": 0, "error": ""}
         try:
             self._edit_stage(edit_id, "materials", "正在读取素材片段清单。")
-            listing = self.resolve.run("candidates", {**where(config), "materials": materials,
-                                                      "target_uid": timeline["unique_id"], "count_usage": True}, timeout=180, held=True)
+            listing = self.resolve.run("candidates", {**where(config), "materials": materials, "target_uid": timeline["unique_id"],
+                                                      "ignore_usage": [item["unique_id"] for item in rivals], "count_usage": True}, timeout=180, held=True)
             if not isinstance(listing.get("materials"), list):
                 raise ValueError("达芬奇没有返回素材片段清单")
             adopt_project_location(config, listing)
@@ -981,7 +1069,7 @@ class EditingWorkbenchMixin:
             counted = listing.get("usage_counted") is True
             found = build_candidates(listing, count_usage=counted)
             if counted:
-                add_in_progress_usage(found, self._occupied_by_others(edit_id, project or project_key(config)))
+                add_in_progress_usage(found, self._occupied_by_others(edit_id, project or project_key(config), rivals))
             self._edit_stage(edit_id, "materials", status="completed")
             entries = index.load()
             # A clip-labeling label means the clip was already looked at; contact images are only for the rest.
@@ -1006,7 +1094,7 @@ class EditingWorkbenchMixin:
         stats["seconds"] = round((datetime.now() - started).total_seconds())
         return candidates_section(stats, stats["error"]), stats
 
-    def _refresh_usage(self, edit_id, folder, config, timeline, materials, project):
+    def _refresh_usage(self, edit_id, folder, config, timeline, materials, project, rivals=()):
         """Count footage use again right before the AI places shots, and rewrite the candidate list with the new counts.
 
         The snapshot may have been taken while earlier edits of the project were still planning, when only their first
@@ -1023,11 +1111,12 @@ class EditingWorkbenchMixin:
         try:
             self._progress(edit_id, "开剪前重新统计素材使用次数。")
             listing = self.resolve.run("candidates", {**where(config), "materials": materials, "target_uid": timeline["unique_id"],
+                                                      "ignore_usage": [item["unique_id"] for item in rivals],
                                                       "count_usage": True, "current_only": True}, timeout=180, held=True)
             if listing.get("usage_counted") is not True or not isinstance(listing.get("materials"), list):
                 raise ValueError("达芬奇没有返回素材使用次数")
             fresh = build_candidates(listing, count_usage=True)
-            add_in_progress_usage(fresh, self._occupied_by_others(edit_id, project))
+            add_in_progress_usage(fresh, self._occupied_by_others(edit_id, project, rivals))
             rows, changed = refreshed_usage(data["candidates"], fresh)
             index = self._visual_index(config["project"])
             stats = write_task_files(folder, rows, index, index.load(), {
@@ -1140,10 +1229,11 @@ class EditingWorkbenchMixin:
                 wanted = " ".join(str(line.get(key) or "") for line in job["lines"] for key in ("zh", "proof", "tags", "evidence"))
                 # Taken once: the snapshot may add the folder and project id to config, which must not move this edit's queue.
                 project = project_key(config)
+                rivals = recut_rivals(job, timeline["unique_id"])
                 with self._edit_selection_access(edit_id, project) as turn:
                     with self._edit_resolve_access(edit_id, "preparing", "整理候选画面", queued=turn.queued.set,
                                                    ahead_of=self._editing_places(project)):
-                        section, preparation = self._prepare_candidates(edit_id, folder, config, timeline, materials, wanted, project)
+                        section, preparation = self._prepare_candidates(edit_id, folder, config, timeline, materials, wanted, project, rivals)
                     handoff = handoff_project_location(handoff, config).rstrip("\n") + "\n\n" + section
                     (folder / "handoff.md").write_text(handoff, encoding="utf-8")
                     try:
@@ -1159,7 +1249,7 @@ class EditingWorkbenchMixin:
                     handoff += ("\n\n## 并行选材\n\n先读取 planning.md 中各分工的候选建议，结合 candidates.json、本次画面模式与当前技能决定镜头。"
                                 "建议仅来自快照，可能不完整；需现场查看的画面仍由你查看。"
                                 "各组末尾的 picks 是该组首选清单，只供参考和工作台登记占用，不限定你的选择。"
-                                "分组未找到或细节待核实不等于全部素材缺失，也不能增设身份辨认、全过程或词级同步门槛。"
+                                "分组未找到或细节待核实不等于全部素材缺失，也不能增设身份辨认、全过程或词级同步门槛；选材建议里的源帧范围未看过画面，入出点仍按技能「定入出点」确定。"
                                 "进入达芬奇后先核对当前项目与目标 UniqueId，按本次目标时间线执行。\n")
                     (folder / "handoff.md").write_text(handoff, encoding="utf-8")
                 with self._editing_place(project) as place, self._edit_resolve_access(
@@ -1169,7 +1259,7 @@ class EditingWorkbenchMixin:
                     state = self.resolve.run("status", where(config), timeout=30, held=True)
                     adopt_project_location(config, state)
                     handoff = handoff_project_location(handoff, config)
-                    refresh, note = self._refresh_usage(edit_id, folder, config, timeline, materials, project)
+                    refresh, note = self._refresh_usage(edit_id, folder, config, timeline, materials, project, rivals)
                     if note:
                         handoff = handoff.rstrip("\n") + "\n\n" + note
                     (folder / "handoff.md").write_text(handoff, encoding="utf-8")

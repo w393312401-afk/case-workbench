@@ -9,7 +9,7 @@ from uuid import uuid4
 import test_server as fixture
 from direction_store import now
 from elevenlabs_client import VoiceError
-from production_store import ProductionStore, job_status, manual_completion_current
+from production_store import ProductionStore, job_status, manual_completion_current, public_job
 import test_production_verification_http as verification_fixture
 
 JOB_ID = "PRD-0123456789ab"
@@ -92,18 +92,59 @@ class ManualCompletionTests(unittest.TestCase):
         restored = self.mutate("select_take", take_id=TAKE_ID)["job"]
         self.assertEqual(restored["status"], "timeline")
 
-    def test_new_current_timeline_clears_receipt_but_other_take_does_not(self):
+    def test_a_new_timeline_leaves_the_others_completed_and_is_completed_on_its_own(self):
         self.complete()
         other = {"unique_id": "uid-other", "name": "Other", "take_id": OTHER_TAKE_ID, "built_at": now()}
         result = self.mutate("timeline", other)["job"]
         self.assertTrue(manual_completion_current(result))
         current = {**other, "unique_id": "uid-2", "name": "Current", "take_id": TAKE_ID}
         result = self.mutate("timeline", current)["job"]
-        self.assertNotIn("manual_completion", result)
-        self.assertEqual(result["status"], "timeline")
+        # Building another timeline of the same voiceover does not take uid-1's completion away.
+        self.assertTrue(manual_completion_current(result))
+        self.assertEqual(result["status"], "approved")
+        flags = lambda job: {row["unique_id"]: bool(row["manual_completion"]) for row in public_job(job)["timelines"]}
+        self.assertEqual(flags(result), {"uid-1": True, "uid-other": False, "uid-2": False})
+        second = self.complete(timeline_uid="uid-2", note="第二条")
+        self.assertEqual((second["completed"], second["manual_completion"]["timeline_name"]), (True, "Current"))
+        self.assertEqual(flags(second["job"]), {"uid-1": True, "uid-other": False, "uid-2": True})
+        # Revoking one leaves the other; each is revoked with its own time.
+        first_at = public_job(second["job"])["timelines"][0]["manual_completion"]["at"]
+        revoked = self.complete(timeline_uid="uid-1", completed=False, completion_at=first_at)
+        self.assertEqual((revoked["completed"], flags(revoked["job"])), (False, {"uid-1": False, "uid-other": False, "uid-2": True}))
+        self.assertEqual(revoked["job"]["status"], "approved")
         with self.assertRaises(VoiceError) as caught:
-            self.complete()
+            self.complete(timeline_uid="uid-1", completed=False, completion_at=first_at)
         self.assertEqual(caught.exception.status, 409)
+        # A timeline of another voiceover cannot be completed.
+        with self.assertRaises(VoiceError) as caught:
+            self.complete(timeline_uid="uid-other")
+        self.assertEqual(caught.exception.status, 409)
+
+    def test_an_edit_running_on_one_timeline_does_not_hold_back_or_undo_another(self):
+        self.mutate("timeline", {"unique_id": "uid-2", "name": "Second", "take_id": TAKE_ID, "built_at": now()})
+        self.complete()
+        edit = {"id": "EDT-0123456789ab", "timeline_uid": "uid-2", "timeline_name": "Second", "take_id": TAKE_ID,
+                "started_at": now(), "status": "running", "materials": []}
+        job = self.mutate("edit_start", edit)["job"]
+        # uid-1 keeps its completion; only uid-2 (being edited) is blocked.
+        self.assertTrue(manual_completion_current(job))
+        self.assertEqual(job["status"], "approved")  # the order still has a completed timeline; uid-2's card shows the edit
+        view ={row["unique_id"]: row for row in public_job(job)["timelines"]}
+        self.assertTrue(view["uid-1"]["manual_completion"])
+        self.assertEqual((view["uid-1"]["manual_completion_blocked"] == "", view["uid-2"]["manual_completion_blocked"] != ""), (True, True))
+        with self.assertRaises(VoiceError) as caught:
+            self.complete(timeline_uid="uid-2")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(self.complete(completed=False, completion_at=view["uid-1"]["manual_completion"]["at"])["completed"], False)
+
+    def test_the_standing_receipt_stays_in_the_old_field_and_the_others_move_aside(self):
+        self.complete()
+        self.assertNotIn("manual_completions", self.store.job(JOB_ID))
+        self.mutate("timeline", {"unique_id": "uid-2", "name": "Second", "take_id": TAKE_ID, "built_at": now()})
+        second = self.complete(timeline_uid="uid-2")["job"]
+        # The current timeline's receipt stays where earlier readers look; the other moves into manual_completions.
+        self.assertEqual(second["manual_completion"]["timeline_uid"], "uid-2")
+        self.assertEqual(list(second["manual_completions"]), ["uid-1"])
 
     def test_new_edit_clears_manual_receipt_and_counts_only_real_edit(self):
         self.complete()
@@ -136,7 +177,7 @@ class ManualCompletionTests(unittest.TestCase):
     def test_archived_running_unbuilt_or_unsaved_orders_cannot_be_marked(self):
         for change in (lambda job: job.update(archived=True), lambda job: job.update(timelines=[]),
                        lambda job: job["timelines"][0].update(saved=False),
-                       lambda job: job["edits"].append({"id": "EDT-0123456789ab", "status": "running"})):
+                       lambda job: job["edits"].append({"id": "EDT-0123456789ab", "timeline_uid": "uid-1", "status": "running"})):
             data = self.store.empty()
             data["jobs"].append(job_fixture())
             change(data["jobs"][0])
@@ -150,7 +191,7 @@ class ManualCompletionTests(unittest.TestCase):
     def test_stale_receipt_is_not_an_approved_read_model(self):
         original = self.complete()["job"]
         for change in (lambda job: job.update(selected_take=OTHER_TAKE_ID),
-                       lambda job: job["timelines"].append({"unique_id": "uid-new", "take_id": TAKE_ID}),
+                       lambda job: job["timelines"][0].update(archived=True),
                        lambda job: job["edits"].append({"timeline_uid": "uid-1", "status": "running"})):
             job = copy.deepcopy(original)
             change(job)

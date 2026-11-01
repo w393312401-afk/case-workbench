@@ -106,8 +106,40 @@ class ProductionValidationBrowserTests(unittest.TestCase):
         page.get_by_role("button", name="重新核验", exact=True).click()
         page.locator("#edit-runs .script-status").get_by_text("待人工审查", exact=True).wait_for()
         self.assertEqual(len(self.calls), 1)
-        self.assertEqual(self.calls[0]["body"], {})
+        # The server refuses a recheck without a save id ("缺少保存标识"), so the button must always send one.
+        body = dict(self.calls[0]["body"])
+        self.assertRegex(body.pop("request_id"), r"^[\w-]{10,100}$")
+        self.assertEqual(body, {})
         self.assertIn("读回并保存现有工程", page.get_by_role("button", name="重新核验", exact=True).get_attribute("title"))
+
+    def test_unsaved_latest_edit_retries_in_place_with_its_own_options(self):
+        old = self.edit("failed", "EDT-aaaaaaaaaaaa")
+        latest = {**self.edit("needs_repair", "EDT-bbbbbbbbbbbb"), "instruction": "开头用切纸结果", "materials": ["素材时间线"]}
+        self.payload["job"]["edits"] = [old, latest]
+        def started(route):
+            self.assertTrue(route.request.url.endswith(f"/api/production/jobs/{JOB_ID}/edit"))
+            route.fulfill(status=200, content_type="application/json", body="{}")
+
+        page = self.open_page(width=1080, post=started)
+        # Only the newest run on a timeline offers the retry; an older one would fork the history.
+        self.assertEqual(page.get_by_role("button", name="原地重试", exact=True).count(), 1)
+        page.get_by_role("button", name="原地重试", exact=True).click()
+        page.wait_for_function("() => document.body.innerText.includes('已在原时间线上重新提交')")
+        body = dict(self.calls[0]["body"])
+        self.assertRegex(body.pop("request_id"), r"^[\w-]{10,100}$")
+        self.assertEqual(body, {"timeline": "uid-own", "mode": "explain", "instruction": "开头用切纸结果",
+                                "materials": ["素材时间线"], "retry_of": "EDT-bbbbbbbbbbbb"})
+
+    def test_unsaved_report_with_gap_status_still_offers_retry(self):
+        # The stored status can show gaps ("素材待核实") while the report says the project was never saved.
+        edit = {**self.edit("needs_verification", validated=False), "completion_policy": "skill_delivery",
+                "report": {"saved": False, "gaps": [{"start": 0, "end": 30, "status": "unverified", "need": "x"}]}}
+        self.payload["job"]["edits"] = [edit]
+        page = self.open_page(width=1080)
+        self.assertEqual(page.get_by_role("button", name="原地重试", exact=True).count(), 1)
+        edit["report"]["saved"] = True
+        page = self.open_page(width=1080)
+        self.assertEqual(page.get_by_role("button", name="原地重试", exact=True).count(), 0)
 
     def test_low_coverage_invalid_missing_and_out_of_bounds_times_cannot_be_selected(self):
         good = {"number": 1, "start": 0, "end": 1, "coverage": .6}
@@ -212,7 +244,7 @@ class ProductionValidationBrowserTests(unittest.TestCase):
             job['status'] = job_status(job)
             jobs.append(job)
         page.route('**/api/content?*', lambda route: route.fulfill(status=200, content_type='application/json',
-            body=json.dumps(content_response(self.server.app, jobs, [], route.request.url))))
+            body=json.dumps(content_response(self.server.app, jobs, route.request.url))))
         page.goto(f'http://127.0.0.1:{self.server.server_port}/#/202H/content?view=all')
         page.locator('[data-content-id="video:PRD-000000000004"]').get_by_text('待人工审查', exact=True).wait_for()
         self.assertEqual(page.locator('.flow-row').count(), 4)
@@ -333,7 +365,9 @@ class ProductionValidationBrowserTests(unittest.TestCase):
 
         def recover(route):
             self.assertTrue(route.request.url.endswith("/recheck"))
-            self.assertEqual(route.request.post_data_json, {"recover_result": True})
+            body = route.request.post_data_json
+            self.assertRegex(body.pop("request_id"), r"^[\w-]{10,100}$")
+            self.assertEqual(body, {"recover_result": True})
             edit.update(status="completed", result_pending=False, error="")
             route.fulfill(status=200, content_type="application/json", body=json.dumps({"job": self.payload["job"], "edit": edit}))
 
@@ -384,7 +418,7 @@ class ProductionValidationBrowserTests(unittest.TestCase):
         page = self.open_page()
         page.wait_for_load_state('networkidle')
         page.route('**/api/content?*', lambda route: route.fulfill(status=200, content_type='application/json',
-            body=json.dumps(content_response(self.server.app, [self.payload['job']], [], route.request.url))))
+            body=json.dumps(content_response(self.server.app, [self.payload['job']], route.request.url))))
         page.goto(f'http://127.0.0.1:{self.server.server_port}/#/202H/content?view=all')
         card = page.locator(f'[data-content-id="video:{JOB_ID}"]')
         card.get_by_text('待人工审查', exact=True).wait_for()

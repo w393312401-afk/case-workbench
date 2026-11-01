@@ -21,7 +21,7 @@ from production_store import ProductionStore, job_status
 from production_validation import snapshot
 from resolve_bridge import ResolveBridge
 from test_production import Bench, FakeEleven, CANDIDATE
-from workbench_editing import EditingWorkbenchMixin, edit_summary, final_report, handoff_markdown, project_key, with_location
+from workbench_editing import EditingWorkbenchMixin, edit_summary, final_report, handoff_markdown, project_key, recut_rivals, with_location
 from workbench_production import meaning_markers
 
 REPORT = 'Done.\n\n```json\n{"timeline": "Lab261010-202-1", "shots": 3, "gaps": [], "questions": ["开头要不要换切纸？"], "saved": true}\n```'
@@ -189,6 +189,122 @@ class EditingTests(unittest.TestCase):
         self.assertIsNone(edit["baseline"])
         self.assertEqual(judging_inspects(self.bench.runner.calls), [])
         self.assertEqual(self.bench.production.public("202H")["product_settings"]["material_timelines"], ["蓝点折刀成品素材"])
+
+    def test_unsaved_edit_retries_in_place_on_the_same_timeline(self):
+        job = self.timeline_job()
+        self.editor.output = REPORT.replace('"saved": true', '"saved": false')
+        first = self.start(job)["edit"]
+        failed = self.wait(job["id"])
+        self.assertEqual((failed["id"], failed["status"]), (first["id"], "needs_repair"))
+        self.editor.output = REPORT
+        retry = self.start(job, retry_of=first["id"])["edit"]
+        self.assertEqual(retry["retry_of"], first["id"])
+        self.assertEqual(retry["timeline_uid"], first["timeline_uid"])
+        self.assertEqual(self.wait(job["id"])["status"], "completed")
+        handoff = (Path(self.editor.calls[-1]["cwd"]) / "handoff.md").read_text(encoding="utf-8")
+        for text in ("原地重试", first["id"], "不要清空重来", "UniqueId", "开头用切纸结果"):
+            self.assertIn(text, handoff)
+        # A saved delivery, an unknown record, or another timeline is not a retry target.
+        for target in (retry["id"], "EDT-ffffffffffff"):
+            with self.assertRaises(VoiceError) as caught:
+                self.start(job, retry_of=target)
+            self.assertIn(caught.exception.status, {404, 409})
+        with self.assertRaises(VoiceError) as caught:
+            self.start(job, retry_of="bad")
+        self.assertEqual(caught.exception.status, 400)
+
+    def recut_runner(self):
+        """Each build makes a timeline of its own, as Resolve does."""
+        runner, built = self.bench.runner, []
+        original = runner.__call__
+        def call(args, input, **options):
+            result = original(args, input, **options)
+            request = json.loads(input.decode("utf-8"))
+            if request["command"] == "build":
+                built.append(request)
+                body = json.loads(result.stdout.decode("utf-8"))
+                body.update(name=f"{request['prefix']}{len(built) + 1}", unique_id=f"uid-{len(built) + 1}")
+                result.stdout = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            return result
+        self.bench.resolve = ResolveBridge(runner=call)
+        return built
+
+    def test_recut_builds_its_own_timeline_and_leaves_the_earlier_cut_alone(self):
+        job = self.timeline_job()
+        built = self.recut_runner()
+        first = self.start(job)["edit"]
+        self.wait(job["id"])
+        source = self.bench.production.job(job["id"])["timelines"][-1]
+        body = {"request_id": uuid4().hex, "recut_from": source["unique_id"], "materials": ["蓝点折刀成品素材"], "mode": "explain"}
+        second = self.bench.start_edit(job["id"], body)["edit"]
+        self.wait(job["id"])
+        fresh = self.bench.production.job(job["id"])
+        self.assertEqual(len(built), 1)
+        self.assertEqual((built[0]["fps"], built[0]["width"], built[0]["height"]), (source["fps"], source["width"], source["height"]))
+        self.assertEqual(len(fresh["timelines"]), 2)
+        twin = fresh["timelines"][-1]
+        self.assertEqual((twin["recut_of"], twin["take_id"], twin["creator"]), (source["unique_id"], source["take_id"], source["creator"]))
+        self.assertEqual(second["timeline_uid"], twin["unique_id"])
+        self.assertEqual(next(edit for edit in fresh["edits"] if edit["id"] == first["id"])["timeline_uid"], source["unique_id"])
+        # The handoff names only the new timeline, and a repeated submission neither builds nor cuts again.
+        handoff = (Path(self.editor.calls[-1]["cwd"]) / "handoff.md").read_text(encoding="utf-8")
+        self.assertIn(twin["name"], handoff)
+        self.assertNotIn("原地重试", handoff)
+        self.assertEqual(self.bench.start_edit(job["id"], body)["edit"]["id"], second["id"])
+        self.assertEqual(len(built), 1)
+
+    def test_recut_keeps_the_compared_timelines_voice_and_custom_format(self):
+        job = self.timeline_job()
+        built = self.recut_runner()
+        self.bench.build_timeline(job["id"], {"request_id": uuid4().hex, "creator": "Lab", "options": {"code": "X9", "lead_seconds": 2}})
+        source = self.bench.production.job(job["id"])["timelines"][-1]
+        newer = self.bench.generate_take(job["id"], {"request_id": uuid4().hex, "voice_id": "VOICE123456789"})["take"]
+        self.mutate("select_take", job_id=job["id"], take_id=newer["id"])
+        self.bench.start_edit(job["id"], {"request_id": uuid4().hex, "recut_from": source["unique_id"], "materials": [], "mode": "explain"})
+        self.wait(job["id"])
+        twin = self.bench.production.job(job["id"])["timelines"][-1]
+        self.assertIn("-X9-", built[-1]["prefix"])
+        self.assertEqual(built[-1]["lead_frames"], source["lead_frames"])
+        self.assertGreater(source["lead_frames"], 0)
+        self.assertEqual(twin["take_id"], source["take_id"])
+        self.assertNotEqual(twin["take_id"], newer["id"])
+
+    def test_recut_refuses_a_target_mix_and_an_unknown_timeline_without_building(self):
+        job = self.timeline_job()
+        built = self.recut_runner()
+        uid = job["timelines"][-1]["unique_id"]
+        with self.assertRaises(VoiceError) as caught:
+            self.start(job, recut_from=uid)
+        self.assertEqual(caught.exception.status, 400)
+        with self.assertRaises(VoiceError) as caught:
+            self.bench.start_edit(job["id"], {"request_id": uuid4().hex, "recut_from": "uid-nope", "materials": [], "mode": "explain"})
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(built, [])
+
+    def test_compared_cuts_do_not_count_each_others_footage_as_used(self):
+        job = self.timeline_job()
+        self.recut_runner()
+        source = self.bench.production.job(job["id"])["timelines"][-1]
+        self.bench.start_edit(job["id"], {"request_id": uuid4().hex, "recut_from": source["unique_id"], "materials": [], "mode": "explain"})
+        self.wait(job["id"])
+        fresh = self.bench.production.job(job["id"])
+        twin = fresh["timelines"][-1]
+        self.assertEqual([item["unique_id"] for item in recut_rivals(fresh, twin["unique_id"])], [source["unique_id"]])
+        self.assertEqual([item["unique_id"] for item in recut_rivals(fresh, source["unique_id"])], [twin["unique_id"]])
+        unrelated = {**source, "unique_id": "uid-other", "recut_of": None}
+        self.assertEqual(recut_rivals({"timelines": [unrelated, source]}, "uid-other"), [])
+        self.bench.__dict__["_edit_occupied"] = {"p": {"EDT-a": {"timeline": source["name"], "spans": [1]},
+                                                       "EDT-b": {"timeline": "别的成片", "spans": [2]}}}
+        self.assertEqual(self.bench._occupied_by_others("EDT-c", "p", [source]), {"别的成片": [2]})
+
+    def test_retry_target_is_decided_by_the_unconfirmed_save_not_the_status_label(self):
+        from workbench_editing import edit_retryable
+        base = {"status": "needs_verification", "completion_policy": "skill_delivery", "execution_status": "completed", "report": {"saved": False}}
+        self.assertTrue(edit_retryable(base))
+        self.assertTrue(edit_retryable({**base, "report": None}))
+        self.assertFalse(edit_retryable({**base, "report": {"saved": True}}))
+        self.assertFalse(edit_retryable({**base, "result_pending": True}))
+        self.assertFalse(edit_retryable({**base, "status": "running"}))
 
     def test_archived_timeline_cannot_start_ai_until_restored(self):
         job = self.timeline_job()

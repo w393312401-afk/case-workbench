@@ -1,6 +1,9 @@
 """Background edits and carousel steps share one cancellable Resolve queue."""
+import json
 import threading
+import types
 import unittest
+from unittest import mock
 
 from codex_bridge import BridgeCancelled
 from elevenlabs_client import VoiceError
@@ -125,6 +128,84 @@ class ResolveAccessTests(unittest.TestCase):
                 raise RuntimeError('step failed')
         self.assertFalse(bridge.busy())
         self.assertEqual(bridge._access_waiters, [])
+
+
+class ResolveLaunchTests(unittest.TestCase):
+    """A closed DaVinci is started by the first operation that needs it instead of failing it."""
+
+    def bridge(self, states, launched, *, started=True, answers=None, wait=5):
+        calls = []
+        answers = list(answers or [{"ok": True}])
+
+        def runner(args, input, **options):
+            calls.append(json.loads(input.decode("utf-8"))["command"])
+            reply = answers.pop(0) if len(answers) > 1 else answers[0]
+            return types.SimpleNamespace(stdout=json.dumps(reply).encode("utf-8"))
+
+        def launch():
+            launched.append(1)
+            return started
+
+        bridge = ResolveBridge(runner=runner, probe=lambda: states.pop(0) if len(states) > 1 else states[0], launch=launch, launch_wait=wait)
+        return bridge, calls
+
+    def test_closed_resolve_is_started_and_awaited_before_the_operation(self):
+        launched = []
+        bridge, calls = self.bridge([False, False, True], launched, answers=[{"ok": False, "error": "连不上"}, {"ok": True}])
+        with mock.patch("resolve_bridge.LAUNCH_POLL", 0):
+            self.assertTrue(bridge.run("status")["ok"])
+        self.assertEqual(launched, [1])
+        self.assertEqual(calls, ["ping", "ping", "status"])
+
+    def test_no_scripting_call_until_the_started_resolve_shows_its_main_window(self):
+        launched = []
+        bridge, calls = self.bridge([False, True], launched, answers=[{"ok": False, "error": "连不上"}, {"ok": True}])
+        windows = [False, False, True]
+        seen = []
+
+        def window_ready():
+            seen.append(list(calls))
+            return windows.pop(0)
+
+        bridge.window_ready = window_ready
+        with mock.patch("resolve_bridge.LAUNCH_POLL", 0):
+            self.assertTrue(bridge.run("status")["ok"])
+        self.assertEqual(seen, [["ping"]] * 3)
+        self.assertEqual(calls, ["ping", "ping", "status"])
+
+    def test_a_main_window_that_never_shows_does_not_stop_the_connection_for_good(self):
+        bridge, calls = self.bridge([False, True], [], answers=[{"ok": False, "error": "连不上"}, {"ok": True}])
+        bridge.window_ready = lambda: False
+        with mock.patch("resolve_bridge.LAUNCH_POLL", 0), mock.patch("resolve_bridge.LAUNCH_QUIET", 0):
+            self.assertTrue(bridge.run("status")["ok"])
+        self.assertEqual(calls, ["ping", "ping", "status"])
+
+    def test_a_resolve_the_process_list_missed_is_not_started_twice(self):
+        launched = []
+        bridge, calls = self.bridge([False], launched)
+        bridge.run("status")
+        self.assertEqual((launched, calls), ([], ["ping", "status"]))
+
+    def test_open_resolve_is_not_started_again(self):
+        launched = []
+        bridge, calls = self.bridge([True], launched)
+        bridge.run("status")
+        self.assertEqual((launched, calls), ([], ["status"]))
+
+    def test_missing_executable_asks_for_a_manual_start(self):
+        bridge, calls = self.bridge([False], [], started=False, answers=[{"ok": False, "error": "连不上"}])
+        with self.assertRaisesRegex(VoiceError, "没有找到 Resolve.exe"):
+            bridge.run("status")
+        self.assertEqual(calls, ["ping"])
+
+    def test_a_resolve_that_never_answers_ends_with_a_clear_error(self):
+        bridge, calls = self.bridge([False, True], [], answers=[{"ok": False, "error": "连不上"}], wait=0.05)
+        with mock.patch("resolve_bridge.LAUNCH_POLL", 0.01):
+            with self.assertRaises(VoiceError) as caught:
+                bridge.run("status")
+        self.assertEqual(caught.exception.status, 504)
+        self.assertNotIn("status", calls)
+        self.assertFalse(bridge.busy())
 
 
 if __name__ == '__main__':

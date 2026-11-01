@@ -118,7 +118,7 @@ class ProductionVideoReviewBrowserTests(unittest.TestCase):
         page.locator('.production-steps [data-step="timeline"]').click()
         active = page.locator('[data-timeline-id="uid-own"]')
         self.assertIn("current", active.get_attribute("class"))
-        active.get_by_text("当前生效", exact=True).wait_for()
+        active.get_by_text("当前使用", exact=True).wait_for()
         active.get_by_text("配音第 2 版（当前选用）", exact=True).wait_for()
         active.get_by_text("AI 剪辑：待人工审查", exact=True).wait_for()
         old_card = page.locator('[data-timeline-id="uid-old"]')

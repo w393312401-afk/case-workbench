@@ -492,6 +492,29 @@ class BuildTests(unittest.TestCase):
         opened = self.runner.calls[-1]
         self.assertEqual((opened["creator"], opened["folder"], opened["project_id"]), ("Zack", "B跨境店渠道号-zack", "pid-zack"))
 
+    def test_opening_an_unlocated_timeline_pins_it_to_the_project_it_opened_in(self):
+        class OpenLocated(FakeRunner):
+            def __call__(self, args, input, **options):
+                done = super().__call__(args, input, **options)
+                if self.calls[-1]["command"] != "open":
+                    return done
+                body = {**json.loads(done.stdout.decode("utf-8")), "folder": "B跨境店渠道号-zack", "project_id": "pid-zack"}
+                return subprocess.CompletedProcess(args, 0, json.dumps(body, ensure_ascii=False).encode("utf-8"), b"")
+
+        self.runner = OpenLocated()
+        self.bench.resolve = ResolveBridge(runner=self.runner)
+        self.mutate("settings", settings={"creators": ["Zack"]})
+        job, _ = self.voiced_job()
+        record = self.bench.build_timeline(job["id"], {"request_id": uuid4().hex, "creator": "Zack"})["timeline"]
+        self.assertNotIn("project_id", record)  # Built before locations were recorded.
+        opened = self.bench.open_timeline(job["id"], {"unique_id": record["unique_id"]})
+        self.assertNotIn("project_id", opened)
+        saved = self.bench.production.job(job["id"])["timelines"][0]
+        self.assertEqual((saved["folder"], saved["project_id"]), ("B跨境店渠道号-zack", "pid-zack"))
+        self.bench.open_timeline(job["id"], {"unique_id": record["unique_id"]})
+        again = self.runner.calls[-1]
+        self.assertEqual((again["folder"], again["project_id"]), ("B跨境店渠道号-zack", "pid-zack"))
+
     def wait_for(self, check, seconds=5):
         deadline = time.monotonic() + seconds
         while not check():

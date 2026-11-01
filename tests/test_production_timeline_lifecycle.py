@@ -100,14 +100,17 @@ class TimelineLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(VoiceError, "当前版本"):
             self.mutate("edit_approve", edit_id="EDT-0123456789ab", approved=True)
 
-    def test_new_work_does_not_revive_old_receipt_when_restored(self):
+    def test_restoring_a_timeline_brings_back_its_own_receipt_and_nothing_for_newer_work(self):
         self.mutate("job_completion", completed=True)
         self.mutate("timeline_archive", archived=True)
         self.mutate("timeline", {"unique_id": "uid-new", "name": "New", "take_id": fixture.TAKE_ID, "built_at": now()})
         job = self.mutate("timeline_archive", archived=False)["job"]
-        self.assertNotIn("manual_completion", job)
-        self.assertEqual(job["status"], "timeline")
+        # uid-2 was completed itself, so it is completed again; the newer timeline has no receipt of its own.
+        self.assertEqual(job["status"], "approved")
         self.assertEqual(current_timeline(job)["unique_id"], "uid-new")
+        view = {row["unique_id"]: row for row in public_job(job)["timelines"]}
+        self.assertTrue(view["uid-2"]["manual_completion"])
+        self.assertFalse(view["uid-new"]["manual_completion"])
         self.assertEqual(job["timelines"][1]["task_status"], "completed")
 
     def test_task_status_does_not_fabricate_or_mutate_ai_and_review_records(self):

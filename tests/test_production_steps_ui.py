@@ -3,8 +3,6 @@ import unittest
 
 import json
 
-from test_production_carousel_delivery_ui import CarouselDeliveryBrowserTests
-from test_production_carousel_ui import CarouselBrowserTests
 from test_production_validation_ui import ProductionValidationBrowserTests
 
 
@@ -36,10 +34,12 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         steps.locator('[data-step="voice"]').click()
         page.locator("#voice-panel").wait_for()
         self.assertFalse(page.locator("#edit-panel").is_visible())
-        # Open completed controls so this fixture remains long enough to test sticky scrolling.
+        # Open completed controls and shorten the window so this fixture remains long enough to test sticky scrolling.
         page.locator('[data-production-controls="voice"] > summary').click()
+        page.set_viewport_size({"width": page.viewport_size["width"], "height": 480})
         page.mouse.wheel(0, 3000)
-        page.wait_for_function("() => scrollY > 0")
+        # Wait for the wheel scroll to settle rather than its first frame.
+        page.wait_for_function("() => scrollY + innerHeight >= document.documentElement.scrollHeight - 1")
         pinned = page.evaluate(PINNED)
         self.assertEqual(pinned["bar"], 0)
         self.assertEqual(pinned["steps"], pinned["height"])
@@ -52,7 +52,7 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         page.locator('#edit-form input[name="material_text"]').wait_for()
         self.assertEqual(page.locator('#edit-form input[name="material"]').count(), 0)
         page.locator('#edit-form input[name="material_text"]').fill("混剪素材")
-        page.locator("#edit-panel").get_by_role("button", name="开始 AI 剪辑", exact=True).click()
+        page.locator("#edit-panel").get_by_role("button", name="另建时间线并开始剪辑", exact=True).click()
         page.locator("#edit-form [data-error]").get_by_text("素材时间线只能选名称带「成品素材」的时间线。", exact=True).wait_for()
         self.assertEqual(self.calls, [])
 
@@ -137,50 +137,11 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         self.assertFalse(page.locator('#timeline-form button[type="submit"]').is_disabled())
 
 
-class CarouselStepsBrowserTests(CarouselBrowserTests):
-    def test_carousel_opens_on_next_step_and_offers_finished_material_only(self):
-        page = self.open_page(f"#production/{self.carousel['id']}")
-        steps = page.locator(".production-steps")
-        steps.wait_for()
-        self.assertEqual(steps.locator('[aria-selected="true"]').get_attribute("data-step"), "pick")
-        self.assertEqual(steps.locator("[data-step]").evaluate_all("nodes => nodes.map(node => node.dataset.step)"),
-                         ["slides", "pick", "images", "delivery"])
-        self.assertTrue(page.locator("#still-panel").is_visible())
-        for hidden in ("#carousel-images-panel", "#carousel-delivery-panel"):
-            self.assertFalse(page.locator(hidden).is_visible())
-        options = page.locator('#still-panel input[name="material"]')
-        options.first.wait_for()
-        self.assertEqual(options.evaluate_all("nodes => nodes.map(node => [node.value, node.checked])"), [["蓝点折刀成品素材", True]])
-
-        steps.locator('[data-step="images"]').click()
-        page.locator("#carousel-images-panel").wait_for()
-        self.assertFalse(page.locator("#still-panel").is_visible())
-        page.reload()
-        page.locator(".production-steps").wait_for()
-        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute("data-step"), "pick")
-
-
-class CarouselShortcutBrowserTests(CarouselDeliveryBrowserTests):
-    def test_settings_fold_and_confirming_the_group_packages_it(self):
-        page = self.open_images()
-        toggle = page.locator("#carousel-requirements-toggle")
-        self.assertFalse(toggle.evaluate("node => node.open"))
-        self.assertFalse(page.locator('[name="image_mode"]').is_visible())
-        self.assertIn("实拍保真版", toggle.locator("summary").inner_text())
-        toggle.locator("summary").click()
-        page.locator('[name="image_mode"]').wait_for()
-        self.confirm_group(page)
-        self.assertEqual(len(self.detail().get("deliveries", [])), 1)
-        page.locator('[data-step="delivery"]').click()
-        page.locator("[data-download-delivery]").wait_for()
-
-
 # Reuse the fixtures without running the inherited tests a second time.
-for case, base in ((VideoStepsBrowserTests, ProductionValidationBrowserTests), (CarouselStepsBrowserTests, CarouselBrowserTests),
-                   (CarouselShortcutBrowserTests, CarouselDeliveryBrowserTests)):
+for case, base in ((VideoStepsBrowserTests, ProductionValidationBrowserTests),):
     for name in [name for name in vars(base) if name.startswith("test_")]:
         setattr(case, name, None)
-del ProductionValidationBrowserTests, CarouselBrowserTests, CarouselDeliveryBrowserTests, case, base, name
+del ProductionValidationBrowserTests, case, base, name
 
 if __name__ == "__main__":
     unittest.main()

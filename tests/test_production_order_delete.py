@@ -12,15 +12,11 @@ sys.path.insert(0, str(APP))
 
 from elevenlabs_client import VoiceError
 from test_production import Bench, CANDIDATE as VIDEO_CANDIDATE, FakeEleven
-import test_production_carousel as carousel_fixture
-from variant_parse import carousel_text, parse_carousels
-from workbench_carousel import CarouselWorkbenchMixin
-from workbench_carousel_stills import CarouselStillsMixin
 from workbench_editing import EditingWorkbenchMixin
 from workbench_order_delete import OrderDeleteMixin
 
 
-class OrderBench(Bench, EditingWorkbenchMixin, CarouselWorkbenchMixin, CarouselStillsMixin, OrderDeleteMixin):
+class OrderBench(Bench, EditingWorkbenchMixin, OrderDeleteMixin):
     pass
 
 
@@ -41,9 +37,8 @@ class OrderDeleteTests(unittest.TestCase):
             "script": {"product": "202H", "direction_id": "202H-S2", "title": "稿", "text": text, "confirmed": True}}, source)["script"]
 
     def archive(self, kind, identifier, archived=True):
-        key = "job_archive" if kind == "job" else "carousel_archive"
-        return self.bench.production.mutate(key, {"request_id": uuid4().hex, "revision": self.revision(),
-                                                  f"{kind}_id": identifier, "archived": archived})
+        return self.bench.production.mutate("job_archive", {"request_id": uuid4().hex, "revision": self.revision(),
+                                                            "job_id": identifier, "archived": archived})
 
     # -- video -----------------------------------------------------------------------------------------------------
     def video_job(self):
@@ -119,39 +114,15 @@ class OrderDeleteTests(unittest.TestCase):
         self.assertEqual(self.bench.delete_job_order(job["id"], {"request_id": uuid4().hex})["deleted_job"], job["id"])
         self.assertEqual(list((self.root / "operations").glob("*.json")), [])
 
-    # -- carousel --------------------------------------------------------------------------------------------------
-    def carousel(self):
-        script = self.script(carousel_text(parse_carousels(carousel_fixture.CANDIDATE)[0]), carousel_fixture.CANDIDATE)
-        item = self.bench.create_carousel({"request_id": uuid4().hex, "revision": self.revision(), "carousel": {"script_id": script["id"]}})["carousel"]
-        folder = self.root / "carousels" / item["id"]
-        for name in ("candidates", "searches/STS-0123456789ab", "outputs", "deliveries/DLV-0123456789ab"):
-            (folder / name).mkdir(parents=True)
-            (folder / name / "file.bin").write_bytes(b"y" * 1024)
-        return item, folder
-
-    def test_archived_carousel_goes_with_its_folder(self):
-        item, folder = self.carousel()
-        self.archive("carousel", item["id"])
-        preview = self.bench.delete_carousel_order(item["id"], {"preview": True})
-        self.assertEqual((preview["kind"], preview["files"], preview["published"]), ("carousel", 4, False))
-        self.assertTrue(folder.is_dir())
-        result = self.bench.delete_carousel_order(item["id"], {"request_id": uuid4().hex})
-        self.assertEqual((result["deleted_carousel"], result["warnings"]), (item["id"], []))
-        self.assertFalse(folder.exists())
-        self.assertEqual([entry["id"] for entry in self.bench.production.public()["carousels"]], [])
-        # The script version stays so the order can be created again.
-        self.assertTrue(self.bench.creation.get_script(item["script_id"]))
-
-    def test_a_running_generation_blocks_carousel_deletion(self):
-        item, folder = self.carousel()
-        self.archive("carousel", item["id"])
-        data = self.bench.production.read()
-        data["carousels"][0].setdefault("generations", []).append({"id": "IMG-0123456789ab", "status": "running", "slides": [1]})
-        self.bench.production.write(data)
-        with self.assertRaises(VoiceError) as caught:
-            self.bench.delete_carousel_order(item["id"], {"request_id": uuid4().hex})
-        self.assertEqual(caught.exception.status, 409)
-        self.assertTrue(folder.is_dir())
+    def test_batch_handles_each_order_on_its_own(self):
+        job, other = self.video_job(), self.video_job()
+        request = {"request_id": uuid4().hex, "action": "archive", "items": [{"kind": "job", "id": job["id"]}, {"kind": "job", "id": other["id"]}]}
+        self.assertEqual(self.bench.batch_orders(request)["changed"], 2)
+        self.assertTrue(self.bench.production.job(job["id"]).get("archived"))
+        result = self.bench.batch_orders({"request_id": uuid4().hex, "action": "delete", "items": [{"kind": "job", "id": job["id"]}]})
+        self.assertEqual(result["changed"], 1)
+        with self.assertRaises(VoiceError):
+            self.bench.batch_orders({"request_id": uuid4().hex, "action": "delete", "items": [{"kind": "carousel", "id": "CAR-000000000001"}]})
 
 
 if __name__ == "__main__":

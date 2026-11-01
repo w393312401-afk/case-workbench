@@ -4,7 +4,6 @@ import unittest
 
 from playwright.sync_api import expect
 import test_production_video_visuals_ui as video_fixture
-import test_production_carousel_ui as carousel_fixture
 
 
 class VideoNeedsBrowserTests(unittest.TestCase):
@@ -67,30 +66,6 @@ class VideoNeedsBrowserTests(unittest.TestCase):
         expect(target).to_be_visible()
         self.assertTrue(target.evaluate("node=>node===document.activeElement"))
         self.assertEqual(self.calls,[])
-
-
-class CarouselNeedsBrowserTests(unittest.TestCase):
-    setUpClass = classmethod(carousel_fixture.CarouselBrowserTests.setUpClass.__func__)
-    tearDownClass = classmethod(carousel_fixture.CarouselBrowserTests.tearDownClass.__func__)
-    setUp = carousel_fixture.CarouselBrowserTests.setUp
-    stop_server = carousel_fixture.CarouselBrowserTests.stop_server
-    request = carousel_fixture.CarouselBrowserTests.request
-    open_page = carousel_fixture.CarouselBrowserTests.open_page
-    make_playable_video = carousel_fixture.CarouselBrowserTests.make_playable_video
-
-    def test_missing_base_links_directly_to_its_slide_without_importing(self):
-        page=self.open_page(f'#production/{self.carousel["id"]}')
-        posts=[]
-        page.on("request",lambda request:posts.append(request.url) if request.method=="POST" else None)
-        link=page.locator('[data-need-key="slide-base-2"]')
-        expect(link).to_be_attached()
-        link.evaluate("node=>node.click()")
-        target=page.locator('[data-pick-slide="2"]')
-        expect(target).to_be_visible()
-        expect(target).to_have_class("pick-slide production-target")
-        self.assertTrue(target.evaluate("node=>node===document.activeElement"))
-        self.assertEqual(posts,[])
-        self.assertIsNone(self.app.production.carousel(self.carousel["id"])["slides"][1].get("base"))
 
 
 if __name__ == '__main__':

@@ -224,15 +224,28 @@ class ProductionOperations:
                 other = self._read(path)
                 if (other.get("job_id") == body["job_id"] and other.get("kind") == kind and
                         other.get("request_id") != body["request_id"] and other.get("state") not in TERMINAL):
-                    if kind == "timeline" and not self.recovery_file(other).exists():
-                        # This job's lock is held, so that build is not running; without its worker journal it
-                        # never changed DaVinci and must not block a new build.
-                        self.update(other, "safe_failed", error="这次建线没有开始，达芬奇里没有改动；已由新的建线请求取代。",
+                    if kind == "timeline" and self.timeline_not_created(other):
+                        # This job's lock is held, so that build is not running; it stopped before creating a
+                        # timeline (at worst one spare voice clip in the media pool) and must not block a new build.
+                        self.update(other, "safe_failed", error=("这次建线停在导入配音，时间线没有创建；已由新的建线请求取代。"
+                                                                 if self.recovery_file(other).exists() else
+                                                                 "这次建线没有开始，达芬奇里没有改动；已由新的建线请求取代。"),
                                     cancelled=True)
                         continue
-                    label = "配音" if kind == "take" else "建线"
-                    raise VoiceError(409, f"这张制作单有一项{label}尚未恢复（请求 {other['request_id']}），请先恢复或核实该项结果。")
+                    if kind == "timeline":
+                        raise VoiceError(409, "这张制作单有一项建线尚未恢复，请到页面上方「异常恢复」里恢复或放弃这次建线。")
+                    raise VoiceError(409, f"这张制作单有一项配音尚未恢复（请求 {other['request_id']}），请先恢复或核实该项结果。")
             yield record
+
+    def timeline_not_created(self, record):
+        """Whether a build stopped before creating its timeline, so a new build cannot leave a second one."""
+        path = self.recovery_file(record)
+        if not path.exists():
+            return True
+        try:
+            return json.loads(path.read_text(encoding="utf-8")).get("stage") in {"prepared", "importing", "imported"}
+        except (OSError, ValueError, AttributeError):
+            return False
 
     def prepare(self, kind, body, snapshot, *, take_id=""):
         self.validate(kind, body)
@@ -317,7 +330,8 @@ class ProductionOperations:
                 message = ("已找到音频，请先核对并恢复或导入该音频，不能按未生成重新发送。" if uncertain and has_audio else
                            "配音结果不确定，请先核对服务商记录；工作台不会再次发送配音请求。" if uncertain else
                            "已保存外部结果，可用原请求恢复资料登记。" if state in {"response_saved", "result_ready"} or has_response or has_result else
-                           "可用原请求恢复；建线将先核对已有时间线。" if kind == "timeline" and self.recovery_file(record).exists() else
+                           "这次建线停在导入配音，时间线还没有创建；可按原请求继续，或直接重新建线。" if kind == "timeline" and self.recovery_file(record).exists() and self.timeline_not_created(record) else
+                           "可用原请求恢复；建线将先核对已有时间线。如果恢复一直报错，可放弃这次建线再重新建。" if kind == "timeline" and self.recovery_file(record).exists() else
                            "这次建线没有开始，达芬奇里没有改动；可按原请求继续，或直接重新建线。" if kind == "timeline" else
                            "尚未发送配音，可用原请求继续。")
                 result.append({key: copy.deepcopy(record.get(key)) for key in

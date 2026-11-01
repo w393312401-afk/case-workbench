@@ -402,6 +402,52 @@ except VoiceError as error:
         self.assertEqual(resolve.calls[0]["operation_key"], resolve.calls[1]["operation_key"])
         self.assertEqual(resolve.calls[0]["recovery_file"], resolve.calls[1]["recovery_file"])
 
+    def lost_build(self):
+        job, body = self.configured_job(), {"request_id": uuid4().hex, "creator": "Lab"}
+        self.bench.resolve = RecoveringResolve(lost_response=True)
+        self.error(504, self.bench.build_timeline, job["id"], body)
+        self.bench.resolve.lost_response, self.bench.resolve.timelines = False, {}
+        return job, body
+
+    def test_build_stopped_during_voice_import_does_not_block_a_new_build(self):
+        job, body = self.lost_build()
+        operations = self.bench._production_operations()
+        journal = operations.recovery_file(self.operation("timeline", job, body))
+        journal.write_text(json.dumps({"stage": "importing"}), encoding="utf-8")
+        self.assertIn("直接重新建线", operations.public(job["id"])[0]["message"])
+        self.restart()
+        self.assertTrue(self.bench.build_timeline(job["id"], {"request_id": uuid4().hex, "creator": "Lab"})["timeline"])
+        record = self.operation("timeline", job, body)
+        self.assertEqual((record["state"], record["cancelled"]), ("safe_failed", True))
+        self.assertEqual(self.bench._production_operations().public(job["id"]), [])
+
+    def test_build_past_timeline_creation_still_blocks_until_recovered_or_abandoned(self):
+        job, body = self.lost_build()
+        journal = self.bench._production_operations().recovery_file(self.operation("timeline", job, body))
+        journal.write_text(json.dumps({"stage": "placing"}), encoding="utf-8")
+        self.assertIn("异常恢复", self.error(409, self.bench.build_timeline, job["id"], {"request_id": uuid4().hex, "creator": "Lab"}))
+        self.assertEqual(self.bench.abandon_timeline(job["id"], {"request_id": body["request_id"]}), {"ok": True})
+        record = self.operation("timeline", job, body)
+        self.assertEqual((record["state"], record["cancelled"]), ("safe_failed", True))
+        self.assertIn("__WB_", record["error"])
+        self.assertTrue(self.bench.build_timeline(job["id"], {"request_id": uuid4().hex, "creator": "Lab"})["timeline"])
+
+    def test_abandon_refuses_a_build_with_a_result_or_another_job(self):
+        job, body = self.configured_job(), {"request_id": uuid4().hex, "creator": "Lab"}
+        update = ProductionOperations.update
+
+        def failed_commit(operations, record, state, **values):
+            if state == "committed":
+                raise OSError("catalog write failure")
+            return update(operations, record, state, **values)
+
+        with patch.object(ProductionOperations, "update", failed_commit):
+            self.error(503, self.bench.build_timeline, job["id"], body)
+        self.error(409, self.bench.abandon_timeline, job["id"], {"request_id": body["request_id"]})
+        self.error(400, self.bench.abandon_timeline, job["id"], {})
+        self.error(404, self.bench.abandon_timeline, job["id"], {"request_id": uuid4().hex})
+        self.assertEqual(self.operation("timeline", job, body)["state"], "result_ready")
+
     def test_build_result_journal_write_failure_recovers_original_line(self):
         job, body = self.configured_job(), {"request_id": uuid4().hex, "creator": "Lab"}
         update = ProductionOperations.update
