@@ -152,6 +152,13 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(compact["context"]["writing_topic"], "202H-S1 别再靠手腕猜刃角")
         self.assertEqual(compact["created_at"], task["created_at"])
         self.assertEqual(self.path(task["task_id"]).read_bytes(), before)
+        # Reruns are matched on the complete instruction: a different ending past the preview is a different request.
+        other = self.wait(self.manager.create(self.identifier, self.body(instruction=instruction.replace("保持本轮主题", "换一个主题")))["task_id"])
+        rows = {row["task_id"]: row for row in self.manager.list_tasks()}
+        self.assertEqual(rows[task["task_id"]]["instruction"], rows[other["task_id"]]["instruction"])
+        self.assertNotEqual(rows[task["task_id"]]["instruction_sha256"], rows[other["task_id"]]["instruction_sha256"])
+        self.assertEqual(rows[task["task_id"]]["subject_key"], rows[other["task_id"]]["subject_key"])
+        self.assertFalse(rows[task["task_id"]]["fill_request"])
 
     def test_all_actions_use_their_own_analysis_requirements(self):
         install_review_fixture(self.skill)
@@ -1227,6 +1234,26 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(self.manager.list_tasks(), [])
         self.assertEqual(self.bridges[0].calls, [])
         self.assertEqual(list(self.store.folder(self.identifier).rglob(".task-*.tmp")), [])
+
+    def test_path_check_keeps_containment_without_resolving_plain_paths(self):
+        root = self.root / "owner"
+        root.mkdir()
+        inside = root / "ai-tasks" / "task.json"
+        with patch.object(Path, "resolve", side_effect=AssertionError("A plain contained path needs no resolve")):
+            self.assertEqual(ai_tasks._check_path(inside, root), inside)
+        for outside in (root / ".." / "elsewhere" / "task.json", self.root / "elsewhere" / "task.json"):
+            with self.assertRaises(AITaskError):
+                ai_tasks._check_path(outside, root)
+
+    def test_task_list_resolves_a_case_folder_no_more_often_with_more_tasks(self):
+        def folder_calls():
+            with patch.object(self.store, "folder", wraps=self.store.folder) as folder:
+                self.assertTrue(self.manager.list_tasks())
+            return folder.call_count
+        self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        one_task = folder_calls()
+        self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        self.assertEqual(folder_calls(), one_task)
 
     @unittest.skipUnless(os.name == "nt", "Windows junction validation")
     def test_collaboration_junction_is_rejected_without_touching_target(self):

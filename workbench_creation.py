@@ -106,8 +106,7 @@ class CreationWorkbenchMixin:
                 owners = []
             else:
                 production = self.production.records()
-                found = [(row, row_kind) for key, row_kind in (("jobs", "video"), ("carousels", "carousel"))
-                         for row in production[key] if row["id"] == identifier]
+                found = [(row, "video") for row in production["jobs"] if row["id"] == identifier]
                 if len(found) > 1:
                     raise CreationError(409, "发现重复的制作记录编号，请先核对资料。")
                 record, production_kind = found[0] if found else (None, None)
@@ -216,7 +215,7 @@ class CreationWorkbenchMixin:
         rows, seen = [], set()
         for script in sorted(self.creation.public()["scripts"], key=lambda row: str(row.get("created_at") or ""), reverse=True):
             body = str(script.get("text") or "").strip()
-            if product_key(script.get("product")) != product or not body or body in seen or "图文" in str(script.get("title") or ""):
+            if product_key(script.get("product")) != product or not body or body in seen:
                 continue
             seen.add(body)
             rows.append([line.strip() for line in body.splitlines() if line.strip()])
@@ -237,6 +236,18 @@ class CreationWorkbenchMixin:
         repeated = [gram for gram, n in sorted(grams.items(), key=lambda item: -item[1]) if n >= min_scripts][:15]
         return {"scripts_checked": len(rows), "openings": list(dict.fromkeys(lines[0] for lines in rows))[:10], "repeated_closings": top(lines[-1] for lines in rows),
                 "repeated_phrases": repeated}
+
+    def _available_directions(self, product):
+        """This product's live directions and variants, compact: a task with no chosen direction picks one instead of inventing its own."""
+        rows = []
+        for item in self.direction_catalog(product)["directions"]:
+            if item.get("status") in {"archived", "paused"}:
+                continue
+            variants = [{"number": number, **{key: variant[key] for key in ("progression", "audience", "concern", "closing") if variant.get(key)}}
+                        for number, variant in enumerate(item.get("variants") or [], 1) if not variant.get("conflict")]
+            rows.append({**{key: item[key] for key in ("direction_id", "main_difference", "audience", "concern", "closing", "notes") if item.get(key)},
+                         "variants": variants})
+        return rows
 
     def _linked_reviews(self, product, direction, limit=12):
         """Comments the user linked (关联主题) to this direction's concern or its selling point, frozen into the writing context."""
@@ -264,6 +275,10 @@ class CreationWorkbenchMixin:
             video = item.get("video_id")
             result["sales_data"] = self.sales.resolve_case({"case_id": identifier, "current": {"metrics": {"video_id": video} if video else {}}})
             result["video"] = self.performance.video(video, self.video_case_links()) if video else None
+            # A post found only in the 图文 exports is a photo post: its figures live in 图文, so the page must not
+            # report it as a video missing from the sales table.
+            photo = bool(video) and not result["video"] and bool(self.performance.photo_item_shop(video))
+            result["script"]["post_kind"] = "photo" if photo else "video" if video else ""
             result["case"] = None
             if item.get("case_id") and self.store.folder(item["case_id"]).is_dir():
                 result["case"] = self.detail(item["case_id"])
@@ -308,7 +323,7 @@ class CreationWorkbenchMixin:
             self.state_cache = None
             return {**result, "catalog": self.creation_catalog()}
 
-    def save_script_status(self, identifier, body, *, carousel_id=None, video_job_id=None):
+    def save_script_status(self, identifier, body, *, video_job_id=None):
         with self.lock:
             body = copy.deepcopy(body)
             value = body.setdefault("script_status", {})
@@ -328,16 +343,6 @@ class CreationWorkbenchMixin:
                 invalid_status = "status" in value and value["status"] not in {"published", "reviewed", "archived"}
                 if (changed or invalid_status) and video_job_id != video_publication["job_id"]:
                     raise CreationError(409, "这条脚本已有视频成片发布登记，请到对应视频制作单修改，保留实际成片关联。")
-            production = getattr(self, "production", None)
-            for carousel in production.public().get("carousels", []) if production else []:
-                published = carousel.get("publication") or {}
-                if carousel["script_id"] != identifier or not published:
-                    continue
-                changed = (value.get("video_id", script.get("video_id")), value.get("published_on", script.get("published_on"))) != (
-                    published["post_id"], published["published_on"])
-                invalid_status = "status" in value and value["status"] not in {"published", "reviewed", "archived"}
-                if (changed or invalid_status) and carousel_id != carousel["id"]:
-                    raise CreationError(409, "这条脚本已有图文发布登记，请到对应图文制作单修改，保留实际成品包关联。")
             video = str(value.get("video_id", script["video_id"]) or "")
             if video:
                 actual = self.performance.video_brief([video]).get(video)
@@ -959,9 +964,26 @@ class CreationWorkbenchMixin:
             context = {"kind": "case" if case else "direction" if direction else "blank", "product": product,
                        "title": (case or {}).get("current", {}).get("title") or (direction or {}).get("direction_id") or "空白创作",
                        "direction": direction, "materials": materials}
+            if body.get("source_production_id") is not None:
+                # 「补全脚本信息」 names the 制作单 it fills, so a later rerun can be matched to it by number, not title.
+                wanted = body["source_production_id"]
+                if not isinstance(wanted, str) or not any(row["id"] == wanted for row in self.production.records()["jobs"]):
+                    raise CreationError(409, "补全来源的制作单不存在。")
+                context["source_production_id"] = wanted
             used = self._used_phrasing(product) if body.get("action") == "variants" else None
             if used:
                 context["used_phrasing"] = used
+            if body.get("action") == "variants":
+                try:  # Optional: an unreadable calendar only means the script names no deadline.
+                    campaigns = self.campaigns.for_writing()
+                except CreationError:
+                    campaigns = []
+                if campaigns:
+                    context["campaigns"] = campaigns
+                if context["kind"] == "blank":
+                    available = self._available_directions(product)
+                    if available:
+                        context["available_directions"] = available
             linked = self._linked_reviews(product, direction)
             if linked:
                 context["linked_reviews"] = linked
@@ -973,8 +995,6 @@ class CreationWorkbenchMixin:
                 if plan:
                     raise CreationError(400, "原稿发散与按变体写稿不能同时使用。")
                 context["writing_mode"] = mode
-            if body.get("carousel"):
-                raise CreationError(400, "写稿不再同时出图文版：脚本定稿后，用口播稿的意群表配合图文技能另做逐张表。")
             if body.get("plan_id"):
                 plan = task_plan
                 if plan["product"] != product or plan["direction_id"] != direction_id:
@@ -1011,6 +1031,10 @@ class CreationWorkbenchMixin:
                         context["direction"] = self._creation_direction(product, context["review_summary"]["direction_id"], allow_archived=True)
                     except CreationError:
                         pass
+                # The product's graded selling points, frozen with the task: the drafted conclusion names the ones the video covers.
+                context["selling_points"] = [{"code": point["code"], "title": point["title"]}
+                    for point in self.directions.read()["selling_points"]
+                    if product_key(point.get("product")) == product and point.get("status") != "merged"]
                 context["sales_data"] = self.sales.resolve_case({"case_id": video["video_id"], "current": {"metrics": {"video_id": video["video_id"]}}})
                 prepublish = self.prepublish_for_video(video["video_id"]) if hasattr(self, "prepublish_for_video") else None
                 if prepublish:  # Written before posting without any performance data; the draft checks its pre-mortem.

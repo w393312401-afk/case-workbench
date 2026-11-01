@@ -13,7 +13,7 @@
 .ai-title-lines-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
 .ai-title-lines-head h3{font-size:13px;font-weight:650;color:var(--ink)}
 .ai-title-lines-head h3 small{font-weight:400;color:var(--muted-soft);margin-left:6px;font-size:var(--font-micro)}
-.ai-title-lines-head .subtle{font-size:var(--font-micro);white-space:nowrap}
+.ai-title-lines-head .subtle{white-space:nowrap}
 .ai-title-group+.ai-title-group{margin-top:12px}
 .ai-title-group h4{font-size:var(--font-micro);font-weight:600;color:var(--muted-soft);margin:0 0 6px}
 .ai-title-line{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;margin:0 0 6px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit;font-size:14px;line-height:1.6;text-align:left;cursor:pointer;transition:border-color .15s,background .15s}
@@ -132,7 +132,6 @@
   /* Writing page: whole row copies the 🔴 title line; icon stays visible on touch screens. */
   .ai-title-lines { padding: 12px; margin-left: -2px; margin-right: -2px; }
   .ai-title-lines-head { flex-wrap: wrap; }
-  .ai-title-lines-head .subtle { min-height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
   .ai-title-line { min-height: 48px; padding: 10px 12px; font-size: 14px; line-height: 1.55; }
   .ai-title-line svg { width: 18px; height: 18px; opacity: .8; }
   .ai-title-line:active { background: var(--surface-tint); }
@@ -170,11 +169,9 @@
 .ai-selection-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
 .ai-row-main small.ai-management-badge{color:var(--accent-text);font-size:11px}
 .ai-task-entry.is-archived .ai-management-badge{color:var(--muted)}
-.ai-segment{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--fill)}
-.ai-segment button{display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:8px;background:transparent;color:var(--muted);font-size:13px;font-weight:500;white-space:nowrap}
-.ai-segment button small{font-size:12px;color:var(--muted-soft);font-variant-numeric:tabular-nums}
+
 .ai-segment button small:empty{display:none}
-.ai-segment button[aria-pressed=true]{background:var(--selected-fill);color:var(--ink);box-shadow:var(--shadow-segment)}
+
 #content .ai-group-choice{display:inline-flex;align-items:center;gap:6px;margin:0 0 0 auto;font-size:12px;color:var(--muted-soft)}
 #content .ai-group-choice select{appearance:auto;border:0;background:transparent;color:var(--ink);font-size:13px;font-weight:500;padding:4px 2px}
 #content .ai-selection-toolbar{margin:-6px 0 14px;padding:10px 14px;border:0;border-radius:12px;background:var(--surface-alt)}
@@ -280,7 +277,7 @@
 #ai-create-dialog .ai-basket-choice{display:flex;flex-direction:column;gap:8px;margin:4px 0 6px}
 #ai-create-dialog .ai-basket-choice .context-note{background:none;padding:0 0 0 24px;margin:-6px 0 0;font-size:12px}
 .ai-check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink)}
-.ai-check input,.ai-carousel-toggle input{accent-color:var(--accent);width:16px;height:16px}
+.ai-check input{accent-color:var(--accent);width:16px;height:16px}
 
 @media(max-width:760px){
   #content .ai-task-rows .ai-task-card{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"main status" "kind meta";row-gap:2px}
@@ -386,3 +383,69 @@
 .ai-title-lines-detail{margin-top:4px}
 .ai-task-progress[hidden]{display:none}
 #content .ai-composer:not(:focus-within):has(#ai-continue-instruction:placeholder-shown){position:static}
+
+/* 2026-10-29 several variants in one answer: overview rows on top, only the picked variant in full below. */
+.ai-variant-board{margin:4px 0 14px}
+.ai-variant-overview-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
+.ai-variant-overview-head h4{margin:0;font-size:14px;display:flex;align-items:baseline;gap:8px}
+.ai-variant-overview-head h4 small{font-size:12px;font-weight:400;color:var(--muted-soft)}
+.ai-variant-overview{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface)}
+.ai-variant-columns,.ai-variant-pick{display:grid;grid-template-columns:36px minmax(70px,.8fr) minmax(90px,1.1fr) minmax(0,2.2fr) 52px 64px;gap:10px;align-items:center;padding:0 12px}
+.ai-variant-columns{font-size:12px;color:var(--muted-soft);background:var(--surface-alt);min-height:30px}
+.ai-variant-columns>span:nth-child(5),.ai-variant-pick>.ai-variant-seconds{text-align:right}
+.ai-variant-pick{min-height:38px;font-size:13px;line-height:1.4;border-top:1px solid var(--line);cursor:pointer}
+.ai-variant-pick>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ai-variant-pick>b{font-weight:600;font-variant-numeric:tabular-nums}
+.ai-variant-pick .ai-variant-first{color:var(--muted)}
+.ai-variant-pick .ai-variant-seconds{color:var(--muted);font-variant-numeric:tabular-nums}
+.ai-variant-pick:hover{background:var(--fill)}
+.ai-variant-pick[aria-selected=true]{background:var(--surface-tint);box-shadow:inset 3px 0 0 var(--accent)}
+.ai-variant-pick:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.ai-variant-state{display:inline-flex;padding:1px 8px;border-radius:999px;font-size:12px;color:var(--muted-soft);background:var(--fill)}
+.ai-variant-state.is-adopted,.ai-variant-state.is-filmed{color:var(--accent-text);background:var(--surface-tint)}
+.ai-variant-state.is-published,.ai-variant-state.is-reviewed{color:var(--success-ink);background:var(--surface-success)}
+.ai-variant-card{border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:0 0 14px;background:var(--surface)}
+.ai-variant-card[hidden]{display:none}
+.ai-variant-card-head{display:flex;align-items:center;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--line);margin-bottom:10px}
+.ai-variant-card-head h4{margin:0;font-size:15px;min-width:0;flex:1;overflow-wrap:anywhere}
+.ai-variant-card-head .ai-variant-seconds{font-size:12px;color:var(--muted)}
+.ai-variant-card-head .subtle svg{width:15px;height:15px}
+.ai-variant-opening p{margin:4px 0;font-size:13px;line-height:1.7}
+.ai-variant-script-labels,.ai-variant-pairs{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:20px}
+.ai-variant-script-labels{margin:12px 0 4px;font-size:12px;color:var(--muted-soft)}
+.ai-variant-pairs{background:var(--surface-alt);border-radius:8px;padding:8px 14px}
+.ai-variant-pairs p{margin:0;padding:5px 0;font-size:14px;line-height:1.65;border-top:1px solid var(--line)}
+.ai-variant-pairs p:nth-child(-n+2){border-top:0}
+.ai-variant-pairs.is-blocks p{white-space:pre-wrap;border-top:0}
+.ai-variant-pairs .ai-variant-zh{color:var(--muted)}
+.ai-variant-folds{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.ai-variant-fold>summary{cursor:pointer;font-size:12px;padding:3px 10px;border-radius:999px;background:var(--fill);color:var(--muted);list-style:none}
+.ai-variant-fold>summary::-webkit-details-marker{display:none}
+.ai-variant-fold[open]{flex-basis:100%;order:1}
+.ai-variant-fold[open]>summary{color:var(--ink);background:var(--fill-hover);width:fit-content}
+.ai-variant-data{margin:8px 0;font-size:12px}
+.ai-variant-data>summary{cursor:pointer;color:var(--accent-text)}
+@media(max-width:760px){
+  .ai-variant-columns{display:none}
+  .ai-variant-pick{grid-template-columns:32px minmax(0,1fr) auto;row-gap:2px;padding:6px 12px}
+  .ai-variant-pick>span:nth-of-type(2),.ai-variant-pick>span:nth-of-type(4){display:none}
+  .ai-variant-pick .ai-variant-first{grid-column:2/4;grid-row:2}
+  .ai-variant-script-labels{display:none}
+  .ai-variant-pairs{grid-template-columns:1fr}
+  .ai-variant-pairs p{border-top:0;padding:2px 0}
+  .ai-variant-pairs .ai-variant-zh{padding-bottom:8px;border-bottom:1px solid var(--line)}
+}
+.ai-variant-fold{min-width:0;max-width:100%}.ai-variant-card,.ai-variant-board{min-width:0;max-width:100%}
+/* Two to four variants switch by chips; a single variant is just its card; the round's pre-publish check stays open below. */
+.ai-variant-chips{display:flex;flex-wrap:wrap;gap:6px}
+.ai-variant-chip{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:4px 10px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--ink);font-size:13px;max-width:100%}
+.ai-variant-chip>span:not([data-variant-status]){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:12em}
+.ai-variant-chip small{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.ai-variant-chip:hover{background:var(--fill)}
+.ai-variant-chip[aria-selected=true]{border-color:var(--accent);background:var(--surface-tint);box-shadow:inset 0 0 0 1px var(--accent)}
+.ai-variant-chips+*,.ai-variant-board{margin-bottom:12px}
+.ai-variant-card-head [data-variant-status]{flex:none}
+.ai-variant-subtitle{margin:-4px 0 8px;font-size:12px;color:var(--muted-soft);line-height:1.6}
+.ai-variant-shared{border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin:0 0 14px;background:var(--surface-alt)}
+.ai-variant-shared h4{margin:0 0 6px;font-size:14px}
+.ai-variant-shared :is(p,ul,ol){margin:4px 0;font-size:13px;line-height:1.7}

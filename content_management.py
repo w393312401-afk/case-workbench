@@ -11,15 +11,15 @@ import re
 import threading
 from urllib.parse import quote, urlencode
 
+from ai_resolution import ai_task_resolutions
 from creation_store import CreationError, CreationStore
-from direction_store import fingerprint, now
+from direction_store import fingerprint, now, product_key
 from elevenlabs_client import VoiceError
 from pathlib import Path
 from production_operations import durable_json, file_lock
-from content_naming import content_title, label_task_starts, task_created_at
+from content_naming import content_heading, label_task_starts, task_created_at
 from production_naming import timeline_label
-from production_store import (ProductionStore, carousel_confirmation_current, carousel_output_current,
-                              current_timeline, job_status, manual_completion_current)
+from production_store import (current_timeline, job_status, manual_completion_current)
 from workbench_video_publish import reviewed_source
 
 
@@ -27,7 +27,9 @@ from workbench_video_publish import reviewed_source
 DEFAULT_MANAGEMENT = {"archived": False}
 # calendar_uploaded: a pre-publish reminder that the order sits in the publish calendar; a registration's own mark wins once posted.
 MANAGEMENT_FIELDS = frozenset({*DEFAULT_MANAGEMENT, "calendar_uploaded", "calendar_date"})
-CONTENT_ID = re.compile(r"(?:task|script|video|carousel):[A-Za-z0-9][A-Za-z0-9_-]{0,199}\Z")
+CONTENT_ID = re.compile(r"(?:task|script|video):[A-Za-z0-9][A-Za-z0-9_-]{0,199}\Z")
+# Marks saved for retired picture orders stay in the file; nothing new can be written for them.
+STORED_ID = re.compile(r"(?:task|script|video|carousel):[A-Za-z0-9][A-Za-z0-9_-]{0,199}\Z")
 REQUEST_ID = re.compile(r"[\w-]{10,100}\Z")
 
 
@@ -71,7 +73,7 @@ class ContentManagementStore:
                     not isinstance(data.get("items"), dict) or not isinstance(data.get("requests"), dict)):
                 raise ValueError()
             for identifier, entry in data["items"].items():
-                if (not isinstance(identifier, str) or not CONTENT_ID.fullmatch(identifier) or
+                if (not isinstance(identifier, str) or not STORED_ID.fullmatch(identifier) or
                         not isinstance(entry, dict) or not isinstance(entry.get("updated_at"), str)):
                     raise ValueError()
                 _validate_patch({key: value for key, value in entry.items() if key != "updated_at"})
@@ -216,50 +218,18 @@ def _video_stage(row):
     }.get(state, (state or "unknown", "待核对制作状态", "查看制作单", "", True, False))
 
 
-def _carousel_stage(row):
-    published = row.get("publication") or row.get("current_publication")
-    if (isinstance(published, dict) and published.get("post_id") and published.get("published_on") and
-            row.get("publication_current") is not False and published.get("source_current") is not False):
-        return "published", "已发布", "查看发布记录", "delivery", False, True
-    if any(run.get("status") in {"running", "queued"} for run in row.get("autopilot_runs", [])):
-        return "autopilot_running", "AI 制作中", "查看制作进度", "images", False, False
-    if row.get("clip_picking_live") or any(run.get("status") in {"running", "queued"} for run in row.get("searches", [])):
-        return "picking_running", "找底图中", "查看选材进度", "pick", False, False
-    if any(run.get("status") in {"running", "queued"} for run in row.get("generations", [])):
-        return "generating", "出图中", "查看出图进度", "images", False, False
-    if _carousel_reviews_busy(row):
-        return "reviewing_running", "图片审查中", "查看审查进度", "images", False, False
-    # Status derivation may update slide presentation fields; the caller's
-    # original records remain untouched because this module copies inputs.
-    state = ProductionStore._carousel_status(row) if isinstance(row.get("slides"), list) else row.get("status")
-    return {
-        "draft": ("draft", "待选底图", "选择底图", "pick", True, False),
-        "picking": ("picking", "待选底图", "继续选底图", "pick", True, False),
-        "ready": ("ready", "待出图", "生成图片", "images", True, False),
-        "reviewing": ("reviewing", "待确认成图", "核对并确认图片", "images", True, False),
-        "approved": ("awaiting_publication", "待发布", "整理成品与登记发布", "delivery", False, False),
-    }.get(state, (state or "unknown", "待核对制作状态", "查看制作单", "", True, False))
-
-
-def _carousel_reviews_busy(row):
-    return (any(run.get("status") in {"running", "queued"} for key in ("review_runs", "group_reviews") for run in row.get(key, [])) or
-            any(run.get("status") in {"running", "queued"} for slide in row.get("slides", [])
-                for output in slide.get("outputs", []) for run in output.get("review_runs", [])))
-
-
 def _progress_text(row, kind):
     """A brief snapshot of actual live work; do not infer that a file is ready."""
     texts = []
-    for key in ("timeline_building", "voicing_live", "clip_picking_live", "live"):
+    for key in ("timeline_building", "voicing_live", "live"):
         live = row.get(key)
         if isinstance(live, dict):
             texts.append(live.get("progress") or live.get("message"))
-    for key in ("autopilot_runs", "edits", "generations", "searches", "review_runs", "group_reviews"):
-        for run in reversed(row.get(key, [])):
-            if run.get("status") not in {"running", "queued"}:
-                continue
-            live = run.get("live") or {}
-            texts.append(live.get("progress") or run.get("message") or run.get("progress"))
+    for run in reversed(row.get("edits", [])):
+        if run.get("status") not in {"running", "queued"}:
+            continue
+        live = run.get("live") or {}
+        texts.append(live.get("progress") or run.get("message") or run.get("progress"))
     if kind == "task":
         texts.append(row.get("progress"))
     return next((value.strip()[:180] for value in texts if isinstance(value, str) and value.strip()), "")
@@ -273,12 +243,12 @@ def _tiktok_url(posted, kind):
     if url.startswith(("https://", "http://")):
         return url
     account = str(posted.get("account") or "").lstrip("@")
-    return f"https://www.tiktok.com/@{quote(account or '_', safe='')}/{'photo' if kind == 'carousel' else 'video'}/{posted['post_id']}"
+    return f"https://www.tiktok.com/@{quote(account or '_', safe='')}/video/{posted['post_id']}"
 
 
 def _bound_posts(row, kind):
     """Every video bound to this order, oldest first, one entry per post (its latest registration wins)."""
-    records = row.get("publication_posts") if kind == "video" else [*row.get("publication_history", []), row.get("publication")]
+    records = row.get("publication_posts")
     latest = {}
     for record in records or []:
         if isinstance(record, dict) and record.get("post_id"):
@@ -288,7 +258,7 @@ def _bound_posts(row, kind):
 
 def _calendar_state(posted, own, kind):
     """Registration mark once posted (None for old records without one); otherwise the manual mark, default not uploaded."""
-    if kind not in {"video", "carousel"}:
+    if kind != "video":
         return None
     if posted:
         return posted["calendar_uploaded"] if isinstance(posted.get("calendar_uploaded"), bool) else None
@@ -334,70 +304,32 @@ def _video_workflow(row):
             note = "当前剪辑审查已完成，已有发布记录对应历史版本"
     else:
         note = {"lines": "待完成脚本", "voice": "待选用配音", "timeline": "待建立并保存当前配音的时间线",
-                "edit": "当前时间线尚未完成剪辑审查"}[next(step["key"] for step in steps if not step["done"])]
+                "edit": _edit_note(row)}[next(step["key"] for step in steps if not step["done"])]
     return steps, note
 
 
-def _carousel_workflow(row):
-    slides = row.get("slides") or []
-    current = []
-    confirmed = []
-    based = []
-    for slide in slides:
-        def valid(output):
-            try:
-                return carousel_output_current(row, slide, output)
-            except (KeyError, TypeError, ValueError):
-                return False
-        outputs = [output for output in slide.get("outputs", []) if valid(output)]
-        selected = next((output for output in outputs if output.get("id") == slide.get("output_id")), None)
-        current.append(bool(outputs))
-        confirmed.append(bool(selected and carousel_confirmation_current(row, slide, selected)))
-        # An imported finished image supplies its own source; it does not need a separately picked base.
-        based.append(bool(slide.get("base") or any(output.get("origin") == "external_generated_layout" for output in outputs)))
-    ready = bool(slides and all(confirmed))
-    delivery = next((entry for entry in reversed(row.get("deliveries", []))
-                     if ready and entry.get("current") is True and entry.get("selection_signature") and
-                     entry.get("images_only") and entry.get("available") is True), None)
-    signature = delivery.get("selection_signature") if delivery else None
-    publication = row.get("publication") or row.get("current_publication") or {}
-    published = bool(delivery and publication.get("delivery_id") == delivery.get("id") and
-                     publication.get("delivery_sha256") == delivery.get("sha256") and
-                     publication.get("selection_signature") == signature and
-                     publication.get("post_id") and publication.get("published_on") and
-                     row.get("publication_current") is not False and publication.get("source_current") is not False)
-    steps = _workflow_steps(row, [
-        ("slides", "逐张表", slides, "slides"),
-        ("pick", "选底图", slides and all(based), "pick"),
-        ("images", "出图", slides and all(current), "images"),
-        ("confirm", "图片确认", ready, "images"),
-        ("package", "成品包", delivery, "delivery"),
-        ("publish", "发布", published, "delivery"),
-    ])
-    if all(step["done"] for step in steps):
-        note = "当前图文已确认成图、整理成品包并登记发布"
-    else:
-        note = {"slides": "待完成逐张表", "pick": "待选齐底图", "images": "待生成整组当前成图",
-                "confirm": "当前成图尚未全部确认", "package": "待整理当前成图的可用成品包",
-                "publish": "成品包已就绪，尚未登记发布"}[next(step["key"] for step in steps if not step["done"])]
-        if delivery and publication.get("post_id"):
-            note = "当前成品包已就绪，已有发布记录对应历史版本"
-    return steps, note
+def _edit_note(row):
+    """While 剪辑审查 is the open step, the note gives the same reason as the order's status chip."""
+    status = row.get("status") or job_status(row)
+    if status == "needs_repair" or row.get("recovery_operations"):
+        return "剪辑结果待修正"
+    return {"needs_material": "素材不足，补齐后重新剪辑", "needs_verification": "素材待核实",
+            "failed": "上次剪辑失败", "cancelled": "剪辑已停止", "interrupted": "剪辑已中断",
+            "verification_failed": "剪辑结果待核验", "unverified": "剪辑结果待核验",
+            "awaiting_review": "剪辑结果待人工审查"}.get(status, "当前时间线尚未完成剪辑审查")
 
 
 def _workflow(row, kind):
-    if kind not in {"video", "carousel"}:
+    if kind != "video":
         return {}
-    steps, note = _video_workflow(row) if kind == "video" else _carousel_workflow(row)
+    steps, note = _video_workflow(row)
     complete = all(step["done"] for step in steps)
-    label = "视频" if kind == "video" else "图文"
     return {"workflow_steps": steps, "workflow_complete": complete,
-            "workflow_label": label + ("链已完结" if complete else "链未完结"), "summary_note": note,
-            "unit_count": len(row.get("lines" if kind == "video" else "slides") or []),
-            "unit_label": "个意群" if kind == "video" else "张"}
+            "workflow_label": "视频" + ("链已完结" if complete else "链未完结"), "summary_note": note,
+            "unit_count": len(row.get("lines") or []), "unit_label": "个意群"}
 
 
-def build_content_items(tasks, scripts, jobs, carousels, management=None, detached=False):
+def build_content_items(tasks, scripts, jobs, management=None, detached=False, variants=None):
     """Return stable queue rows without modifying task/script/production facts.
 
     detached=True means the caller passes fresh snapshots nobody else keeps, so they are read in place
@@ -406,10 +338,13 @@ def build_content_items(tasks, scripts, jobs, carousels, management=None, detach
     Lists or public catalog dictionaries are accepted. A script catalog's
     reviewed variant_links may supply direction labels, but never merge rows.
     Management holds each row's own archive mark; nothing is inherited.
+    variants, when given, is {"owners": {(kind, id): {"direction": (product, direction_id), "indexes": set}},
+    "labels": {(product, direction_id): [(label, structure), …]}}: which catalog variant each script, order and
+    writing task belongs to, as the direction page assigns them. Without it rows keep their older names.
     """
     task_rows, script_rows = _rows(tasks, "tasks", detached), _rows(scripts, "scripts", detached)
     script_rows = [CreationStore.script_lifecycle(row) if "lifecycle_status" not in row else row for row in script_rows]
-    job_rows, carousel_rows = _rows(jobs, "jobs", detached), _rows(carousels, "carousels", detached)
+    job_rows = _rows(jobs, "jobs", detached)
     variant_links = _rows(scripts, "variant_links", detached) if isinstance(scripts, dict) else []
     links_by_record = {(row.get("kind"), row.get("record_id")): row for row in variant_links}
     metadata = management or {}
@@ -422,7 +357,7 @@ def build_content_items(tasks, scripts, jobs, carousels, management=None, detach
         families.setdefault(row.get("family_id") or row["id"], []).append(row)
     for rows in families.values():
         rows.sort(key=lambda row: (row.get("version", 0), row.get("created_at", ""), row["id"]))
-    used_script_ids = {row.get("script_id") for row in [*job_rows, *carousel_rows] if row.get("script_id")}
+    used_script_ids = {row.get("script_id") for row in job_rows if row.get("script_id")}
     adopted_pairs = {_provenance(row) for row in script_rows if _provenance(row)}
     result = []
 
@@ -432,11 +367,9 @@ def build_content_items(tasks, scripts, jobs, carousels, management=None, detach
         own = own if isinstance(own, dict) else {}
         source_archived = bool(row.get("archived") or kind == "script" and row.get("status") == "archived")
         archived = source_archived or bool(own.get("archived"))
-        busy = bool(row.get("busy") or row.get("stopping") or row.get("voicing") or row.get("timeline_building") or row.get("clip_picking_live") or
+        busy = bool(row.get("busy") or row.get("stopping") or row.get("voicing") or row.get("timeline_building") or
                     row.get("status") in {"running", "queued", "editing"} or
-                    kind == "carousel" and _carousel_reviews_busy(row) or
-                    any(run.get("status") in {"running", "queued"} for key in ("edits", "generations", "searches", "review_runs", "group_reviews", "autopilot_runs")
-                        for run in row.get(key, []) if isinstance(run, dict)))
+                    any(run.get("status") in {"running", "queued"} for run in row.get("edits", []) if isinstance(run, dict)))
         attention = bool(not archived and not completed and not busy and attention)
         if kind == "task":
             destination = _hash("ai", row.get("task_id", row.get("id")))
@@ -458,13 +391,12 @@ def build_content_items(tasks, scripts, jobs, carousels, management=None, detach
         for script in related_scripts:
             record_links.append(_link(f"采用稿版本详情 · 第 {script.get('version', 1)} 版", _hash("content", script["id"])))
         if production_ids:
-            record_links.append(_link("视频制作单" if kind == "video" else "图文制作单", _hash("production", row["id"])))
+            record_links.append(_link("视频制作单", _hash("production", row["id"])))
             publication = row.get("current_publication") or row.get("publication")
             if isinstance(publication, dict) and publication.get("post_id") and publication.get("published_on"):
                 record_links.append(_link("发布登记" if stage == "published" else "历史发布记录",
-                                          _hash("production", row["id"], "publish" if kind == "video" else "delivery")))
-        posted = ((row.get("current_publication") if kind == "video" else row.get("publication") or row.get("current_publication"))
-                  if kind in {"video", "carousel"} and stage == "published" else None)
+                                          _hash("production", row["id"], "publish")))
+        posted = row.get("current_publication") if kind == "video" and stage == "published" else None
         context = row.get("context") or {}
         context = context if isinstance(context, dict) else {}
         direction = row.get("direction_id") or context.get("direction_id") or ""
@@ -477,11 +409,19 @@ def build_content_items(tasks, scripts, jobs, carousels, management=None, detach
         if not direction and isinstance(reviewed_link, dict) and reviewed_link.get("product") == row.get("product"):
             direction = reviewed_link.get("direction_id") or ""
         sources = [row, *related_scripts, *(by_task[key] for key in related_tasks if key in by_task), own]
-        exact_script = by_script.get(row.get("script_id")) if kind in {"video", "carousel"} else None
+        exact_script = by_script.get(row.get("script_id")) if kind == "video" else None
         exact_task_id = _source(row).get("task_id") or _source(exact_script or {}).get("task_id")
-        title = content_title(row, kind, direction=direction, script=exact_script,
-                              task=by_task.get(exact_task_id))
-        result.append({"id": identifier, "title": title, "source_title": row.get("title") or "",
+        owner_key = (("task", row.get("task_id", row.get("id"))) if kind == "task" else
+                     ("script", row["id"]) if kind == "script" else ("production", row["id"]))
+        placed = (variants.get("owners") or {}).get(owner_key) if variants is not None else None
+        if placed and not direction:
+            direction = placed["direction"][1]
+        place = (product_key(row.get("product") or context.get("product") or ""), direction)
+        owners = None if variants is None else placed["indexes"] if placed and placed["direction"] == place else set()
+        title, subtitle = content_heading(row, kind, direction=direction, script=exact_script,
+                                          task=by_task.get(exact_task_id), owners=owners,
+                                          labels=(variants or {}).get("labels", {}).get(place, ()))
+        result.append({"id": identifier, "title": title, "subtitle": subtitle, "source_title": row.get("title") or "",
                        "timeline_name": timeline_label(row) if kind == "video" else "",
                        "created_at": task_created_at(row) if kind == "task" else row.get("created_at") or "",
                        "product": row.get("product") or context.get("product") or "", "direction_id": direction,
@@ -512,23 +452,7 @@ def build_content_items(tasks, scripts, jobs, carousels, management=None, detach
     for row in job_rows:
         related_scripts, related_tasks = related(row)
         make(f"video:{row['id']}", row, "video", related_scripts, related_tasks, [row["id"]], _video_stage(row))
-    for row in carousel_rows:
-        related_scripts, related_tasks = related(row)
-        make(f"carousel:{row['id']}", row, "carousel", related_scripts, related_tasks, [row["id"]], _carousel_stage(row))
     by_content_id = {row["id"]: row for row in result}
-    for row in job_rows:
-        item = by_content_id["video:" + row["id"]]
-        item["related_workflows"] = []
-        for carousel in carousel_rows:
-            if _source(carousel).get("video_job_id") != row["id"]:
-                continue
-            linked = by_content_id["carousel:" + carousel["id"]]
-            item["related_workflows"].append({"id": linked["id"], "kind": "carousel", "title": linked["title"],
-                "steps": copy.deepcopy(linked["workflow_steps"]), "complete": linked["workflow_complete"],
-                "hash": _hash("production", carousel["id"]), "stage_label": linked["stage_label"],
-                "workflow_label": linked["workflow_label"], "summary_note": linked["summary_note"],
-                "calendar_uploaded": linked["calendar_uploaded"], "post_url": linked["post_url"], "posts": linked["posts"],
-                "archived": linked["archived"]})
     for family, versions in families.items():
         # A newer unproduced version stays available; old versions used by a
         # production order are still visible through that exact order's links.
@@ -544,12 +468,23 @@ def build_content_items(tasks, scripts, jobs, carousels, management=None, detach
             "archived": ("archived", "已归档", "查看历史版本", "", False, True),
         }.get(status, ("adopted", "待制作", "开始制作", "", True, False))
         make(f"script:{family}", latest, "script", versions, related_tasks, [], state)
+        # Never merged or settled: a script sharing a title with existing orders only says so, for the user to judge.
+        # Orders made from an earlier version of this same script are its own history, not another script.
+        title, family_ids = str(latest.get("title") or "").strip(), {entry["id"] for entry in versions}
+        if title and not result[-1]["history"]:
+            result[-1]["same_title_orders"] = [
+                {"id": row["id"], "stage_label": by_content_id[f"video:{row['id']}"]["stage_label"]}
+                for row in job_rows
+                if row.get("script_id") not in family_ids and str(row.get("title") or "").strip() == title
+                and not by_content_id[f"video:{row['id']}"]["archived"]]
+    settled = ai_task_resolutions(task_rows, job_rows)
     for row in task_rows:
         task_id = row.get("task_id", row.get("id"))
         # A retrospective studies a posted video; it is worked from 待复盘 and the video's chain, not as content.
         if not task_id or row.get("action") == "retrospective":
             continue
         status, disposition = row.get("status"), row.get("management_state", "pending_selection")
+        resolution = settled.get(task_id) if disposition not in {"needs_revision", "adopted", "abandoned"} else None
         writing = (row.get("action") or "variants") == "variants"
         result_kind = "审稿" if row.get("action") == "review" else "协作"
         rounds = row.get("rounds") or []
@@ -576,11 +511,20 @@ def build_content_items(tasks, scripts, jobs, carousels, management=None, detach
             state = (disposition, "已采纳" if disposition == "adopted" else "已放弃", "查看协作记录", "", False, True)
         elif disposition == "needs_revision":
             state = ("needs_revision", "待继续修改", "继续修改候选", "", True, False)
+        elif resolution and resolution["kind"] in {"rerun", "refilled"}:
+            # Settled by a later run: kept in 全部 for the record, out of 待我处理.
+            state = ("superseded", "已重跑完成", "查看协作记录", "", False, True)
+        elif resolution and resolution["kind"] == "written_back":
+            # A fill's result is already on its 制作单; the candidate can still be adopted from the task page.
+            state = ("written_back", "已写回制作单", "查看协作记录", "", False, True)
         elif status == "completed":
-            state = ("pending_selection", "待选稿", "查看并选择候选", "", True, False)
+            state = ("pending_selection", "未写回" if resolution and resolution["kind"] == "not_written" else "待选稿",
+                     "查看并选择候选", "", True, False)
         else:
             state = (status or "unknown", {"failed": "生成失败", "interrupted": "生成已中断", "cancelled": "生成已停止"}.get(status, "待处理"), "查看并继续任务", "", True, False)
         make(f"task:{task_id}", row, "task", [], [task_id], [], state)
+        if resolution and resolution.get("by_job"):
+            result[-1]["links"].append(_link("视频制作单", _hash("production", resolution["by_job"])))
     label_task_starts(result)
     result.sort(key=lambda row: (row["updated_at"], row["id"]), reverse=True)
     return result

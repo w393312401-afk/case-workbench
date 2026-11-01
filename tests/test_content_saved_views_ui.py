@@ -79,7 +79,8 @@ class ContentSavedViewsBrowserTests(unittest.TestCase):
 
         self.refresh(second)
         remote = second.locator(f'[data-flow-saved-view="{identifier}"]')
-        expect(remote).to_have_text("共享的待发布视频")
+        expect(remote).to_contain_text("共享的待发布视频")
+        filter_fixture.open_saved_views(second)
         remote.click()
         self.assert_rows(second, [rows["approved"]])
 
@@ -87,6 +88,7 @@ class ContentSavedViewsBrowserTests(unittest.TestCase):
         self.save(first, "共享的全部视频", update=True)
         self.refresh(second)
         expect(remote).to_have_attribute("title", "共享的全部视频")
+        filter_fixture.open_saved_views(second)
         remote.click()
         self.assert_rows(second, [rows["approved"], rows["draft"]])
 
@@ -107,12 +109,87 @@ class ContentSavedViewsBrowserTests(unittest.TestCase):
         self.assertEqual(self.stored_views()["views"], [])
         self.assertEqual(len(self.stored_views("129N")["views"]), 1)
 
+    def test_pinned_view_becomes_a_tab_keeps_its_pin_on_update_and_unpins_from_the_menu(self):
+        rows = self.records()
+        page = self.content_page()
+        self.view(page, "all")
+        self.set_filters(page, [("kind", ["video"])])
+        self.save(page, "置顶的视频")
+        identifier = self.stored_views()["views"][0]["id"]
+        tab = page.locator(f'.flow-pinned-view[data-flow-saved-view="{identifier}"]')
+        expect(tab).to_have_count(0)
+        filter_fixture.open_saved_views(page)
+        pin = page.locator(f'[data-flow-pin="{identifier}"]')
+        expect(pin).to_have_attribute("aria-pressed", "false")
+        with page.expect_response(lambda response: "/api/content/views" in response.url and response.request.method == "POST"):
+            pin.click()
+        expect(tab).to_have_text("置顶的视频2")
+        expect(pin).to_have_attribute("aria-pressed", "true")
+        self.assertIs(self.stored_views()["views"][0]["pinned"], True)
+        # The open view is a tab now, so the menu goes back to naming itself.
+        expect(tab).to_have_attribute("aria-pressed", "true")
+        expect(page.locator("#content-flow-saved-menu > summary")).to_have_text("我的视图")
+
+        self.view(page, "attention")
+        tab.click()
+        self.assert_rows(page, [rows["approved"], rows["draft"]])
+        self.assertEqual(self.params(page)["saved"], [identifier])
+        # Updating the view's rules from 管理视图 keeps it pinned.
+        self.set_filters(page, [("kind", ["video"]), ("status", ["approved"])])
+        expect(tab.locator("em")).to_have_text("已修改")
+        dialog = self.dialog(page)
+        dialog.locator("[data-view-update]").click()
+        expect(dialog).not_to_be_visible()
+        self.assertIs(self.stored_views()["views"][0]["pinned"], True)
+        expect(tab).to_have_text("置顶的视频1")
+
+        filter_fixture.open_saved_views(page)
+        with page.expect_response(lambda response: "/api/content/views" in response.url and response.request.method == "POST"):
+            pin.click()
+        expect(tab).to_have_count(0)
+        self.assertNotIn("pinned", self.stored_views()["views"][0])
+        expect(page.locator("#content-flow-saved-menu > summary")).to_contain_text("置顶的视频")
+
+    def test_tabs_reorder_by_drag_and_keyboard_and_the_order_is_shared(self):
+        self.records()
+        page = self.content_page()
+        self.view(page, "all")
+        self.set_filters(page, [("kind", ["video"])])
+        self.save(page, "拖动的视频")
+        identifier = self.stored_views()["views"][0]["id"]
+        filter_fixture.open_saved_views(page)
+        with page.expect_response(lambda response: "/api/content/views" in response.url and response.request.method == "POST"):
+            page.locator(f'[data-flow-pin="{identifier}"]').click()
+        page.locator("#content-flow-saved-menu > summary").click()
+        keys = lambda target: target.locator("#content-flow-views [data-tab-key]").evaluate_all("tabs => tabs.map(tab => tab.dataset.tabKey)")
+        pinned = "view:" + identifier
+        self.assertEqual(keys(page), ["attention", "publish", "all", pinned])
+
+        with page.expect_response(lambda response: "/api/content/views" in response.url and response.request.method == "POST"):
+            page.locator(f'[data-tab-key="{pinned}"]').drag_to(page.locator('[data-tab-key="attention"]'),
+                                                                target_position={"x": 2, "y": 10})
+        expect(page.locator(".flow-pinned-view")).to_have_attribute("data-tab-key", pinned)
+        page.wait_for_function("() => document.querySelector('#content-flow-views [data-tab-key]').dataset.tabKey.startsWith('view:')")
+        self.assertEqual(keys(page), [pinned, "attention", "publish", "all"])
+        self.assertEqual(self.stored_views()["tab_order"], [pinned, "attention", "publish", "all"])
+
+        page.locator('[data-tab-key="all"]').focus()
+        with page.expect_response(lambda response: "/api/content/views" in response.url and response.request.method == "POST"):
+            page.keyboard.press("Alt+ArrowLeft")
+        page.wait_for_function("() => document.querySelectorAll('#content-flow-views [data-tab-key]')[2].dataset.tabKey === 'all'")
+        expect(page.locator('[data-tab-key="all"]')).to_be_focused()
+        # Clicking still opens the tab; another browser reads the same order.
+        self.view(page, "publish")
+        other = self.content_page()
+        expect(other.locator("#content-flow-views [data-tab-key]").first).to_have_attribute("data-tab-key", pinned)
+        self.assertEqual(keys(other), [pinned, "attention", "all", "publish"])
+
     def test_legacy_views_migrate_once_and_are_visible_in_an_independent_browser(self):
         record = self.legacy_view()
         first = self.open_page("#/202H/library")
         self.seed_legacy(first, record)
         first.evaluate("location.hash = '#/202H/content'")
-        expect(first.locator("[data-flow-saved-view]")).to_have_text(record["name"])
+        expect(first.locator("[data-flow-saved-view]")).to_contain_text(record["name"])
         first.wait_for_function("key => localStorage.getItem(key) === null", arg=LEGACY_KEY)
         stored = self.stored_views()["views"]
         self.assertEqual(len(stored), 1)
@@ -125,9 +202,10 @@ class ContentSavedViewsBrowserTests(unittest.TestCase):
         second = self.open_page("#/202H/library")
         self.seed_legacy(second, record)
         second.evaluate("location.hash = '#/202H/content'")
-        expect(second.locator("[data-flow-saved-view]")).to_have_text(record["name"])
+        expect(second.locator("[data-flow-saved-view]")).to_contain_text(record["name"])
         second.wait_for_function("key => localStorage.getItem(key) === null", arg=LEGACY_KEY)
         self.assertEqual(len(self.stored_views()["views"]), 1)
+        filter_fixture.open_saved_views(second)
         second.locator("[data-flow-saved-view]").click()
         expect(second.locator("#content-flow-query")).to_have_value(record["q"])
         second.wait_for_function("id => new URLSearchParams(location.hash.split('?')[1]).get('saved') === id",
@@ -156,7 +234,7 @@ class ContentSavedViewsBrowserTests(unittest.TestCase):
         page.unroute("**/api/content/views*", reject_import)
         self.refresh(page)
         page.wait_for_function("key => localStorage.getItem(key) === null", arg=LEGACY_KEY)
-        expect(page.locator("[data-flow-saved-view]")).to_have_text(record["name"])
+        expect(page.locator("[data-flow-saved-view]")).to_contain_text(record["name"])
         expect(page.locator("#content-flow-views-error")).to_be_hidden()
         self.assertEqual(len(self.stored_views()["views"]), 1)
 
@@ -201,6 +279,7 @@ class ContentSavedViewsBrowserTests(unittest.TestCase):
         self.save(first, "两个设备共用的视图")
         identifier = self.stored_views()["views"][0]["id"]
         second = self.content_page()
+        filter_fixture.open_saved_views(second)
         second.locator(f'[data-flow-saved-view="{identifier}"]').click()
         stale_dialog = self.dialog(second)
         stale_dialog.locator('[name="name"]').fill("设备二尚未提交的名称")
@@ -215,7 +294,7 @@ class ContentSavedViewsBrowserTests(unittest.TestCase):
         self.assertEqual([row["name"] for row in self.stored_views()["views"]], ["设备一已保存的名称"])
         stale_dialog.locator("[data-close]").last.click()
         self.refresh(second)
-        expect(second.locator(f'[data-flow-saved-view="{identifier}"]')).to_have_text("设备一已保存的名称")
+        expect(second.locator(f'[data-flow-saved-view="{identifier}"]')).to_contain_text("设备一已保存的名称")
 
 
 if __name__ == "__main__":

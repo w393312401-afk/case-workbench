@@ -21,12 +21,23 @@ MAX_VIEWS = 30
 MAX_NAME_LENGTH = 40
 VIEW_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}\Z")
 PRESET_NAMES = frozenset({"待处理", "进行中", "待发布", "全部"})
+# Tab row order: preset keys and pinned views as "view:<id>". Keys for views that are gone are dropped on save.
+PRESET_TABS = ("attention", "running", "publish", "all")
+MAX_TABS = len(PRESET_TABS) + MAX_VIEWS
 
 
 def view_product(value):
     if not isinstance(value, str) or len(value) > 200 or any(ord(char) < 32 for char in value):
         raise CreationError(400, "视图所属产品无效。")
     return product_key(value)
+
+
+def tab_order(value):
+    if (not isinstance(value, list) or len(value) > MAX_TABS or len(set(map(str, value))) != len(value) or
+            not all(isinstance(key, str) and (key in PRESET_TABS or key.startswith("view:") and VIEW_ID.fullmatch(key[5:]))
+                    for key in value)):
+        raise CreationError(400, "标签顺序无效。")
+    return list(value)
 
 
 def view_id(value):
@@ -53,7 +64,8 @@ class ContentViewsStore:
         return {"views": [], "known_ids": []}
 
     def validate_view(self, value):
-        if not isinstance(value, dict) or set(value) != {"id", "name", "filter", "q"}:
+        if (not isinstance(value, dict) or not {"id", "name", "filter", "q"} <= set(value) <= {"id", "name", "filter", "q", "pinned"}
+                or value.get("pinned", True) is not True):
             raise CreationError(400, "保存的视图格式无效。")
         identifier = view_id(value["id"])
         name, query = value["name"], value["q"]
@@ -62,8 +74,9 @@ class ContentViewsStore:
             raise CreationError(400, "视图名称须为 1–40 个字符。")
         if not isinstance(query, str) or len(query) > 200:
             raise CreationError(400, "视图搜索词不能超过 200 个字符。")
+        # pinned: shown as a tab beside the presets. Stored only when set, so older files read unchanged.
         return {"id": identifier, "name": name.strip(), "filter": self.filter_validator(value["filter"]),
-                "q": query.strip()}
+                "q": query.strip(), **({"pinned": True} if value.get("pinned") else {})}
 
     def read(self):
         if not self.path.exists():
@@ -75,7 +88,8 @@ class ContentViewsStore:
                 raise ValueError()
             for product, entry in data["products"].items():
                 if (view_product(product) != product or not isinstance(entry, dict) or
-                        set(entry) != {"views", "known_ids"} or not isinstance(entry["views"], list) or
+                        not {"views", "known_ids"} <= set(entry) <= {"views", "known_ids", "tab_order"} or
+                        "tab_order" in entry and (not entry["tab_order"] or tab_order(entry["tab_order"]) != entry["tab_order"]) or not isinstance(entry["views"], list) or
                         len(entry["views"]) > MAX_VIEWS or not isinstance(entry["known_ids"], list)):
                     raise ValueError()
                 records = [self.validate_view(row) for row in entry["views"]]
@@ -92,7 +106,8 @@ class ContentViewsStore:
 
     @staticmethod
     def _public(product, entry):
-        return {"product": product, "views": copy.deepcopy(entry["views"]), "revision": fingerprint(entry)}
+        return {"product": product, "views": copy.deepcopy(entry["views"]), "tab_order": list(entry.get("tab_order", [])),
+                "revision": fingerprint(entry)}
 
     def public(self, product=""):
         product = view_product(product)
@@ -122,7 +137,8 @@ class ContentViewsStore:
         action = body["action"]
         required = {"save": {"product", "action", "view", "revision"},
                     "delete": {"product", "action", "id", "revision"},
-                    "import": {"product", "action", "views"}}.get(action)
+                    "import": {"product", "action", "views"},
+                    "order": {"product", "action", "order", "revision"}}.get(action)
         if required is None or set(body) != required:
             raise CreationError(400, "内容视图保存参数无效。")
         product = view_product(body["product"])
@@ -132,6 +148,8 @@ class ContentViewsStore:
             identifier = record["id"]
         elif action == "delete":
             identifier = view_id(body["id"])
+        elif action == "order":
+            order = tab_order(body["order"])
         else:
             if not isinstance(body["views"], list) or len(body["views"]) > MAX_VIEWS:
                 raise CreationError(400, "每个产品最多保存 30 个视图；浏览器中的旧视图尚未迁移，请先整理后重试。")
@@ -147,7 +165,16 @@ class ContentViewsStore:
                     previous = data["products"].get(product, self.empty_product())
                     entry = copy.deepcopy(previous)
                     views, known = entry["views"], set(entry["known_ids"])
-                    if action == "import":
+                    if action == "order":
+                        if body["revision"] != fingerprint(previous):
+                            raise CreationError(409, "视图已在其他浏览器或设备更新，请刷新视图后重试。")
+                        ids = {row["id"] for row in views}
+                        kept = [key for key in order if not key.startswith("view:") or key[5:] in ids]
+                        if kept:
+                            entry["tab_order"] = kept
+                        else:
+                            entry.pop("tab_order", None)
+                    elif action == "import":
                         additions = [row for row in records if row["id"] not in known]
                         if len(views) + len(additions) > MAX_VIEWS:
                             raise CreationError(400, "合并后超过 30 个视图，浏览器中的旧视图尚未迁移；请先删除不再使用的工作台视图再重试。")

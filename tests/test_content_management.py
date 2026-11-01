@@ -1,14 +1,14 @@
 import copy
+import json
 from pathlib import Path
 import tempfile
 import unittest
 from uuid import uuid4
 
 from content_management import ContentManagementStore, build_content_items
-from content_naming import content_title, task_topic_hint
+from content_naming import content_heading, content_title, task_topic_hint, variant_labels
 from creation_store import CreationError
 from direction_store import fingerprint
-from production_store import carousel_input_signature
 from workbench_video_publish import reviewed_source
 
 
@@ -30,45 +30,8 @@ def job(identifier="PRD-one", script_id="SCR-one", **extra):
 
 
 class ContentQueueTests(unittest.TestCase):
-    def queue(self, tasks=None, scripts=None, jobs=None, carousels=None, management=None):
-        return build_content_items(tasks or [], scripts or [], jobs or [], carousels or [], management)
-
-    def test_list_names_show_topic_form_and_variant_with_the_timeline_as_metadata(self):
-        production = job(title="202H-S2 变体 B", direction_id="202H-S2", selected_take="T2",
-                         lines=[{"number": 1, "zh": "从粗到细，一套配齐", "spoken": "A complete kit."}],
-                         timelines=[{"name": "Lab261021-202-1", "take_id": "T2"}])
-        before = copy.deepcopy(production)
-        rows = self.queue(scripts=[script(title="另一条采用稿的主题")], jobs=[production],
-                          carousels=[{"id": "CAR-one", "title": "图文原来的标题", "status": "draft"}])
-        names = {row["id"]: row["title"] for row in rows}
-        self.assertEqual(names["video:PRD-one"], "从粗到细，一套配齐｜视频方案 B")
-        video = next(row for row in rows if row["id"] == "video:PRD-one")
-        self.assertEqual(video["source_title"], "202H-S2 变体 B")
-        self.assertEqual(video["timeline_name"], "Lab261021-202-1")
-        self.assertEqual(names["carousel:CAR-one"], "图文原来的标题｜图文")
-        self.assertEqual(production, before)
-
-    def test_each_carousel_uses_its_own_cover_and_preserves_the_visible_variant_label(self):
-        common = {"direction_id": "202H-S2", "product": "202H", "title": "202H-S2 变体 9", "status": "draft",
-                  "source": {"variant_index": 1}, "script_id": "SCR-one"}
-        first = {**common, "id": "CAR-one", "slides": [{"title_zh": "镜面，在锋利之后"}]}
-        second = {**common, "id": "CAR-two", "slides": [{"title_zh": "锋利只是第一步"}]}
-        originals = copy.deepcopy([first, second])
-        rows = self.queue(carousels=[first, second], scripts=[script(title="关联采用稿的旧主题")])
-        names = {row["id"]: row["title"] for row in rows}
-        self.assertEqual(names["carousel:CAR-one"], "镜面，在锋利之后｜图文方案 9")
-        self.assertEqual(names["carousel:CAR-two"], "锋利只是第一步｜图文方案 9")
-        self.assertEqual([first, second], originals)
-
-    def test_fallbacks_follow_exact_provenance_and_do_not_borrow_same_direction_scripts(self):
-        first = script(title="202H-S2 变体 1", direction_id="202H-S2", translation_zh="这条稿自己的中文开头。\n第二句")
-        other = script("SCR-two", "SCR-two", title="同方向无关主题", direction_id="202H-S2")
-        rows = self.queue(scripts=[first, other], carousels=[
-            {"id": "CAR-linked", "script_id": "SCR-one", "direction_id": "202H-S2", "title": "202H-S2 变体 1", "status": "draft"},
-            {"id": "CAR-alone", "direction_id": "202H-S2", "title": "202H-S2 变体 1", "status": "draft"}])
-        names = {row["id"]: row["title"] for row in rows}
-        self.assertEqual(names["carousel:CAR-linked"], "这条稿自己的中文开头。｜图文方案 1")
-        self.assertEqual(names["carousel:CAR-alone"], "未命名内容｜图文方案 1")
+    def queue(self, tasks=None, scripts=None, jobs=None, management=None):
+        return build_content_items(tasks or [], scripts or [], jobs or [], management)
 
     def test_same_direction_tasks_use_creation_time_in_beijing_and_never_update_time(self):
         context = {"title": "202H-S1", "direction_id": "202H-S1", "writing_topic": "202H-S1 别再靠手腕猜刃角"}
@@ -227,23 +190,6 @@ class ContentQueueTests(unittest.TestCase):
         self.assertTrue(row["needs_attention"])
         self.assertTrue(any(link["label"] == "历史发布记录" and link["hash"].endswith("?step=publish") for link in row["links"]))
 
-    def test_historical_carousel_registration_does_not_complete_current_slides(self):
-        carousel = {"id": "CAR-one", "product": "202H", "slides": [{"number": 1, "outputs": [], "base": None}],
-                    "publication": {"post_id": "1234567", "published_on": "2026-10-12"}, "publication_current": False}
-        row = self.queue(carousels=[carousel])[0]
-        self.assertEqual(row["stage"], "draft")
-        self.assertFalse(row["history"])
-        self.assertTrue(row["needs_attention"])
-        self.assertTrue(any(link["label"] == "历史发布记录" and link["hash"].endswith("?step=delivery") for link in row["links"]))
-
-    def test_carousel_registration_is_independent_of_video_and_selected_script(self):
-        carousel = {"id": "CAR-one", "script_id": "SCR-one", "script_family": "SCR-one", "product": "202H",
-                    "slides": [{"number": 1, "outputs": [], "base": None}],
-                    "publication": {"post_id": "1234567", "published_on": "2026-10-13"}}
-        rows = self.queue(scripts=[script()], jobs=[job()], carousels=[carousel])
-        self.assertEqual({row["id"] for row in rows}, {"video:PRD-one", "carousel:CAR-one"})
-        self.assertEqual(next(row for row in rows if row["kind"] == "carousel")["stage"], "published")
-
     def test_archive_marks_belong_to_their_own_row(self):
         metadata = {"revision": "human-r1", "items": {"task:AIT-one": {"archived": True}, "script:SCR-one": {"archived": True}}}
         rows = self.queue([task()], [script()], [job(), job("PRD-two")], management=metadata)
@@ -274,23 +220,6 @@ class ContentQueueTests(unittest.TestCase):
         self.assertEqual(posted["stage"], "published")
         self.assertTrue(posted["history"])
 
-    def test_aggregation_does_not_modify_original_facts_and_busy_is_explicit(self):
-        source = {"id": "CAR-one", "product": "202H", "slides": [{"number": 1, "outputs": [], "base": {"path": "a"}}],
-                  "generations": [{"status": "running"}]}
-        before = copy.deepcopy(source)
-        rows = self.queue(tasks=[task(status="running")], carousels=[source])
-        self.assertEqual(source, before)
-        self.assertTrue(all(row["busy"] for row in rows))
-        self.assertFalse(any(row["needs_attention"] for row in rows))
-
-    def test_running_image_review_is_busy_until_human_confirmation(self):
-        source = {"id": "CAR-one", "product": "202H", "slides": [{"number": 1, "outputs": [
-            {"id": "OUT-one", "review_runs": [{"status": "running"}]}]}]}
-        row = self.queue(carousels=[source])[0]
-        self.assertTrue(row["busy"])
-        self.assertEqual(row["stage"], "reviewing_running")
-        self.assertFalse(row["needs_attention"])
-
     def test_timeline_building_and_material_verification_have_correct_next_steps(self):
         waiting = job(timeline_building={"stage": "waiting", "progress": "等待达芬奇建线"})
         original = copy.deepcopy(waiting)
@@ -305,27 +234,6 @@ class ContentQueueTests(unittest.TestCase):
         self.assertEqual(row["stage_label"], "素材待核实")
         self.assertFalse(row["busy"])
         self.assertTrue(row["needs_attention"])
-
-    def test_autopilot_queued_generation_and_group_review_remain_running_without_mutation(self):
-        sources = [
-            {"id": "CAR-auto", "product": "202H", "slides": [],
-             "autopilot_runs": [{"status": "running", "message": "正在制作第 2 张"}]},
-            {"id": "CAR-queued", "product": "202H", "slides": [], "generations": [{"status": "queued"}]},
-            {"id": "CAR-review", "product": "202H", "slides": [], "group_reviews": [{"status": "running"}]},
-        ]
-        original = copy.deepcopy(sources)
-        rows = {row["id"]: row for row in self.queue(carousels=sources)}
-        self.assertTrue(all(row["busy"] and not row["needs_attention"] for row in rows.values()))
-        self.assertEqual(rows["carousel:CAR-auto"]["stage"], "autopilot_running")
-        self.assertEqual(rows["carousel:CAR-auto"]["progress_text"], "正在制作第 2 张")
-        self.assertEqual(rows["carousel:CAR-review"]["stage"], "reviewing_running")
-        self.assertEqual(sources, original)
-
-    def test_finished_carousel_without_verified_package_does_not_offer_a_download(self):
-        row = self.queue(carousels=[{"id": "CAR-done", "product": "202H", "status": "approved",
-                                    "deliveries": [{"id": "DEL-old", "current": False}]}])[0]
-        self.assertEqual((row["stage"], row["next_label"]), ("awaiting_publication", "整理成品与登记发布"))
-        self.assertNotIn("领取", row["next_label"])
 
     def test_reviewed_variant_link_only_supplies_direction_and_does_not_merge(self):
         catalog = {"scripts": [script(direction_id="", source=None), script("SCR-two", "SCR-two", direction_id="", source=None)],
@@ -352,24 +260,10 @@ class ContentWorkflowTests(unittest.TestCase):
                    status="approved")
 
     def queue(self, row, kind="video"):
-        return build_content_items([], [], [row] if kind == "video" else [], [row] if kind == "carousel" else [])[0]
+        return build_content_items([], [], [row] if kind == "video" else [])[0]
 
     def done(self, row):
         return {step["key"]: step["done"] for step in row["workflow_steps"]}
-
-    def carousel(self):
-        item = {"id": "CAR-one", "script_id": "SCR-one", "script_version": 1, "image_aspect": "3:4",
-                "product": "202H", "title": "图文", "slides": []}
-        for number in (1, 2):
-            slide = {"number": number, "title_lines": [f"Slide {number}"], "body": "Description",
-                     "base": {"id": f"base-{number}"}, "output_id": f"OUT-{number}"}
-            output = {"id": slide["output_id"], "aspect": "3:4", "sha256": f"image-{number}", "approved": True,
-                      "input_signature": carousel_input_signature(item, slide, "3:4")}
-            slide["outputs"] = [output]
-            item["slides"].append(slide)
-        item["deliveries"] = [{"id": "DLV-current", "current": True, "available": True, "images_only": True,
-                               "selection_signature": "selection-current", "sha256": "zip-current"}]
-        return item
 
     def test_posted_video_is_flagged_only_while_its_calendar_mark_is_not_uploaded(self):
         posted = {"post_id": "7561234567890123456", "published_on": "2026-10-22", "source_current": True}
@@ -383,18 +277,6 @@ class ContentWorkflowTests(unittest.TestCase):
         archived = self.queue({**self.video(), "archived": True, "current_publication": {**posted, "calendar_uploaded": False}})
         self.assertFalse(archived["calendar_pending"])
         self.assertFalse(self.queue(self.video())["calendar_pending"])
-
-    def test_posted_carousel_is_flagged_only_while_its_calendar_mark_is_not_uploaded(self):
-        for mark, pending in ((False, True), (True, False), (None, False)):
-            with self.subTest(mark=mark):
-                publication = {"id": "PUB-one", "delivery_id": "DLV-current", "delivery_sha256": "zip-current",
-                               "selection_signature": "selection-current", "post_id": "7561234567890123456",
-                               "published_on": "2026-10-22", **({} if mark is None else {"calendar_uploaded": mark})}
-                row = self.queue({**self.carousel(), "publication": publication}, "carousel")
-                self.assertEqual(row["stage"], "published")
-                self.assertIs(row["calendar_pending"], pending)
-                self.assertEqual(row["published_on"], "2026-10-22")
-        self.assertFalse(self.queue(self.carousel(), "carousel")["calendar_pending"])
 
     def test_manual_edit_completion_does_not_complete_video_before_publication(self):
         source = self.video()
@@ -439,58 +321,6 @@ class ContentWorkflowTests(unittest.TestCase):
         self.assertTrue(self.done(self.queue(source))["edit"])
         source["edits"].append({"id": "edit-new", "timeline_uid": "timeline-new", "status": "running"})
         self.assertFalse(self.done(self.queue(source))["edit"])
-
-    def test_carousel_has_distinct_generation_confirmation_package_and_publication_steps(self):
-        source = self.carousel()
-        expected = {"slides": True, "pick": True, "images": True, "confirm": True, "package": True, "publish": False}
-        item = self.queue(source, "carousel")
-        self.assertEqual(self.done(item), expected)
-        self.assertFalse(item["workflow_complete"])
-        source["slides"][0]["outputs"][0]["approved"] = False
-        item = self.queue(source, "carousel")
-        self.assertTrue(self.done(item)["images"])
-        self.assertFalse(self.done(item)["confirm"])
-        self.assertFalse(self.done(item)["package"])
-        source["slides"][0]["outputs"][0]["approved"] = True
-        for change in ({"current": False}, {"available": False}):
-            with self.subTest(change=change):
-                source["deliveries"][0].update(current=True, available=True)
-                source["deliveries"][0].update(change)
-                self.assertFalse(self.done(self.queue(source, "carousel"))["package"])
-
-    def test_carousel_publication_must_name_current_confirmed_package(self):
-        source = self.carousel()
-        publication = {"delivery_id": "DLV-current", "delivery_sha256": "zip-current", "selection_signature": "selection-current",
-                       "post_id": "1234567", "published_on": "2026-10-20"}
-        source["publication"] = publication
-        self.assertTrue(self.queue(source, "carousel")["workflow_complete"])
-        for changes in ({"delivery_id": "DLV-history"}, {"delivery_sha256": "zip-history"}, {"selection_signature": "selection-history"}):
-            with self.subTest(changes=changes):
-                source["publication"] = {**publication, **changes}
-                self.assertFalse(self.done(self.queue(source, "carousel"))["publish"])
-        source["publication"] = publication
-        source["slides"][0]["body"] = "Changed adopted words"
-        item = self.queue(source, "carousel")
-        self.assertFalse(self.done(item)["images"])
-        self.assertFalse(self.done(item)["confirm"])
-        self.assertFalse(item["workflow_complete"])
-
-    def test_related_carousel_chains_only_use_exact_video_job_provenance(self):
-        first, second, independent = self.carousel(), self.carousel(), self.carousel()
-        first["source"] = {"video_job_id": "PRD-one"}
-        second.update(id="CAR-two", source={"video_job_id": "PRD-one"})
-        independent.update(id="CAR-independent", direction_id="DIR-one", script_id="SCR-one")
-        originals = copy.deepcopy([first, second, independent])
-        rows = build_content_items([], [], [self.video(), job("PRD-two")], [first, second, independent])
-        by_id = {row["id"]: row for row in rows}
-        links = by_id["video:PRD-one"]["related_workflows"]
-        self.assertEqual([link["id"] for link in links], ["carousel:CAR-one", "carousel:CAR-two"])
-        self.assertEqual(links[0]["steps"], by_id["carousel:CAR-one"]["workflow_steps"])
-        self.assertFalse(links[0]["complete"])
-        self.assertEqual(by_id["video:PRD-two"]["related_workflows"], [])
-        self.assertEqual(len(rows), 5)
-        self.assertEqual([first, second, independent], originals)
-
 
 class ContentManagementStoreTests(unittest.TestCase):
     def setUp(self):
@@ -556,5 +386,66 @@ class ContentManagementStoreTests(unittest.TestCase):
         self.assertEqual(self.store.path.read_bytes(), before)
 
 
+class RetiredPictureRecordsTests(unittest.TestCase):
+    def test_stored_marks_keep_loading_and_cannot_be_written_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = ContentManagementStore(folder)
+            store.root.mkdir(parents=True, exist_ok=True)
+            store.path.write_text(json.dumps({"schema_version": 1, "requests": {}, "items": {
+                "carousel:CAR-091dc72062a9": {"calendar_uploaded": True, "updated_at": "2026-10-23T05:51:13+00:00"}}}), encoding="utf-8")
+            self.assertIn("carousel:CAR-091dc72062a9", store.public()["items"])
+            with self.assertRaises(CreationError):
+                store.mutate({"request_id": "retired-mark-0001", "id": "carousel:CAR-091dc72062a9", "revision": store.public()["revision"],
+                              "management": {"archived": True}})
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class ContentVariantNamingTests(unittest.TestCase):
+    """The list names a row by the catalog variant the direction page assigns it, numbered as that page numbers it."""
+
+    direction = {"product": "202H", "direction_id": "202H-S2", "variants": [
+        {"variant_type": "execution", "progression": "回应质疑"},
+        {"variant_type": "direction", "progression": ""},
+        {"variant_type": "execution", "progression": "其他：送礼"},
+        {"variant_type": "execution"}]}
+
+    def heading(self, row, kind="script", owners=frozenset(), direction="202H-S2"):
+        return content_heading(row, kind, direction=direction, owners=owners, labels=variant_labels(self.direction))
+
+    def test_labels_skip_the_definition_and_drop_the_other_prefix(self):
+        self.assertEqual(variant_labels(self.direction), [("#1", "回应质疑"), ("方向定义", ""), ("#2", "送礼"), ("#3", "")])
+
+    def test_one_owner_names_the_variant_and_the_opening_line_follows(self):
+        script = {"title": "202H-S2 变体 #9 · 旧名", "translation_zh": "给爱刀的人挑礼物。\n第二句。", "text": "Gift."}
+        self.assertEqual(self.heading(script, owners={2}), ("S2 #2 送礼", "给爱刀的人挑礼物。"))
+        self.assertEqual(self.heading(script, owners={1})[0], "S2 方向定义")
+        self.assertEqual(self.heading(script, owners={3})[0], "S2 #3")
+
+    def test_unplaced_records_say_so_instead_of_trusting_old_titles(self):
+        script = {"title": "202H-S2 变体 #4 · 身份认同", "text": "Hook."}
+        self.assertEqual(self.heading(script, owners=set())[0], "S2 变体待核对")
+        self.assertEqual(self.heading(script, owners={0, 2})[0], "S2 变体待核对")
+        task = {"task_id": "AIT-000000000001", "action": "variants", "context": {"title": "写稿主题"}}
+        self.assertEqual(self.heading(task, "task", owners={0, 2}), ("S2 写稿 · 2 条变体", "写稿主题"))
+        self.assertEqual(self.heading(task, "task", owners=set())[0], "S2 写稿")
+
+    def test_records_without_a_direction_keep_their_own_name(self):
+        self.assertEqual(self.heading({"title": "手写的名字", "text": "Hook line."}, direction=""), ("手写的名字", "Hook line."))
+        self.assertEqual(self.heading({"text": ""}, direction="")[0], "未关联方向")
+
+    def test_unknown_ownership_and_reviews_keep_the_older_name(self):
+        script = {"title": "身份认同", "text": "Hook."}
+        self.assertEqual(self.heading(script, owners=None), (content_title(script, "script", direction="202H-S2"), ""))
+        review = {"task_id": "AIT-000000000002", "action": "review", "context": {"title": "审一稿"}}
+        self.assertEqual(self.heading(review, "task", owners={0})[0], "审一稿｜审稿结果")
+
+    def test_build_uses_the_owner_map_and_its_direction(self):
+        rows = build_content_items([], [{"id": "SCR-000000000001", "family_id": "SCR-000000000001", "product": "202H",
+                                         "title": "x", "text": "Line one.", "status": "adopted", "version": 1,
+                                         "created_at": "2026-10-01T00:00:00Z"}], [], [],
+                                   variants={"owners": {("script", "SCR-000000000001"): {"direction": ("202H", "202H-S2"), "indexes": {0}}},
+                                             "labels": {("202H", "202H-S2"): variant_labels(self.direction)}})
+        self.assertEqual((rows[0]["title"], rows[0]["subtitle"], rows[0]["direction_id"]), ("S2 #1 回应质疑", "Line one.", "202H-S2"))

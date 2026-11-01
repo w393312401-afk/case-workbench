@@ -27,13 +27,11 @@ def rows():
                 "product": "202H", "updated_at": "2026-10-23", **extra}
     return [
         row("video:review", "video", "awaiting_review", needs_attention=True, workflow_complete=False),
-        row("carousel:review", "carousel", "reviewing", needs_attention=True, workflow_complete=False),
         row("video:running", "video", "rendering", busy=True, workflow_complete=False),
         row("video:approved", "video", "awaiting_publication", workflow_complete=True),
         row("task:attention", "task", "pending_selection", needs_attention=True),
         row("video:posted", "video", "published", history=True, calendar_pending=True, published_on="2026-10-22"),
         row("video:archived", "video", "awaiting_review", archived=True, needs_attention=True),
-        row("carousel:archived", "carousel", "awaiting_publication", archived=True),
     ]
 
 
@@ -42,7 +40,8 @@ class MemoryContent(ContentWorkbenchMixin):
         self.items = rows()
         self.lock = threading.RLock()
         self.delete_job_order = Mock(return_value={"warnings": []})
-        self.delete_carousel_order = Mock(return_value={"warnings": []})
+        self.saved_views = []
+        self.content_views = Mock(public=lambda product="": {"views": self.saved_views})
 
     def _content_snapshot(self, product=None):
         return copy.deepcopy(self.items), {"revision": "filters-test", "items": {}}
@@ -61,25 +60,13 @@ class ContentFilterTests(unittest.TestCase):
     def ids(self, result):
         return {item["id"] for item in result["items"]}
 
-    def test_multi_select_is_or_within_a_condition_and_all_across_conditions(self):
-        result = self.catalog(custom(rule("kind", "video", "carousel"),
-                                     rule("status", "awaiting_review", "approved")))
-        self.assertEqual(self.ids(result), {"video:review", "carousel:review", "video:approved",
-                                           "video:archived", "carousel:archived"})
-
-    def test_any_combines_conditions_without_duplicating_rows(self):
-        result = self.catalog(custom(rule("kind", "carousel"), rule("status", "awaiting_review"), match="any"))
-        self.assertEqual(self.ids(result), {"carousel:review", "carousel:archived", "video:review", "video:archived"})
-        self.assertEqual(result["total"], 4)
-
-    def test_presets_use_the_existing_live_row_predicates(self):
-        for view in ("attention", "running", "publish"):
-            with self.subTest(view=view):
-                legacy = self.catalog(view=view)
-                explicit = self.catalog(custom(rule("view", view)))
-                self.assertEqual(explicit, legacy)
-        union = self.catalog(custom(rule("view", "attention", "running")))
-        self.assertEqual(self.ids(union), {"video:review", "carousel:review", "task:attention", "video:running"})
+    def test_saved_views_are_counted_over_all_rows_with_their_search(self):
+        self.app.saved_views = [
+            {"id": "videos", "name": "视频", "q": "", "filter": custom(rule("kind", "video"))},
+            {"id": "none", "name": "无结果", "q": "不存在的词", "filter": custom(rule("kind", "video"))}]
+        result = self.catalog(view="attention")
+        videos = {item["id"] for item in self.app.items if item["kind"] == "video"}
+        self.assertEqual(result["view_counts"], {"videos": len(videos), "none": 0})
 
     def test_filter_runs_before_pagination_and_keeps_global_counts_and_calendar(self):
         baseline = self.catalog()
@@ -120,33 +107,6 @@ class ContentFilterTests(unittest.TestCase):
                     self.assertEqual(error.exception.status, 400)
             with self.assertRaises(CreationError):
                 self.app.content_catalog({"filter": [json.dumps(custom()), json.dumps(custom())]})
-
-    def test_archive_count_preview_and_delete_use_the_same_filter(self):
-        content_filter = custom(rule("kind", "video"), rule("status", "archived"))
-        catalog = self.catalog(content_filter)
-        preview = self.app.delete_archived_content({"filter": content_filter, "preview": True})
-        self.assertEqual(self.ids(catalog), {"video:archived"})
-        self.assertEqual(self.ids(preview), self.ids(catalog))
-        self.assertEqual(catalog["archived_deletable"], len(preview["items"]))
-        result = self.app.delete_archived_content({"filter": content_filter,
-                                                  "ids": ["video:archived", "carousel:archived", "video:review"]})
-        self.assertEqual((result["deleted"], result["failed"]), (1, 2))
-        self.app.delete_job_order.assert_called_once()
-        self.assertEqual(self.app.delete_job_order.call_args.args[0], "archived")
-        self.app.delete_carousel_order.assert_not_called()
-
-    def test_archive_preview_respects_any_conditions_and_legacy_scope(self):
-        content_filter = custom(rule("kind", "video"), rule("status", "approved"), match="any")
-        preview = self.app.delete_archived_content({"filter": json.dumps(content_filter), "preview": True})
-        self.assertEqual(self.ids(preview), {"video:archived", "carousel:archived"})
-        preview = self.app.delete_archived_content({"filter": content_filter, "status": "approved", "preview": True})
-        self.assertEqual(self.ids(preview), {"carousel:archived"})
-        preview = self.app.delete_archived_content({"filter": custom(rule("view", "attention")), "preview": True})
-        self.assertEqual(preview["items"], [])
-        for value in (None, {}, custom(rule("status", "all"))):
-            with self.subTest(value=value), self.assertRaises(CreationError):
-                self.app.delete_archived_content({"filter": value, "preview": True})
-
 
 class ContentFilterHTTPTests(unittest.TestCase):
     setUp = fixture.WorkbenchHTTPTests.setUp

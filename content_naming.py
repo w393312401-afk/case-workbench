@@ -12,7 +12,7 @@ _VARIANT = re.compile(
     r"(?=$|[\s｜|·:：—–\-、，,])", re.IGNORECASE)
 _TOPIC_LINE = re.compile(r"^(?:制作单|文案标题|内容主题|写稿主题|主题|标题)\s*[：:]\s*(.+)$")
 _GENERIC = {"空白创作", "空白写稿", "未命名内容", "未命名制作单", "创作任务", "候选稿", "稿件", "视频", "图文", "脚本"}
-_FORMS = {"video": "视频", "carousel": "图文", "task": "候选稿", "script": "脚本"}
+_FORMS = {"video": "视频", "task": "候选稿", "script": "脚本"}
 _BEIJING = timezone(timedelta(hours=8))
 
 
@@ -57,12 +57,6 @@ def task_topic_hint(instruction):
 
 
 def _opening(row, kind):
-    if kind == "carousel":
-        slides = row.get("slides") or []
-        slide = next((value for value in slides if isinstance(value, dict)), {})
-        titles = slide.get("title_lines") or []
-        english = " ".join(value for value in titles if isinstance(value, str)) if isinstance(titles, list) else ""
-        return _text(slide.get("title_zh")) or _text(slide.get("body_zh")) or _text(english) or _text(slide.get("body"))
     if kind == "video":
         lines = [value for value in row.get("lines") or [] if isinstance(value, dict)]
         return next((_text(line.get("zh")) for line in lines if _text(line.get("zh"))), "") or next(
@@ -115,6 +109,47 @@ def content_title(row, kind, *, direction="", script=None, task=None):
             if kind == "task" else _FORMS[kind])
     form += f"方案 {variant}" if variant and kind != "task" else ""
     return f"{topic}｜{form}"
+
+
+def variant_labels(direction):
+    """Each catalog variant's label as the direction page numbers it: execution variants #1, #2…; the definition is 方向定义."""
+    labels, number = [], 0
+    for variant in direction.get("variants") or []:
+        structure = re.sub(r"^其他\s*[：:]\s*", "", _text(variant.get("progression")))
+        if variant.get("variant_type") == "direction":
+            labels.append(("方向定义", structure))
+        else:
+            number += 1
+            labels.append((f"#{number}", structure))
+    return labels
+
+
+def content_heading(row, kind, *, direction="", script=None, task=None, owners=None, labels=()):
+    """The list's two lines: 「S2 #4 身份认同」 from the catalog variant the record belongs to, and its opening line.
+
+    owners is the set of catalog variant indexes the direction page assigns this record to; None means that
+    assignment could not be worked out, and the record keeps its older single-line name."""
+    legacy = content_title(row, kind, direction=direction, script=script, task=task)
+    if owners is None or kind == "task" and row.get("action") in {"review", "retrospective"}:
+        return legacy, ""
+    topic = legacy.rpartition("｜")[0]
+    topic = "" if topic == "未命名内容" else topic
+    hook = _clean(_opening(row, kind), direction)[0] or (_clean(_opening(script, "script"), direction)[0] if script else "")
+    subtitle = hook or topic
+    if len(subtitle) > 80:
+        subtitle = subtitle[:79].rstrip() + "…"
+    short = direction.rsplit("-", 1)[-1] if direction else ""
+    if not short:
+        # Nothing to number it by: its own name leads, and the opening line follows only when it says more.
+        return (topic, hook if hook != topic else "") if topic else ("未关联方向", subtitle)
+    named = lambda index: " ".join(part for part in (short, *labels[index]) if part)
+    owners = sorted(owners)
+    if len(owners) == 1 and owners[0] < len(labels):
+        return named(owners[0]), subtitle
+    if kind == "task":
+        return (f"{short} 写稿 · {len(owners)} 条变体" if owners else f"{short} 写稿"), subtitle
+    # A script or order the direction page cannot place on exactly one variant says so instead of guessing.
+    return f"{short} 变体待核对", subtitle
 
 
 def task_created_at(row):

@@ -10,6 +10,13 @@ from playwright.sync_api import expect
 import test_content_flow_ui as flow_fixture
 
 
+def open_saved_views(page):
+    """Saved views live in the 我的视图 menu; open it before picking one."""
+    menu = page.locator("#content-flow-saved-menu")
+    if not menu.evaluate("node => node.open"):
+        menu.locator(":scope > summary").click()
+
+
 class ContentFiltersBrowserTests(unittest.TestCase):
     setUpClass = classmethod(flow_fixture.ContentFlowBrowserTests.setUpClass.__func__)
     tearDownClass = classmethod(flow_fixture.ContentFlowBrowserTests.tearDownClass.__func__)
@@ -130,6 +137,7 @@ class ContentFiltersBrowserTests(unittest.TestCase):
 
         self.view(page, "all")
         self.assert_rows(page, rows.values())
+        open_saved_views(page)
         saved.click()
         self.assert_rows(page, [rows["approved"]])
         self.set_filters(page, [("kind", ["video"])])
@@ -149,6 +157,7 @@ class ContentFiltersBrowserTests(unittest.TestCase):
         expect(page.locator("[data-flow-saved-view]")).to_have_count(0)
         page.evaluate("location.hash = '#/202H/content'")
         expect(saved).to_have_count(1)
+        open_saved_views(page)
         saved.click()
         self.assert_rows(page, [rows["approved"], rows["draft"]])
         dialog = self.dialog(page)
@@ -213,7 +222,7 @@ class ContentFiltersBrowserTests(unittest.TestCase):
         expect(dialog.locator('[name="name"]')).to_have_value("")
         dialog.locator('[name="name"]').fill("正常保存的视图")
         dialog.locator("[data-view-save]").click()
-        expect(page.locator("[data-flow-saved-view]")).to_have_text("正常保存的视图")
+        expect(page.locator("[data-flow-saved-view]")).to_contain_text("正常保存的视图")
 
     def test_detail_back_keeps_filter_and_query_and_editor_fits_light_dark_mobile(self):
         item = self.script("筛选后打开详情")

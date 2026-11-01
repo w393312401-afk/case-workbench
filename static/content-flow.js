@@ -4,7 +4,7 @@ window.ContentFlow = (() => {
   // 待我处理: needs you; 待发布: finished, waiting to be posted; 全部: everything, archived included.
   const views = {attention:'待处理',running:'进行中',publish:'待发布',all:'全部'};
   const statuses = {all:'全部状态',workflow_incomplete:'链路未完结',in_progress:'制作中',needs_attention:'需处理',awaiting_review:'待核对 / 审查',approved:'已完成待发布',published:'已登记发布',archived:'已归档'};
-  const kinds = {all:'所有形式',task:'协作任务',script:'待制作采用稿',video:'视频',carousel:'图文'};
+  const kinds = {all:'所有形式',task:'协作任务',script:'待制作采用稿',video:'视频'};
   const fields = {kind:{label:'内容类型',options:kinds},status:{label:'状态',options:statuses},view:{label:'工作阶段',options:views},
     review_calendar:{label:'审查后日历',options:{all:'全部',added:'已添加到日历',not_added:'未添加到日历'}}};
   const copy = value => JSON.parse(JSON.stringify(value));
@@ -12,13 +12,17 @@ window.ContentFlow = (() => {
     return value && ['all','any'].includes(value.match) && Array.isArray(value.conditions) && value.conditions.length <= 12 && value.conditions.every(rule =>
       rule && Object.hasOwn(fields,rule.field) && Array.isArray(rule.values) && rule.values.length > 0 && rule.values.length < Object.keys(fields[rule.field].options).length && rule.values.every(value => value !== 'all' && Object.hasOwn(fields[rule.field].options,value)));
   }
-  const tags = {task:'候选',script:'采用稿',video:'视频',carousel:'图文'};
+  // List order: a field plus a direction; updated_desc is the default reading and stays out of links.
+  const sortFields = {updated:'最近更新',created:'创建时间',published:'发布日期',title:'标题'};
+  const sortDirections = {desc:'降序',asc:'升序'};
+  const validSort = value => typeof value === 'string' && Object.hasOwn(sortFields,value.split('_')[0]) && Object.hasOwn(sortDirections,value.split('_')[1] || '') && value.split('_').length === 2;
+  const tags = {task:'候选',script:'采用稿',video:'视频'};
   const page = {sequence:0,product:'',filters:null,selecting:false,selected:new Set(),archiving:false,deleting:false};
   const url = (hash,product) => window.WorkbenchShell?.url(hash,product) || hash;
   const product = () => window.WorkbenchShell?.product() || '';
   const hash = () => window.WorkbenchShell?.legacyHash() || location.hash;
   const errorText = error => error?.message || '操作暂未完成';
-  const filterScope = () => JSON.stringify([page.filters.view,page.filters.kind,page.filters.status,page.filters.q,page.filters.page,page.filters.filter]);
+  const filterScope = () => JSON.stringify([page.filters.view,page.filters.kind,page.filters.status,page.filters.q,page.filters.page,page.filters.filter,page.filters.sort]);
   const currentData = () => !!page.data && page.data.product === page.product && page.product === product() && page.dataScope === filterScope() && !!$('#content-flow-list');
   // Creation has one list. Secondary records return here without another parallel tab bar.
   function tabs(active) {
@@ -30,7 +34,7 @@ window.ContentFlow = (() => {
     try {const value = JSON.parse(params.get('filter'));if (validFilter(value)) filter = value;} catch { /* Legacy links remain usable. */ }
     return {filter,saved:params.get('saved') || '',view:filter ? 'all' : Object.hasOwn(views,params.get('view')) ? params.get('view') : 'attention',
       kind:!filter && Object.hasOwn(kinds,params.get('kind')) ? params.get('kind') : 'all',status:!filter && Object.hasOwn(statuses,params.get('status')) ? params.get('status') : 'all',q:(params.get('q') || '').slice(0,200),
-      page:Math.max(1,Number.parseInt(params.get('page'),10) || 1)};
+      sort:validSort(params.get('sort')) ? params.get('sort') : 'updated_desc',page:Math.max(1,Number.parseInt(params.get('page'),10) || 1)};
   }
   function filterHash(filters = page.filters) {
     const params = new URLSearchParams();
@@ -40,6 +44,7 @@ window.ContentFlow = (() => {
     if (filters.q) params.set('q',filters.q);
     if (filters.filter) params.set('filter',JSON.stringify(filters.filter));
     if (filters.saved) params.set('saved',filters.saved);
+    if (filters.sort && filters.sort !== 'updated_desc') params.set('sort',filters.sort);
     if (filters.page > 1) params.set('page',String(filters.page));
     return url('#content' + (params.size ? '?' + params : ''),page.product);
   }
@@ -61,9 +66,13 @@ window.ContentFlow = (() => {
   }
   const savedViews = () => viewCatalog().views;
   const validView = row => row && typeof row.id === 'string' && typeof row.name === 'string' && row.name.trim() && row.name.length <= 40 && typeof row.q === 'string' && row.q.length <= 200 && validFilter(row.filter);
+  // A saved view may still name retired picture orders: its record stays on file, it just is not offered.
+  const retiredView = row => (row?.filter?.conditions || []).some(condition => condition.field === 'kind' && condition.values?.includes('carousel'));
   function acceptViews(owner,data) {
-    if (data?.product !== owner || !Array.isArray(data.views) || !data.views.every(validView) || data.revision == null) throw new Error('工作台返回的视图资料不完整，请刷新重试。');
-    Object.assign(viewCatalog(owner),{views:copy(data.views),revision:data.revision,ready:true,error:''});
+    const views = Array.isArray(data?.views) ? data.views.filter(row => !retiredView(row)) : null;
+    if (data?.product !== owner || !views || !views.every(validView) || data.revision == null) throw new Error('工作台返回的视图资料不完整，请刷新重试。');
+    const tabOrder = Array.isArray(data.tab_order) && data.tab_order.every(key => typeof key === 'string') ? [...data.tab_order] : [];
+    Object.assign(viewCatalog(owner),{views:copy(views),tabOrder,revision:data.revision,ready:true,error:''});
   }
   function paintViewsFor(owner) {if (page.product === owner && product() === owner && $('#content-flow-list')) paintFilterControls();}
   async function refreshViews(owner,force = false) {
@@ -112,7 +121,7 @@ window.ContentFlow = (() => {
   }
   function chooseFilters(filters) {
     closeQuickFilter();clearTimeout(page.filterTimer);
-    clearTimeout(page.searchTimer);page.selected.clear();page.filters = {view:'all',kind:'all',status:'all',q:'',page:1,filter:null,saved:'',...filters};
+    clearTimeout(page.searchTimer);page.selected.clear();page.filters = {view:'all',kind:'all',status:'all',q:'',page:1,filter:null,saved:'',sort:page.filters?.sort || 'updated_desc',...filters};
     $('#content-flow-query').value = page.filters.q;
     closeFilterEditor();paintFilterControls();void load(++page.sequence,false,true);
   }
@@ -120,29 +129,77 @@ window.ContentFlow = (() => {
     const root = $('#content-flow-views');if (!root) return;
     const saved = savedViews(), active = saved.find(row => row.id === page.filters.saved), filter = effectiveFilter();
     const changed = active && (JSON.stringify(active.filter) !== JSON.stringify(filter) || active.q !== page.filters.q);
-    const viewMarkup = Object.entries(views).map(([key,label]) => `<button type="button" data-flow-view="${key}" aria-pressed="${!active && !page.filters.filter && page.filters.view === key}" title="预设视图：${label}">${label}<small>${page.data?.counts[key] || 0}</small></button>`).join('') +
-      saved.map(row => `<button type="button" data-flow-saved-view="${esc(row.id)}" aria-pressed="${row.id === active?.id}" title="${esc(row.name)}">${esc(row.name)}${row.id === active?.id && changed ? '<small>已修改</small>' : ''}</button>`).join('');
+    // 进行中 shows only while something runs or while it is the open view.
+    const shown = Object.entries(views).filter(([key]) => key !== 'running' || page.data?.counts.running || page.filters.view === key);
+    // Saved views sit in one menu after the presets; its button names the open one.
+    const counted = row => page.data?.view_counts?.[row.id];
+    const countMarkup = row => counted(row) == null ? '' : `<small>${counted(row)}</small>`;
+    const menuOpen = !!$('#content-flow-saved-menu[open]',root), pinBusy = viewCatalog().busy || !viewCatalog().ready;
+    // Pinned views sit as tabs after the presets; the menu names the open view only when it is not already a tab.
+    const named = active && !active.pinned;
+    // Presets and pinned views share one row in the order the user dragged them into; new tabs join at the end.
+    const tabs = [...shown.map(([key,label]) => ({key,markup:`<button type="button" data-tab-key="${key}" draggable="true" data-flow-view="${key}" aria-pressed="${!active && !page.filters.filter && page.filters.view === key}" title="预设视图：${label}（可拖动调整位置）">${label}<small>${page.data?.counts[key] || 0}</small></button>`})),
+      ...saved.filter(row => row.pinned).map(row => ({key:'view:' + row.id,markup:`<button type="button" class="flow-pinned-view" data-tab-key="view:${esc(row.id)}" draggable="true" data-flow-saved-view="${esc(row.id)}" aria-pressed="${row.id === active?.id}" title="${esc(row.name)}（可拖动调整位置）">${esc(row.name)}${row.id === active?.id && changed ? '<em>已修改</em>' : ''}${countMarkup(row)}</button>`}))];
+    const order = viewCatalog().tabOrder || [], place = key => {const at = order.indexOf(key);return at < 0 ? order.length + tabs.findIndex(tab => tab.key === key) : at;};
+    tabs.sort((a,b) => place(a.key) - place(b.key));
+    const viewMarkup = tabs.map(tab => tab.markup).join('') +
+      (saved.length ? `<details class="ai-menu flow-saved-menu" id="content-flow-saved-menu"${menuOpen ? ' open=""' : ''}><summary aria-label="我的视图" data-active="${!!named}">${named ? esc(active.name) + (changed ? '<small>已修改</small>' : '') : '我的视图'}<i aria-hidden="true"></i></summary><div role="menu">${saved.map(row => `<div class="flow-saved-row"><button type="button" role="menuitem" data-flow-saved-view="${esc(row.id)}" aria-pressed="${row.id === active?.id}" title="${esc(row.name)}">${esc(row.name)}${countMarkup(row)}</button><button type="button" class="flow-view-pin" data-flow-pin="${esc(row.id)}" aria-pressed="${!!row.pinned}" aria-label="${row.pinned ? '取消置顶' : '置顶到标签栏'}：${esc(row.name)}" title="${row.pinned ? '取消置顶' : '置顶到标签栏'}"${pinBusy ? ' disabled' : ''}>${icon('pin')}</button></div>`).join('')}</div></details>` : '');
     if (root.innerHTML !== viewMarkup) root.innerHTML = viewMarkup;
     $$('[data-flow-view]',root).forEach(button => button.onclick = () => chooseFilters({view:button.dataset.flowView}));
-    $$('[data-flow-saved-view]',root).forEach(button => button.onclick = () => {const row = saved.find(row => row.id === button.dataset.flowSavedView);chooseFilters({filter:copy(row.filter),q:row.q,saved:row.id});});
-    $('#content-flow-filter-toggle').textContent = `规则${filter.conditions.length ? ` · ${filter.conditions.length}` : ''}`;
-    $('#content-flow-save-view').textContent = active ? '管理视图' : '保存视图';
+    $$('[data-flow-saved-view]',root).forEach(button => button.onclick = () => {const row = saved.find(row => row.id === button.dataset.flowSavedView);const menu = button.closest('details');if (menu) menu.open = false;chooseFilters({filter:copy(row.filter),q:row.q,saved:row.id});});
+    $$('[data-flow-pin]',root).forEach(button => button.onclick = () => void togglePin(button.dataset.flowPin));
+    bindTabDrag(root);
+    // A preset tab already names its own rule; its chip appears once the user edits the rules.
+    const preset = !active && !page.filters.filter && page.filters.kind === 'all' && page.filters.status === 'all';
+    const rules = preset ? [] : filter.conditions;
+    // Notion-style: the filter icon in the view row carries the rule count and turns blue while rules apply.
+    const add = $('.flow-filter-add-quick');
+    add.classList.toggle('is-active',rules.length > 0);add.disabled = filter.conditions.length >= 12;
+    $('small',add).textContent = rules.length || '';add.title = rules.length ? `筛选 · ${rules.length} 条条件` : '筛选';
+    $('label.search',$('.flow-toolbar')).classList.toggle('has-query',!!page.filters.q);
+    paintSort();
+    const saveLabel = active ? '管理视图' : '保存视图';
+    $('#content-flow-save-view').setAttribute('aria-label',saveLabel);$('#content-flow-save-view').title = saveLabel;
     const catalog = viewCatalog();
     $('#content-flow-save-view').disabled = !catalog.ready || catalog.busy || catalog.migrating || !$('#content-flow-filter-editor').hidden;
     const viewError = $('#content-flow-views-error');
     if (viewError) {viewError.hidden = !catalog.error;viewError.textContent = catalog.error;}
     const summary = $('#content-flow-filter-summary');
-    const summaryMarkup = (filter.conditions.length ? `<button type="button" class="flow-filter-match" title="切换为满足${filter.match === 'all' ? '任一' : '所有'}条件">${filter.match === 'all' ? '所有条件' : '任一条件'} ⇄</button>` : '') +
-      filter.conditions.map((rule,index) => `<span class="flow-filter-chip-wrap"><button type="button" class="flow-filter-chip" data-quick-condition="${index}" aria-haspopup="dialog" title="修改${esc(fields[rule.field].label)}">${esc(fields[rule.field].label)}：${rule.values.map(value => esc(fields[rule.field].options[value])).join('、')}</button><button type="button" class="flow-filter-chip-remove" data-quick-remove="${index}" aria-label="移除${esc(fields[rule.field].label)}条件">×</button></span>`).join('') +
-      `<button type="button" class="flow-filter-add-quick" aria-haspopup="dialog" ${filter.conditions.length >= 12 ? 'disabled' : ''}>＋筛选</button>` +
-      (filter.conditions.length || page.filters.q ? '<button type="button" class="subtle" data-filter-clear>重置</button>' : '') +
-      `<span class="flow-filter-meta">${active ? esc(active.name) + (changed ? ' · 已修改' : '') : page.filters.filter ? '临时筛选' : '预设视图'}</span>`;
+    const [sortField,sortDirection] = page.filters.sort.split('_'), sorted = page.filters.sort !== 'updated_desc';
+    const summaryMarkup = (sorted ? `<span class="flow-filter-chip-wrap"><button type="button" class="flow-filter-chip flow-sort-chip" title="修改排序">${icon('sort')}${esc(sortFields[sortField])} · ${esc(sortDirections[sortDirection])}</button><button type="button" class="flow-filter-chip-remove" data-sort-reset aria-label="恢复默认排序">×</button></span>` : '') +
+      (rules.length ? `<button type="button" class="flow-filter-match" title="切换为满足${filter.match === 'all' ? '任一' : '所有'}条件">${filter.match === 'all' ? '所有条件' : '任一条件'} ⇄</button>` : '') +
+      rules.map((rule,index) => `<span class="flow-filter-chip-wrap"><button type="button" class="flow-filter-chip" data-quick-condition="${index}" aria-haspopup="dialog" title="修改${esc(fields[rule.field].label)}">${esc(fields[rule.field].label)}：${rule.values.map(value => esc(fields[rule.field].options[value])).join('、')}</button><button type="button" class="flow-filter-chip-remove" data-quick-remove="${index}" aria-label="移除${esc(fields[rule.field].label)}条件">×</button></span>`).join('') +
+      (rules.length || page.filters.q ? '<button type="button" class="subtle" data-filter-clear>重置</button>' : '') +
+      // The saved-view menu already names an open view; only an unsaved rule set needs saying so.
+      (page.filters.filter && !active ? '<span class="flow-filter-meta">临时筛选</span>' : '');
     if (summary.innerHTML !== summaryMarkup) summary.innerHTML = summaryMarkup;
     $$('.flow-filter-chip',summary).forEach(button => button.onclick = () => openQuickFilter(button,Number(button.dataset.quickCondition)));
-    $('.flow-filter-add-quick',summary).onclick = event => openQuickFilter(event.currentTarget);
     $$('[data-quick-remove]',summary).forEach(button => button.onclick = () => {closeQuickFilter();const next = effectiveFilter();next.conditions.splice(Number(button.dataset.quickRemove),1);applyQuickFilter(next);$('.flow-filter-add-quick')?.focus();});
     const matchButton = $('.flow-filter-match',summary);if (matchButton) matchButton.onclick = () => {closeQuickFilter();const next = effectiveFilter();next.match = next.match === 'all' ? 'any' : 'all';applyQuickFilter(next);$('.flow-filter-match')?.focus();};
+    const sortChip = $('.flow-sort-chip',summary);if (sortChip) sortChip.onclick = () => {const menu = $('#content-flow-sort');menu.open = true;$('[role=menuitemradio][aria-checked=true]',menu)?.focus();};
+    const sortReset = $('[data-sort-reset]',summary);if (sortReset) sortReset.onclick = () => chooseSort('updated_desc');
     const clearButton = $('[data-filter-clear]',summary);if (clearButton) clearButton.onclick = () => chooseFilters({view:'all'});
+  }
+  function paintSort() {
+    const menu = $('#content-flow-sort');if (!menu) return;
+    const [field,direction] = page.filters.sort.split('_');
+    const item = (attr,key,label,on) => `<button type="button" role="menuitemradio" ${attr}="${key}" aria-checked="${on}">${esc(label)}</button>`;
+    const markup = '<small>排序依据</small>' + Object.entries(sortFields).map(([key,label]) => item('data-sort-field',key,label,key === field)).join('') +
+      '<hr>' + Object.entries(sortDirections).map(([key,label]) => item('data-sort-direction',key,label,key === direction)).join('');
+    const list = $('[role=menu]',menu);if (list.innerHTML !== markup) list.innerHTML = markup;
+    $('summary',menu).classList.toggle('is-active',page.filters.sort !== 'updated_desc');
+    $('summary',menu).title = `排序：${sortFields[field]} · ${sortDirections[direction]}`;
+    // 标题 reads A→Z by default; dates read newest first.
+    $$('[data-sort-field]',list).forEach(button => button.onclick = () => {menu.open = false;const next = button.dataset.sortField;chooseSort(`${next}_${next === field ? direction : next === 'title' ? 'asc' : 'desc'}`);});
+    $$('[data-sort-direction]',list).forEach(button => button.onclick = () => {menu.open = false;chooseSort(`${field}_${button.dataset.sortDirection}`);});
+  }
+  function chooseSort(sort) {
+    if (!validSort(sort) || sort === page.filters.sort) return;
+    clearTimeout(page.searchTimer);clearTimeout(page.filterTimer);clearTimeout(page.pollTimer);
+    page.filters = {...page.filters,sort,page:1};page.sequence++;
+    history.replaceState(null,'',filterHash());paintFilterControls();
+    $('#content-flow-result-count').textContent = '正在排序…';
+    void load(++page.sequence,false,true);
   }
   function applyQuickFilter(filter) {
     clearTimeout(page.searchTimer);clearTimeout(page.filterTimer);clearTimeout(page.pollTimer);
@@ -248,6 +305,68 @@ window.ContentFlow = (() => {
     $('[data-filter-apply]',editor).onclick = () => {if (validFilter(draft)) chooseFilters({filter:copy(draft),q:page.filters.q,saved:page.filters.saved});};
     renderRows();
   }
+  // Tabs move by drag, or by Alt+←/→ from the keyboard; the new order is saved with the views, like pins.
+  function bindTabDrag(root) {
+    const tabs = () => $$('[data-tab-key]',root);
+    tabs().forEach(tab => {
+      tab.ondragstart = event => {page.dragTab = tab.dataset.tabKey;tab.classList.add('is-dragging');event.dataTransfer.effectAllowed = 'move';event.dataTransfer.setData('text/plain',page.dragTab);};
+      tab.ondragend = () => {page.dragTab = null;tabs().forEach(node => node.classList.remove('is-dragging','drop-before','drop-after'));};
+      tab.ondragover = event => {
+        if (!page.dragTab || page.dragTab === tab.dataset.tabKey) return;
+        event.preventDefault();event.dataTransfer.dropEffect = 'move';
+        const rect = tab.getBoundingClientRect(), after = event.clientX > rect.left + rect.width / 2;
+        tabs().forEach(node => node.classList.remove('drop-before','drop-after'));
+        tab.classList.add(after ? 'drop-after' : 'drop-before');
+      };
+      tab.ondrop = event => {
+        event.preventDefault();
+        const from = page.dragTab, after = tab.classList.contains('drop-after');
+        if (!from || from === tab.dataset.tabKey) return;
+        const keys = tabs().map(node => node.dataset.tabKey).filter(key => key !== from);
+        keys.splice(keys.indexOf(tab.dataset.tabKey) + (after ? 1 : 0),0,from);
+        void saveTabOrder(keys,from);
+      };
+      tab.onkeydown = event => {
+        if (!event.altKey || !['ArrowLeft','ArrowRight'].includes(event.key)) return;
+        event.preventDefault();
+        const keys = tabs().map(node => node.dataset.tabKey), at = keys.indexOf(tab.dataset.tabKey), to = at + (event.key === 'ArrowLeft' ? -1 : 1);
+        if (to < 0 || to >= keys.length) return;
+        keys.splice(to,0,keys.splice(at,1)[0]);
+        void saveTabOrder(keys,tab.dataset.tabKey);
+      };
+    });
+  }
+  async function saveTabOrder(keys,moved) {
+    const owner = page.product, catalog = viewCatalog(owner), previous = catalog.tabOrder || [];
+    if (!catalog.ready || catalog.busy || catalog.migrating) {toast('视图资料读取完成后再调整顺序。',true);return;}
+    // Tabs hidden right now (进行中 with nothing running) keep their place relative to the rest.
+    const hidden = previous.filter(key => !keys.includes(key));
+    const order = [...keys,...hidden];
+    if (JSON.stringify(order) === JSON.stringify(previous)) return;
+    catalog.tabOrder = order;catalog.busy = true;catalog.generation++;catalog.request = null;paintViewsFor(owner);
+    $(`[data-tab-key="${CSS.escape(moved)}"]`)?.focus({preventScroll:true});
+    try {acceptViews(owner,await api('/api/content/views',{method:'POST',body:{product:owner,action:'order',order,revision:catalog.revision}}));}
+    catch (error) {
+      catalog.tabOrder = previous;catalog.busy = false;
+      if (error?.status === 409) await refreshViews(owner,true);
+      toast(`标签顺序未保存：${errorText(error)}`,true);
+    } finally {catalog.busy = false;paintViewsFor(owner);$(`[data-tab-key="${CSS.escape(moved)}"]`)?.focus({preventScroll:true});}
+  }
+  // Pinning rewrites only the view's pinned mark, against the revision this browser last read.
+  async function togglePin(id) {
+    const owner = page.product, catalog = viewCatalog(owner), row = catalog.views.find(entry => entry.id === id);
+    if (!row || !catalog.ready || catalog.busy || catalog.migrating) {toast('视图资料读取完成后再置顶。',true);return;}
+    const {pinned,...rest} = row, record = {...copy(rest),...(pinned ? {} : {pinned:true})};
+    catalog.busy = true;catalog.generation++;catalog.request = null;paintViewsFor(owner);
+    try {
+      acceptViews(owner,await api('/api/content/views',{method:'POST',body:{product:owner,action:'save',revision:catalog.revision,view:record}}));
+      toast(pinned ? `「${row.name}」已取消置顶` : `「${row.name}」已置顶到标签栏`);
+    } catch (error) {
+      catalog.busy = false;
+      if (error?.status === 409) await refreshViews(owner,true);
+      toast(`置顶未完成：${errorText(error)}`,true);
+    } finally {catalog.busy = false;paintViewsFor(owner);}
+  }
   function saveViewDialog() {
     const owner = page.product, catalog = viewCatalog(owner), existing = savedViews().find(row => row.id === page.filters.saved);
     if (!catalog.ready || catalog.busy || catalog.migrating) {toast('视图资料读取完成后再保存；读取失败时可点击刷新重试。',true);return;}
@@ -299,7 +418,7 @@ window.ContentFlow = (() => {
       if (!name) {fail('请填写视图名称。');return;}
       if (rows.some(row => row.id !== (update ? existing.id : newId) && row.name.toLocaleLowerCase() === name.toLocaleLowerCase()) || Object.values(views).includes(name)) {fail('这个名称已被使用，请换一个名称。');return;}
       if (!update && !rows.some(row => row.id === newId) && rows.length >= 30) {fail('最多保存 30 个视图，请先删除不再使用的视图。');return;}
-      const record = {id:update ? existing.id : newId,name,...copy(snapshot)};
+      const record = {id:update ? existing.id : newId,name,...copy(snapshot),...(update && existing.pinned ? {pinned:true} : {})};
       void persist('save',record,update);
     }
     $('form',dialog).onsubmit = event => {event.preventDefault();save(false);};
@@ -318,46 +437,61 @@ window.ContentFlow = (() => {
   // An order may carry several videos; each is its own link, numbered when there is more than one.
   function tiktokLinks(flow) {
     const posts = (flow.posts?.length ? flow.posts : flow.post_url ? [{url:flow.post_url}] : []).filter(post => /^https?:\/\//.test(post.url || ''));
-    return posts.map((post,index) => `<a class="flow-tiktok" href="${esc(post.url)}" target="_blank" rel="noopener noreferrer" title="在 TikTok 打开已发布的帖子">TikTok${posts.length > 1 ? ` ${index + 1}` : ''} ↗</a>`).join('');
+    return posts.map((post,index) => openLinkButton(post.url,`TikTok 帖子${posts.length > 1 ? ` ${index + 1}` : ''}`,`在 TikTok 打开已发布的帖子${posts.length > 1 ? ` ${index + 1}` : ''}`,'flow-tiktok')).join('');
   }
-  function workflowMarkup(flow,product,{linked = false} = {}) {
-    const complete = flow.complete === true, label = flow.kind === 'carousel' ? '图文链' : '视频链';
-    const id = String(flow.id || '').replace(/^(?:video|carousel):/,'');
-    const heading = linked && flow.hash ? `<a class="flow-workflow-label" href="${esc(url(flow.hash,product))}" title="${esc(flow.title || '关联图文')}">${label}${flow.title ? ` · ${esc(flow.title)}` : ''}${flow.archived ? '（已归档）' : ''}</a>` : `<span class="flow-workflow-label">${label}</span>`;
+  // A chain is a row of dots; only the step waiting now names itself, the rest say so on hover.
+  function workflowMarkup(flow,product) {
+    const complete = flow.complete === true;
+    const id = String(flow.id || '').replace(/^video:/,'');
     const chips = (flow.steps || []).map(step => {
       const status = step.done ? '已完成' : step.active ? '当前待完成' : '未完成';
       const attrs = `class="flow-chain-step" data-step-key="${esc(step.key)}" data-done="${step.done === true}" data-active="${step.active === true}" title="${esc(step.label)}：${status}" aria-label="${esc(step.label)}：${status}"`;
-      return step.hash ? `<a ${attrs} href="${esc(url(step.hash,product))}"><i aria-hidden="true"></i>${esc(step.label)}</a>` : `<span ${attrs}><i aria-hidden="true"></i>${esc(step.label)}</span>`;
+      return step.hash ? `<a ${attrs} href="${esc(url(step.hash,product))}"><i aria-hidden="true"></i><span>${esc(step.label)}</span></a>` : `<span ${attrs}><i aria-hidden="true"></i><span>${esc(step.label)}</span></span>`;
     });
     // 日历 comes before 发布 (upload to the calendar, then post) and never gates 已完结.
-    const calendar = typeof flow.calendar_uploaded === 'boolean' ? `<span class="flow-chain-step" data-step-key="calendar" data-done="${flow.calendar_uploaded}" data-active="false" title="发布日历：${flow.calendar_uploaded ? '已上传' : '未上传'}" aria-label="发布日历：${flow.calendar_uploaded ? '已上传' : '未上传'}"><i aria-hidden="true"></i>日历</span>` : '';
+    const calendar = typeof flow.calendar_uploaded === 'boolean' ? `<span class="flow-chain-step" data-step-key="calendar" data-done="${flow.calendar_uploaded}" data-active="false" title="发布日历：${flow.calendar_uploaded ? '已上传' : '未上传'}" aria-label="发布日历：${flow.calendar_uploaded ? '已上传' : '未上传'}"><i aria-hidden="true"></i><span>日历</span></span>` : '';
     const at = chips.findIndex((_,index) => flow.steps[index].key === 'publish');
     const steps = (calendar ? chips.toSpliced(at < 0 ? chips.length : at,0,calendar) : chips).join('');
-    return `<div class="flow-workflow" data-workflow-kind="${esc(flow.kind)}" data-workflow-id="${esc(id)}" data-linked="${linked}" data-complete="${complete}">${heading}<div class="flow-chain">${steps}</div><span class="flow-chain-result" data-complete="${complete}">${esc(flow.label || `${label}${complete ? '已完结' : '未完结'}`)}</span>${tiktokLinks(flow)}</div>`;
+    // Every listed chain is unfinished until it says otherwise, so only 已完结 is worth a word.
+    const result = complete ? `<span class="flow-chain-result" data-complete="true">${esc(flow.label || '视频链已完结')}</span>` : '';
+    return `<span class="flow-workflow" data-workflow-kind="${esc(flow.kind)}" data-workflow-id="${esc(id)}" data-complete="${complete}" ${flow.note ? `title="${esc(flow.note)}"` : ''}><span class="flow-chain">${steps}</span>${result}${tiktokLinks(flow)}</span>`;
   }
-  function productionRow(item,{target,title,select,menu}) {
-    const own = {id:item.production_ids[0],kind:item.kind,steps:item.workflow_steps || [],complete:item.workflow_complete === true,label:item.workflow_label,calendar_uploaded:item.calendar_uploaded,post_url:item.post_url,posts:item.posts};
-    const related = item.related_workflows || [];
-    const workflows = workflowMarkup(own,item.product) + related.map(flow => workflowMarkup(flow,item.product,{linked:true})).join('') +
-      (item.kind === 'video' && !related.length ? '<div class="flow-workflow" data-workflow-kind="carousel" data-linked="true"><span class="flow-workflow-label">图文链</span><span class="flow-chain-result">尚未关联图文</span></div>' : '');
-    const meta = [item.product,item.direction_id,item.timeline_name,item.unit_count ? `${item.unit_count} ${item.unit_label || (item.kind === 'video' ? '个意群' : '张图片')}` : '',readableDate(item.updated_at)].filter(Boolean).map(esc).join(' · ');
-    const note = item.summary_note || item.progress_text || item.stage_label || '查看当前制作进度';
-    const success = own.complete || own.steps.some(step => ['edit','confirm'].includes(step.key) && step.done === true);
-    return `<article class="flow-row is-production${item.history || item.archived ? ' is-finished' : ''}" data-content-id="${esc(item.id)}">${select}<div class="flow-record-main"><div class="flow-record-title"><span class="flow-kind">${esc(tags[item.kind])}</span><a class="flow-title" href="${target}" title="${title}">${title}</a></div><div class="flow-record-meta">${meta}</div><p class="flow-record-note${item.progress_text === note ? ' flow-progress' : ''}">${esc(note)}</p>${item.progress_text && item.progress_text !== note ? `<p class="flow-progress">${esc(item.progress_text)}</p>` : ''}<div class="flow-workflows">${workflows}</div></div><div class="flow-record-actions"><span class="flow-stage is-${item.archived ? 'muted' : success ? 'success' : tone(item)}">${esc(item.archived ? '已归档' : item.stage_label || '待处理')}</span><a class="flow-next" href="${target}">${esc(item.next_label || '查看详情')}${icon('arrow')}</a></div>${menu}</article>`;
+  // Videos share the candidates' columns; their chains ride on the second line.
+  // The list names a row by its direction and variant (「S2 #4 身份认同」); its opening line says which script it is.
+  const hookLine = item => item.subtitle ? `<small class="flow-hook" title="${esc(item.subtitle)}">${esc(item.subtitle)}</small>` : '';
+  function productionRow(item,{target,title,select,menu,stage,next}) {
+    const own = {id:item.production_ids[0],kind:item.kind,steps:item.workflow_steps || [],complete:item.workflow_complete === true,label:item.workflow_label,calendar_uploaded:item.calendar_uploaded,post_url:item.post_url,posts:item.posts,note:item.summary_note};
+    const workflows = workflowMarkup(own,item.product);
+    const meta = [item.timeline_name,item.unit_count ? `${item.unit_count} ${item.unit_label || '个意群'}` : ''].filter(Boolean).map(esc).join(' · ');
+    return `<article class="flow-row is-production${item.history || item.archived ? ' is-finished' : ''}" data-content-id="${esc(item.id)}">${select}<span class="flow-kind">${esc(tags[item.kind])}</span><span class="flow-record-main"><a class="flow-title" href="${target}" title="${title}">${title}</a>${hookLine(item)}<span class="flow-record-line">${meta ? `<span class="flow-record-meta">${meta}</span>` : ''}${workflows}</span>${item.progress_text ? `<small class="flow-progress">${esc(item.progress_text)}</small>` : ''}</span><span class="flow-direction">${esc(item.direction_id || '')}</span>${stage}${next}<time datetime="${esc(item.updated_at || '')}">${esc(when(item.updated_at))}</time>${menu}</article>`;
+  }
+  // Finished orders (待发布, 已发布) answer only "which one, and is it on the calendar": one line in every view,
+  // saved views included. The chain, note and timeline stay on hover; the title opens the publish panel.
+  function publishRow(item,{target,title,select,menu,view}) {
+    const tip = esc([item.title,item.subtitle,item.timeline_name ? `时间线 ${item.timeline_name}` : '',item.summary_note].filter(Boolean).join('\n'));
+    const calendar = !item.archived && typeof item.calendar_uploaded === 'boolean' ? `<span class="flow-cal" data-uploaded="${item.calendar_uploaded}">${item.calendar_uploaded ? '已上传日历' : '未上传日历'}</span>` : '';
+    const stage = view === 'publish' ? '' : `<span class="flow-stage is-${item.archived ? 'muted' : 'success'}">${esc(item.archived ? '已归档' : item.stage_label || '待发布')}</span>`;
+    const timeline = item.timeline_name ? `<span class="flow-publish-timeline">${esc(item.timeline_name)}</span>` : '';
+    return `<article class="flow-row is-publish${item.history || item.archived ? ' is-finished' : ''}" data-content-id="${esc(item.id)}">${select}<span class="flow-kind">${esc(tags[item.kind])}</span><span class="flow-publish-main"><a class="flow-title" href="${target}" title="${tip}">${title}</a>${item.subtitle ? `<span class="flow-hook-inline">${esc(item.subtitle)}</span>` : ''}${timeline}${tiktokLinks(item)}${calendar}</span><span class="flow-direction">${esc(item.direction_id || (page.product && page.product !== 'all' ? '' : item.product || ''))}</span>${stage}${['attention','running'].includes(view) ? '<span aria-hidden="true"></span>' : ''}<time datetime="${esc(item.updated_at || '')}">${esc(when(item.updated_at))}</time>${menu}</article>`;
   }
   function row(item) {
     const links = item.links || [], view = page.filters.view, title = esc(item.title || '未命名内容');
     const target = esc(url(item.next_hash || links[0]?.hash || '#ai',item.product));
     const select = page.selecting ? `<input class="flow-select" type="checkbox" data-flow-select="${esc(item.id)}" aria-label="选择 ${title}" ${item.busy ? 'disabled' : ''} ${page.selected.has(item.id) ? 'checked' : ''}>` : '';
     // 待发布 rows all share one stage and one next step, so that view names neither.
-    const stage = view === 'publish' ? '' : `<span class="flow-stage is-${tone(item)}">${esc(item.archived ? '已归档' : item.stage_label || '待处理')}</span>`;
+    const production = item.kind === 'video';
+    const success = production && !item.archived && (item.workflow_complete === true || (item.workflow_steps || []).some(step => step.key === 'edit' && step.done === true));
+    const stage = view === 'publish' ? '' : `<span class="flow-stage is-${success ? 'success' : tone(item)}">${esc(item.archived ? '已归档' : item.stage_label || '待处理')}</span>`;
     const next = ['attention','running'].includes(view) ? `<a class="flow-next" href="${target}">${esc(item.next_label || '继续处理')}${icon('arrow')}</a>` : '';
     const archive = `<button type="button" role="menuitem" data-archive="${esc(item.id)}" ${item.busy ? 'disabled title="任务结束后可整理"' : ''}>${item.archived ? '恢复' : '归档'}</button>`;
-    const remove = ['video','carousel'].includes(item.kind) ? `<button type="button" role="menuitem" data-delete-order="${esc(item.id)}" ${item.busy ? 'disabled' : ''}>永久删除</button>` : '';
+    const remove = item.kind === 'video' ? `<button type="button" role="menuitem" data-delete-order="${esc(item.id)}" ${item.busy ? 'disabled' : ''}>永久删除</button>` : '';
     const menu = `<details class="ai-menu flow-menu"><summary class="icon-button" aria-label="更多操作：${title}">${dots}</summary><div role="menu">${links.map(link => `<a role="menuitem" href="${esc(url(link.hash,item.product))}">${esc(link.label)}</a>`).join('')}${archive}${remove}</div></details>`;
-    if (['video','carousel'].includes(item.kind)) return productionRow(item,{target,title,select,menu});
-    const started = item.task_started_label ? `<small class="flow-task-started">${esc(item.task_started_label)}</small>` : '';
-    return `<article class="flow-row${item.history || item.archived ? ' is-finished' : ''}" data-content-id="${esc(item.id)}">${select}<span class="flow-kind">${esc(item.kind_label || tags[item.kind] || item.kind)}</span><span class="flow-candidate-main"><a class="flow-title" href="${target}" title="${title}">${title}</a>${started}${item.progress_text ? `<small class="flow-progress">${esc(item.progress_text)}</small>` : ''}</span><span class="flow-direction">${esc(item.direction_id || '')}</span>${stage}${next}<time datetime="${esc(item.updated_at || '')}">${esc(when(item.updated_at))}</time>${menu}</article>`;
+    if (production && ['awaiting_publication','published'].includes(item.stage)) return publishRow(item,{target,title,select,menu,view});
+    if (production) return productionRow(item,{target,title,select,menu,stage,next});
+    const same = item.same_title_orders || [];
+    const started = item.task_started_label ? `<small class="flow-task-started">${esc(item.task_started_label)}</small>`
+      : same.length ? `<small class="flow-task-started" data-same-title title="${esc(same.map(order => `${order.id} ${order.stage_label}`).join('\n'))}">同题已有 ${same.length} 张制作单 ⓘ</small>` : '';
+    return `<article class="flow-row${item.history || item.archived ? ' is-finished' : ''}" data-content-id="${esc(item.id)}">${select}<span class="flow-kind">${esc(item.kind_label || tags[item.kind] || item.kind)}</span><span class="flow-candidate-main"><a class="flow-title" href="${target}" title="${title}">${title}</a>${hookLine(item)}${started}${item.progress_text ? `<small class="flow-progress">${esc(item.progress_text)}</small>` : ''}</span><span class="flow-direction">${esc(item.direction_id || '')}</span>${stage}${next}<time datetime="${esc(item.updated_at || '')}">${esc(when(item.updated_at))}</time>${menu}</article>`;
   }
   async function route(keepScroll = false) {
     const seq = ++page.sequence;
@@ -368,13 +502,14 @@ window.ContentFlow = (() => {
     if (!mounted) {closeQuickFilter();clearTimeout(page.filterTimer);page.selecting = false;page.selected.clear();}
     $('#breadcrumb').textContent = '内容创作';
     if (!same || !keepScroll) {
-      $('#content').innerHTML = `<div class="page-heading"><div><h1>内容创作</h1><p>从候选到发布，查看每条内容走到哪一步、下一步做什么。</p></div><div class="flow-heading-actions"><button type="button" class="secondary" id="content-flow-refresh">${icon('refresh')}刷新</button><details class="ai-menu flow-main-menu"><summary class="secondary" aria-label="内容更多操作">更多</summary><div role="menu"><a role="menuitem" href="${esc(url('#ai'))}">协作记录</a><button type="button" role="menuitem" id="content-production-settings">制作设置</button><button type="button" role="menuitem" id="content-flow-batch-open">批量管理</button></div></details></div></div><div class="flow-views" id="content-flow-views" role="group" aria-label="内容视图"></div><div class="flow-filters"><label class="search">${icon('search')}<input id="content-flow-query" type="search" maxlength="200" placeholder="搜索内容、方向或编号" aria-label="搜索内容"></label><button type="button" class="secondary" id="content-flow-filter-toggle" aria-expanded="false" aria-controls="content-flow-filter-editor">筛选</button><button type="button" class="secondary" id="content-flow-save-view">保存视图</button><button type="button" class="secondary" id="content-flow-select" hidden>退出批量管理</button><button type="button" class="secondary flow-delete-archived" id="content-flow-delete-archived" hidden>删除已归档</button></div><div id="content-flow-filter-summary" class="flow-filter-summary"></div><section id="content-flow-filter-editor" class="flow-filter-editor" aria-label="自定义筛选" hidden></section><p id="content-flow-result-count" class="context-note" aria-live="polite"></p><div class="flow-batch" id="content-flow-batch" hidden></div><p id="content-flow-status" class="context-note" role="status"></p><p id="content-flow-error" class="ai-error" role="alert" hidden></p><div id="content-flow-list" class="flow-list">${skeletonMarkup(2)}</div><nav id="content-flow-pages" class="flow-pages" aria-label="内容分页"></nav>`;
+      $('#content').innerHTML = `<div class="flow-toolbar"><div class="flow-views" id="content-flow-views" role="group" aria-label="内容视图"></div><div class="flow-filters"><label class="search" title="搜索">${icon('search')}<input id="content-flow-query" type="search" maxlength="200" placeholder="搜索内容、方向或编号" aria-label="搜索内容"></label><details class="ai-menu flow-sort-menu" id="content-flow-sort"><summary class="icon-button" aria-label="排序" title="排序">${icon('sort')}</summary><div role="menu"></div></details><button type="button" class="icon-button flow-filter-add-quick" aria-haspopup="dialog" aria-label="筛选" title="筛选">${icon('filter')}<small></small></button><button type="button" class="icon-button" id="content-flow-filter-toggle" aria-expanded="false" aria-controls="content-flow-filter-editor" aria-label="规则" title="高级筛选规则">${icon('sliders')}</button><button type="button" class="icon-button" id="content-flow-save-view" aria-label="保存视图" title="保存视图">${icon('bookmark')}</button><button type="button" class="secondary" id="content-flow-select" hidden>退出批量管理</button><button type="button" class="secondary flow-delete-archived" id="content-flow-delete-archived" hidden>删除已归档</button><button type="button" class="icon-button" id="content-flow-refresh" aria-label="刷新" title="刷新">${icon('refresh')}</button><details class="ai-menu flow-main-menu"><summary class="icon-button" aria-label="内容更多操作" title="更多">${icon('more')}</summary><div role="menu"><a role="menuitem" href="${esc(url('#ai'))}">协作记录</a><button type="button" role="menuitem" id="content-production-settings">制作设置</button><button type="button" role="menuitem" id="content-flow-batch-open">批量管理</button></div></details></div></div><div class="flow-subbar"><p id="content-flow-result-count" class="context-note" aria-live="polite"></p><div id="content-flow-filter-summary" class="flow-filter-summary"></div></div><section id="content-flow-filter-editor" class="flow-filter-editor" aria-label="自定义筛选" hidden></section><nav id="content-flow-groups" class="flow-groups" aria-label="按下一步分组" hidden></nav><div class="flow-batch" id="content-flow-batch" hidden></div><p id="content-flow-status" class="context-note" role="status"></p><p id="content-flow-error" class="ai-error" role="alert" hidden></p><div id="content-flow-list" class="flow-list">${skeletonMarkup(2)}</div><nav id="content-flow-pages" class="flow-pages" aria-label="内容分页"></nav>`;
       const viewError = document.createElement('p');viewError.id = 'content-flow-views-error';viewError.className = 'ai-error';viewError.setAttribute('role','alert');viewError.hidden = true;
-      $('#content-flow-filter-summary').after(viewError);
+      $('.flow-subbar').after(viewError);
       $('#content-flow-query').value = page.filters.q;
+      $('.flow-filter-add-quick').onclick = event => openQuickFilter(event.currentTarget);
       $('#content-flow-query').oninput = () => {
         page.filters.q = $('#content-flow-query').value;page.filters.page = 1;page.selected.clear();page.sequence++;paintFilterControls();
-        clearTimeout(page.searchTimer);page.searchTimer = setTimeout(() => void load(++page.sequence,false,true),250);
+        clearTimeout(page.searchTimer);page.searchTimer = setTimeout(() => void load(++page.sequence,false,true),150);
       };
       $('#content-flow-refresh').onclick = () => {clearTimeout(page.filterTimer);clearTimeout(page.searchTimer);void load(++page.sequence,true);};
       $('#content-flow-filter-toggle').onclick = () => {if ($('#content-flow-filter-editor').hidden) openFilterEditor();else closeFilterEditor();};
@@ -404,10 +539,11 @@ window.ContentFlow = (() => {
     if (!page.selecting) return;
     const chosen = (page.data?.items || []).filter(item => page.selected.has(item.id));
     const live = chosen.filter(item => !item.archived && !item.busy), archived = chosen.filter(item => item.archived && !item.busy);
-    const orders = chosen.filter(item => ['video','carousel'].includes(item.kind) && !item.busy);
+    const orders = chosen.filter(item => item.kind === 'video' && !item.busy);
     const busy = page.archiving || page.deleting;
-    bar.innerHTML = `<span role="status">已选 ${chosen.length} 项</span><button type="button" class="subtle" data-flow-select-all ${busy ? 'disabled' : ''}>全选本页</button><button type="button" class="secondary compact" data-flow-archive-selected ${live.length && !busy ? '' : 'disabled'}>归档 ${live.length || ''}</button><button type="button" class="secondary compact" data-flow-restore-selected ${archived.length && !busy ? '' : 'disabled'}>恢复 ${archived.length || ''}</button><button type="button" class="secondary compact flow-delete-archived" data-flow-delete-selected ${orders.length && !busy ? '' : 'disabled'}>永久删除制作记录 ${orders.length || ''}</button>${chosen.length > orders.length && orders.length ? '<small>只删除所选视频、图文的制作记录，候选和采用稿保留。</small>' : ''}`;
-    $('[data-flow-select-all]',bar).onclick = () => {page.data.items.filter(item => !item.busy).forEach(item => page.selected.add(item.id));paint();};
+    bar.innerHTML = `<span role="status">已选 ${chosen.length} 项</span><button type="button" class="subtle" data-flow-select-all ${busy ? 'disabled' : ''}>全选本页</button><button type="button" class="secondary compact" data-flow-archive-selected ${live.length && !busy ? '' : 'disabled'}>归档 ${live.length || ''}</button><button type="button" class="secondary compact" data-flow-restore-selected ${archived.length && !busy ? '' : 'disabled'}>恢复 ${archived.length || ''}</button><button type="button" class="secondary compact flow-delete-archived" data-flow-delete-selected ${orders.length && !busy ? '' : 'disabled'}>永久删除制作记录 ${orders.length || ''}</button>${chosen.length > orders.length && orders.length ? '<small>只删除所选视频的制作记录，候选和采用稿保留。</small>' : ''}`;
+    // Only rows on screen: a folded group's rows are never picked unseen.
+    $('[data-flow-select-all]',bar).onclick = () => {$$('#content-flow-list [data-flow-select]:not(:disabled)').forEach(box => page.selected.add(box.dataset.flowSelect));paint();};
     $('[data-flow-archive-selected]',bar).onclick = () => void archive(live.map(item => item.id),true);
     $('[data-flow-restore-selected]',bar).onclick = () => void archive(archived.map(item => item.id),false);
     $('[data-flow-delete-selected]',bar).onclick = () => void deleteOrders(orders);
@@ -423,14 +559,82 @@ window.ContentFlow = (() => {
       }
     });
   }
+  // 待处理 groups rows by what to do next; a folded group keeps only its heading. Folding is a per-browser convenience.
+  const foldKey = 'case-content-folded-groups-v1';
+  function folded() {
+    try {return new Set(JSON.parse(localStorage.getItem(foldKey) || '[]'));} catch {return new Set();}
+  }
+  function fold(key,closed) {
+    const keys = folded();if (closed) keys.add(key);else keys.delete(key);
+    try {localStorage.setItem(foldKey,JSON.stringify([...keys]));} catch { /* Folding then lasts until the next repaint. */ }
+    page.folded = keys;
+  }
+  const grouped = data => page.filters.view === 'attention' && !page.filters.filter && data.groups?.length > 0;
+  function groupedMarkup(data) {
+    const closed = page.folded || folded(), labels = new Map(data.groups.map(group => [group.key,group]));
+    let at = '';
+    return data.items.map(item => {
+      const group = labels.get(item.group);
+      if (!group) return row(item);
+      const shown = data.items.filter(entry => entry.group === group.key).length;
+      const heading = item.group === at ? '' : `<div class="flow-group" data-flow-group="${esc(group.key)}"><button type="button" class="flow-group-toggle" aria-expanded="${!closed.has(group.key)}">${esc(group.label)}<small>${group.count}</small></button>${shown > 1 && !page.selecting ? `<button type="button" class="flow-group-queue" data-flow-queue="${esc(group.key)}" title="打开第一条，之后用底部的「下一条」逐条处理">依次处理${icon('arrow')}</button>` : ''}</div>`;
+      at = item.group;
+      return heading + (closed.has(group.key) ? '' : row(item));
+    }).join('');
+  }
+  function paintGroups(data) {
+    const strip = $('#content-flow-groups');if (!strip) return;
+    strip.hidden = !grouped(data);
+    strip.innerHTML = strip.hidden ? '' : data.groups.map(group => `<button type="button" data-flow-jump="${esc(group.key)}"><b>${group.count}</b><span>${esc(group.label)}</span></button>`).join('');
+    $$('[data-flow-jump]',strip).forEach(button => button.onclick = () => {
+      const key = button.dataset.flowJump;
+      if ((page.folded || folded()).has(key)) {fold(key,false);paint();}
+      $(`[data-flow-group="${key}"]`)?.scrollIntoView({block:'start',behavior:'smooth'});
+    });
+  }
+  // 依次处理 walks one group's rows on this page in order; the bar shows only on a page the walk lists.
+  const queueKey = 'case-content-queue-v1';
+  const routePath = hash => String(hash || '').split('?')[0];
+  function readQueue() {
+    try {const queue = JSON.parse(sessionStorage.getItem(queueKey));return queue && Array.isArray(queue.entries) && queue.entries.length ? queue : null;}
+    catch {return null;}
+  }
+  function startQueue(key) {
+    const group = page.data.groups.find(entry => entry.key === key);
+    const entries = page.data.items.filter(item => item.group === key && item.next_hash).map(item => ({path:routePath(item.next_hash),hash:item.next_hash,product:item.product,title:item.title || ''}));
+    if (!group || !entries.length) return;
+    try {sessionStorage.setItem(queueKey,JSON.stringify({label:group.label,entries}));}
+    catch {toast('浏览器不允许保存处理顺序，已打开第一条。',true);}
+    location.hash = url(entries[0].hash,entries[0].product);
+  }
+  function paintQueue() {
+    const queue = readQueue(), here = routePath(window.WorkbenchShell?.legacyHash() || location.hash);
+    const index = queue ? queue.entries.findIndex(entry => entry.path === here) : -1;
+    let bar = $('#content-flow-queue');
+    if (index < 0) {bar?.remove();return;}
+    if (!bar) {bar = document.createElement('div');bar.id = 'content-flow-queue';bar.className = 'flow-queue';bar.setAttribute('role','navigation');bar.setAttribute('aria-label','依次处理');document.body.append(bar);}
+    const go = entry => entry ? `href="${esc(url(entry.hash,entry.product))}" title="${esc(entry.title)}"` : 'aria-disabled="true"';
+    const previous = queue.entries[index - 1], next = queue.entries[index + 1];
+    bar.innerHTML = `<span>${esc(queue.label)} <b>${index + 1} / ${queue.entries.length}</b></span><a class="secondary" ${go(previous)}>上一条</a><a class="${next ? 'primary' : 'secondary'}" ${go(next)}>${next ? '下一条' : '已是最后一条'}</a><button type="button" class="icon-button" data-queue-end aria-label="结束依次处理">${icon('close')}</button>`;
+    $('[data-queue-end]',bar).onclick = () => {try {sessionStorage.removeItem(queueKey);} catch { /* The bar still goes away. */ }bar.remove();};
+  }
+  window.addEventListener('hashchange',paintQueue);
+  document.addEventListener('DOMContentLoaded',paintQueue);
   function paint() {
     const node = $('#content-flow-list'), data = page.data;
     if (!node || !data || !currentData()) return;
     const opened = new Set($$('.flow-menu[open]',node).map(menu => menu.closest('[data-content-id]')?.dataset.contentId));
     node.dataset.view = page.filters.view;
     node.classList.toggle('is-selecting',page.selecting);
-    node.innerHTML = data.items.length ? data.items.map(row).join('') : `<div class="empty"><h3>${data.counts.all ? '当前视图没有内容' : '还没有创作记录'}</h3><p>${data.counts.all ? '切换视图或调整搜索，查看其他内容。' : '开始写稿后，候选、脚本和制作记录会出现在这里。'}</p>${data.counts.all ? '<button type="button" class="secondary" data-flow-all>查看全部</button>' : '<button type="button" class="primary" data-flow-start>开始写稿</button>'}</div>`;
+    paintGroups(data);
+    node.innerHTML = data.items.length ? grouped(data) ? groupedMarkup(data) : data.items.map(row).join('') : `<div class="empty"><h3>${data.counts.all ? '当前视图没有内容' : '还没有创作记录'}</h3><p>${data.counts.all ? '切换视图或调整搜索，查看其他内容。' : '开始写稿后，候选、脚本和制作记录会出现在这里。'}</p>${data.counts.all ? '<button type="button" class="secondary" data-flow-all>查看全部</button>' : '<button type="button" class="primary" data-flow-start>开始写稿</button>'}</div>`;
     $$('.flow-menu',node).forEach(menu => {if (opened.has(menu.closest('[data-content-id]')?.dataset.contentId)) menu.open = true;});
+    $$('.flow-group-toggle',node).forEach(button => button.onclick = () => {
+      const key = button.closest('[data-flow-group]').dataset.flowGroup;
+      fold(key,button.getAttribute('aria-expanded') === 'true');paint();
+      $(`[data-flow-group="${key}"] .flow-group-toggle`)?.focus({preventScroll:true});
+    });
+    $$('[data-flow-queue]',node).forEach(button => button.onclick = () => startQueue(button.dataset.flowQueue));
     $('[data-flow-all]',node)?.addEventListener('click',() => chooseFilters({view:'all'}));
     $('[data-flow-start]',node)?.addEventListener('click',() => void window.CaseAI?.startBlank());
     $$('[data-archive]',node).forEach(button => button.onclick = () => {const item = data.items.find(entry => entry.id === button.dataset.archive);if (item) void archive([item.id],!item.archived);});
@@ -442,6 +646,7 @@ window.ContentFlow = (() => {
   // reuse: the data did not change (filter, search, page changes within the open list), so the server may answer from its recent snapshot.
   async function load(seq,refreshSaved = false,reuse = false) {
     const node = $('#content-flow-list');if (!node) return;
+    clearTimeout(page.revalidateTimer);
     node.setAttribute('aria-busy','true');
     const chosenProduct = page.product;
     const {filter,saved,...query} = page.filters;
@@ -453,12 +658,14 @@ window.ContentFlow = (() => {
     try {
       // A slow saved-view read must not hold up content results. Filter changes reuse recent view metadata.
       void refreshViews(chosenProduct,refreshSaved);
-      const data = await api('/api/content?' + params);
+      const {stale,...data} = await api('/api/content?' + params);
       if (seq !== page.sequence || !node.isConnected || chosenProduct !== product()) return;
       node.setAttribute('aria-busy','false');
       status('');
+      // An older snapshot answered at once; read afresh once the clicking pauses and repaint only if that differs.
+      const revalidate = () => {if (stale) page.revalidateTimer = setTimeout(() => {if (node.isConnected) void load(++page.sequence);},600);};
       const signature = JSON.stringify([page.filters,data]);
-      if (node === page.resultNode && page.resultSignature === signature) {schedulePoll(node,data);return;}
+      if (node === page.resultNode && page.resultSignature === signature) {schedulePoll(node,data);revalidate();return;}
       const focusedId = document.activeElement?.id;
       page.resultNode = node;page.resultSignature = signature;
       page.data = data;page.dataAt = Date.now();page.filters.page = data.page;
@@ -472,6 +679,7 @@ window.ContentFlow = (() => {
       if (focusedId) document.getElementById(focusedId)?.focus({preventScroll:true});
       paintPages(data);
       schedulePoll(node,data);
+      revalidate();
     } catch (error) {
       if (seq !== page.sequence || !node.isConnected) return;
       node.setAttribute('aria-busy','false');
@@ -520,8 +728,8 @@ window.ContentFlow = (() => {
     try {preview = await api('/api/content/delete-archived',{method:'POST',body:{...scope,preview:true}});}
     catch (error) {toast(errorText(error),true);return;}
     const total = preview.items.length, kept = preview.kept || {};
-    const counts = preview.counts, parts = [['script','条脚本'],['task','条协作候选'],['video','张视频制作单'],['carousel','张图文制作单']].filter(([key]) => counts[key]).map(([key,unit]) => `${counts[key]} ${unit}`);
-    const orders = counts.video || counts.carousel;
+    const counts = preview.counts, parts = [['script','条脚本'],['task','条协作候选'],['video','张视频制作单']].filter(([key]) => counts[key]).map(([key,unit]) => `${counts[key]} ${unit}`);
+    const orders = counts.video;
     const notes = [];
     if (kept.script) notes.push(`${kept.script} 条已归档的脚本被制作单、案例、视频 ID 或写稿计划用到，会保留在归档里。`);
     if (kept.busy) notes.push(`${kept.busy} 项还在运行，这次跳过。`);

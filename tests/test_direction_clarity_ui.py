@@ -105,7 +105,8 @@ class DirectionClarityTests(unittest.TestCase):
         self.assertEqual(page.locator("details.dir-variant[open]").count(), 0)
         last = page.locator('details.dir-variant[data-variant-index="8"]')
         self.assertIn("结果倒叙", last.locator("summary").inner_text())
-        self.assertIn("先演示第 9 个结果再解释原因", last.locator("summary").inner_text())
+        # On a phone the one-line row hides the change; it is still the row's text for search and hover.
+        self.assertIn("先演示第 9 个结果再解释原因", last.locator("summary").text_content())
         self.assertFalse(last.locator("[data-variant-progression]").is_visible())
         last.locator("summary").focus()
         page.keyboard.press("Enter")

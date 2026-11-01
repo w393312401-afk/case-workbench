@@ -212,29 +212,6 @@ class VariantLinkHTTPTests(unittest.TestCase):
         self.assertEqual(status, 409, result)
         self.assertEqual(self.server.app.creation.public()["variant_links"], [])
 
-    def test_video_and_carousel_jobs_use_frozen_records_and_original_script_direction(self):
-        first, other = self.direction(), self.direction("S2")
-        script = self.script(first)
-        production = self.server.app.production
-        data = production.read()
-        for key, identifier in (("jobs", "PRD-000000000001"), ("carousels", "CAR-000000000002")):
-            data[key].append({"id": identifier, "product": "202H", "direction_id": "", "script_id": script["id"],
-                              "title": "历史制作单", "status": "draft", "source": {"variant_index": 7}})
-        production.write(data)
-        before = production.path.read_bytes()
-        for identifier in ("PRD-000000000001", "CAR-000000000002"):
-            source = self.source("production", identifier)
-            self.assertEqual(source["record"]["direction_id"], first["direction_id"])
-            status, _, result = self.request("POST", "/api/variant-links", self.body("production", identifier, other))
-            self.assertEqual(status, 409, result)
-            saved = self.save(self.body("production", identifier, first))["link"]
-            self.assertEqual(saved["record_id"], identifier)
-        self.assertEqual(production.path.read_bytes(), before)
-        body = self.body("production", "PRD-000000000001", first)
-        data["jobs"][0]["title"] = "核对后修改"
-        production.write(data)
-        self.assertEqual(self.request("POST", "/api/variant-links", body)[0], 409)
-
     def test_case_video_source_is_read_only_and_cannot_be_taken_by_another_direction(self):
         first, other = self.direction(), self.direction("S2")
         current = copy.deepcopy(self.store.read_case(self.identifier)["current"])

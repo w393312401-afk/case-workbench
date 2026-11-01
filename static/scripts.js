@@ -105,16 +105,11 @@ window.CaseScripts = (() => {
         await adoptedMounts.get($('#content-adopted-script'))?.refresh?.();return;
       }
       workspace.detailHash = hash;workspace.detailSignature = signature;renderDetail(data);
-      const table = new URLSearchParams(hash.split('?').slice(1).join('?')).get('table');
-      const target = `${hash}:${table || ''}`;
-      if (table && (!keepScroll || workspace.tableResultTarget !== target)) {
-        workspace.tableResultTarget = target;void resumeTableResult(table,scriptId(script));
-      }
       if (!keepScroll) window.scrollTo(0,0);
     } catch (error) {
       if (seq !== workspace.sequence || hash !== pageHash()) return;
       if (error.status === 404) {
-        $('#content').innerHTML = `<div class="empty"><h3>这份采用稿已不存在</h3><p>可能已被删除，或属于其他产品。</p><a class="secondary" href="${esc(url('#content'))}">返回内容列表</a></div>`;return;
+        $('#content').innerHTML = `<div class="empty"><h3>这份采用稿已不存在</h3><p>可能已被删除，或属于其他产品。</p><a class="secondary" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#content'))}">返回内容列表</a></div>`;return;
       }
       $('#content').innerHTML = `<div class="empty"><h3>暂时无法读取内容</h3><p>${esc(fail(error))}</p><button class="secondary" id="script-retry">重新读取</button></div>`;
       $('#script-retry').onclick = () => route(true);
@@ -132,7 +127,7 @@ window.CaseScripts = (() => {
     return `<pre>${esc(script.text || '')}</pre>${script.translation_zh ? `<h3>中文对照</h3><pre>${esc(script.translation_zh)}</pre>` : ''}`;
   }
   function usageMarkup(script) {
-    return `<p class="context-note">${esc(usageLabel(script))}</p>${(script.production_usage || []).map(use => `<a class="script-use-link" href="${esc(url(`#production/${encodeURIComponent(use.id)}`,script.product))}">${use.kind === 'carousel' ? '图文' : '视频'}制作单 · ${esc(use.id)}${use.publication?.post_id ? ` · 已发布 ${esc(use.publication.post_id)}` : ''}${use.archived ? ' · 已归档' : ''}</a>`).join('')}`;
+    return `<p class="context-note">${esc(usageLabel(script))}</p>${(script.production_usage || []).map(use => `<a class="script-use-link" href="${esc(url(`#production/${encodeURIComponent(use.id)}`,script.product))}">视频制作单 · ${esc(use.id)}${use.archived ? ' · 已归档' : ''}</a>`).join('')}`;
   }
   function paintVersions(host,data,script,options = {}) {
     const rows = familyVersions(data,script), current = scriptId(script);
@@ -193,7 +188,7 @@ window.CaseScripts = (() => {
   }
   function taskProductionMarkup(script) {
     const uses = (script.production_usage || []).filter(use => !use.archived && use.status !== 'archived');
-    const production = uses.length ? uses.map(use => `<a class="secondary compact task-adopted-production" data-task-production href="${esc(url(`#production/${encodeURIComponent(use.id)}`,script.product))}"><span>继续制作${use.kind === 'carousel' ? '图文' : '视频'}</span>${uses.length > 1 ? `<small>${esc(use.id)}</small>` : ''}</a>`).join('') : '<button type="button" class="secondary compact" data-task-production>开始制作</button>';
+    const production = uses.length ? uses.map(use => `<a class="secondary compact task-adopted-production" data-task-production href="${esc(url(`#production/${encodeURIComponent(use.id)}`,script.product))}"><span>继续制作视频</span>${uses.length > 1 ? `<small>${esc(use.id)}</small>` : ''}</a>`).join('') : '<button type="button" class="secondary compact" data-task-production>开始制作</button>';
     return `<div class="task-adopted-actions">${production}<a class="adopted-version-detail" data-adopted-version-detail href="${esc(scriptLink(script))}">版本详情</a></div>`;
   }
   async function mountTaskAdopted(container,task,options = {}) {
@@ -213,6 +208,7 @@ window.CaseScripts = (() => {
         const key = script.family_id || scriptId(script), old = families.get(key);
         if (!old || (Number(script.version) || 1) > (Number(old.version) || 1)) families.set(key,script);
       }
+      window.CaseAI?.taskScriptsLoaded?.(task.task_id,(data.scripts || []).filter(script => script.source?.task_id === task.task_id));
       const requested = requestedId ? (data.scripts || []).find(script => scriptId(script) === requestedId && script.source?.task_id === task.task_id) : null;
       if (requested) families.set(requested.family_id || scriptId(requested),requested);
       const scripts = [...families.values()];keepReadingPlace(() => {container.hidden = !scripts.length && !requestedId;});
@@ -257,11 +253,12 @@ window.CaseScripts = (() => {
   function renderDetail(data) {
     const script = data.script, id = scriptId(script), source = script.source || {};
     const performanceItem = {sales_data:data.sales_data || {status:script.video_id ? 'not_found' : 'missing_video_id'},current:{metrics:{video_id:script.video_id || ''}}};
+    // A photo post has no row in the video sales table; its figures are in 图文, so it is named and linked as such.
+    const photo = script.post_kind === 'photo', postLabel = photo ? '帖子 ID' : '视频 ID';
+    const salesMarkup = photo ? `<section class="section-card script-photo-sales"><h2>图文数据</h2><p class="context-note">这是一条图文帖子，播放、点击和售出在带货数据的「自制图文」里，不在视频销售表中。</p><a class="secondary" href="${esc(url(`#videos?photo=${encodeURIComponent(script.video_id)}`,script.product))}">在图文数据中查看</a></section>`
+      : typeof renderPerformanceSection === 'function' ? renderPerformanceSection(performanceItem,'script') : '';
     const versionMetadata = `<details class="section-card script-version-meta"><summary>版本记录</summary><dl class="script-facts"><dt>保存时间</dt><dd>${esc(readableDate(script.created_at))}</dd>${source.task_id ? '' : '<dt>录入方式</dt><dd>手动整理的正文</dd>'}</dl>${variantAssociation(script)}${script.note ? `<p>${esc(script.note)}</p>` : ''}</details>`;
-    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#content',script.product))}">${icon('back')}返回内容列表</a><div class="page-heading"><div><span class="eyebrow">ADOPTED COPY</span><h1>${esc(script.title || '未命名脚本')}</h1><p>${esc(script.product)} · ${esc(scriptDirection(script) || '未指定方向')}${script.variant_link ? ` · 变体 ${script.variant_link.resolved_index + 1}` : ''} · <span class="script-status ${esc(scriptStatus(script))}">${esc(labels[scriptStatus(script)] || scriptStatus(script))}${isArchived(script) ? ' · 已归档' : ''}</span></p></div><div class="script-detail-actions"><button class="primary" id="script-production-toggle" type="button" aria-expanded="false" aria-controls="script-production-choices" disabled>正在读取制作单…</button><details class="script-more-actions" id="script-more-actions"><summary>更多操作</summary><div><button class="subtle" id="script-derive">编辑采用稿</button><button class="subtle" id="script-archive">${isArchived(script) ? '恢复采用稿' : '归档采用稿'}</button><button class="subtle" id="script-case">${script.case_id ? '补充案例结论' : '沉淀为案例'}</button></div></details></div></div><p class="context-note script-production-note" id="script-production-note" role="status" hidden></p><section class="section-card script-production-choices" id="script-production-choices" aria-label="选择制作单或制作形式" hidden></section><div class="script-detail-grid"><section class="section-card script-body" id="content-adopted-script"></section><aside><section class="section-card"><h2>拍摄与发布</h2><dl class="script-facts"><dt>采用稿编号</dt><dd>${esc(id)}</dd><dt>视频 ID</dt><dd><span>${esc(script.video_id || '尚未登记')}</span>${copyIdButton(script.video_id,'视频 ID')}</dd><dt>发布日期</dt><dd>${esc(script.published_on || '尚未登记')}</dd></dl><button class="secondary" id="script-release">登记进度与视频</button><p class="context-note" id="script-release-note">同一视频按视频 ID 匹配销售数据。拍摄不同版本时请分别登记。</p></section></aside></div>${versionMetadata}<section id="script-sales">${typeof renderPerformanceSection === 'function' ? renderPerformanceSection(performanceItem,'script') : ''}</section>`;
-    // Per-slide tables are generated from this script; their runs show as one line under the heading.
-    const runs = document.createElement('div');runs.id = 'script-activity-logs';runs.className = 'task-activity-logs';$('.page-heading',$('#content')).after(runs);
-    window.TaskActivity?.mountLogs(runs,{owner_id:id,label:'本脚本'});
+    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#content',script.product))}">${icon('back')}返回内容列表</a><div class="page-heading"><div><span class="eyebrow">ADOPTED COPY</span><h1>${esc(script.title || '未命名脚本')}</h1><p>${esc(script.product)} · ${esc(scriptDirection(script) || '未指定方向')}${script.variant_link ? ` · 变体 ${script.variant_link.resolved_index + 1}` : ''} · <span class="script-status ${esc(scriptStatus(script))}">${esc(labels[scriptStatus(script)] || scriptStatus(script))}${isArchived(script) ? ' · 已归档' : ''}</span></p></div><div class="script-detail-actions"><button class="primary" id="script-production-toggle" type="button" aria-expanded="false" aria-controls="script-production-choices" disabled>正在读取制作单…</button><details class="script-more-actions" id="script-more-actions"><summary>更多操作</summary><div><button class="subtle" id="script-derive">编辑采用稿</button><button class="subtle" id="script-archive">${isArchived(script) ? '恢复采用稿' : '归档采用稿'}</button><button class="subtle" id="script-case">${script.case_id ? '补充案例结论' : '沉淀为案例'}</button></div></details></div></div><p class="context-note script-production-note" id="script-production-note" role="status" hidden></p><section class="section-card script-production-choices" id="script-production-choices" aria-label="选择制作单或制作形式" hidden></section><div class="script-detail-grid"><section class="section-card script-body" id="content-adopted-script"></section><aside><section class="section-card"><h2>拍摄与发布</h2><dl class="script-facts"><dt>采用稿编号</dt><dd>${esc(id)}</dd><dt>${postLabel}</dt><dd class="id-row"><span>${esc(script.video_id || '尚未登记')}</span>${copyIdButton(script.video_id,postLabel,{icon:true})}</dd><dt>发布日期</dt><dd>${esc(script.published_on || '尚未登记')}</dd></dl><button class="secondary" id="script-release">登记进度与视频</button><p class="context-note" id="script-release-note">${photo ? '同一图文按帖子 ID 匹配图文数据。' : '同一视频按视频 ID 匹配销售数据。拍摄不同版本时请分别登记。'}</p></section></aside></div>${versionMetadata}<section id="script-sales">${salesMarkup}</section>`;
     window.WorkbenchLinks?.mount({kind:'script',record:script,script});
     void mountAdopted($('#content-adopted-script'),script,{editable:false});
     $('#script-derive').onclick = () => openManual(script);
@@ -278,16 +275,6 @@ window.CaseScripts = (() => {
     $$('button',more).forEach(button => button.addEventListener('click',() => {more.open = false;}));
     void loadScriptProduction(script);
   }
-  function canResumeTableResult() {
-    return !workspace.modal && !state.editor && !window.CaseAI?.modalOpen?.() && !window.CaseProduction?.modalOpen?.() && !window.CaseDirectionPicker?.hasVideoEdits?.();
-  }
-  async function resumeTableResult(tableId,expectedScriptId = '') {
-    if (!canResumeTableResult()) {toast('请先完成或关闭当前编辑，再查看逐张表。',true);return false;}
-    const script = workspace.loaded?.script, tail = pageHash().replace(/^#(?:content|scripts)\/?/,'').split('?')[0];
-    if (!script || tail !== scriptId(script) || (expectedScriptId && expectedScriptId !== scriptId(script))) return false;
-    await window.CaseProduction?.resumeCarouselTable(script,tableId);
-    return true;
-  }
   async function loadScriptProduction(script) {
     const toggle = $('#script-production-toggle'), panel = $('#script-production-choices'), note = $('#script-production-note');
     const hash = pageHash(), seq = workspace.sequence;
@@ -296,17 +283,16 @@ window.CaseScripts = (() => {
     try {
       const data = await api(`/api/production?product=${encodeURIComponent(script.product || '')}`);
       if (seq !== workspace.sequence || hash !== pageHash() || !toggle.isConnected) return;
-      if (!Array.isArray(data.jobs) || !Array.isArray(data.carousels)) throw new Error('制作单列表不完整，请重新读取。');
+      if (!Array.isArray(data.jobs)) throw new Error('制作单列表不完整，请重新读取。');
       const sameScript = item => item.script_id === scriptId(script) && (!item.product || window.WorkbenchShell.matchesProduct(item.product,script.product)) && !item.archived && item.status !== 'archived';
-      const existing = [...data.jobs.filter(sameScript).map(item => ({...item,kind:'video'})),...data.carousels.filter(sameScript).map(item => ({...item,kind:'carousel'}))]
+      const existing = data.jobs.filter(sameScript)
         .sort((a,b) => String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || '')));
       const videoLabels = {draft:'待配音',voiced:'已配音',timeline:'已建时间线',editing:'剪辑中',awaiting_review:'待人工审查',approved:'人工审查通过',needs_material:'待补素材',needs_verification:'素材待核实',needs_repair:'待修正',verification_failed:'核验未完成',unverified:'旧记录待核验',completed:'旧记录待核验',failed:'剪辑失败',cancelled:'剪辑已停止',interrupted:'剪辑已中断'};
-      const carouselLabels = {draft:'待选底图',picking:'选图中',picked:'底图已选齐',ready:'底图已选齐',reviewing:'成图待核对',approved:'成图已确认',published:'已登记发布'};
       const create = '<div class="script-production-create"><button type="button" class="secondary" id="script-produce">制作视频</button></div>';
       panel.innerHTML = existing.length ? `<h2>关联制作单 <small>${existing.length} 张</small></h2><p class="context-note">选择要接着处理的制作单。</p><div class="script-production-links">${existing.map(item => {
-        const carousel = item.kind === 'carousel', status = (carousel ? carouselLabels : videoLabels)[item.status] || '查看进度';
+        const status = videoLabels[item.status] || '查看进度';
         const href = url(`#production/${encodeURIComponent(item.id)}`,item.product || script.product);
-        return `<a class="script-production-link" href="${esc(href)}"><span><strong>${esc(item.display_title || item.title || script.title || '未命名制作单')}</strong><small>${carousel ? '图文' : '视频'} · ${esc(item.id)}${item.updated_at || item.created_at ? ` · ${esc(readableDate(item.updated_at || item.created_at))}` : ''}</small></span><span>${esc(status)}${item.status === 'awaiting_review' && !carousel ? ' · 去审查' : ' · 打开'}</span></a>`;
+        return `<a class="script-production-link" href="${esc(href)}"><span><strong>${esc(item.display_title || item.title || script.title || '未命名制作单')}</strong><small>视频 · ${esc(item.id)}${item.updated_at || item.created_at ? ` · ${esc(readableDate(item.updated_at || item.created_at))}` : ''}</small></span><span>${esc(status)}${item.status === 'awaiting_review' ? ' · 去审查' : ' · 打开'}</span></a>`;
       }).join('')}</div><details class="script-production-new"><summary>新建另版</summary><p class="context-note">已有制作单会保留，另建一张用于不同的制作版本。</p>${create}</details>` : `<h2>制作视频</h2><p class="context-note">这条脚本还没有未归档的制作单。核对内容后创建视频制作单。</p>${create}`;
       toggle.textContent = existing.length ? '继续制作' : '开始制作';toggle.disabled = false;
       // With an order, the video ID is registered in the order's publish step, which writes it back here;
@@ -316,7 +302,7 @@ window.CaseScripts = (() => {
         const only = existing.length === 1 ? existing[0] : null;
         release.textContent = '去制作单登记发布';release.className = 'primary';
         release.onclick = () => {
-          if (only) {location.hash = url(`#production/${encodeURIComponent(only.id)}?step=${only.kind === 'carousel' ? 'delivery' : 'publish'}`,only.product || script.product);return;}
+          if (only) {location.hash = url(`#production/${encodeURIComponent(only.id)}?step=publish`,only.product || script.product);return;}
           panel.hidden = false;toggle.setAttribute('aria-expanded','true');panel.scrollIntoView({block:'nearest'});
         };
         if (releaseNote) releaseNote.innerHTML = `${only ? '' : `这条脚本有 ${existing.length} 张制作单，选实际发布的那张。`}在制作单的发布步骤填视频 ID，会自动写回这里。<button type="button" class="subtle compact" id="script-release-manual">不经制作单，手动登记</button>`;
@@ -350,11 +336,18 @@ window.CaseScripts = (() => {
     try {
       const data = await catalog(product), direction = task.context?.direction_id || task.direction_id || '';
       const title = task.case_title || task.context?.title || direction || `${product} 写稿`;
-      const body = `<p class="context-note">从完整候选中选取一条准备采用的脚本，粘贴到「采用正文」。中文放入对照栏；多稿说明与评分不自动写入正文。</p><details open class="script-candidate-source"><summary>完整候选 · 第 ${(task.rounds || []).findIndex(item => item.round_id === round.round_id)+1} 轮</summary><pre>${esc(round.output)}</pre><button type="button" class="secondary" id="script-use-selection">把选中的候选文字填入正文</button></details>${field('title','脚本标题',title,{required:true})}${field('text','采用正文','',{area:true,rows:9,required:true})}${field('translation_zh','中文对照','',{area:true})}<p class="context-note">${esc(product)}${direction ? ` · ${esc(direction)}` : ''} · 保存完整候选来源，正文以你核对的内容为准。</p>`;
+      // A round with no direction names the one the writer picked for each variant; the person confirms it here.
+      const [directions,variants] = direction ? [[],[]] : await Promise.all([
+        api(`/api/direction-catalog?product=${encodeURIComponent(product)}`).then(result => (result.directions || []).filter(item => item.status !== 'archived')).catch(() => []),
+        api(`/api/production/variants?task_id=${encodeURIComponent(task.task_id)}&round_id=${encodeURIComponent(round.round_id)}`).then(result => result.variants || []).catch(() => [])]);
+      const suggested = variant => directions.some(item => item.direction_id === variant.suggested_direction) ? variant.suggested_direction : '';
+      const picks = [...new Set(variants.map(suggested))], only = picks.length === 1 ? picks[0] : '';
+      const directionField = directions.length ? `<label class="field"><span>关联方向</span><select name="direction_id"><option value="">暂不指定</option>${directions.map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === only ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>` : '';
+      const body = `<p class="context-note">从完整候选中选取一条准备采用的脚本，粘贴到「采用正文」。中文放入对照栏；多稿说明与评分不自动写入正文。</p><details open class="script-candidate-source"><summary>完整候选 · 第 ${(task.rounds || []).findIndex(item => item.round_id === round.round_id)+1} 轮</summary><pre>${esc(round.output)}</pre><button type="button" class="secondary" id="script-use-selection">把选中的候选文字填入正文</button></details>${field('title','脚本标题',title,{required:true})}${directionField}${field('text','采用正文','',{area:true,rows:9,required:true})}${field('translation_zh','中文对照','',{area:true})}<p class="context-note">${esc(product)}${direction ? ` · ${esc(direction)}` : ''} · 保存完整候选来源，正文以你核对的内容为准。</p>`;
       const modal = showModal(writeBack ? '核对正文后写回案例' : '保存采用稿',body,writeBack ? '核对并继续写回' : '保存采用稿',async modal => {
         const values = Object.fromEntries(new FormData(modal.form));
         try {
-          const result = await post(modal,'/api/scripts',{revision:modal.revision,script:{...values,product,direction_id:direction,confirmed:true},source:{task_id:task.task_id,round_id:round.round_id,task_revision:modal.taskRevision}});
+          const result = await post(modal,'/api/scripts',{revision:modal.revision,script:{...values,product,direction_id:direction || values.direction_id || '',confirmed:true},source:{task_id:task.task_id,round_id:round.round_id,task_revision:modal.taskRevision}});
           const saved = result.script;closeModal(true);toast(result.reused ? '这条候选之前已采纳，已打开原来的采用稿。' : '采用稿已保存，来源已自动保留。');
           if (writeBack) await openCase(saved,task.case_id || '');else location.hash = scriptLink(saved);
         } catch (error) {
@@ -366,7 +359,16 @@ window.CaseScripts = (() => {
       let selected = '';
       const source = $('.script-candidate-source pre',modal.dialog);
       source.addEventListener('mouseup',() => {const selection = window.getSelection();if (selection && source.contains(selection.anchorNode) && source.contains(selection.focusNode)) selected = selection.toString();});
-      $('#script-use-selection').onclick = () => {if (!selected.trim()) {setError(modal,'请先在上方候选中选中一条脚本的正文，或直接复制粘贴到正文栏。');return;}$('[name="text"]',modal.form).value = selected.trim();setError(modal,'');};
+      // The pasted body tells which variant is being adopted, so its pick follows until the person changes the field.
+      const directionSelect = $('[name="direction_id"]',modal.form);let directionEdited = false;
+      const followBody = () => {
+        if (!directionSelect || directionEdited) return;
+        const body = $('[name="text"]',modal.form).value;
+        const match = variants.find(variant => variant.lines?.length && body.includes(variant.lines[0].spoken));
+        if (match) directionSelect.value = suggested(match);
+      };
+      if (directionSelect) {directionSelect.onchange = () => {directionEdited = true;};$('[name="text"]',modal.form).addEventListener('input',followBody);}
+      $('#script-use-selection').onclick = () => {if (!selected.trim()) {setError(modal,'请先在上方候选中选中一条脚本的正文，或直接复制粘贴到正文栏。');return;}$('[name="text"]',modal.form).value = selected.trim();followBody();setError(modal,'');};
     } catch (error) {toast(`暂时无法采纳候选：${fail(error)}`,true);}
   }
   function openArchive(script,revision) {
@@ -408,5 +410,5 @@ window.CaseScripts = (() => {
       });if (modal) {modal.revision = data.revision;modal.caseRevision = item?.revision;modal.product = script.product;const destination = $('[name="destination"]',modal.form);if (destination) destination.onchange = () => {modal.button = destination.value === 'existing' ? '保存为案例修订' : '创建案例';setBusy(modal,false);};}
     } catch (error) {toast(`暂时无法打开案例沉淀：${fail(error)}`,true);}
   }
-  return {route,adoptCandidate,openManual,openCase,resumeTableResult,canResumeTableResult,modalOpen,hasUnsavedInput,beforeNavigate,captureListState,mountAdopted,mountTaskAdopted};
+  return {route,adoptCandidate,openManual,openCase,modalOpen,hasUnsavedInput,beforeNavigate,captureListState,mountAdopted,mountTaskAdopted};
 })();

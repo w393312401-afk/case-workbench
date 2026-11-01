@@ -168,6 +168,7 @@ class DirectionBrowserTests(unittest.TestCase):
         page.locator("#close-comparison").click()
         page.locator("#directions-nav").click()
         page.locator(".direction-card-link").first.click()
+        page.locator(".dir-case-performance > summary").click()
         page.locator(".direction-group").first.wait_for()
         self.assertEqual(page.locator(".direction-group").count(), 1)
         self.assertEqual(page.locator(".direction-observations tbody tr").count(), 2)
@@ -239,6 +240,7 @@ class DirectionBrowserTests(unittest.TestCase):
         page = self.open_page("#directions?product=202H")
         page.set_viewport_size({"width": 1265, "height": 900})
         page.locator(".direction-card-link").first.click()
+        page.locator(".dir-case-performance > summary").click()
         page.locator(".direction-table tbody tr").wait_for()
         self.assertEqual(page.locator(".direction-observations .case-table").count(), 0)
         self.assertEqual(page.locator(".direction-table thead th").all_text_contents(),

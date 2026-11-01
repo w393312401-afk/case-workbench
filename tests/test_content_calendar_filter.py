@@ -37,7 +37,6 @@ class ContentCalendarFilterTests(unittest.TestCase):
             video("video:unfinished", True, workflow_steps=[{"key": "edit", "done": False}]),
             video("video:expired", False, workflow_steps=[{"key": "edit", "done": False}]),
             video("video:missing", False, workflow_steps=[{"key": "timeline", "done": True}]),
-            video("carousel:approved", False, kind="carousel"),
             video("script:pending", False, kind="script"),
             video("video:archived", True, archived=True),
             video("video:history", False, history=True, stage="published"),
@@ -48,15 +47,6 @@ class ContentCalendarFilterTests(unittest.TestCase):
                          {"video:added", "video:archived"})
         self.assertEqual(self.ids(self.catalog(custom(rule("review_calendar", "not_added")))),
                          {"video:pending", "video:history"})
-
-    def test_multiple_calendar_values_and_all_any_compose_with_existing_conditions(self):
-        self.assertEqual(self.ids(self.catalog(custom(rule("review_calendar", "added", "not_added")))),
-                         {"video:added", "video:pending", "video:archived", "video:history"})
-        self.assertEqual(self.ids(self.catalog(custom(rule("review_calendar", "added"),
-                                                     rule("status", "archived")))), {"video:archived"})
-        self.assertEqual(self.ids(self.catalog(custom(rule("review_calendar", "not_added"),
-                                                     rule("kind", "carousel"), match="any"))),
-                         {"video:pending", "video:history", "carousel:approved"})
 
     def test_calendar_condition_persists_and_invalid_values_cannot_replace_saved_view(self):
         with tempfile.TemporaryDirectory(prefix="calendar-filter-test-") as temporary:

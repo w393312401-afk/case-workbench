@@ -46,6 +46,13 @@ CANDIDATE_VARIANT_SNAPSHOT_KEYS = ("progression", "baseline", "variant_type", "m
 CODE_PATTERN = re.compile(r"(?<![A-Za-z0-9])([SAB][1-9]\d*)(?!\d)")
 
 
+def variant_number(variants, index):
+    """The label the direction page shows: only execution variants are numbered (#N); the definition is named."""
+    if variants[index].get("variant_type") == "direction":
+        return "方向定义"
+    return "#" + str(sum(1 for item in variants[:index + 1] if item.get("variant_type") != "direction"))
+
+
 def progression_value(value):
     """One of PROGRESSIONS, or "其他：说明" with a short description."""
     value = value.strip() if isinstance(value, str) else ""
@@ -683,7 +690,7 @@ class DirectionStore:
             change = text(value.get("execution_change"), "执行改动", limit=4000)
             same = next((index for index, item in enumerate(old["variants"]) if item.get("progression") == progression and not item.get("conflict")), None)
             if same is not None:
-                raise DirectionError(409, f"这个方向第 {same + 1} 条已经是“{progression}”推进，只换开头不算新变体。请换一种推进结构。")
+                raise DirectionError(409, f"这个方向{variant_number(old['variants'], same)}已经是“{progression}”推进，只换开头不算新变体。请换一种推进结构。")
             if any({key: item.get(key) for key in ("concern", "closing")} == {key: chain[key] for key in ("concern", "closing")} for item in old["variants"]):
                 raise DirectionError(409, "这条链和已有记录完全相同，不算新变体。")
             meta = {"progression": progression}
@@ -726,7 +733,7 @@ class DirectionStore:
             progression = progression_value(value["progression"])
             same = next((i for i, item in enumerate(entity["variants"]) if i != index and item.get("progression") == progression and not item.get("conflict")), None)
             if same is not None:
-                raise DirectionError(409, f"第 {same + 1} 条已经是“{progression}”推进。两条推进相同，应合并为一条变体。")
+                raise DirectionError(409, f"{variant_number(entity['variants'], same)}已经是“{progression}”推进。两条推进相同，应合并为一条变体。")
             variant["progression"] = progression
         if "audience" in value:
             audience = text(value.get("audience") or "", "目标人群", False, 2000)

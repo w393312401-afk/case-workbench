@@ -407,7 +407,7 @@ window.CaseAI = (() => {
   function taskCard(task) {
     const busy = active(task), title = contextTitle(task);
     const detail = task.last_error ? '原因：' + task.last_error : typeof task.progress === 'string' && busy ? task.progress : taskStarted(task) || (task.stale ? '基于案例的较早版本' : '');
-    return `<div class="ai-task-entry${task.archived ? ' is-archived' : ''}" data-ai-task-id="${esc(task.task_id)}"><div class="ai-task-select" ${busy ? 'title="任务正在处理，结束后可整理"' : ''}><input type="checkbox" aria-label="选择 ${esc(title)} 的协作记录" ${busy ? 'disabled' : ''}></div><a class="ai-task-card" href="#ai/${encodeURIComponent(task.task_id)}" title="${esc(task.task_id)}"><span class="ai-action-kind">${esc(actions[task.action] || 'AI 协作')}</span><span class="ai-row-main"><strong>${esc(title)}</strong>${detail ? `<small${task.last_error ? ' class="ai-task-reason"' : ''}>${esc(detail)}</small>` : ''}<small class="ai-management-badge">${esc(managementLabel(task))}${task.archived ? ' · 已归档' : ''}${isWriting(task) && task.adopted_script_count ? ` · 已保存 ${task.adopted_script_count} 份采用稿` : ''}</small></span><span class="ai-row-meta"><span>${esc(readableDate(task.updated_at))} 更新${task.round_count > 1 ? ` · ${task.round_count} 轮` : ''}${task.stale ? ' · 案例已更新' : ''}</span></span><span class="ai-status ${esc(task.status)}">${esc(statusText(task))}</span></a></div>`;
+    return `<div class="ai-task-entry${task.archived ? ' is-archived' : ''}" data-ai-task-id="${esc(task.task_id)}"><div class="ai-task-select" ${busy ? 'title="任务正在处理，结束后可整理"' : ''}><input type="checkbox" aria-label="选择 ${esc(title)} 的协作记录" ${busy ? 'disabled' : ''}></div><a class="ai-task-card" href="#ai/${encodeURIComponent(task.task_id)}" title="${esc(task.task_id)}"><span class="ai-action-kind">${esc(actions[task.action] || 'AI 协作')}</span><span class="ai-row-main"><strong>${esc(title)}</strong>${detail ? `<small${task.last_error ? ' class="ai-task-reason"' : ''}>${esc(detail)}</small>` : ''}<small class="ai-management-badge">${esc(managementLabel(task))}${task.resolution_note && managementState(task) === 'pending_selection' ? ` · ${esc(task.resolution_note)}` : ''}${task.archived ? ' · 已归档' : ''}${isWriting(task) && task.adopted_script_count ? ` · 已保存 ${task.adopted_script_count} 份采用稿` : ''}</small></span><span class="ai-row-meta"><span>${esc(readableDate(task.updated_at))} 更新${task.round_count > 1 ? ` · ${task.round_count} 轮` : ''}${task.stale ? ' · 案例已更新' : ''}</span></span><span class="ai-status ${esc(task.status)}">${esc(statusText(task))}</span></a></div>`;
   }
   const listFilters = {all:['全部',() => true],active:['进行中',task => active(task)],completed:['已完成',task => task.status === 'completed'],stopped:['未完成',task => ['failed','cancelled','interrupted'].includes(task.status)]};
   function startOptions() {
@@ -529,7 +529,7 @@ window.CaseAI = (() => {
       ai.page = 'list';ai.task = null;ai.lastList = '';
       ai.listProduct = window.WorkbenchShell?.product() || '';
       $('#breadcrumb').innerHTML = '协作记录';
-      $('#content').innerHTML = `${window.ContentFlow?.tabs?.('ai') || `<a class="back-link" href="${esc(pageURL('#content'))}">${icon('back')}返回内容列表</a>`}<div class="page-heading ai-list-heading"><div><h1>协作记录</h1><p>查看历次协作、各轮回答及采用记录，归档后仍可回看和恢复。</p></div><button type="button" class="ai-service-pill" id="ai-check-service" title="重新检查 AI 服务"><i></i><span id="ai-service-label">${esc(availabilityText())}</span></button></div>
+      $('#content').innerHTML = `${window.ContentFlow?.tabs?.('ai') || `<a class="back-link" href="${esc(window.WorkbenchShell?.listURL?.('content') || pageURL('#content'))}">${icon('back')}返回内容列表</a>`}<div class="page-heading ai-list-heading"><div><h1>协作记录</h1><p>查看历次协作、各轮回答及采用记录，归档后仍可回看和恢复。</p></div><button type="button" class="ai-service-pill" id="ai-check-service" title="重新检查 AI 服务"><i></i><span id="ai-service-label">${esc(availabilityText())}</span></button></div>
         <div class="ai-management-toolbar"><label>查看<select id="ai-list-view">${Object.entries(listViews).map(([key,label]) => `<option value="${key}" ${ai.listView === key ? 'selected' : ''}>${label}</option>`).join('')}</select></label><label>管理状态<select id="ai-management-filter"><option value="">全部管理状态</option>${Object.entries(managementFilterLabels).map(([key,label]) => `<option value="${key}" ${ai.managementFilter === key ? 'selected' : ''}>${label}</option>`).join('')}</select></label></div>
         <div class="ai-list-toolbar"><div class="ai-segment" role="group" aria-label="按执行状态筛选">${Object.entries(listFilters).map(([key,[label]]) => `<button type="button" data-ai-filter="${key}" aria-pressed="${(ai.filter || 'all') === key}">${label}<small data-ai-filter-count="${key}"></small></button>`).join('')}</div><label class="ai-group-choice"><span>分组</span><select id="ai-group-by"><option value="direction">按方向</option><option value="case">按案例</option></select></label><button type="button" class="subtle" id="ai-select-toggle" aria-pressed="false">选择</button></div>
         <div class="ai-selection-toolbar" id="ai-selection-toolbar" hidden><div class="ai-selection-main"><label class="select-all"><input type="checkbox" id="ai-select-all">全选</label><span id="ai-selected-count" class="selection-count">已选 0 条</span><span id="ai-selection-note" class="selection-count"></span></div><div class="ai-selection-actions"><button type="button" class="secondary compact" id="ai-archive-selected" disabled>归档所选</button><button type="button" class="secondary compact" id="ai-restore-selected" disabled hidden>恢复所选</button><button type="button" class="danger-outline" id="ai-delete-selected" disabled>${icon('trash')}永久删除</button></div></div><div id="ai-list-error" class="ai-error" role="alert" hidden></div><div id="ai-task-list">${skeletonMarkup(2)}</div>`;
@@ -683,6 +683,207 @@ window.CaseAI = (() => {
       if (event.target.closest('[data-copy-all-titles]')) copyText(groups.flatMap(group => group.lines).join('\n'),'全部标题行已复制');
     };
   }
+  // Every writing answer reads as cards: one per variant, what is read aloud on top and production notes folded.
+  // Variants are found after rendering, by "变体 #N" title lines or, without them, by each 「口播（配音用）」 block and the
+  // rule or 开头 lines before it. A trailing 「发布前核对」 belongs to the whole round. Anything unrecognised stays as written.
+  const scriptStatusNames = {draft:'草稿',adopted:'已采纳',filmed:'已拍摄',published:'已发布',reviewed:'已复盘',archived:'已归档'};
+  const textOf = node => (node?.textContent || '').trim();
+  const boldLine = node => node.tagName === 'P' && node.children.length === 1 && node.firstElementChild.tagName === 'STRONG' && textOf(node) === textOf(node.firstElementChild);
+  const variantNumber = node => (/^H[2-5]$/.test(node.tagName) || boldLine(node)) ? /^\s*(?:[\w-]+\s*[·・]\s*)?变体\s*#?\s*(\d+)/.exec(textOf(node))?.[1] || '' : '';
+  const blockText = node => (node?.querySelector('code') || node)?.textContent.trim() || '';
+  const sectionLabel = node => boldLine(node) || /^H[2-5]$/.test(node.tagName) ? textOf(node) : /^补拍清单\s*[：:]/.test(textOf(node)) ? '补拍清单' : '';
+  const isSpokenLabel = node => /^口播\s*[（(]\s*配音用/.test(sectionLabel(node));
+  const openingLine = /^开头(逻辑|画面|屏显)\s*(?:[（(][^）)]*[）)])?\s*[：:]\s*/;
+  const isOpening = node => openingLine.test(textOf(node));
+  // The check may be its own label line or a paragraph led by it in bold ("**发布前核对**：…").
+  const isCheckLabel = node => /^(?:同批|共用)?发布前核对/.test(textOf(node)) && (!!sectionLabel(node) || node.firstElementChild?.tagName === 'STRONG');
+  function variantGroups(children) {
+    const groups = [];
+    for (const node of children) {
+      const number = variantNumber(node), last = groups.at(-1);
+      // A second title line straight under the first, with the same number, belongs to the same variant.
+      if (number && last?.number === number && !last.nodes.length) last.subtitles.push(node);
+      else if (number) groups.push({number,heading:node,subtitles:[],nodes:[]});
+      else if (last) last.nodes.push(node);
+    }
+    if (groups.length) return groups;
+    // No titles: each spoken block starts after the rule before it, or at the 开头 lines leading into it.
+    const spoken = children.flatMap((node,index) => isSpokenLabel(node) ? [index] : []), starts = [];
+    spoken.forEach((at,order) => {
+      const floor = order ? spoken[order - 1] : -1;
+      let start = at;
+      for (let index = at - 1;index > floor;index--) if (children[index].tagName === 'HR') {start = index + 1;break;}
+      if (start === at) while (start - 1 > floor && /^开头/.test(textOf(children[start - 1]))) start--;
+      starts.push(start);
+    });
+    return starts.map((start,order) => ({number:String(order + 1),heading:null,subtitles:[],nodes:children.slice(start,order + 1 < starts.length ? starts[order + 1] : children.length)}));
+  }
+  function splitVariants(output) {
+    const variants = variantGroups([...output.children]);
+    let shared = [];
+    const last = variants.at(-1);
+    if (last) {
+      // Only a check that closes the answer is shared; one followed by more script sections stays with its variant.
+      const at = last.nodes.findIndex(isCheckLabel);
+      if (at >= 0 && !last.nodes.slice(at + 1).some(node => /口播|中文|意群|补拍|图文|发布文案/.test(sectionLabel(node))))
+        {shared = last.nodes.slice(at);last.nodes = last.nodes.slice(0,at);}
+    }
+    for (const variant of variants) {
+      while (variant.nodes.at(-1)?.tagName === 'HR') variant.nodes.pop().remove();
+      while (variant.nodes[0]?.tagName === 'HR') variant.nodes.shift().remove();
+      const nodes = variant.nodes;
+      const spokenAt = nodes.findIndex(isSpokenLabel);
+      const chineseLabel = /^(?:对应中文|中文对照)\s*[：:]?/;
+      let chineseAt = nodes.findIndex(node => chineseLabel.test(sectionLabel(node)) && !sectionLabel(node).replace(chineseLabel,'').trim());
+      // "**中文对照**" with the text on the next line renders as one paragraph led by the bold label.
+      const inline = chineseAt < 0 ? nodes.findIndex(node => node.tagName === 'P' && node.firstElementChild?.tagName === 'STRONG' && chineseLabel.test(textOf(node.firstElementChild))) : -1;
+      variant.chineseText = inline >= 0 ? textOf(nodes[inline]).replace(chineseLabel,'').trim() : '';
+      if (inline >= 0) chineseAt = inline;
+      variant.spoken = spokenAt >= 0 && nodes[spokenAt + 1]?.tagName === 'PRE' ? nodes[spokenAt + 1] : null;
+      variant.chinese = inline >= 0 ? null : chineseAt >= 0 && /^(?:PRE|P)$/.test(nodes[chineseAt + 1]?.tagName) && !sectionLabel(nodes[chineseAt + 1]) ? nodes[chineseAt + 1] : null;
+      // 开头画面 and 开头屏显 may be their own lines or items in a list of notes; list items are lifted out.
+      variant.opening = [];
+      for (const node of spokenAt < 0 ? [] : nodes.slice(0,spokenAt)) {
+        if (isOpening(node)) variant.opening.push(node);
+        else if (/^[UO]L$/.test(node.tagName)) for (const item of [...node.children].filter(isOpening)) {
+          const line = document.createElement('p');line.innerHTML = item.innerHTML;variant.opening.push(line);item.remove();
+        }
+      }
+      const screen = variant.opening.find(node => /^开头屏显/.test(textOf(node)));
+      variant.screen = screen ? textOf(screen).replace(openingLine,'') : '';
+      const used = new Set([...variant.opening,variant.spoken,variant.chinese,nodes[spokenAt],nodes[chineseAt]].filter(Boolean));
+      // Each label starts a fold; a one-line "补拍清单：…" is its own fold together with a list right under it;
+      // loose text joins the fold before it.
+      variant.folds = [];
+      for (const node of nodes.filter(item => !used.has(item) && !(/^[UO]L$/.test(item.tagName) && !item.children.length))) {
+        const label = sectionLabel(node), shots = variant.folds.at(-2);
+        if (label === '补拍清单' && !boldLine(node)) variant.folds.push({label,nodes:[node]},{label:'',nodes:[]});
+        else if (label) variant.folds.push({label,nodes:[]});
+        else if (/^[UO]L$/.test(node.tagName) && shots?.label === '补拍清单' && shots.nodes.length === 1 && !variant.folds.at(-1).nodes.length) shots.nodes.push(node);
+        else {if (!variant.folds.length) variant.folds.push({label:'',nodes:[]});variant.folds.at(-1).nodes.push(node);}
+      }
+      variant.folds = variant.folds.filter(fold => fold.nodes.length).map(fold => ({...fold,label:fold.label || '备注'}));
+    }
+    return {variants,shared};
+  }
+  // English and Chinese side by side, line against line when both have the same number of lines.
+  function variantScriptPairs(variant) {
+    const lines = node => blockText(node).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const english = lines(variant.spoken), chinese = variant.chineseText ? variant.chineseText.split(/\r?\n/).map(line => line.trim()).filter(Boolean) : lines(variant.chinese);
+    if (english.length && english.length === chinese.length)
+      return `<div class="ai-variant-pairs">${english.map((line,index) => `<p>${esc(line)}</p><p class="ai-variant-zh">${esc(chinese[index])}</p>`).join('')}</div>`;
+    return `<div class="ai-variant-pairs is-blocks"><p>${esc(english.join('\n'))}</p><p class="ai-variant-zh">${esc(chinese.join('\n') || '未提供对应中文')}</p></div>`;
+  }
+  // An adopted script names its variant by index; older ones without it are matched by "变体 #N" in the title.
+  function variantStatus(round,number) {
+    const rows = (ai.taskScripts?.taskId === ai.task?.task_id ? ai.taskScripts.rows : []).filter(script => script.source?.round_id === round.round_id &&
+      (Number.isInteger(script.source.variant_index) ? script.source.variant_index === Number(number) - 1 : new RegExp(`变体\\s*#?\\s*${number}(?!\\d)`).test(script.title || '')));
+    const rank = ['draft','adopted','filmed','published','reviewed'];
+    const best = rows.sort((a,b) => rank.indexOf(b.status) - rank.indexOf(a.status))[0];
+    return best ? `<span class="ai-variant-state is-${esc(best.status)}">${esc(scriptStatusNames[best.status] || best.status)}</span>` : '<span class="ai-variant-state">待定</span>';
+  }
+  // One variant: just its card. Two to four: a row of switch chips. Five or more: an overview table.
+  function variantPicker(variants,round,picked) {
+    const status = variant => `<span data-variant-status="${esc(variant.number)}">${variantStatus(round,variant.number)}</span>`;
+    const head = `<div class="ai-variant-overview-head"><h4>${variants.length} 条变体${variants.length >= 5 ? '<small>点一行查看这一条</small>' : ''}</h4><button type="button" class="subtle" data-variant-show-all>全部展开</button></div>`;
+    if (variants.length < 5) return `${head}<div class="ai-variant-chips" role="listbox" aria-label="选择要查看的变体" aria-orientation="horizontal">${variants.map(variant => `<button type="button" class="ai-variant-chip" role="option" data-variant-pick="${esc(variant.number)}" aria-selected="${variant.number === picked}"><b>#${esc(variant.number)}</b>${variant.structure ? `<span>${esc(variant.structure)}</span>` : ''}${variant.seconds != null ? `<small>${esc(variant.seconds)} 秒</small>` : ''}${status(variant)}</button>`).join('')}</div>`;
+    return `${head}<div class="ai-variant-overview" role="listbox" aria-label="选择要查看的变体"><div class="ai-variant-columns" aria-hidden="true"><span>#</span><span>推进结构</span><span>开头屏显</span><span>第一句口播</span><span>时长</span><span>状态</span></div>${variants.map(variant => {
+      const first = blockText(variant.spoken).split(/\r?\n/).find(line => line.trim()) || '', screen = variant.screen.replace(/\s*[（(][^）)]*[）)]\s*$/,'');
+      return `<div class="ai-variant-pick" role="option" tabindex="0" data-variant-pick="${esc(variant.number)}" aria-selected="${variant.number === picked}"><b>#${esc(variant.number)}</b><span title="${esc(variant.title)}">${esc(variant.structure || '—')}</span><span title="${esc(variant.screen)}">${esc(screen || '—')}</span><span class="ai-variant-first" title="${esc(first)}">${esc(first)}</span><span class="ai-variant-seconds">${variant.seconds != null ? `${esc(variant.seconds)} 秒` : '—'}</span>${status(variant)}</div>`;
+    }).join('')}</div>`;
+  }
+  function layoutVariants(output,round) {
+    if (output.dataset.layout === output.dataset.source) return;
+    output.dataset.layout = output.dataset.source;
+    try {arrangeVariants(output,round);}
+    catch (error) {
+      // A shape the splitter did not foresee must never cost the reader any text: fall back to the answer as written.
+      console.error(error);
+      output.innerHTML = renderMarkdown(displayResponseText(output.dataset.source,true));
+      delete output.dataset.variantRound;
+    }
+  }
+  function arrangeVariants(output,round) {
+    const {variants,shared} = splitVariants(output);
+    if (!variants.length || !variants.every(variant => variant.spoken)) return;
+    output.dataset.variantRound = round.round_id;
+    const estimates = Array.isArray(round.read_estimates) ? round.read_estimates : [];
+    variants.forEach((variant,index) => {
+      variant.title = variant.heading ? textOf(variant.heading) : variants.length > 1 ? `第 ${variant.number} 条` : '口播稿';
+      variant.structure = variant.heading ? variant.title.split(/[·・]/).pop().replace(/^\s*变体\s*#?\s*\d+\s*[：:]?/,'').trim().replace(/^其他[：:]/,'') : '';
+      const estimate = estimates.find(item => /#\s*(\d+)/.exec(item.label || '')?.[1] === variant.number) || (estimates.length === variants.length ? estimates[index] : null);
+      variant.seconds = estimate ? estimate.seconds : null;
+    });
+    const several = variants.length > 1, picks = (ai.variantPicks ||= new Map()), key = `${ai.task.task_id}:${round.round_id}`;
+    if (!variants.some(variant => variant.number === picks.get(key))) picks.set(key,variants[0].number);
+    const anchor = variant => variant.heading || variant.nodes[0];
+    let board = null;
+    if (several) {
+      board = document.createElement('div');board.className = 'ai-variant-board';board.dataset.roundId = round.round_id;
+      board.innerHTML = variantPicker(variants,round,picks.get(key));
+      anchor(variants[0]).before(board);
+    }
+    for (const variant of variants) {
+      const card = document.createElement('article');card.className = 'ai-variant-card';card.dataset.variantCard = variant.number;card.hidden = several && variant.number !== picks.get(key);
+      card.innerHTML = `<div class="ai-variant-card-head"><h4>${esc(variant.title)}</h4><span class="ai-variant-seconds">${variant.seconds != null ? `约 ${esc(variant.seconds)} 秒` : ''}</span><span data-variant-status="${esc(variant.number)}">${variantStatus(round,variant.number)}</span><button type="button" class="subtle" data-copy-variant-spoken>${icon('copy')}复制口播</button></div>${variant.subtitles.map(node => `<p class="ai-variant-subtitle">${esc(textOf(node))}</p>`).join('')}<div class="ai-variant-opening"></div><div class="ai-variant-script-labels" aria-hidden="true"><span>口播（配音用）</span><span>对应中文</span></div>${variantScriptPairs(variant)}<div class="ai-variant-folds"></div>`;
+      // Placed before any of its nodes move in, since the first node is also where the card goes.
+      anchor(variant).before(card);
+      $('.ai-variant-opening',card).append(...variant.opening);
+      for (const fold of variant.folds) {
+        const details = document.createElement('details');details.className = 'ai-variant-fold';
+        details.innerHTML = `<summary>${esc(fold.label)}</summary>`;
+        for (const node of fold.nodes) {
+          // Picture data in older candidates stays one more click away.
+          if (node.tagName === 'PRE' && /^\s*\{/.test(blockText(node))) {
+            const data = document.createElement('details');data.className = 'ai-variant-data';data.innerHTML = '<summary>图文数据（JSON）</summary>';data.append(node);details.append(data);
+          } else details.append(node);
+        }
+        $('.ai-variant-folds',card).append(details);
+      }
+      $('[data-copy-variant-spoken]',card).onclick = () => copyText(blockText(variant.spoken),'口播已复制');
+      [variant.heading,...variant.subtitles,...variant.nodes].filter(node => node?.isConnected && !card.contains(node)).forEach(node => node.remove());
+    }
+    // The pre-publish check covers every variant, so it stays open under the cards.
+    if (shared.length) {
+      const section = document.createElement('section');section.className = 'ai-variant-shared';
+      const title = sectionLabel(shared[0]), bare = /^(?:同批|共用)?发布前核对\s*[：:]?$/.test(title);
+      section.innerHTML = `<h4>${esc(bare ? title.replace(/[：:]$/,'') : '发布前核对')}</h4>`;
+      $$('.ai-variant-card',output).at(-1).after(section);
+      section.append(...shared.slice(bare ? 1 : 0).filter(node => node.tagName !== 'HR'));
+      shared.filter(node => node.isConnected && !section.contains(node)).forEach(node => node.remove());
+    }
+    if (!board) return;
+    const cards = () => $$('.ai-variant-card',output), showAll = $('[data-variant-show-all]',board);
+    const select = number => {
+      picks.set(key,number);
+      $$('[data-variant-pick]',board).forEach(row => row.setAttribute('aria-selected',String(row.dataset.variantPick === number)));
+      cards().forEach(card => card.hidden = card.dataset.variantCard !== number);
+      showAll.textContent = '全部展开';
+    };
+    board.addEventListener('click',event => {
+      const row = event.target.closest('[data-variant-pick]');
+      if (row) {select(row.dataset.variantPick);return;}
+      if (!event.target.closest('[data-variant-show-all]')) return;
+      const expand = cards().some(card => card.hidden);
+      cards().forEach(card => card.hidden = !expand && card.dataset.variantCard !== picks.get(key));
+      showAll.textContent = expand ? '只看选中的一条' : '全部展开';
+    });
+    board.addEventListener('keydown',event => {
+      const row = event.target.closest('[data-variant-pick]');if (!row) return;
+      if ((event.key === 'Enter' || event.key === ' ') && row.tagName !== 'BUTTON') {event.preventDefault();select(row.dataset.variantPick);}
+      else if (/^Arrow(?:Down|Up|Left|Right)$/.test(event.key)) {
+        event.preventDefault();
+        (/Down|Right/.test(event.key) ? row.nextElementSibling : row.previousElementSibling)?.closest?.('[data-variant-pick]')?.focus();
+      }
+    });
+  }
+  function repaintVariantStatus() {
+    $$('.ai-round-output[data-variant-round]').forEach(output => {
+      const round = (ai.task?.rounds || []).find(item => item.round_id === output.dataset.variantRound);
+      if (round) $$('[data-variant-status]',output).forEach(cell => {const html = variantStatus(round,cell.dataset.variantStatus);if (cell.innerHTML !== html) cell.innerHTML = html;});
+    });
+  }
+  function taskScriptsLoaded(taskId,rows) {ai.taskScripts = {taskId,rows:Array.isArray(rows) ? rows : []};repaintVariantStatus();}
   // Read time is counted by the workbench from each "口播（配音用）" block, never taken from the model.
   function updateReadEstimates(node,round) {
     const items = Array.isArray(round.read_estimates) ? round.read_estimates : [];
@@ -716,6 +917,7 @@ window.CaseAI = (() => {
       const recovered = Object.values(round.stages || {}).some(stage => stage.output || stage.messages?.some(entry => entry.phase !== 'commentary' && entry.text));
       const text = round.output || (active(round) ? round.stages ? round.active_stage === 'format' ? '正在整理成可制作格式（只改排版，完成后逐字核对）。' : round.active_stage === 'review' ? '初稿已保存，正在独立复核。完成后显示修订候选。' : '正在起草。独立复核完成后显示修订候选。' : '正在等待回复…' : round.kind === 'format' ? '格式整理没有通过，原候选保持不变；可以在原候选里手动拆分口播。' : recovered ? '本轮未完成，已保留的文本可在执行记录中查看。' : '本轮没有返回可用回答。');
       writeResponseBody(output,text,round.status === 'completed' && !!round.output,canonical && isWriting(ai.task));
+      if (canonical && isWriting(ai.task) && !selectionInside(output)) layoutVariants(output,round);
     }
     const copy = $('.ai-copy-round',node), text = roundCopyText(round);
     updateTitleLines(node,text,round.status === 'completed' && isWriting(ai.task));
@@ -804,6 +1006,7 @@ window.CaseAI = (() => {
   function variantHeadings() {
     const open = $$('#ai-rounds > .ai-round:not(.is-collapsed)'), found = [];
     open.forEach((round,roundIndex) => {
+      if ($('.ai-variant-card',round)) return;
       $$('.markdown-body h2,.markdown-body h3,.markdown-body h4,.markdown-body h5,.markdown-body p',round).forEach(heading => {
         if (heading.closest('[hidden]')) return;
         // Variants are usually a bold-only line ("**202H-S2 · 变体 #1 · …**"), not a markdown heading.
@@ -1092,7 +1295,8 @@ window.CaseAI = (() => {
     } catch (error) {if (sequence !== ai.sequence || pageHash() !== hash) return;if (error.status === 404) renderMissing();else $('#content').innerHTML = `<div class="empty"><h3>暂时无法读取任务</h3><p>${esc(message(error))}</p><button type="button" class="secondary" id="retry-ai-detail">重新读取</button></div>`;$('#retry-ai-detail')?.addEventListener('click',() => routeAI(true));}
   }
   // Running and completed work share the same content entry; the badge still shows active AI tasks.
-  $('#ai-nav').onclick = () => {location.hash = pageURL(window.WorkbenchGuest ? '#ai' : '#content');};
+  // Reopen the list with the view and filters it was last left on.
+  $('#ai-nav').onclick = () => {const page = window.WorkbenchGuest ? 'ai' : 'content';location.hash = window.WorkbenchShell?.listURL?.(page) || pageURL('#' + page);};
   $('#ai-create-form').addEventListener('submit',submitCreate);
   $('#ai-create-instruction').addEventListener('input',event => {if (ai.modal) {ai.modal.instruction = event.target.value;updateCreateControls();}});
   // Ctrl/Cmd+Enter submits from either writing box, through the form's own checks.
@@ -1122,5 +1326,5 @@ window.CaseAI = (() => {
   if (state.detail && pageHash() === `#case/${state.detail.case_id}` && !$('.ai-case-actions')) void mountCaseActions(state.detail);
   const closeMenus = event => $$('.ai-menu[open]').forEach(menu => {if (event.key === 'Escape' || !menu.contains(event.target)) menu.open = false;});
   window.addEventListener('click',closeMenus,true);window.addEventListener('keydown',event => {if (event.key === 'Escape') closeMenus(event);});
-  return {mountCaseActions,startWriting,startFromDirection,startBlank,startWithMaterials,modalOpen,hasUnsavedInput,refreshAvailability,refreshDefaults,captureListState,route:routeAI,formatRound,taskDisplayTitle:contextTitle,taskManagementLabel:managementLabel};
+  return {mountCaseActions,startWriting,startFromDirection,startBlank,startWithMaterials,modalOpen,hasUnsavedInput,refreshAvailability,refreshDefaults,captureListState,route:routeAI,formatRound,taskDisplayTitle:contextTitle,taskManagementLabel:managementLabel,taskScriptsLoaded};
 })();

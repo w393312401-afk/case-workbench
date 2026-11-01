@@ -271,6 +271,11 @@ class CreationStore:
                 all(left.get(key) == right.get(key) for key in ("candidate_id", "direction_id", "script_id")) and
                 CreationStore._same_variant_identity(left.get("variant_ref"), right.get("variant_ref")))
 
+    def variant_links(self):
+        """Copies of the variant links only; callers that need no other record skip cloning the whole catalog."""
+        with self.lock:
+            return copy.deepcopy(self._read_catalog()["variant_links"])
+
     def associate_candidate(self, candidate_id, *, script_id, product, direction_id, variant_ref, reference_url,
                             dry_run=False):
         """Fill reviewed direction metadata and a standard link, preserving the adopted version."""
@@ -278,49 +283,66 @@ class CreationStore:
         script_id = text(script_id, "文案编号", limit=200)
         reference_url = text(reference_url, "参考视频来源", False, 1000)
         with self.lock:
+            # Start-up re-checks every saved card, and nearly all are already linked. Look at only this script's
+            # records first; whatever would change (or fail) is decided on a full copy exactly as before.
+            snapshot = self._read_catalog()
+            part = {"scripts": [copy.deepcopy(item) for item in snapshot["scripts"] if item["id"] == script_id],
+                    "variant_links": [copy.deepcopy(row) for row in snapshot["variant_links"]
+                                      if row.get("kind") == "script" and row.get("record_id") == script_id]}
+            try:
+                script, changed = self._candidate_script(part, script_id, product, association, candidate_id, reference_url)
+            except Exception:  # Not final: the full-copy pass below raises the real error.
+                script = None
+            if script is not None and not changed:
+                return script
             data = self.read()
-            script = next((item for item in data["scripts"] if item["id"] == script_id), None)
-            if not script:
-                raise CreationError(404, "这条文案版本不存在。")
-            if script.get("product") != product:
-                raise CreationError(409, "候选与文案所属产品不一致，未补关联。")
-            if script.get("direction_id") and script["direction_id"] != association["direction_id"]:
-                raise CreationError(409, "文案已有其他方向，不能覆盖。")
-            previous = script.get("candidate_direction")
-            if previous is not None and not self._same_candidate_association(previous, association):
-                raise CreationError(409, "文案已有其他候选方向或变体关联，不能覆盖。")
-            frozen_ref = (script.get("source") or {}).get("variant_ref")
-            if frozen_ref is not None and not self._same_variant_identity(frozen_ref, association["variant_ref"]):
-                raise CreationError(409, "文案原始来源已指定其他变体，不能覆盖关联。")
-            links = [row for row in data["variant_links"]
-                     if row.get("kind") == "script" and row.get("record_id") == script_id]
-            if len(links) > 1:
-                raise CreationError(409, "文案存在重复变体关联，请先核对原记录。")
-            if links and (links[0].get("product") != product or
-                          links[0].get("direction_id") != association["direction_id"] or
-                          not self._same_variant_identity(links[0].get("variant_ref"), association["variant_ref"])):
-                raise CreationError(409, "文案已有其他方向或变体关联，不能覆盖。")
-            changed = not script.get("direction_id") or previous is None or not links
-            if not links:
-                self._variant_link(data, {"link": {"kind": "script", "record_id": script_id, "product": product,
-                    "direction_id": association["direction_id"], "variant_ref": association["variant_ref"],
-                    "evidence": {"note": "按已核对的插件候选自动归入对应方向。",
-                                 "refs": [candidate_id] + ([reference_url] if reference_url else [])}}})
-            script["direction_id"] = association["direction_id"]
-            if previous is None:
-                script["candidate_direction"] = copy.deepcopy(association)
-            history = script.setdefault("history", [])
-            if not any(row.get("event") == "candidate_direction" and row.get("candidate_id") == candidate_id
-                       for row in history):
-                changed = True
-                history.append({"at": now(), "status": script.get("status", "adopted"),
-                    "event": "candidate_direction", "note": "按插件候选自动归入对应方向；正文和版本编号保持不变。",
-                    **copy.deepcopy(association)})
-            if changed:
-                script["updated_at"] = now()
-                if not dry_run:
-                    self.write(data)
-            return copy.deepcopy(script)
+            script, changed = self._candidate_script(data, script_id, product, association, candidate_id, reference_url)
+            if changed and not dry_run:
+                self.write(data)
+            return script
+
+    def _candidate_script(self, data, script_id, product, association, candidate_id, reference_url):
+        """Apply a candidate association to data in place; returns the script copy and whether anything changed."""
+        script = next((item for item in data["scripts"] if item["id"] == script_id), None)
+        if not script:
+            raise CreationError(404, "这条文案版本不存在。")
+        if script.get("product") != product:
+            raise CreationError(409, "候选与文案所属产品不一致，未补关联。")
+        if script.get("direction_id") and script["direction_id"] != association["direction_id"]:
+            raise CreationError(409, "文案已有其他方向，不能覆盖。")
+        previous = script.get("candidate_direction")
+        if previous is not None and not self._same_candidate_association(previous, association):
+            raise CreationError(409, "文案已有其他候选方向或变体关联，不能覆盖。")
+        frozen_ref = (script.get("source") or {}).get("variant_ref")
+        if frozen_ref is not None and not self._same_variant_identity(frozen_ref, association["variant_ref"]):
+            raise CreationError(409, "文案原始来源已指定其他变体，不能覆盖关联。")
+        links = [row for row in data["variant_links"]
+                 if row.get("kind") == "script" and row.get("record_id") == script_id]
+        if len(links) > 1:
+            raise CreationError(409, "文案存在重复变体关联，请先核对原记录。")
+        if links and (links[0].get("product") != product or
+                      links[0].get("direction_id") != association["direction_id"] or
+                      not self._same_variant_identity(links[0].get("variant_ref"), association["variant_ref"])):
+            raise CreationError(409, "文案已有其他方向或变体关联，不能覆盖。")
+        changed = not script.get("direction_id") or previous is None or not links
+        if not links:
+            self._variant_link(data, {"link": {"kind": "script", "record_id": script_id, "product": product,
+                "direction_id": association["direction_id"], "variant_ref": association["variant_ref"],
+                "evidence": {"note": "按已核对的插件候选自动归入对应方向。",
+                             "refs": [candidate_id] + ([reference_url] if reference_url else [])}}})
+        script["direction_id"] = association["direction_id"]
+        if previous is None:
+            script["candidate_direction"] = copy.deepcopy(association)
+        history = script.setdefault("history", [])
+        if not any(row.get("event") == "candidate_direction" and row.get("candidate_id") == candidate_id
+                   for row in history):
+            changed = True
+            history.append({"at": now(), "status": script.get("status", "adopted"),
+                "event": "candidate_direction", "note": "按插件候选自动归入对应方向；正文和版本编号保持不变。",
+                **copy.deepcopy(association)})
+        if changed:
+            script["updated_at"] = now()
+        return copy.deepcopy(script), changed
 
     def replay(self, kind, body):
         """Return a durable receipt before the caller resolves a now-changed source."""
@@ -654,7 +676,7 @@ class CreationStore:
         elif value.get("task_id") or value.get("round_id"):
             raise CreationError(400, "候选来源必须由服务端核验。")
         if source is not None and parent is None:
-            # Adopting the same candidate text again (a retried 制作图文 or 制作视频) keeps the version
+            # Adopting the same candidate text again (a retried 制作视频) keeps the version
             # already adopted, so one variant never becomes several identical scripts.
             body_text = text(value.get("text"), "文案正文", limit=500000)
             translation = text(value.get("translation_zh", ""), "中文译文", False, 500000)

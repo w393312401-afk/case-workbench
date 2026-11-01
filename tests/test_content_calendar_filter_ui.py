@@ -89,6 +89,7 @@ class ContentCalendarFilterBrowserTests(unittest.TestCase):
 
         second = self.content_page()
         self.assertIsNot(first.context, second.context)
+        filter_fixture.open_saved_views(second)
         second.locator(f'[data-flow-saved-view="{stored["id"]}"]').click()
         self.assert_rows(second, [rows["pending"]])
         self.assertEqual(json.loads(self.params(second)["filter"][0]), expected_filter)

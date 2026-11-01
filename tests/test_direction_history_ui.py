@@ -66,9 +66,11 @@ class DirectionHistoryBrowserTests(unittest.TestCase):
 
     def test_linked_historical_video_opens_exact_video_performance_route(self):
         page, _ = self.history_page(width=390)
-        flow = page.locator('[data-variant-progress="0"]')
-        self.assertIn("已关联 1 条视频", flow.inner_text())
-        self.assertNotIn("已登记 1 条发布", flow.inner_text())
+        # Only the stages that need you or are under way speak in the folded row.
+        flow = page.locator('[data-variant-state="0"]')
+        self.assertIn("已关联 1 条视频", flow.text_content())
+        self.assertIn("制作中", flow.text_content())
+        self.assertNotIn("已登记 1 条发布", flow.text_content())
         records = self.expand_history(page)
         video = records.get_by_role("link", name="7664986913497009439", exact=True)
         self.assertEqual(video.get_attribute("href"), "#/202H/videos?video=7664986913497009439")

@@ -27,6 +27,46 @@ Set the angle once. Keep it steady through every pass.
 """
 
 
+def titled_variant(number, structure, first):
+    """One variant as the writing skill lays it out, with a JSON carousel block under 图文版."""
+    return f"""---
+
+**202H-S2 · 变体 #{number} · {structure}**
+
+开头画面：刃面倒影 {number}。
+
+开头屏显：`Screen {number}`（屏显 {number}）
+
+**口播（配音用）**
+
+```
+{first}
+Second line {number}.
+```
+
+**对应中文**
+
+```
+第一句 {number}。
+第二句 {number}。
+```
+
+**意群表**
+
+| # | 口播 |
+| --- | --- |
+| 1 | {first} |
+
+补拍清单：同一刃面 {number}。
+
+**图文版**
+
+```
+{{"content_type": "photo_carousel", "variant": "#{number}"}}
+```
+"""
+
+
 class AIProductionEntryBrowserTests(unittest.TestCase):
     setUpClass = classmethod(browser.AISelectionBrowserTests.setUpClass.__func__)
     tearDownClass = classmethod(browser.AISelectionBrowserTests.tearDownClass.__func__)
@@ -81,42 +121,125 @@ class AIProductionEntryBrowserTests(unittest.TestCase):
           const record = (kind, task, round) => {
             window.productionEntryCalls.push(JSON.parse(JSON.stringify({kind, task, round})));
           };
-          window.CaseProduction.fromCandidateCarousel = (task, round) => record('carousel', task, round);
           window.CaseProduction.fromCandidate = (task, round) => record('video', task, round);
           window.CaseScripts.adoptCandidate = (task, round) => record('adopt', task, round);
         }""")
         return page, task, round_record, posts
 
-    def test_candidate_starts_video_production_and_keeps_adoption_in_more_actions(self):
-        self.assertNotIn("photo_carousel", VOICE_OUTPUT)
-        self.assertNotIn("叠字", VOICE_OUTPUT)
-        outputs = {
-            "voice_without_carousel": VOICE_OUTPUT,
-            "legacy_overlay": VOICE_OUTPUT + "\n旧版叠字：Hold the angle steady.\n",
-            "legacy_carousel": VOICE_OUTPUT + '\n旧格式：{"kind":"photo_carousel"}\n',
-        }
-        for name, output in outputs.items():
-            with self.subTest(output=name):
-                page, task, round_record, posts = self.open_candidate(output)
-                primary = page.locator(".ai-candidate-actions > [data-start-production]")
-                self.assertEqual(primary.inner_text(), "开始制作")
-                primary.click()
-                self.assertEqual(page.evaluate("window.productionEntryCalls"), [
-                    {"kind": "video", "task": task, "round": round_record},
-                ])
-                menu = page.locator(".ai-candidate-actions .ai-menu")
-                menu.locator("summary").click()
-                self.assertEqual(menu.locator("[data-produce-carousel]").count(), 0)
-                self.assertEqual(menu.locator("[data-produce-video]").count(), 0)
-                self.assertEqual(menu.locator("[data-adopt-script]").inner_text(), "保存采用稿")
-                menu.locator("[data-adopt-script]").click()
-                self.assertEqual(page.evaluate("window.productionEntryCalls"), [
-                    {"kind": "video", "task": task, "round": round_record},
-                    {"kind": "adopt", "task": task, "round": round_record},
-                ])
-                self.assertEqual(page.locator("#toast .toast-item").count(), 0)
-                self.assertEqual(posts, [])
-                page.close()
+    def visible_cards(self, page):
+        return [card.get_attribute("data-variant-card") for card in page.locator(".ai-variant-card").all() if card.is_visible()]
+
+    def test_five_or_more_variants_use_an_overview_table_and_one_card_at_a_time(self):
+        structures = ["回应质疑", "其他：原理讲解", "送礼", "身份认同", "结果倒叙"]
+        output = "本轮说明在最前。\n\n" + "".join(titled_variant(index + 1, name, f"First line {index + 1}.")
+                                             for index, name in enumerate(structures))
+        page, task, round_record, posts = self.open_candidate(output)
+        board = page.locator(".ai-variant-board")
+        board.wait_for()
+        self.assertIn("本轮说明在最前", page.locator(".ai-round-output").inner_text())
+        rows = board.locator(".ai-variant-overview [data-variant-pick]")
+        self.assertEqual(rows.count(), 5)
+        self.assertEqual(rows.nth(1).locator("span").nth(0).inner_text(), "原理讲解")
+        self.assertEqual(rows.nth(1).locator("span").nth(1).inner_text(), "Screen 2")
+        self.assertEqual(rows.nth(1).locator(".ai-variant-first").inner_text(), "First line 2.")
+        self.assertEqual(rows.nth(1).locator("[data-variant-status]").inner_text(), "待定")
+        self.assertEqual(self.visible_cards(page), ["1"])
+        rows.nth(2).click()
+        self.assertEqual(self.visible_cards(page), ["3"])
+        self.assertEqual(rows.nth(2).get_attribute("aria-selected"), "true")
+        rows.nth(2).press("ArrowUp")
+        page.keyboard.press("Enter")
+        self.assertEqual(self.visible_cards(page), ["2"])
+        board.locator("[data-variant-show-all]").click()
+        self.assertEqual(self.visible_cards(page), ["1", "2", "3", "4", "5"])
+        board.locator("[data-variant-show-all]").click()
+        self.assertEqual(self.visible_cards(page), ["2"])
+        # The overview replaces the right-edge outline, and the raw answer stays complete.
+        self.assertTrue(page.locator("#ai-variant-nav").is_hidden())
+        self.assertEqual(page.locator(".ai-raw-output pre").text_content(), output)
+        # Saved scripts mark their variant by index, or by "变体 #N" in older titles; other rounds never count.
+        page.evaluate("""([task, round]) => window.CaseAI.taskScriptsLoaded(task, [
+          {status: 'published', title: '任意标题', source: {task_id: task, round_id: round, variant_index: 1}},
+          {status: 'adopted', title: '202H-S2 变体 #3 · 送礼', source: {task_id: task, round_id: round}},
+          {status: 'published', title: '202H-S2 变体 #1', source: {task_id: task, round_id: 'AIR-another-round'}}])""",
+                      [TASK_ID, ROUND_ID])
+        self.assertEqual(rows.locator("[data-variant-status]").all_inner_texts(), ["待定", "已发布", "已采纳", "待定", "待定"])
+        self.assertEqual(page.locator('.ai-variant-card[data-variant-card="2"] [data-variant-status]').inner_text(), "已发布")
+        page.set_viewport_size({"width": 390, "height": 850})
+        self.assertFalse(page.evaluate("document.documentElement.scrollWidth>document.documentElement.clientWidth"))
+        self.assertEqual(posts, [])
+
+    def test_a_single_variant_is_one_card_without_a_picker(self):
+        page, task, round_record, posts = self.open_candidate(VOICE_OUTPUT)
+        card = page.locator(".ai-variant-card")
+        card.wait_for()
+        self.assertEqual(page.locator(".ai-variant-board").count(), 0)
+        self.assertEqual(card.locator(".ai-variant-card-head h4").inner_text(), "变体 1：固定角度")
+        self.assertEqual(card.locator(".ai-variant-pairs p").all_inner_texts(),
+                         ["Set the angle once. Keep it steady through every pass.", "先固定角度，每一遍都保持稳定。"])
+        self.assertEqual(card.locator(".ai-variant-fold > summary").all_inner_texts(), ["意群表"])
+        self.assertEqual(page.locator(".ai-raw-output pre").text_content(), VOICE_OUTPUT)
+
+    def test_untitled_variants_split_at_rules_and_share_the_closing_check(self):
+        def untitled(number):
+            return f"""开头逻辑：处境开场 {number}。
+
+开头画面（待核，新拍）：手在磨石上 {number}。
+
+**开头屏显**：Guided {number}
+
+**口播（配音用）**
+
+```
+Spoken {number}.
+```
+
+**对应中文**
+
+```
+口播 {number}。
+```
+
+补拍清单：以下镜头
+
+- 镜头 {number}
+
+**发布文案**
+
+测试方向：202H-S1 · {number}
+"""
+        output = f"按美区英语口播写，三版共用的说明。\n\n{untitled(1)}\n---\n\n{untitled(2)}\n**发布前核对**：确认读法与购买动机。\n\n经验范围：弱参考。\n"
+        page, task, round_record, posts = self.open_candidate(output)
+        chips = page.locator(".ai-variant-chips [data-variant-pick]")
+        chips.first.wait_for()
+        self.assertEqual(chips.count(), 2)
+        self.assertEqual(page.locator(".ai-variant-card-head h4").all_inner_texts(), ["第 1 条", "第 2 条"])
+        output_text = page.locator(".ai-round-output")
+        self.assertEqual(output_text.locator("> p").first.inner_text(), "按美区英语口播写，三版共用的说明。")
+        card = page.locator('.ai-variant-card[data-variant-card="1"]')
+        self.assertEqual([line.split("：")[0] for line in card.locator(".ai-variant-opening p").all_inner_texts()],
+                         ["开头逻辑", "开头画面（待核，新拍）", "开头屏显"])
+        self.assertEqual(card.locator(".ai-variant-fold > summary").all_inner_texts(), ["补拍清单", "发布文案"])
+        card.locator(".ai-variant-fold > summary").first.click()
+        self.assertIn("镜头 1", card.locator(".ai-variant-fold").first.inner_text())
+        shared = page.locator(".ai-variant-shared")
+        self.assertTrue(shared.is_visible())
+        self.assertEqual(shared.locator("h4").inner_text(), "发布前核对")
+        self.assertIn("确认读法与购买动机", shared.inner_text())
+        self.assertIn("经验范围", shared.inner_text())
+        self.assertNotIn("确认读法", page.locator('.ai-variant-card[data-variant-card="2"]').text_content())
+        self.assertEqual(posts, [])
+
+    def test_a_repeated_title_line_stays_with_its_variant(self):
+        output = ("**变体 #7 · 逐件对照**\n\n**202H-S2 · 变体 #7 逐件对照 ｜ 估读未计数**\n\n" + titled_variant(7, "", "One kit.").split("\n", 4)[4]
+                  + titled_variant(9, "其他:送礼", "For the knife person."))
+        page, task, round_record, posts = self.open_candidate(output)
+        chips = page.locator(".ai-variant-chips [data-variant-pick]")
+        chips.first.wait_for()
+        self.assertEqual(chips.count(), 2)
+        self.assertEqual(page.locator(".ai-variant-card-head h4").first.inner_text(), "变体 #7 · 逐件对照")
+        self.assertIn("估读未计数", page.locator(".ai-variant-subtitle").inner_text())
+        self.assertEqual(chips.nth(1).locator("span").first.inner_text(), "送礼")
 
     def test_other_completed_task_types_offer_results_without_writing_production(self):
         for action in ("review", "retrospective"):

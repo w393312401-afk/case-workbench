@@ -87,6 +87,9 @@ class AIActivityTests(unittest.TestCase):
         self.assertEqual(task["status"], "failed")
         run = self.activity.feed()["items"][0]
         self.assertEqual(run["status"], "failed")
+        # The safe reason is said once, without the generic 「本轮未完成」 sentence in front of it.
+        self.assertTrue(run["message"])
+        self.assertNotIn("本轮未完成", run["message"])
         self.assertNotIn("TOKEN_SECRET", json.dumps(self.activity.logs(run["run_id"]), ensure_ascii=False))
         with patch.object(self.manager.activity, "record", side_effect=OSError("database unavailable")):
             task = self.wait(self.manager.create(self.identifier, self.body())["task_id"])

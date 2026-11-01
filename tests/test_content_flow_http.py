@@ -12,7 +12,6 @@ import zipfile
 import test_server as fixture
 from test_ai_tasks import FakeBridge
 import test_phase4_http as creation_fixture
-import test_production_carousel_publish as carousel_publish_fixture
 from test_production import CANDIDATE
 from test_video_publication import VIDEO
 from data_backup import BackupManager
@@ -239,64 +238,6 @@ class ContentFlowHTTPTests(unittest.TestCase):
             self.assertEqual(self.content(view="all", status=status)["items"], [])
         self.assertEqual(self.stored_business(), before)
 
-    def test_incomplete_workflow_filter_combines_both_formats_and_keeps_other_filters(self):
-        # Completion facts are covered by the current-source tests below. A
-        # fixed snapshot keeps this test about HTTP filtering and pagination.
-        def record(identifier, kind, **values):
-            return {"id": identifier, "kind": kind, "product": "202H", "title": "待办 Shared",
-                    "direction_id": "202H-S1", "stage": "draft", "stage_label": "待制作",
-                    "archived": False, "history": False, "busy": False, "needs_attention": True,
-                    "workflow_complete": False, "updated_at": "2026-10-20T10:00:00Z",
-                    "script_ids": [], "task_ids": [], "production_ids": [], **values}
-
-        rows = [
-            record("video:VIDEO-draft", "video"),
-            record("video:VIDEO-busy", "video", busy=True, needs_attention=False),
-            record("video:VIDEO-publish", "video", stage="awaiting_publication", needs_attention=False),
-            record("carousel:CAR-draft", "carousel"),
-            record("carousel:CAR-busy", "carousel", busy=True, needs_attention=False),
-            record("carousel:CAR-publish", "carousel", stage="awaiting_publication", needs_attention=False),
-            record("video:VIDEO-done", "video", workflow_complete=True, history=True, stage="published",
-                   related_workflows=[{"id": "carousel:CAR-draft", "complete": False}]),
-            record("carousel:CAR-done", "carousel", workflow_complete=True, history=True, stage="published"),
-            record("video:VIDEO-archived", "video", archived=True, history=True),
-            record("carousel:CAR-archived", "carousel", archived=True, history=True),
-            record("script:SCRIPT-unused", "script"),
-            record("task:TASK-candidate", "task"),
-            record("video:VIDEO-unknown", "video", workflow_complete=None),
-            record("video:VIDEO-other", "video", product="103N"),
-        ]
-        management = self.server.app.content_management.public()
-
-        def snapshot(product=None):
-            return ([row for row in rows if not product or row["product"] == product], management)
-
-        before = self.stored_business()
-        with patch.object(self.server.app, "_content_snapshot", side_effect=snapshot) as read:
-            query = {"view": "all", "status": "workflow_incomplete"}
-            expected = {row["id"] for row in rows[:6]}
-            self.assertEqual({row["id"] for row in self.content(**query)["items"]}, expected | {"video:VIDEO-other"})
-            combined = self.content(**query, product="202H")
-            self.assertEqual({row["id"] for row in combined["items"]}, expected)
-            read.assert_called_with("202H")
-            self.assertEqual(combined["total"], 6)
-            self.assertEqual({row["kind"] for row in combined["items"]}, {"video", "carousel"})
-            self.assertNotIn("video:VIDEO-done", {row["id"] for row in combined["items"]},
-                             "An unfinished linked carousel does not reopen the video's own completed chain")
-            for kind in ("video", "carousel"):
-                with self.subTest(kind=kind):
-                    filtered = self.content(**query, product="202H", kind=kind, q="sHaReD", page_size=2)
-                    matching = sorted((identifier for identifier in expected if identifier.startswith(kind + ":")), reverse=True)
-                    self.assertEqual((filtered["total"], filtered["pages"], filtered["page"]), (3, 2, 1))
-                    self.assertEqual([row["id"] for row in filtered["items"]], matching[:2])
-                    last = self.content(**query, product="202H", kind=kind, q="shared", page_size=2, page=999)
-                    self.assertEqual((last["page"], [row["id"] for row in last["items"]]), (2, matching[2:]))
-            self.assertEqual(self.content(**query, product="202H", q="VIDEO-publish")["items"][0]["id"], "video:VIDEO-publish")
-            self.assertEqual(self.content(**query, product="202H", q="does not exist")["items"], [])
-            self.assertEqual(self.content(**query, kind="script")["items"], [])
-            self.assertEqual(self.content(**query, kind="task")["items"], [])
-        self.assertEqual(self.stored_business(), before, "Filtering must leave the content and production stores unchanged")
-
     def test_unified_restore_unarchives_task_script_and_video_sources_idempotently(self):
         task = self.completed_task()
         self.ok("POST", "/api/ai/tasks/manage", {"request_id": uuid4().hex, "archived": True,
@@ -411,55 +352,21 @@ class ContentFlowHTTPTests(unittest.TestCase):
         self.assertEqual(self.server.app.creation.get_script(script["id"])["status"], "published")
         self.assertEqual(self.ok("GET", endpoint)["publication"]["post_id"], "7999999999999999912")
 
-    def test_carousel_publication_checks_current_package_and_preserves_publication_when_archived(self):
-        # The existing fixture makes and confirms real temporary images and a
-        # checked ZIP using fake generation, then exposes the actual HTTP app.
-        scenario = carousel_publish_fixture.CarouselPublishTests()
-        self.addCleanup(scenario.doCleanups)
-        scenario.setUp()
-        scenario.publish()
-        identifier = "carousel:" + scenario.item["id"]
-
-        def queue(view="attention", **filters):
-            status, _, response = scenario.request("GET", "/api/content?" + urlencode({"view": view, **filters}))
-            self.assertEqual(status, 200, response)
-            return response["items"]
-
-        self.assertEqual(queue(), [])
-        published = queue("all")
-        self.assertEqual([(row["id"], row["stage"], row["history"]) for row in published], [(identifier, "published", True)])
-        self.assertTrue(published[0]["workflow_complete"])
-        self.assertTrue(all(step["done"] for step in published[0]["workflow_steps"]))
-        self.assertEqual(queue("all", status="workflow_incomplete"), [])
-        original_bytes = scenario.stored_bytes()
-        self.assertTrue(queue("all")[0]["workflow_complete"])
-        self.assertEqual(scenario.stored_bytes(), original_bytes, "Completion checks must be read-only")
-        original_publication = scenario.current()["publication"]
-        scenario.pick_new_base(1)
-        revised = queue("all")
-        self.assertEqual([row["id"] for row in revised], [identifier])
-        self.assertNotEqual(revised[0]["stage"], "published")
-        self.assertFalse(revised[0]["history"])
-        steps = {step["key"]: step["done"] for step in revised[0]["workflow_steps"]}
-        self.assertFalse(steps["images"])
-        self.assertFalse(steps["confirm"])
-        self.assertFalse(steps["package"])
-        self.assertFalse(steps["publish"])
-        self.assertEqual([row["id"] for row in queue("all", status="workflow_incomplete")], [identifier])
-        scenario.bench.archive_carousel(scenario.item["id"], scenario.body(archived=True))
-        self.assertEqual(queue(), [])
-        self.assertTrue(queue("all")[0]["source_archived"])
-        self.assertEqual(queue("all", status="workflow_incomplete"), [])
-        self.assertEqual(scenario.current()["publication"], original_publication)
-        self.assertEqual(scenario.script()["status"], "published")
-        body = {"request_id": uuid4().hex, "revision": scenario.bench.content_management.public()["revision"],
-                "id": identifier, "management": {"archived": False}}
-        status, _, restored = scenario.request("POST", "/api/content/manage", body)
-        self.assertEqual(status, 200, restored)
-        self.assertFalse(queue("all")[0]["archived"])
-        self.assertFalse(scenario.current()["archived"])
-        self.assertEqual(scenario.current()["publication"], original_publication)
-        self.assertEqual(scenario.request("POST", "/api/content/manage", body)[2], restored)
+    def test_each_timeline_of_an_order_keeps_its_own_calendar_day(self):
+        job = self.job(self.script())
+        take = "TAK-111111111111"
+        data = self.server.app.production.read()
+        row = next(row for row in data["jobs"] if row["id"] == job["id"])
+        row.update(selected_take=take, timelines=[{"unique_id": "timeline-1", "take_id": take, "saved": True},
+                                                  {"unique_id": "timeline-2", "take_id": take, "saved": True}])
+        self.server.app.production.write(data)
+        order, other = "video:" + job["id"], "video:" + job["id"] + "_tl_timeline-1"
+        self.ok("POST", "/api/content/calendar", {"id": order, "calendar_date": "2026-11-10"})
+        self.ok("POST", "/api/content/calendar", {"id": other, "calendar_date": "2026-11-12"})
+        days = [self.ok("GET", "/api/content/calendar?" + urlencode({"id": key}))["calendar_date"] for key in (order, other)]
+        self.assertEqual(days, ["2026-11-10", "2026-11-12"])
+        status, _, _ = self.request("POST", "/api/content/calendar", {"id": "video:" + job["id"] + "_tl_unknown", "calendar_date": "2026-11-12"})
+        self.assertEqual(status, 404)
 
     def test_management_metadata_and_request_receipts_survive_full_backup_restore(self):
         script = self.script(title="备份后仍可继续的内容")
@@ -481,58 +388,8 @@ class ContentFlowHTTPTests(unittest.TestCase):
         self.assertTrue(restored["archived"])
         self.assertEqual(self.ok("POST", "/api/content/manage", body), saved)
 
-    def test_archived_rows_delete_without_backup_and_used_scripts_stay(self):
-        unused = self.script(title="没人用的旧脚本")
-        self.script(title="没人用的旧脚本 v2", parent_id=unused["id"])
-        self.manage("script:" + unused["family_id"], archived=True)
-        posted = self.script(title="已登记视频的脚本")
-        self.ok("POST", "/api/scripts/" + posted["id"] + "/status", {
-            "revision": self.ok("GET", "/api/creation")["revision"], "request_id": uuid4().hex,
-            "script_status": {"status": "published", "video_id": "7999999999999999912", "published_on": "2026-10-01"}})
-        self.manage("script:" + posted["family_id"], archived=True)
-        used = self.script(title="旧版被制作单用到")
-        self.job(used)
-        self.script(title="旧版被制作单用到 v2", parent_id=used["id"])
-        self.manage("script:" + used["family_id"], archived=True)
-        task = self.completed_task()
-        self.manage("task:" + task["task_id"], archived=True)
-        job = self.job(self.script(title="要删除的制作单"))
-        self.manage("video:" + job["id"], archived=True)
-        active = self.job(self.script(title="没有归档的制作单"))
-        targets = sorted(["script:" + unused["family_id"], "task:" + task["task_id"], "video:" + job["id"]])
-        self.assertEqual(self.content(product="202H", view="all")["archived_deletable"], 3)
-        data = self.server.app.data_transfer
-        self.assertEqual(data.config["settings"]["directory"], "")
-        # Missing or broken backup configuration must not affect this explicit deletion action.
-        with patch.object(data, "status", side_effect=RuntimeError("备份状态无法读取")) as status, \
-                patch.object(data, "backup", side_effect=RuntimeError("备份不可用")) as backup:
-            preview = self.ok("POST", "/api/content/delete-archived", {"product": "202H", "preview": True})
-            self.assertEqual(sorted(item["id"] for item in preview["items"]), targets)
-            self.assertEqual(preview["counts"], {"task": 1, "video": 1, "carousel": 0, "script": 1})
-            self.assertEqual(preview["kept"], {"script": 2, "busy": 0})
-            self.assertNotIn("backup_ready", preview)
-            asked = targets + ["video:" + active["id"], "script:" + posted["family_id"]]
-            result = self.ok("POST", "/api/content/delete-archived", {"product": "202H", "ids": asked})
-            status.assert_not_called()
-            backup.assert_not_called()
-        self.assertEqual((result["deleted"], result["failed"]), (3, 2))
-        refused = {entry["id"]: entry["error"] for entry in result["results"] if not entry["ok"]}
-        self.assertEqual(refused, {"video:" + active["id"]: "已不在归档里，没有删除。",
-                                   "script:" + posted["family_id"]: "有版本已登记视频 ID，保留。"})
-        self.assertIsNone(result["backup"])
-        remaining = {row["id"] for row in self.content(product="202H", view="all")["items"]}
-        self.assertTrue({"script:" + posted["family_id"], "script:" + used["family_id"], "video:" + active["id"]} <= remaining)
-        self.assertFalse(set(targets) & remaining)
-        families = {row["family_id"] for row in self.server.app.creation.public()["scripts"]}
-        self.assertNotIn(unused["family_id"], families)
-        self.assertTrue({posted["family_id"], used["family_id"]} <= families)
-        self.assertEqual(self.request("GET", "/api/ai/tasks/" + task["task_id"])[0], 404)
-        self.assertNotIn(job["id"], [row["id"] for row in self.ok("GET", "/api/production")["jobs"]])
-        self.assertEqual(self.content(product="202H", view="all")["archived_deletable"], 0)
-
-
 class ContentSnapshotReuseTests(unittest.TestCase):
-    """Filter, search and page changes may reuse a young snapshot; refresh and any write may not."""
+    """Filter, search and page changes reuse a snapshot; an old one or one from before a write is marked stale."""
     setUp = fixture.WorkbenchHTTPTests.setUp
     stop_server = fixture.WorkbenchHTTPTests.stop_server
     request = fixture.WorkbenchHTTPTests.request
@@ -553,40 +410,62 @@ class ContentSnapshotReuseTests(unittest.TestCase):
             self.assertEqual(read.call_count, 2, "A request without reuse always rebuilds")
             self.content(product="103N", view="all", reuse=1)
             self.assertEqual(read.call_count, 3, "Another product never borrows this snapshot")
+            self.content(product="202H", view="all", reuse=1)
+            self.assertEqual(read.call_count, 3, "nor does reading it evict this product's snapshot")
 
     def test_reuse_expires_and_rejects_unknown_values(self):
-        with self.reads() as read, patch("workbench_content.SNAPSHOT_REUSE_SECONDS", 0):
+        with self.reads() as read, patch("workbench_content.SNAPSHOT_REUSE_SECONDS", 0), \
+                patch("workbench_content.SNAPSHOT_STALE_SECONDS", 0):
             self.content(product="202H")
             time.sleep(.01)
             self.content(product="202H", reuse=1)
             self.assertEqual(read.call_count, 2)
         self.assertEqual(self.request("GET", "/api/content?reuse=yes")[0], 400)
 
-    def test_a_write_request_ends_reuse_even_after_its_response_is_sent(self):
+    def test_an_older_snapshot_answers_at_once_but_says_it_is_stale(self):
+        with self.reads() as read, patch("workbench_content.SNAPSHOT_REUSE_SECONDS", 0):
+            self.assertIs(self.content(product="202H")["stale"], False)
+            time.sleep(.01)
+            self.assertIs(self.content(product="202H", reuse=1, kind="video")["stale"], True)
+            self.assertEqual(read.call_count, 1, "A filter change never waits for a rebuild")
+            self.assertIs(self.content(product="202H", kind="video")["stale"], False)
+            self.assertEqual(read.call_count, 2, "The page's follow-up read rebuilds")
+
+    def test_a_write_marks_older_snapshots_stale_and_nothing_from_its_window_is_kept(self):
         app = self.server.app
         with self.reads() as read:
             self.content(product="202H")
             app.content_write_started()
             try:
-                self.content(product="202H", reuse=1)
-                self.content(product="202H", reuse=1)
-                self.assertEqual(read.call_count, 3, "Nothing is reused or kept while a write is in flight")
+                self.assertIs(self.content(product="202H", reuse=1)["stale"], True, "An older snapshot answers, marked stale")
+                self.content(product="202H")
+                self.assertEqual(read.call_count, 2)
+                self.assertIs(self.content(product="202H", reuse=1)["stale"], True, "A read during the write is not kept")
             finally:
                 app.content_write_finished()
-            self.content(product="202H", reuse=1)
-            self.assertEqual(read.call_count, 4, "The first read after the write rebuilds")
-            self.content(product="202H", reuse=1)
-            self.assertEqual(read.call_count, 4, "and later filter changes reuse that fresh snapshot")
+            self.assertIs(self.content(product="202H", reuse=1)["stale"], True, "and stays stale after the response is sent")
+            self.assertEqual(read.call_count, 2, "Filter changes never wait for a rebuild")
+            self.assertIs(self.content(product="202H")["stale"], False, "The page's follow-up read rebuilds")
+            self.assertIs(self.content(product="202H", reuse=1)["stale"], False, "and later filter changes reuse it")
+            self.assertEqual(read.call_count, 3)
 
-    def test_an_http_write_discards_the_snapshot(self):
+    def test_read_only_extension_calls_keep_the_snapshot_fresh(self):
+        key = self.ok("GET", "/api/public-stats/link")["key"]
+        headers = {"X-TKL-Key": key, "Origin": "chrome-extension://abcdefghijklmnop"}
+        self.content(product="202H")
+        for path in ("/api/public-stats/ping", "/api/public-stats/watch", "/api/public-stats/products"):
+            self.assertEqual(self.request("POST", path, {}, headers=headers, authenticated=False)[0], 200, path)
+        self.assertIs(self.content(product="202H", reuse=1)["stale"], False, "The TK 看板 extension's polling changes nothing")
+        self.request("POST", "/api/public-stats/push", {"videos": []}, headers=headers, authenticated=False)
+        self.assertIs(self.content(product="202H", reuse=1)["stale"], True, "Its pushes may register publications")
+
+    def test_an_http_write_makes_the_snapshot_stale(self):
         with self.reads() as read:
             self.content(product="202H")
-            self.content(product="202H", reuse=1)
-            self.assertEqual(read.call_count, 1)
+            self.assertIs(self.content(product="202H", reuse=1)["stale"], False)
             self.ok("POST", "/api/content/views", {"product": "202H", "action": "import", "views": []})
-            self.content(product="202H", reuse=1)
-            self.assertEqual(read.call_count, 2)
-
+            self.assertIs(self.content(product="202H", reuse=1)["stale"], True)
+            self.assertEqual(read.call_count, 1)
 
 if __name__ == "__main__":
     unittest.main()

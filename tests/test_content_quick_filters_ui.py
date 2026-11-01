@@ -63,6 +63,7 @@ class ContentQuickFiltersBrowserTests(unittest.TestCase):
 
         other = self.content_page()
         self.assertIsNot(page.context, other.context)
+        filter_fixture.open_saved_views(other)
         other.locator(f'[data-flow-saved-view="{stored["id"]}"]').click()
         self.assert_rows(other, [rows["approved"]])
         expect(other.locator(".flow-filter-chip[data-quick-condition]")).to_have_count(2)
@@ -157,6 +158,33 @@ class ContentQuickFiltersBrowserTests(unittest.TestCase):
         # The existing complete editor remains reachable from the rules button.
         page.locator("#content-flow-filter-toggle").click()
         expect(page.locator("#content-flow-filter-editor")).to_be_visible()
+
+    def test_sort_menu_orders_rows_survives_tab_switches_and_resets_from_its_chip(self):
+        rows = self.records()
+        page = self.content_page()
+        self.view(page, "all")
+        order = lambda: page.locator("#content-flow-list .flow-row").evaluate_all("rows => rows.map(row => row.dataset.contentId)")
+        sort = page.locator("#content-flow-sort")
+        expect(page.locator(".flow-sort-chip")).to_have_count(0)
+        sort.locator("summary").click()
+        expect(sort.locator('[data-sort-field="updated"]')).to_have_attribute("aria-checked", "true")
+        with page.expect_response(lambda response: "sort=title_asc" in response.url):
+            sort.locator('[data-sort-field="title"]').click()
+        self.assert_rows(page, rows.values())
+        ascending = order()
+        expect(page.locator(".flow-sort-chip")).to_have_text("标题 · 升序")
+        self.assertEqual(self.params(page)["sort"], ["title_asc"])
+        sort.locator("summary").click()
+        with page.expect_response(lambda response: "sort=title_desc" in response.url):
+            sort.locator('[data-sort-direction="desc"]').click()
+        page.wait_for_function("expected => [...document.querySelectorAll('#content-flow-list .flow-row')].map(row => row.dataset.contentId).join() === expected",
+                               arg=",".join(reversed(ascending)))
+        # The order is a list preference: switching tabs keeps it, the chip's × restores the default.
+        self.view(page, "publish")
+        self.assertEqual(self.params(page)["sort"], ["title_desc"])
+        page.locator("[data-sort-reset]").click()
+        expect(page.locator(".flow-sort-chip")).to_have_count(0)
+        self.assertNotIn("sort", self.params(page))
 
     def test_popover_focus_dismissal_and_small_screen_geometry_in_both_themes(self):
         self.records()

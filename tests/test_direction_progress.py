@@ -3,8 +3,9 @@ import copy
 import json
 import unittest
 from unittest.mock import patch
+from urllib.parse import quote
 
-from direction_progress import build_direction_progress, variant_snapshot
+from direction_progress import attach_performance, build_direction_progress, variant_snapshot
 from direction_store import fingerprint
 from workbench_video_publish import reviewed_source
 import test_direction_loading as loading
@@ -160,15 +161,6 @@ class DirectionProgressTests(unittest.TestCase):
         self.assertEqual([row["video_id"] for row in data["variants"][1]["records"]["publications"]], ["111111"])
         self.assertEqual(data["variants"][0]["next_action"]["kind"], "production")
 
-    def test_carousel_publication_history_stays_visible_and_current_wins(self):
-        carousel = {"id": "CAR-1", "script_id": "SCR-0", "product": "202H", "direction_id": "202H-S1",
-                    "archived": True, "slides": [], "publication": {"id": "new", "post_id": "222222", "published_on": "2026-10-02"},
-                    "publication_history": [{"id": "old", "post_id": "111111", "published_on": "2026-10-01"}]}
-        data = self.build(scripts=[script()], production={"carousels": [carousel]})
-        row = data["variants"][0]
-        self.assertEqual(row["counts"]["publications"], 2)
-        self.assertEqual(row["next_action"]["video_id"], "222222")
-
     def test_corrected_same_post_publication_keeps_current_receipt(self):
         job = {"id": "PRD-1", "script_id": "SCR-0", "product": "202H", "direction_id": "202H-S1",
                "selected_take": "take", "takes": [{"id": "take"}],
@@ -247,6 +239,42 @@ class DirectionProgressHTTPTests(unittest.TestCase):
     request = loading.DirectionLoadingTests.request
     setup_direction = loading.DirectionLoadingTests.setup_direction
     write_task = loading.DirectionLoadingTests.write_task
+
+    def test_each_variant_sums_only_its_own_videos(self):
+        progress = {"variants": [{"records": {"videos": [{"video_id": "111"}],
+                                              "publications": [{"video_id": "111"}, {"video_id": "222"}]}},
+                                 {"records": {"videos": [], "publications": []}}],
+                    "unassigned": {"videos": [{"video_id": "333"}]}}
+        brief = {"111": {"orders": 30.0, "clicks": 1000, "gmv": 10.5, "last_data": "2026-10-18", "headline": "甲", "ctor_pct": 3.0},
+                 "222": {"orders": 10.0, "clicks": 1000, "gmv": 4.5, "last_data": "2026-10-20"},
+                 "333": {"orders": 99.0, "clicks": 100}}
+        attach_performance(progress, brief)
+        first, second = (variant["performance"] for variant in progress["variants"])
+        self.assertEqual((first["video_count"], first["matched_count"], first["orders"], first["clicks"]), (2, 2, 40, 2000))
+        self.assertEqual((first["ctor_pct"], first["data_through"], first["gmv"]), (2.0, "2026-10-20", 15.0))
+        self.assertEqual((second["video_count"], second["orders"], second["ctor_pct"]), (0, 0, None))
+        self.assertEqual(progress["variants"][0]["records"]["videos"][0]["headline"], "甲")
+        self.assertEqual(progress["unassigned"]["videos"][0]["orders"], 99.0)
+
+    def test_content_list_names_a_script_by_the_variant_the_direction_page_gives_it(self):
+        self.setup_direction()
+        app = self.server.app
+        app.direction_catalog("202H")
+        catalog = app.directions.read()
+        catalog["directions"][0]["variants"] = [variant(), variant(1)]
+        app.directions.write(catalog)
+        saved = app.creation.empty()
+        # Written from exactly one catalog variant (#1 问题-解决); its own title still says something else.
+        saved["scripts"] = [script(title="202H-S1 变体 #7 · 旧名", text="Hook line.", translation_zh="开头一句。",
+                                   version=1, family_id="SCR-0", created_at="2026-10-01T00:00:00Z")]
+        app.creation.write(saved)
+        status, _, listing = self.request("GET", "/api/content?product=202H&view=all&page_size=100")
+        self.assertEqual(status, 200, listing)
+        row = next(item for item in listing["items"] if item["id"] == "script:SCR-0")
+        self.assertEqual((row["title"], row["subtitle"]), ("S1 #1 问题-解决", "开头一句。"))
+        # The opening line is searchable too.
+        status, _, found = self.request("GET", "/api/content?product=202H&view=all&q=" + quote("开头一句"))
+        self.assertEqual([item["id"] for item in found["items"]], ["script:SCR-0"])
 
     def test_endpoint_is_read_only_scoped_and_deferred_from_first_page(self):
         self.setup_direction()

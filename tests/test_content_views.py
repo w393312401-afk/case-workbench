@@ -47,6 +47,36 @@ class ContentViewsTests(unittest.TestCase):
         self.assertEqual(failure.exception.status, status)
         return str(failure.exception)
 
+    def test_pinned_is_optional_stored_only_when_set_and_survives_reopen(self):
+        self.save()
+        self.assertNotIn("pinned", self.store.public("202H")["views"][0])
+        pinned = self.save(view(pinned=True))
+        self.assertIs(pinned["views"][0]["pinned"], True)
+        self.assertEqual(self.reopen().public("202H"), pinned)
+        unpinned = self.save(view())
+        self.assertNotIn("pinned", unpinned["views"][0])
+        for value in (False, "yes", 1, None):
+            with self.subTest(pinned=value):
+                self.assert_error(400, self.save, view(pinned=value))
+
+    def order(self, keys, product="202H", revision=None):
+        return self.store.mutate({"product": product, "action": "order", "order": keys,
+                                 "revision": self.store.public(product)["revision"] if revision is None else revision})
+
+    def test_tab_order_is_shared_drops_removed_views_and_rejects_bad_keys(self):
+        self.assertEqual(self.store.public("202H")["tab_order"], [])
+        self.save(view(pinned=True))
+        saved = self.order(["view:test-view", "all", "view:gone", "attention"])
+        self.assertEqual(saved["tab_order"], ["view:test-view", "all", "attention"])
+        self.assertEqual(self.reopen().public("202H"), saved)
+        self.assert_error(409, self.order, ["all"], revision="stale")
+        cleared = self.order([])
+        self.assertEqual(cleared["tab_order"], [])
+        self.assertNotIn("tab_order", json.loads(self.store.path.read_text(encoding="utf-8"))["products"]["202H"])
+        for keys in ("all", ["all", "all"], ["other"], ["view:"], [1], ["view:bad id"], ["all"] * 40):
+            with self.subTest(keys=keys):
+                self.assert_error(400, self.order, keys)
+
     def test_shared_persistence_normalized_product_and_independent_scopes(self):
         empty = self.store.public("202H")
         self.assertEqual(empty["views"], [])

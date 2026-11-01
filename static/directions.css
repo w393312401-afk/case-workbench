@@ -73,11 +73,11 @@
 .dir-filters .search{flex:1 1 260px;max-width:none}
 .dir-filters .search input{background:var(--fill);border-color:transparent;border-radius:10px}
 .dir-filters .search input:focus{background:var(--surface);border-color:var(--accent);outline:3px solid color-mix(in srgb,var(--accent) 22%,transparent);outline-offset:0}
-.dir-segment{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--fill)}
-.dir-segment button{display:inline-flex;align-items:center;gap:5px;padding:6px 11px;border-radius:8px;background:transparent;color:var(--muted);font-size:13px;font-weight:500;white-space:nowrap}
-.dir-segment button small{font-size:12px;color:var(--muted-soft);font-variant-numeric:tabular-nums}
-.dir-segment button:hover{color:var(--ink)}
-.dir-segment button[aria-pressed=true]{background:var(--selected-fill);color:var(--ink);box-shadow:var(--shadow-segment)}
+
+
+
+
+
 .dir-archive{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted-soft);margin-left:auto}
 .dir-archive select{border:0;background:transparent;color:var(--ink);font-size:13px;font-weight:500;padding:4px 2px;cursor:pointer}
 .dir-scope{font-size:13px;color:var(--muted);margin:-8px 0 18px}
@@ -143,36 +143,38 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 .dir-note{font-size:13px;color:var(--muted);margin-top:12px;line-height:1.6}
 .dir-note.is-warn{color:var(--warm-ink)}
 #content .direction-variant-list{display:flex;flex-direction:column;gap:0;margin:0}
-#content .dir-variant-row{border-top:1px solid var(--line);padding:16px 0;min-width:0}
-#content .dir-variant-row:first-child{border-top:0;padding-top:6px}
-#content .dir-variant{background:transparent;border:0;border-radius:0;padding:0;margin:0}
-.dir-variant>summary{position:relative;list-style:none;cursor:pointer;padding-left:20px;border-radius:6px;min-width:0}
+/* Each variant is one line when folded: number, structure, stage dots, the stages that need you, the change. */
+#content .dir-variant-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;column-gap:12px;border-top:1px solid var(--line);padding:1px 0;min-width:0}
+#content .dir-variant-row:first-child{border-top:0}
+#content .dir-variant{background:transparent;border:0;border-radius:0;padding:0;margin:0;min-width:0}
+#content .dir-variant>summary{position:relative;display:flex;align-items:center;gap:8px;min-height:36px;list-style:none;cursor:pointer;padding-left:20px;border-radius:6px;min-width:0;font-size:13px;line-height:1.4}
 .dir-variant>summary::-webkit-details-marker{display:none}
-.dir-variant>summary::before{content:"›";position:absolute;left:0;top:-1px;color:var(--muted);font-size:20px;line-height:1.2}
+.dir-variant>summary::before{content:"›";position:absolute;left:0;top:50%;margin-top:-13px;color:var(--muted);font-size:20px;line-height:1.2}
 .dir-variant[open]>summary::before{transform:rotate(90deg)}
 .dir-variant>summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
-.dir-variant-summary-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;font-size:13px;line-height:1.5}
-.dir-variant-summary-head strong{color:var(--ink);margin:0}
-.dir-variant.is-baseline .dir-variant-summary-head strong{color:var(--accent-text)}
-.dir-variant-structure{color:var(--muted);font-size:12px}
-.dir-variant-summary-change{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:12px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere;margin-top:4px}
-.dir-variant[open] .dir-variant-summary-change{display:none}
-.dir-variant-body{margin:12px 0 0 20px}
-.dir-progress-summary{font-size:12px;color:var(--muted);line-height:1.7;margin:4px 0 14px}
-.dir-variant-progress{display:flex;align-items:center;gap:18px;margin:12px 0 0 20px}
-.dir-variant-progress:empty{margin-top:0}
-.dir-flow{display:grid;flex:1;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;list-style:none;margin:0;padding:0;min-width:0}
-.dir-flow li{position:relative;border-top:2px solid var(--line);padding:7px 0 0;min-width:0;line-height:1.5}
-.dir-flow li:not(:last-child)::after{content:"›";position:absolute;right:0;top:5px;color:var(--muted-soft)}
-.dir-flow li>span{display:block;font-size:12px;color:var(--muted)}
-.dir-flow li>small{display:block;font-size:12px;color:var(--muted);padding-right:6px;overflow-wrap:anywhere}
-.dir-flow .is-done{border-top-color:var(--accent)}
-.dir-flow .is-done>span{color:var(--accent-text)}
-.dir-flow .is-working{border-top-color:var(--ink)}
-.dir-flow .is-working>span,.dir-flow .is-attention>span{font-weight:600;color:var(--ink)}
-.dir-flow .is-attention{border-top-color:var(--warn)}
-.dir-flow-next{display:flex;justify-content:flex-end;flex-shrink:0;max-width:35%}
-.dir-flow-next .compact{font-size:12px;max-width:100%}
+.dir-variant-tag{flex:none;margin:0;color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.dir-variant.is-baseline .dir-variant-tag{color:var(--accent-text)}
+.dir-flag.is-baseline{color:var(--accent-text);background:var(--surface-tint)}
+.dir-variant>summary .dir-flag{flex:none}
+.dir-variant-structure{flex:0 1 auto;min-width:2em;max-width:11em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:12px}
+.dir-dots{display:inline-flex;align-items:center;flex:none}
+.dir-dots i{position:relative;display:block;width:8px;height:8px;border-radius:50%;border:1px solid var(--line-strong);background:transparent;box-sizing:border-box}
+.dir-dots i+i{margin-left:9px}
+.dir-dots i+i::before{content:"";position:absolute;right:100%;top:50%;width:9px;height:1px;margin-right:1px;background:var(--line)}
+.dir-dots .is-done{border-color:var(--accent);background:var(--accent)}
+.dir-dots .is-attention{border-color:var(--warn);background:var(--warn)}
+.dir-dots .is-working{border-color:var(--ink);background:linear-gradient(90deg,var(--ink) 50%,transparent 50%)}
+.dir-dots .is-unknown{border-style:dashed;border-color:var(--muted-soft)}
+.dir-variant-state{flex:0 1 auto;min-width:0;max-width:16em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--warm-ink)}
+.dir-variant-state:empty{display:none}
+.dir-variant-change{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}
+.dir-variant-stages{margin:0 0 8px;font-size:12px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
+.dir-variant-body{margin:6px 0 12px 20px}
+.dir-progress-summary{font-size:12px;color:var(--muted);line-height:1.7;margin:4px 0 8px}
+.dir-variant-progress{display:flex;align-items:center;min-height:36px}
+.dir-variant-progress .compact{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dir-add-short{display:none}
+.dir-test-entry{display:block;margin-top:8px;padding:2px 0;font-size:12px}
 .dir-flow-records:empty{display:none}
 .dir-flow-records{border-top:1px dashed var(--line);margin-top:12px;padding-top:10px}
 .dir-flow-record-group{font-size:12px;margin:7px 0;overflow-wrap:anywhere}
@@ -190,13 +192,13 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 #direction-unassigned>summary{cursor:pointer}
 #direction-unassigned .dir-flow-record-group ul{display:block}
 #direction-unassigned .dir-flow-record-group li{margin:8px 0}
-@media(max-width:620px){.dir-variant-progress{display:block}.dir-flow-next{margin-top:9px;max-width:none}}
+@media(max-width:620px){.dir-variant-change{display:none}.dir-variant-structure{max-width:7em}.dir-variant-row:has(.dir-variant-progress :is(a,button)) .dir-variant-state{display:none}.dir-variant-progress .compact{max-width:132px}.dir-add-long{display:none}.dir-add-short{display:inline}}
 .dir-variant-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:8px}
 .dir-variant-head strong{font-size:13px;font-weight:600}
 .dir-badge{padding:1px 8px;border-radius:999px;background:var(--surface-tint);color:var(--accent-text);font-size:12px;font-weight:600}
 .dir-progression select{appearance:none;-webkit-appearance:none;border:0;border-radius:999px;background:var(--fill);color:var(--ink);font-size:12px;padding:3px 10px;cursor:pointer}
 .dir-progression select:hover{background:var(--fill-hover)}
-.dir-variant-head .subtle{font-size:12px;padding:3px 8px;margin-left:auto}
+.dir-variant-head .subtle{margin-left:auto}
 .dir-change{font-size:12px;color:var(--muted);margin-top:8px}
 .dir-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:-6px -22px 12px;padding:0 14px;overflow-x:auto;scrollbar-width:none}
 .dir-tabs button{display:inline-flex;align-items:center;gap:6px;padding:10px 10px 11px;background:transparent;color:var(--muted-soft);font-size:13px;font-weight:500;white-space:nowrap;border-bottom:2px solid transparent;margin-bottom:-1px}
@@ -289,8 +291,7 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 .dir-parked>summary{cursor:pointer;margin:0 0 8px 4px;font-size:13px;color:var(--muted)}
 .dir-audience strong{margin-right:6px}
 
-/* 2026-10-15 noise pass: a variant with nothing linked is one line, key note lines stand out, the rest folds. */
-.dir-flow-compact{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0;color:var(--muted);font-size:13px}
+/* 2026-10-15 noise pass: key note lines stand out, the rest folds. */
 .dir-note-key strong{margin-right:6px}
 .dir-notes-more{margin-top:6px;font-size:13px;color:var(--muted)}
 .dir-notes-more>summary{cursor:pointer}
@@ -304,3 +305,25 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 .point-fact-picker{border:0;padding:0;margin:0;min-width:0}.point-fact-picker legend{padding-bottom:8px;font-size:var(--font-meta);font-weight:600}.point-fact-picker>div{display:flex;flex-wrap:wrap;gap:6px;max-height:132px;overflow:auto}.point-fact-picker small{color:var(--muted);font-size:var(--font-micro)}.point-fact-choice{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid var(--line);border-radius:999px;font-size:var(--font-micro);cursor:pointer;max-width:100%}.point-fact-choice span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.point-fact-choice:has(input:checked){border-color:var(--accent);background:var(--surface-alt)}.point-fact-choice input{margin:0;flex:none;width:auto;min-width:0;padding:0}.point-fact-choice span{display:block;min-width:0}#selling-point-dialog .field>small{color:var(--muted);font-size:var(--font-micro);line-height:1.5}#selling-point-dialog [data-merge-field][hidden]{display:none}
 
 .dir-next-action{margin-bottom:16px;scroll-margin-top:76px}.dir-next-action .dir-plans li{padding:7px 0}
+
+/* 2026-10-29 variants read as one table: 变体 | 进度 | 视频 | 订单 | CTOR | 下一步. State text lives in the dot tooltips and the opened row. */
+#content .dir-variant-row{grid-template-columns:minmax(0,1fr) 132px}
+.dir-variant-columns{display:flex;align-items:center;gap:8px;padding:0 0 6px 20px;font-size:12px;color:var(--muted-soft);border-bottom:1px solid var(--line)}
+.dir-variant-columns>span:first-child{flex:1;min-width:0}
+.dir-variant-dots-col{flex:none;width:60px}
+.dir-variant-next-col{flex:none;width:132px;margin-left:4px}
+#content .dir-variant>summary .dir-dots{width:60px}
+#content .dir-variant-state{display:none}
+.dir-variant-num{flex:none;width:52px;text-align:right;font-size:12px;font-variant-numeric:tabular-nums;color:var(--muted);white-space:nowrap}
+.dir-variant-num.has-orders{color:var(--ink);font-weight:600}
+.direction-variant-list:not(.has-progress) :is(.dir-variant-columns,.dir-variant-num){display:none}
+.dir-variant-progress .compact{max-width:132px}
+.dir-case-performance{margin:0}
+.dir-case-performance>summary{cursor:pointer;width:fit-content;font-size:13px;color:var(--muted);margin:4px 0 0 4px}
+.dir-case-performance[open]>summary{margin-bottom:10px}
+.dir-case-performance>.context-note{background:none;padding:0;margin:0 0 10px 4px;font-size:12px}
+.direction-related-list:not(.is-all)>:nth-child(n+6){display:none}
+.dir-related-more{font-size:12px;padding:8px 0 0}
+@media(max-width:900px){.dir-variant-num:is([data-variant-videos],[data-variant-ctor]),.dir-variant-columns :is(.col-videos,.col-ctor){display:none}}
+@media(max-width:620px){#content .dir-variant-row{grid-template-columns:minmax(0,1fr) auto}.direction-variant-list :is(.dir-variant-columns,.dir-variant-num){display:none}}
+#content .dir-variant-columns+.dir-variant-row{border-top:0}

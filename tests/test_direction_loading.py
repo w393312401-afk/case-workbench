@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import unittest
 from unittest.mock import patch
@@ -196,7 +197,12 @@ class DirectionLoadingTests(unittest.TestCase):
                     "model": rounds[-1]["model"] or rounds[-1]["requested_model"],
                     "last_error": rounds[-1]["error"].strip()[:160]}
         with patch.object(ai_tasks, "read_estimates", side_effect=AssertionError("Card does not display word counts")):
-            self.assertEqual(app.ai.list_tasks(), [expected])
+            cards = app.ai.list_tasks()
+        # Rerun matching needs the complete instruction's hash and the subject; the card text stays the excerpt.
+        matching = {key: cards[0].pop(key) for key in ("instruction_sha256", "latest_round_finished_at", "fill_request", "subject_key")}
+        self.assertEqual(cards, [expected])
+        self.assertEqual(matching["instruction_sha256"], hashlib.sha256(b"Full original request").hexdigest())
+        self.assertFalse(matching["fill_request"])
         app.ai._live.pop(identifier)
 
 

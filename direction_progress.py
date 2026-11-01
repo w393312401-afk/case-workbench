@@ -27,6 +27,32 @@ def variant_key(variant):
     return fingerprint({key: variant.get(key, "") for key in IDENTITY_KEYS})
 
 
+def video_totals(videos, brief):
+    """Sales over these videos, each counted once; CTOR is summed orders over summed clicks, never an average of rates."""
+    matched = [brief[video] for video in set(videos) if video in brief]
+    orders = int(sum(item.get("orders") or 0 for item in matched))
+    clicks = int(sum(item.get("clicks") or 0 for item in matched))
+    return {"video_count": len(set(videos)), "matched_count": len(matched), "orders": orders, "clicks": clicks,
+            "gmv": round(sum(item.get("gmv") or 0 for item in matched), 2),
+            "ctor_pct": round(orders * 100 / clicks, 2) if clicks else None,
+            "data_through": max((item.get("last_data") or "" for item in matched), default="") or None}
+
+
+def variant_video_ids(variant):
+    records = variant["records"]
+    return sorted({row["video_id"] for row in records["videos"] + records["publications"] if row.get("video_id")})
+
+
+def attach_performance(progress, brief):
+    """Each variant's own sales from the videos it owns; unassigned videos count toward no variant."""
+    for row in [row for variant in progress["variants"] for row in variant["records"]["videos"]] + progress["unassigned"]["videos"]:
+        item = brief.get(row["video_id"]) or {}
+        row.update({key: item[key] for key in ("headline", "orders", "clicks", "ctor_pct") if item.get(key) is not None})
+    for variant in progress["variants"]:
+        variant["performance"] = video_totals(variant_video_ids(variant), brief)
+    return progress
+
+
 def build_direction_progress(direction, *, catalog_revision, tasks=(), scripts=(), plans=(),
                              production=None, video_publications=None, videos=(), read_video=None,
                              variant_links=()):
@@ -133,22 +159,20 @@ def build_direction_progress(direction, *, catalog_revision, tasks=(), scripts=(
     # Explicit script links survive removal of the original AI task. Production
     # records never fall back to their candidate variant_index.
     production = production or {}
-    for kind, rows in (("video", production.get("jobs", [])), ("carousel", production.get("carousels", []))):
-        for row in rows:
-            if not scoped(row, "production") and not (not row.get("direction_id") and
-                    product_key(row.get("product")) == product and row.get("script_id") in script_owners):
-                continue
-            explicit = links.get(("production", row["id"]))
-            inherited = links.get(("script", row.get("script_id")))
-            owners = linked_owners(explicit) if explicit else script_owners.get(row.get("script_id"), set())
-            production_owners[row["id"]] = owners
-            production_rows[row["id"]] = row
-            status = job_status(row) if kind == "video" else row.get("status", "draft")
-            append("productions", {"id": row["id"], "kind": kind, "script_id": row.get("script_id", ""),
-                                    "title": row.get("title") or (row.get("script") or {}).get("title") or "制作单",
-                                    "status": status, "archived": bool(row.get("archived")),
-                                    "created_at": row.get("created_at", ""),
-                                    "association": association(explicit) or association(inherited, row.get("script_id"))}, owners)
+    for row in production.get("jobs", []):
+        if not scoped(row, "production") and not (not row.get("direction_id") and
+                product_key(row.get("product")) == product and row.get("script_id") in script_owners):
+            continue
+        explicit = links.get(("production", row["id"]))
+        inherited = links.get(("script", row.get("script_id")))
+        owners = linked_owners(explicit) if explicit else script_owners.get(row.get("script_id"), set())
+        production_owners[row["id"]] = owners
+        production_rows[row["id"]] = row
+        append("productions", {"id": row["id"], "kind": "video", "script_id": row.get("script_id", ""),
+                                "title": row.get("title") or (row.get("script") or {}).get("title") or "制作单",
+                                "status": job_status(row), "archived": bool(row.get("archived")),
+                                "created_at": row.get("created_at", ""),
+                                "association": association(explicit) or association(inherited, row.get("script_id"))}, owners)
 
     publication_seen = set()
 
@@ -178,10 +202,6 @@ def build_direction_progress(direction, *, catalog_revision, tasks=(), scripts=(
                     source_current = source_current and record.get("source_signature") == fingerprint(reviewed_source(owner))
                 except VoiceError:
                     source_current = False
-            elif kind == "carousel":
-                from workbench_carousel_delivery import carousel_selection_signature
-                source_current = (source_current and bool(record.get("selection_signature")) and
-                                  record["selection_signature"] == carousel_selection_signature(owner))
         video = str(record["post_id"])
         marker = (video, owner_id, script_id)
         if marker in publication_seen:
@@ -202,13 +222,6 @@ def build_direction_progress(direction, *, catalog_revision, tasks=(), scripts=(
         publication(entry.get("publication"), "video", owner_id)
         for record in entry.get("history", []):
             publication(record, "video", owner_id, current=False)
-    for carousel in production.get("carousels", []):
-        if carousel.get("id") in production_owners:
-            current = carousel.get("publication") or {}
-            publication(current, "carousel", carousel["id"], carousel.get("script_id", ""))
-            for record in carousel.get("publication_history", []):
-                if record.get("id") != current.get("id"):
-                    publication(record, "carousel", carousel["id"], carousel.get("script_id", ""), current=False)
     registered_scripts = {row["script_id"] for variant in result["variants"] for row in variant["records"]["publications"]}
     registered_scripts.update(row["script_id"] for row in result["unassigned"]["publications"])
     for script in scripts:
@@ -283,7 +296,7 @@ def _summarize_variant(variant):
         stage("attention", "写稿待处理", len(writing_tasks)) if writing_tasks else stage("empty", "未关联文案"))
     def newest(rows):
         # Catalog lists are appended in creation order; timestamps also make
-        # this deterministic when callers compose video and carousel records.
+        # this deterministic when callers compose video records.
         return max(enumerate(rows), key=lambda pair: (pair[1].get("created_at", ""), pair[0]))[1] if rows else None
     active_productions = [row for row in productions if not row.get("archived") and row["status"] != "cancelled"]
     incomplete_productions = [row for row in active_productions if row["status"] != "approved"]

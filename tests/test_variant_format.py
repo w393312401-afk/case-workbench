@@ -10,8 +10,24 @@ sys.path.insert(0, str(APP))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import test_ai_tasks as base
-from variant_parse import (delivery_ready, looks_like_script, parse_carousels, parse_variants, reformat_problems,
-                           variant_notes, variant_script)
+from variant_parse import (delivery_ready, looks_like_script, parse_variants, reformat_problems,
+                           variant_directions, variant_notes, variant_script)
+
+
+class VariantDirectionTests(unittest.TestCase):
+    @staticmethod
+    def round(*heads):
+        return "\n\n".join(f"{head}\n\n**口播（配音用）**\n```text\nLine direction_id：202H-S9 stays quoted.\n```" for head in heads)
+
+    def test_each_variant_gets_the_direction_its_own_line_names(self):
+        spellings = ["测试方向：`direction_id：202H-S2`（建议）；`closing：x`", "测试方向：`direction_id`：202H-S1｜`main_difference`：S1",
+                     "测试方向：`direction_id` 建议 **202H-S8**｜", "测试方向：`direction_id: 198H-S3`；"]
+        self.assertEqual(variant_directions(self.round(*spellings)), ["202H-S2", "202H-S1", "202H-S8", "198H-S3"])
+
+    def test_a_line_holds_for_following_variants_and_none_means_empty(self):
+        self.assertEqual(variant_directions(self.round("direction_id：202H-S1", "开头逻辑：A")), ["202H-S1", "202H-S1"])
+        self.assertEqual(variant_directions(self.round("开头逻辑：A")), [""], "Text inside the spoken block is not a pick")
+        self.assertEqual(variant_directions("no script here"), [])
 
 # Shape of a real round (AIT-37ea44f7c61d, 2026-10-09) that ignored the code-block format.
 LOOSE = """# 202H-S2 三个版本(口播候选)
@@ -138,20 +154,6 @@ class LooseParseTests(unittest.TestCase):
     def test_analysis_without_spoken_text_still_yields_nothing(self):
         self.assertEqual(parse_variants("## 版本 A 更好\n\n因为开头更早给出结果。"), [])
 
-    def test_carousel_json_without_language_tag_and_table_only_carousels(self):
-        copy = {"content_type": "photo_carousel", "slides": [{"number": n, "title_lines": [f"Slide {n}"], "body": ""} for n in (1, 2, 3)],
-                "caption_en": "Kit", "caption_zh": "套装"}
-        untagged = "## 版本 A\n\n**English**\n\n> One kit.\n\n```\n" + json.dumps(copy) + "\n```\n"
-        self.assertEqual([slide["title_lines"] for slide in parse_carousels(untagged)[0]["slides"]], [["Slide 1"], ["Slide 2"], ["Slide 3"]])
-        table = ("## 版本 B\n\n| 张 | 作用 | 叠字 | 正文 | 中文 | 素材来源 | 禁写 |\n|---|---|---|---|---|---|---|\n"
-                 "| 1 | 开场 | One kit / no jig | Open the case. | 一套 | 实拍 | 无 |\n| 2 | 证明 | Mirror edge | | 镜面 | 实拍 | 无 |\n"
-                 "| 3 | 收口 | Below | | 下方 | 实拍 | 无 |\n")
-        found = parse_carousels(table)
-        self.assertEqual(found[0]["slides"][0]["title_lines"], ["One kit", "no jig"])
-        self.assertEqual(found[0]["slides"][0]["body"], "Open the case.")
-        self.assertIn("没有找到图文 JSON", found[0]["problems"][0])
-
-
 # Shape of a real round (AIT-230fa117a95e, 2026-10-15): strict blocks, but variants named 版本 A/B with no 变体 number.
 NAMED = """**核对范围：** 看了 8 帧。
 
@@ -215,15 +217,6 @@ class NamedVariantTests(unittest.TestCase):
 
 
 class ReformatCheckTests(unittest.TestCase):
-    def test_delivery_ready_and_script_detection(self):
-        self.assertFalse(delivery_ready(LOOSE))
-        self.assertTrue(delivery_ready(FORMATTED))
-        self.assertTrue(delivery_ready(FORMATTED, carousel=True))
-        table = "\n| 张 | 作用 | 叠字 | 正文 |\n|---|---|---|---|\n| 1 | 开场 | One kit | |\n"
-        self.assertFalse(delivery_ready(FORMATTED + table, carousel=True))
-        self.assertTrue(looks_like_script(LOOSE))
-        self.assertFalse(looks_like_script("只回答问题：版本 A 更适合冷启动。"))
-
     def test_faithful_relayout_passes(self):
         self.assertEqual(reformat_problems(LOOSE, FORMATTED), [])
 
