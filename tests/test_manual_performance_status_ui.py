@@ -173,8 +173,7 @@ class ManualPerformanceStatusTests(unittest.TestCase):
                 self.assertEqual(link.get_attribute('href'),url)
                 self.assertEqual(link.get_attribute('target'),'_blank')
                 self.assertIn('noopener',link.get_attribute('rel'))
-                source.locator('[data-copy-video-link]').click()
-                self.assertEqual(page.evaluate('navigator.clipboard.readText()'),url)
+                self.assertEqual(source.locator('[data-copy-video-link]').count(),0)
                 self.assertFalse(page.evaluate('document.documentElement.scrollWidth > innerWidth'))
                 ARTIFACTS.mkdir(parents=True,exist_ok=True)
                 for scheme in ('light','dark'):

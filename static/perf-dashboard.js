@@ -305,7 +305,7 @@
       const total = values.reduce((sum, v) => sum + v, 0);
       return card({ title, head: [fmt(total), `${days[0].date.slice(5)} 至 ${days.at(-1).date.slice(5)} 合计`], chart });
     };
-    const ratioNote = S.shopRatio ? `店铺汇总约为同期视频明细合计的 ${S.shopRatio.toFixed(1)} 倍` : "";
+    const ratioNote = S.shopRatio ? `店铺汇总约为同期自制视频合计的 ${S.shopRatio.toFixed(1)} 倍` : "";
     return `<section class="section-card perf-trend-card"><div class="perf-card-head"><h2>店铺每日视频 GMV</h2><span>店铺汇总口径，不受账号和产品筛选影响${ratioNote ? ` · ${ratioNote}` : ""}</span></div>
       <div class="perf-trend perf-trend-wide">${make("店铺每日归因 GMV", (d) => d.gmv, money, (v) => compact(v, "$"), "columns")}${make("店铺每日归因订单", (d) => d.orders, count, (v) => compact(v), "line")}</div></section>`;
   }
@@ -415,10 +415,10 @@
     const chosen = metrics[ctx.filters.metric] ? ctx.filters.metric : "gmv", w = weeklyCards(S);
     const monthly = monthlyTable(S, a), shop = shopCards(S);
     return `${metricTiles(S, chosen)}${mainCharts(S, chosen)}
-      ${section("视频排行 Top 10", "按归因 GMV，点一行看详情", `${topVideos(S, ctx)}<button type="button" class="secondary perf-more" data-perf-tab="list">查看全部视频明细</button>`)}
+      ${section("视频排行 Top 10", "按归因 GMV，点一行看详情", `${topVideos(S, ctx)}<button type="button" class="secondary perf-more" data-perf-tab="list">查看全部自制视频</button>`)}
       <div class="perf-folds">${fold("发布节奏", "每周新发布视频数，按账号", `<div class="perf-trend perf-trend-wide">${w.posted}${accountCards(S).split('<div class="perf-mini">').slice(2).map((part) => '<div class="perf-mini">' + part).join("")}</div>`)}
       ${fold("转化效率三项", "GPM、点击率、CTOR 各用各的刻度", `<div class="perf-trend">${w.gpm}${w.ctr}${w.ctor}</div>`)}
-      ${shop ? fold("店铺每日汇总", "另一份导出，口径更大，不与视频明细相加", shop) : ""}
+      ${shop ? fold("店铺每日汇总", "另一份导出，口径更大，不与自制视频相加", shop) : ""}
       ${monthly.includes("<tbody>") && !monthly.includes("当前筛选下没有数据") ? fold("月度汇总", S.campaignRange ? "仅活动涉及月份，按整月报表口径，非活动逐日值" : "按每月最全的报表口径，不受周期影响", monthly) : ""}
       ${S.products.size > 1 ? fold("产品型号表现", "按归因 GMV 从高到低", productTable(S)) : ""}
       ${fold("每周数据表", "", weekTable(S))}
@@ -462,13 +462,13 @@
     }
 
     let photo;
-    if (!extras.photoItems) photo = none("photos", "图文", extras.photoFailed ? "暂时读不到图文数据" : "正在读取…");
-    else if (!extras.photoItems.rows.length) photo = none("photos", "图文", "暂无逐条图文数据");
+    if (!extras.photoItems) photo = none("photos", "自制图文", extras.photoFailed ? "暂时读不到图文数据" : "正在读取…");
+    else if (!extras.photoItems.rows.length) photo = none("photos", "自制图文", "暂无逐条图文数据");
     else {
       const P = photoTotals(extras.photoItems, f), labels = P.periods.filter((_, i) => !P.picked || P.picked.has(i)).map((p) => p.label);
       photo = labels.length
-        ? card("photos", "图文", money(P.total.gmv), [`售出 ${count(P.total.sold)} · 播放 ${count(P.total.views)} · ${count(P.total.posts.size)} 条`, `按月导出 · ${labels.join("、")}`])
-        : none("photos", "图文", "所选周期没有图文导出");
+        ? card("photos", "自制图文", money(P.total.gmv), [`售出 ${count(P.total.sold)} · 播放 ${count(P.total.views)} · ${count(P.total.posts.size)} 条`, `按月导出 · ${labels.join("、")}`])
+        : none("photos", "自制图文", "所选周期没有图文导出");
     }
 
     let creators;
@@ -515,7 +515,7 @@
       (r[`${key}Spans`] ||= []).push(`${p.start.slice(5)} 至 ${p.end.slice(5)}`);
     };
     if (S) for (const [month, m] of S.months) { const r = row(month); r.video = m.gmv; r.basis = a.months[month] || ""; }
-    if (extras.photoItems?.rows.length) photoTotals(extras.photoItems, f, true).periods.forEach((p) => place("photo", p, "图文"));
+    if (extras.photoItems?.rows.length) photoTotals(extras.photoItems, f, true).periods.forEach((p) => place("photo", p, "自制图文"));
     if (extras.creators?.periods.length) window.PerfCreators.overview(extras.creators, f).periods.forEach((p) => place("creator", p, "海外达人"));
     const months = [...rows.keys()].filter(month => !campaignRange || (month >= monthOf(campaignRange[0]) && month <= monthOf(campaignRange[1]))).sort();
     if (!months.length) return "";
@@ -526,7 +526,7 @@
       if (r.basis) r.notes.push(`视频为${r.basis}`);
     }
     const years = new Set(months.map((m) => m.slice(0, 4))), name = (m) => (years.size > 1 ? `${m.slice(2, 4)}/${m.slice(5)}` : `${Number(m.slice(5))}月`);
-    const sources = [["video", "自制视频", 0], ["photo", "图文", 1], ["creator", "海外达人", 2]];
+    const sources = [["video", "自制视频", 0], ["photo", "自制图文", 1], ["creator", "海外达人", 2]];
     const series = sources.map(([key, label, slot]) => ({ key, name: label, slot, values: months.map((m) => rows.get(m)[key]) }));
     const id = `c${serial++}`;
     tipFor(id, months.map((m, i) => ({
@@ -539,8 +539,8 @@
     const body = months.slice().reverse().map((m) => { const r = rows.get(m); return [esc(name(m)), cell(r.video), cell(r.photo), cell(r.creator), esc(r.notes.join("；"))]; });
     return fold("按月对比", campaignRange ? "仅活动涉及月份，按整月报表口径，非活动逐日值；三类各算各的" : "三类数据各自按月的归因 GMV，只受账号和产品筛选，不受周期影响",
       `<div class="perf-mini perf-split"><div class="perf-mini-head"><span>每月归因 GMV</span><small>各算各的，不相加</small></div>${chart}${legend}<div class="perf-tooltip" role="status" hidden></div></div>`
-      + table([["月份"], ["自制视频", 1], ["图文", 1], ["海外达人", 1], ["说明"]], body)
-      + `<p class="perf-chart-note">图文和海外达人只有导出覆盖的那几天，月份不全时「说明」里写明；自制视频的月份口径来自当月最全的报表。${skipped.length ? `跨月的区间无法归到某个月，没有列入：${esc(skipped.join("；"))}。` : ""}${f.account ? "账号筛选对海外达人无效。" : ""}</p>`);
+      + table([["月份"], ["自制视频", 1], ["自制图文", 1], ["海外达人", 1], ["说明"]], body)
+      + `<p class="perf-chart-note">自制图文和海外达人只有导出覆盖的那几天，月份不全时「说明」里写明；自制视频的月份口径来自当月最全的报表。${skipped.length ? `跨月的区间无法归到某个月，没有列入：${esc(skipped.join("；"))}。` : ""}${f.account ? "账号筛选对海外达人无效。" : ""}</p>`);
   }
 
   function board(ctx) {
@@ -568,7 +568,7 @@
     const w = weeklyCards(S);
     const scopeText = `${filterText || "全部账号、全部产品"} · ${periodLabel(f.period)}`;
     const empty = !S.total.videos;
-    const head = `<div class="perf-board-note"><strong>口径说明</strong> 视频指标是后台导出里逐条视频的归因数据加总；店铺每日汇总来自另一份导出，口径更大，单独展示不与视频明细相加。点击率 = 商品点击 ÷ 播放，CTOR = 订单 ÷ 商品点击，GPM = 每千次播放的归因 GMV。${gaps ? `导出缺口：${esc(gaps)}，缺口所在周在走势里以短横表示。` : ""}<br><span class="perf-muted">当前范围：${esc(scopeText)}</span></div>`;
+    const head = `<div class="perf-board-note"><strong>口径说明</strong> 视频指标是后台导出里逐条视频的归因数据加总；店铺每日汇总来自另一份导出，口径更大，单独展示不与自制视频相加。点击率 = 商品点击 ÷ 播放，CTOR = 订单 ÷ 商品点击，GPM = 每千次播放的归因 GMV。${gaps ? `导出缺口：${esc(gaps)}，缺口所在周在走势里以短横表示。` : ""}<br><span class="perf-muted">当前范围：${esc(scopeText)}</span></div>`;
     if (empty) return `${head}<div class="empty"><h3>当前筛选下没有数据</h3><p>换个账号、产品或周期试试，或点「清除筛选」。</p></div>`;
     return `${head}${kpis(S)}
       ${section("销售", "归因 GMV 和订单，每周一格", `<div class="perf-trend">${w.gmv}${w.orders}${productRank(S)}</div>`)}
@@ -578,7 +578,7 @@
       ${shopCards(S)}
       ${section("月度汇总", S.campaignRange ? "仅活动涉及月份，按整月报表口径，非活动逐日值" : "按每月最全的报表口径，只受账号和产品筛选，不受周期影响", monthlyTable(S, a))}
       ${section("产品型号表现明细", "按归因 GMV 从高到低", productTable(S))}
-      ${section("视频排行 Top 10", "按归因 GMV，完整列表见「视频明细」", `${topVideos(S, ctx)}<button type="button" class="secondary perf-more" data-perf-tab="list">查看全部视频明细</button>`)}
+      ${section("视频排行 Top 10", "按归因 GMV，完整列表见「自制视频」", `${topVideos(S, ctx)}<button type="button" class="secondary perf-more" data-perf-tab="list">查看全部自制视频</button>`)}
       <details class="perf-week-table section-card"><summary>查看每周数据表</summary>${weekTable(S)}</details>
       <details class="perf-week-table section-card"><summary>查看各账号每周数据表</summary>${accountTable(S)}</details>`;
   }
@@ -738,7 +738,7 @@
   }
 
   // The per-post export (逐条图文): one row per photo post, ranges added up, linked to the production that was registered with it.
-  function photoPosts(items, f, productions) {
+  function photoPosts(items, f) {
     const range = rangeOf(f.period), shell = window.WorkbenchShell, wanted = shell?.product();
     const picked = range ? new Set(items.periods.flatMap((p, i) => (p.start <= range[1] && p.end >= range[0] ? [i] : []))) : null;
     const per = new Map();
@@ -752,17 +752,13 @@
     }
     const rows = [...per.values()].sort((x, y) => y.gmv - x.gmv || y.views - x.views);
     if (!rows.length) return "";
-    const link = (id) => {
-      const production = productions?.[id];
-      return production ? `<a class="perf-case-link" href="${esc(window.WorkbenchShell?.url(`#production/${encodeURIComponent(production)}`) || `#production/${production}`)}">${esc(production)}</a>` : '<span class="perf-muted">—</span>';
-    };
-    const head = [["发布"], ["图文"], ["商品"], ["播放", 1], ["曝光", 1], ["点击率", 1], ["售出", 1], ["GMV", 1], ["制作单"]];
+    const head = [["发布"], ["图文"], ["商品"], ["播放", 1], ["曝光", 1], ["点击率", 1], ["售出", 1], ["GMV", 1]];
     const cell = (m) => {
       const [id, account, title, posted, products] = items.items[m.index];
       // The post's own page: the photo ID alone is enough for TikTok to find it.
       const url = `https://www.tiktok.com/@${encodeURIComponent(account || "_")}/photo/${encodeURIComponent(id)}`;
-      return [esc(posted || "—"), `<span class="perf-cell-title" title="${esc(title)}"><a class="perf-case-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(title || "（没有文案）")}</a><br><small>${esc(account ? `@${account}` : "账号未记录")}</small></span>`,
-        esc(products.join("、")), count(m.views), count(m.impressions), pct(ratio(m.clicks, m.impressions, 100)), count(m.sold), money2(m.gmv), link(id)];
+      return [esc(posted || "—"), `<span class="perf-cell-title" title="${esc(title)}" data-photo-item="${esc(id)}"><a class="perf-case-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(title || "（没有文案）")}</a><br><small>${esc(account ? `@${account}` : "账号未记录")}</small></span>`,
+        esc(products.join("、")), count(m.views), count(m.impressions), pct(ratio(m.clicks, m.impressions, 100)), count(m.sold), money2(m.gmv)];
     };
     const shown = 20, total = rows.reduce((t, m) => ({ views: t.views + m.views, gmv: t.gmv + m.gmv }), { views: 0, gmv: 0 });
     const campaignRange = f.board_campaign ? range : null;
@@ -779,7 +775,7 @@
     const weekly = data.periods.some((p) => p.weekly), posts = !!items?.rows?.length;
     if (!weekly && !posts) return `<div class="empty"><h3>还没有图文数据</h3><p>把后台导出的「图文」表放进数据文件夹里本店的「图文」子文件夹，再点「同步数据」。</p></div>`;
     // The per-post table covers whole months, so it leads; the per-product weekly part follows.
-    const body = `${posts ? photoPosts(items, f, ctx.productions || items.productions) : ""}${weekly ? photoWeekly(data, f) : ""}`;
+    const body = `${posts ? photoPosts(items, f) : ""}${weekly ? photoWeekly(data, f) : ""}`;
     return body || `<div class="empty"><h3>当前范围没有图文数据</h3><p>换个周期，或点「清除筛选」。</p></div>`;
   }
 

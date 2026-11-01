@@ -108,6 +108,19 @@ class PerformanceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.video("7600000000000000002")["window_top_pct"], 100)
         self.assertNotIn("window_top_pct", self.store.video("7600000000000000003"))  # window still open
 
+    def test_videos_readonly_shares_the_cached_rows_that_videos_copies(self):
+        self.store.sync()
+        shared = self.store.videos_readonly()
+        self.assertIs(shared, self.store.videos_readonly())
+        copy = self.store.videos()
+        self.assertIsNot(copy, shared)
+        self.assertEqual([v["video_id"] for v in copy], [v["video_id"] for v in shared])
+        # Changing a copy (case links, public views) never reaches the rows the readers share.
+        copy[0]["case_id"] = "PVR-000000000009"
+        copy[0]["views"] = -1
+        self.assertIsNone(shared[0]["case_id"])
+        self.assertNotEqual(shared[0]["views"], -1)
+
     def test_video_brief_gives_the_light_figures_for_just_the_videos_asked_for(self):
         fresh = PerformanceStore(Path(self.temp.name) / "never-imported", [self.folder])
         self.assertEqual(fresh.video_brief([LINKED]), {})
@@ -140,6 +153,37 @@ class PerformanceStoreTests(unittest.TestCase):
         result = store.sync()
         self.assertEqual((result["imported"], result["missing_sources"]), ([], [str(Path(self.temp.name) / "nowhere")]))
         self.assertEqual(store.summary()["coverage"]["first"], None)
+
+    def test_video_export_with_product_id_column_imports(self):
+        # Exports from 2026-10 add a "Product ID" column after "Time"; it is read but not stored.
+        header = [*HEADER[:5], "Product ID", *HEADER[5:]]
+        values = row("7600000000000000003", 700, 2, 50, 90.0)
+        export(self.folder / "10月" / "第三周视频.xlsx", "2026-10-12", "2026-10-18",
+               [[*values[:5], "1729384756123456789", *values[5:]]], header)
+        result = self.store.sync()
+        self.assertIn("第三周视频.xlsx", [f["file"] for f in result["imported"]])
+        self.assertEqual({v["video_id"]: v["views"] for v in self.store.videos()}["7600000000000000003"], 1600)
+
+    def test_chinese_language_exports_import_like_english_ones(self):
+        # A shop whose back end is in Chinese: same columns and order, Chinese names, and "VV" in the totals too.
+        chinese = ["达人昵称", "达人ID", "视频信息", "视频ID", "发布时间", "商品", "VV", "点赞数", "评论数", "分享数", "新增粉丝数",
+                   "引流次数", "商品曝光次数", "商品点击次数", "去重客户数", "归因 SKU 订单数", "视频 SKU 订单数", "视频间接 SKU 订单数",
+                   "视频归因成交件数", "视频商品成交件数", "视频间接成交件数", "视频归因 GMV ($)", "视频 GMV ($)", "视频间接 GMV ($)",
+                   "GPM ($)", "点击率（视频）", "引流率", "视频完播率", "CTOR（SKU 订单）", "诊断"]
+        totals = ["时间", "视频归因 GMV ($)", "视频 GMV ($)", "视频间接 GMV ($)", "VV", "GPM ($)", "归因 SKU 订单数", "视频 SKU 订单数",
+                  "视频间接 SKU 订单数", "日均客户数", "视频商详页访问用户数", "商品曝光数", "商品点击数", "点击率（视频）", "CTOR（SKU 订单）"]
+        export(self.folder / "10月" / "10月视频.xlsx", "2026-09-14", "2026-09-20", [row("7600000000000000003", 700, 2, 50, 90.0)], chinese)
+        export(self.folder / "10月" / "10月销售.xlsx", "2026-09-14", "2026-09-14",
+               [["2026-09-14", "90", "90", "0", "3106", "29", "2", "2", "0", "2", "2756", "3247", "25", "0.0077", "0.08"]], totals)
+        result = self.store.sync()
+        self.assertEqual(result["failed"], [{"file": "other.xlsx", "error": "无法识别的表头：['Something else']"}])
+        self.assertEqual({v["video_id"]: v["views"] for v in self.store.videos()}["7600000000000000003"], 1600)
+        connection = sqlite3.connect(self.store.database)
+        try:
+            self.assertEqual(connection.execute("SELECT views, product_viewers, clicks, ctr_pct FROM totals_daily WHERE date = '2026-09-14'").fetchone(),
+                             (3106, 2756, 25, 0.77))
+        finally:
+            connection.close()
 
 
 class PerformanceHTTPTests(unittest.TestCase):

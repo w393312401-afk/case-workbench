@@ -53,7 +53,7 @@ class ReviewFollowupFilterTests(unittest.TestCase):
               </section>
             </main>"""))
         page.goto("http://127.0.0.1:43220/review-followup-filters")
-        for name in ("style.css", "home.css"):
+        for name in ("style.css", "buttons.css", "home.css"):
             page.add_style_tag(path=str(STATIC / name))
         page.evaluate("""({campaigns, failures}) => {
           window.esc = value => String(value ?? '').replace(/[&<>"']/g,
@@ -201,13 +201,45 @@ class ReviewFollowupFilterTests(unittest.TestCase):
           hidden.innerHTML = PerfDatePicker.trigger('all', {}); document.body.append(hidden);
           PerfDatePicker.bind({period:()=>'all',summary:()=>({}),choose:()=>{throw Error('wrong date picker')}});
         }""")
-        self.dates(page, "2026-09-17", mode="week")
+        panel = page.locator("#followup-date .perf-date-panel")
+        page.locator("#followup-date-trigger").click()
+        page.locator('#followup-date [data-mode="week"]').click()
+        self.assertEqual(panel.locator("[data-date]").count(), 0)
+        while not panel.locator('[data-week="2026-09-14"]').count():
+            panel.locator('[data-nav="-1"]').click()
+        row = panel.locator('[data-week="2026-09-14"]').first
+        self.assertEqual(row.locator(".perf-cal-weekno").inner_text(), "W38")
+        self.assertEqual(row.get_attribute("aria-label"), "第 38 周，2026-09-14 至 2026-09-20")
+        row.click()
         self.assertEqual(set(self.ids(page)), {"start-edge", "inside", "just-before"})
-        self.dates(page, "2026-09-17", mode="month")
+        # Reopening returns to the mode the dates were picked in, with that week marked.
+        page.locator("#followup-date-trigger").click()
+        self.assertEqual(panel.locator('[data-mode="week"]').get_attribute("aria-pressed"), "true")
+        self.assertEqual(panel.locator(".perf-cal-row.is-selected").first.get_attribute("data-week"), "2026-09-14")
+        panel.locator('[data-mode="month"]').click()
+        self.assertEqual(panel.locator("[data-date], [data-week]").count(), 0)
+        self.assertEqual(panel.locator(".perf-cal-monthcell").count(), 24)
+        panel.locator('[data-month="2026-09"]').click()
         self.assertEqual(set(self.ids(page)), {"before", "start-edge", "inside", "just-before"})
         page.locator("#followup-date-trigger").click()
+        self.assertEqual(panel.locator('[data-mode="month"]').get_attribute("aria-pressed"), "true")
+        self.assertEqual(panel.locator(".perf-cal-monthcell.is-selected").get_attribute("data-month"), "2026-09")
+        # Months and weeks past the last selectable day can't be picked, and a running month stops at that day.
+        self.assertTrue(panel.locator('[data-month="2026-10"]').is_enabled())
+        self.assertTrue(panel.locator('[data-month="2026-11"]').is_disabled())
+        panel.locator('[data-mode="week"]').click()
+        panel.locator('[data-nav="1"]').click()
+        self.assertTrue(panel.locator('[data-week="2026-10-19"]').first.is_enabled())
+        self.assertTrue(panel.locator('[data-week="2026-10-26"]').first.is_disabled())
+        panel.locator('[data-mode="month"]').click()
+        panel.locator('[data-month="2026-10"]').click()
+        self.assertIn("2026-10-25", page.locator("#followup-date-trigger").inner_text())
+        page.locator("#followup-date-trigger").click()
+        self.assertEqual(panel.locator(".perf-cal-monthcell.is-selected").get_attribute("data-month"), "2026-10")
+        panel.locator('[data-mode="day"]').click()
         self.assertTrue(self.show_day(page, "2026-10-25").is_enabled())
         self.assertTrue(self.show_day(page, "2026-10-26").is_disabled())
+        self.assertEqual(page.locator("#followup-date .perf-date-presets button").all_inner_texts(), ["近 7 天", "近 28 天", "全部周期"])
         page.locator("#followup-date .perf-date-presets").get_by_role("button", name="近 7 天", exact=True).click()
         self.assertIn("近 7 天", page.locator("#followup-date-trigger").inner_text())
         page.locator("#followup-date-trigger").click()

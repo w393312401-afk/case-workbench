@@ -22,9 +22,9 @@
     window: ["首两周播放", (v) => v.window_views, "desc"],
     status: ["参考价值", (v) => statusOrder.indexOf(reviewStatus(v).key), "asc"],
     views: ["累计播放", (v) => v.views, "desc"],
-    items: ["售出", (v) => v.items, "desc"],
-    gmv: ["GMV", (v) => v.gmv || 0, "desc"],
-    ctor: ["CTOR", (v) => v.ctor_pct, "desc"],
+    items: ["售出", (v) => salesOf(v).items, "desc"],
+    gmv: ["GMV", (v) => weekSales() ? salesOf(v).gmv : v.gmv || 0, "desc"],
+    ctor: ["CTOR", (v) => salesOf(v).ctor_pct, "desc"],
     week: ["本周 GMV", (v) => v.this_week_gmv || 0, "desc"],
     likes: ["点赞", (v) => v.likes, "desc"],
     comments: ["评论", (v) => v.comments, "desc"],
@@ -32,10 +32,10 @@
     saves: ["收藏", (v) => v.saves, "desc"],
     reviews: ["评论库已收录", (v) => v.review_comments || 0, "desc"],
   };
-  const tabs = [["board", "数据看板"], ["list", "视频明细"], ["photos", "图文"], ["creators", "海外达人"]];
+  const tabs = [["board", "数据看板"], ["list", "自制视频"], ["photos", "自制图文"], ["creators", "海外达人"]];
   // The shop is the first level: every read below asks for one shop, and switching it reloads them all.
   const shopNames = { local: "本土店", cross: "跨境店" };
-  const filterDefaults = { shop: "local", q: "", account: "", product: "", status: "", campaign: "", board_campaign: "", sort: "posted", dir: "desc", tab: "board", period: "all", list_period: "all", board_period: "all", metric: "gmv", ...window.PerfCreators.defaults };
+  const filterDefaults = { shop: "local", q: "", account: "", product: "", status: "", campaign: "", board_campaign: "", sort: "posted", dir: "desc", tab: "board", period: "all", metric: "gmv", ...window.PerfCreators.defaults };
   const perf = {
     videos: null, summary: null, analytics: null, catalog: null, loading: null, coreLoading: null, analyticsReady: null, catalogReady: null, loadSequence: 0, routeSequence: 0, analyticsLoading: false, catalogLoading: false, shown: 200,
     creators: null, creatorsLoading: null, creatorsError: "", creatorsSequence: 0, creatorShown: 100,
@@ -43,12 +43,15 @@
     filters: { ...filterDefaults },
     openVideo: "", renderedProduct: null,
   };
+  // Keep an uncertain submission intact across filters and shop changes so a retry cannot create another batch.
+  let pendingDraftBatch = null, draftBatchSubmitting = false;
   try {
     const saved = JSON.parse(localStorage.getItem("workbench-video-data-filters") || "{}");
     Object.assign(perf.filters, saved);
     if (saved.review_status_filter_version !== 1) perf.filters.status = "";
-    if (!Object.hasOwn(saved, "list_period") && saved.tab === "list") perf.filters.list_period = saved.period || "all";
-    if (!Object.hasOwn(saved, "board_period") && saved.tab !== "list") perf.filters.board_period = saved.period || "all";
+    // Each view used to keep its own date; the one on screen when it was saved carries over.
+    delete perf.filters.list_period;
+    delete perf.filters.board_period;
   } catch {
     /* Filters fall back to defaults without browser storage. */
   }
@@ -78,7 +81,7 @@
     const query = new URLSearchParams();
     const campaignKey = filters.tab === "list" ? "campaign" : "board_campaign";
     for (const key of Object.keys(filterDefaults)) {
-      if (["product", "list_period", "board_period"].includes(key) || (["campaign", "board_campaign"].includes(key) && key !== campaignKey)) continue;
+      if (key === "product" || (["campaign", "board_campaign"].includes(key) && key !== campaignKey)) continue;
       if (filters[key] && filters[key] !== filterDefaults[key]) query.set(key === "status" ? "review_status" : key, filters[key]);
     }
     if (preserveDetails) {
@@ -128,6 +131,8 @@
       if (sequence !== perf.loadSequence) return;
       if (data !== undefined) perf.analytics = data;
       perf.analyticsLoading = false;
+      // The table paints before these weekly rows arrive; the sales columns for a picked date or activity switch over now.
+      if (listSalesRange() && $("#perf-results") && !window.CaseDirectionPicker.hasVideoEdits?.()) {drawCampaignFilter();rerenderResults();}
     });
     const catalog = supplements.then(active => active ? window.CaseDirectionPicker.fetchCatalog().catch(() => null) : undefined).then(data => {
       if (sequence !== perf.loadSequence) return;
@@ -150,14 +155,64 @@
   // All views share the activity, while the video list applies it to observation windows.
   const periodCampaignPending = () => perf.filters.tab !== "list" && perf.filters.board_campaign && !window.Campaigns?.current();
   const campaignLoadingMarkup = () => `<p class="context-note" role="status">${perf.campaignsError ? "活动日历暂时无法读取，请重试或清除筛选。" : "正在读取所选活动期…"}</p>`;
+  // The dates the list's sales columns cover: the picked activity's or the picked date's. An activity still being read counts as neither.
+  const listSalesRange = () => {
+    const f = perf.filters;
+    if (f.tab !== "list") return null;
+    if (!f.campaign) return PerfDashboard.rangeOf(f.period);
+    const campaign = window.Campaigns?.current()?.campaigns.find(row => row.id === f.campaign);
+    return campaign ? [campaign.start, campaign.end] : null;
+  };
+  // Whole Monday-start weeks a range touches, the same weeks the board counts; exports can't be split into days.
+  const salesWeeks = ([start, end]) => {
+    const monday = (day) => addCalendarDays(day, -((new Date(`${day}T00:00:00Z`).getUTCDay() + 6) % 7));
+    return [monday(start), addCalendarDays(monday(end), 6)];
+  };
+  // With a date or activity picked, one video's sold, GMV and CTOR over those weeks; null means the list shows its totals.
+  let weekSalesCache = {};
+  function weekSales() {
+    const range = listSalesRange(), analytics = perf.analytics;
+    if (!range || !analytics) return null;
+    const cache = weekSalesCache, [first, last] = salesWeeks(range);
+    if (cache.analytics === analytics && cache.first === first && cache.last === last) return cache.videos;
+    const videos = new Map();
+    for (const [index, week, , , clicks, orders, items, gmv] of analytics.weekly) {
+      if (week < first || week > last) continue;
+      const id = analytics.videos[index][0], row = videos.get(id) || { clicks: 0, orders: 0, items: 0, gmv: 0 };
+      row.clicks += clicks;
+      row.orders += orders;
+      row.items += items;
+      row.gmv += gmv;
+      videos.set(id, row);
+    }
+    for (const row of videos.values()) row.ctor_pct = row.clicks ? Math.round(row.orders * 10000 / row.clicks) / 100 : null;
+    weekSalesCache = { analytics, first, last, videos };
+    return videos;
+  }
+  const noWeekSales = { items: null, gmv: null, ctor_pct: null };
+  const salesOf = (v) => { const videos = weekSales(); return videos ? videos.get(v.video_id) || noWeekSales : v; };
+  const weekSalesLabels = { items: "售出", gmv: " GMV", ctor: " CTOR" };
+  const weekSalesLabel = (key) => weekSales() && weekSalesLabels[key] ? `${perf.filters.campaign ? "活动周" : "所选周"}${weekSalesLabels[key]}` : sortColumns[key][0];
+  function weekSalesNote() {
+    const range = listSalesRange();
+    if (!range) return "";
+    if (perf.analytics) return `售出、GMV、CTOR 按${perf.filters.campaign ? "活动" : "所选日期"}涉及的整周（${salesWeeks(range).join(" 至 ")}）统计，可能包含${perf.filters.campaign ? "活动外" : "所选范围外的"}日期，鼠标悬停看累计值。`;
+    return perf.analyticsLoading ? "整周数字读取中，售出、GMV、CTOR 暂为累计值。" : "整周数字暂时读不到，售出、GMV、CTOR 显示为累计值。";
+  }
+  function salesCells(v) {
+    const sales = salesOf(v), title = (text) => sales === v ? "" : ` title="${esc(text)}"`;
+    return `<td class="num"${title(`累计售出 ${count(v.items)}`)}>${count(sales.items)}</td><td class="num"${title(`累计 GMV ${money(v.gmv)}`)}>${money(sales.gmv)}</td><td class="num"${title(`累计 CTOR ${pct(v.ctor_pct)}`)}>${pct(sales.ctor_pct)}</td>`;
+  }
   const resultCount = (rows) => {
     if (campaignPending()) return perf.campaignsError ? "活动读取失败" : "正在读取活动…";
     const hidden = perf.hiddenEmpty || 0;
     return `${rows.length} 条${hidden ? `<small title="没有标题、播放和出单都为 0 的导出行，多为已删除的视频；搜索视频 ID 仍可找到"> · 已隐藏 ${hidden} 条空视频</small>` : ""}`;
   };
   function filtered(ignoreStatus = false, ignoreProduct = false) {
-    const f = perf.filters, range = PerfDashboard.rangeOf(f.period);
+    const f = perf.filters;
     const campaignId = f.tab === "list" ? f.campaign : "";
+    // An activity selects by observation window, so its dates don't also narrow the list by publication date.
+    const range = campaignId ? null : PerfDashboard.rangeOf(f.period);
     const campaign = window.Campaigns?.current()?.campaigns.find(row => row.id === campaignId);
     const q = f.q.trim().toLowerCase();
     let hidden = 0;
@@ -192,9 +247,78 @@
     const share = (n) => (total ? `${Math.round((n / total) * 100)}%` : "—");
     const segments = tally.filter(([, n]) => n).map(([k, n]) => `<button type="button" class="perf-seg perf-review-swatch-${k}${active && active !== k ? " is-muted" : ""}" data-status-filter="${k}" data-count="${n}" title="${esc(statusNames[k])} ${n} 条（${share(n)}）：${esc(statusHints[k])}" aria-label="只看${esc(statusNames[k])}，${n} 条"></button>`).join("");
     const legend = tally.map(([k, n]) => `<button type="button" class="perf-legend-item${active === k ? " is-active" : ""}${active && active !== k ? " is-muted" : ""}" data-status-filter="${k}" aria-pressed="${active === k}" title="${esc(statusHints[k])}"><i class="perf-swatch perf-review-swatch-${k}"></i><span>${esc(statusNames[k])}</span><strong>${n}</strong><small>${share(n)}</small></button>`).join("");
-    const batch = batchCandidates(filtered()).length;
-    return `<section class="section-card perf-status-card"><div class="perf-card-head"><h2>参考价值</h2><span>当前筛选 ${total} 条视频${active ? ` · 表格只显示「${esc(statusNames[active])}」，再点一次取消` : " · 点击状态筛选表格"}</span>${batch ? `<button type="button" class="secondary compact perf-batch-collect" data-batch-collect title="当前筛选里还没收为案例、订单最多的 ${batch} 条视频，保存后自动下载原视频并拆解">批量收为案例 · ${batch} 条</button>` : ""}</div>
+    const matches = filtered(), batch = batchCandidates(matches).length;
+    const draftCount = pendingDraftBatch?.videos.length ?? draftBatchCandidates(matches).length;
+    const draftLabel = draftBatchSubmitting ? '正在提交起草' : pendingDraftBatch ? '重试上一批起草' : 'AI 批量起草';
+    const draftHint = pendingDraftBatch ? `继续处理上一批 ${draftCount} 条视频，保留原来的视频范围。`
+      : '按当前筛选和排序，起草前 10 条符合条件的待复盘视频；已有完成稿或正在起草的视频自动跳过。';
+    const draftNote = pendingDraftBatch && !draftBatchSubmitting
+      ? `上一批（${shopNames[pendingDraftBatch.shop]} · ${draftCount} 条）结果尚未确认，重试将继续处理原来的视频。`
+      : !pendingDraftBatch && matches.some(video => video.review_draft?.unavailable === true)
+        ? '起草任务状态暂时无法读取，批量起草暂不可用；请稍后刷新。' : '';
+    return `<section class="section-card perf-status-card"><div class="perf-card-head"><h2>参考价值</h2><span>当前筛选 ${total} 条视频${active ? ` · 表格只显示「${esc(statusNames[active])}」，再点一次取消` : " · 点击状态筛选表格"}</span><button type="button" class="secondary compact" data-batch-draft title="${esc(draftHint)}"${draftBatchSubmitting || !draftCount ? ' disabled' : ''}>${draftLabel} · ${draftCount} 条</button>${batch ? `<button type="button" class="secondary compact perf-batch-collect" data-batch-collect title="当前筛选里还没收为案例、订单最多的 ${batch} 条视频，保存后自动下载原视频并拆解">批量收为案例 · ${batch} 条</button>` : ""}</div>
+      ${draftNote ? `<p class="context-note" role="status" data-batch-draft-note>${esc(draftNote)}</p>` : ''}
       ${total ? `<div class="perf-status-bar" role="group" aria-label="参考价值分布">${segments}</div>` : ""}<div class="perf-status-legend">${legend}</div></section>`;
+  }
+
+  function draftBatchCandidates(rows) {
+    return rows.filter(video => video.review_draft?.eligible === true).slice(0, 10);
+  }
+
+  async function batchDraft() {
+    if (draftBatchSubmitting) return;
+    if (!pendingDraftBatch) {
+      const picks = draftBatchCandidates(filtered());
+      if (!picks.length) return;
+      pendingDraftBatch = {request_id:crypto.randomUUID(), shop:perf.filters.shop,
+        videos:picks.map(({product,video_id,window_end}) => ({product,video_id,window_end}))};
+    }
+    const body = pendingDraftBatch;
+    const scope = {shop:perf.filters.shop,product:currentProduct(),loadSequence:perf.loadSequence,routeSequence:perf.routeSequence};
+    const sameScope = () => scope.shop === body.shop && scope.shop === perf.filters.shop && scope.shop === perf.requestedShop
+      && scope.product === currentProduct() && scope.loadSequence === perf.loadSequence && scope.routeSequence === perf.routeSequence
+      && perf.filters.tab === 'list' && pageHash().startsWith('#videos') && !!$('#perf-results')
+      && !!perf.summary && Array.isArray(perf.videos);
+    draftBatchSubmitting = true;
+    rerenderResults();
+    let confirmed = false;
+    try {
+      const response = await api('/api/performance/batch-draft', {method:'POST',body});
+      const results = response?.results;
+      if (!Array.isArray(results) || results.length !== body.videos.length
+          || results.some((row,index) => !row || !['queued','skipped','failed'].includes(row.status)
+            || ['product','video_id','window_end'].some(key => row[key] !== body.videos[index][key])))
+        throw new Error('起草结果暂未确认，请重试上一批。');
+      confirmed = true;
+      pendingDraftBatch = null;
+      const queued = results.filter(row => row.status === 'queued').length;
+      const skipped = results.filter(row => row.status === 'skipped').length;
+      const failed = results.filter(row => row.status === 'failed');
+      // A confirmed queue/skip stays excluded if refreshing the list temporarily fails.
+      for (const result of sameScope() ? results.filter(row => row.status !== 'failed') : []) {
+        const video = perf.videos?.find(row => row.product === result.product && row.video_id === result.video_id && row.window_end === result.window_end);
+        if (video) video.review_draft = {eligible:false,reason:result.message || '',status:result.status,task_id:result.task_id};
+      }
+      toast(`已排队起草 ${queued} 条，跳过 ${skipped} 条，失败 ${failed.length} 条。进度见任务面板，完成后请逐条核对并保存复盘。${failed.length ? ` ${failed[0].message || '部分视频未能起草，请稍后重试。'}` : ''}`, !!failed.length);
+    } catch (error) {
+      if (error.status && error.status < 500) pendingDraftBatch = null;
+      toast((error.message || '批量起草暂未提交。') + (pendingDraftBatch ? ' 结果尚未确认，请点「重试上一批起草」，继续处理原来的视频。' : ''), true);
+    } finally {
+      draftBatchSubmitting = false;
+      if (pageHash().startsWith('#videos')) rerenderResults();
+    }
+    if (confirmed && sameScope()) {
+      try {
+        // Refresh only this list's eligibility; never invalidate another shop's first paint or a new route.
+        const data = await api(`/api/performance/videos?shop=${encodeURIComponent(scope.shop)}`, {cache:'no-store'});
+        if (sameScope() && Array.isArray(data?.videos)) {
+          perf.videos = data.videos;
+          rerenderResults();
+        }
+      } catch {
+        if (sameScope()) toast('批量起草结果已确认，列表暂未刷新，请稍后刷新查看。', true);
+      }
+    }
   }
 
   // Uncollected videos with orders in the current filter, most orders first; at most 10 per batch.
@@ -225,13 +349,13 @@
     if (!rows.length) return `<div class="empty">${icon("search")}<h3>没有符合条件的视频</h3><p>换个筛选条件，或先同步最新的后台导出。</p></div>`;
     const visible = rows.slice(0, perf.shown);
     const th = (key, cls = "") => {
-      const active = perf.filters.sort === key, asc = perf.filters.dir === "asc", label = sortColumns[key][0];
+      const active = perf.filters.sort === key, asc = perf.filters.dir === "asc", label = weekSalesLabel(key);
       return `<th class="${cls}" aria-sort="${active ? (asc ? "ascending" : "descending") : "none"}"><button type="button" class="perf-sort${active ? " is-active" : ""}" data-sort="${key}" title="按${esc(label)}排序">${esc(label)}<span class="perf-sort-arrow" aria-hidden="true">${active ? (asc ? "↑" : "↓") : "↕"}</span></button></th>`;
     };
     return `<div class="perf-table-wrap"><table class="perf-table perf-video-table"><thead><tr>${th("posted", "perf-col-video")}<th>测试方向</th>${th("status")}${th("window", "num")}${th("views", "num")}${th("items", "num")}${th("gmv", "num")}${th("ctor", "num")}${th("likes", "num")}${th("comments", "num")}${th("shares", "num")}${th("saves", "num")}</tr></thead><tbody>${visible.map((v) => `<tr data-video-row="${esc(v.video_id)}" tabindex="0" aria-label="查看 ${esc(v.headline || v.video_id)} 的详情"${perf.openVideo === v.video_id ? ' class="is-open"' : ""}>
       <td class="perf-title" title="${esc(v.title || "")}"><strong>${esc(v.headline || v.video_id)}</strong><small>${esc(v.account || "账号未记录")} · ${esc(v.posted_on || "—")}${v.case_id ? " · 已收为案例" : ""}${v.review_comments ? ` · 评论库已收录 ${count(v.review_comments)} 条` : ""}</small></td>
       ${window.CaseDirectionPicker.videoCell(v, perf.catalog)}<td>${badge(v)}</td><td class="num">${v.window_views == null ? "—" : count(v.window_views)}</td>
-      <td class="num">${count(v.views)}</td><td class="num">${count(v.items)}</td><td class="num">${money(v.gmv)}</td><td class="num">${pct(v.ctor_pct)}</td>
+      <td class="num">${count(v.views)}</td>${salesCells(v)}
       ${['likes','comments','shares','saves'].map(field => `<td class="num" data-stat="${field}" title="${v.public_stats ? 'TK 看板插件最新推送' : '销售数据表'}">${count(v[field])}</td>`).join('')}
     </tr>`).join("")}</tbody></table></div>${rows.length > visible.length ? `<button type="button" class="secondary perf-more" id="perf-more">再显示 ${Math.min(200, rows.length - visible.length)} 条（共 ${rows.length} 条）</button>` : ""}`;
   }
@@ -303,7 +427,7 @@
     const hooks = window.MaterialBasket?.count({ type: "hook", source_id: v.video_id }) || 0;
     return `<div class="rev-drawer-head"><h2 id="perf-video-title">${esc(v.headline || v.video_id)}</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭视频详情">${icon("close")}</button></div>
       <div class="rev-drawer-body perf-video-body"><div class="perf-video-ident"><p class="perf-video-meta">${esc(v.account || "账号未记录")} · 发布 ${esc(v.posted_on || "—")} · ${esc(v.product || "产品未记录")}</p>
-        <div class="perf-video-source"><span>ID ${esc(v.video_id)}${copyIdButton(v.video_id,'视频 ID')}</span><span><a href="${esc(videoSourceURL(v))}" target="_blank" rel="noopener noreferrer">原视频 ↗</a><button type="button" class="subtle compact" data-copy-video-link>复制直链</button></span></div></div>
+        <div class="perf-video-source"><span>ID ${esc(v.video_id)}${copyIdButton(v.video_id,'视频 ID',{icon:true})}${openLinkButton(videoSourceURL(v),'原视频','在 TikTok 打开原视频')}</span></div></div>
         <div data-video-campaigns>${campaignNote(v)}</div>
         ${videoFacts(v)}<p class="context-note" data-video-facts-error hidden role="status"></p>
         <div class="vb-block perf-review-card">${videoStatusMarkup(v)}</div>
@@ -355,7 +479,9 @@
       }
     };
     videoFactReaders.set(drawer,refreshFacts);
-    if (!initialData) void refreshFacts();
+    // Figures read a moment ago for this very open need no second read; only that one open skips it.
+    const readAt = freshRows.get(v);freshRows.delete(v);
+    if (!initialData && !(readAt && Date.now() - readAt < 5000)) void refreshFacts();
     const onSaved = window.FeedbackChain?.continueAfterSave?.({host:drawer,product:reviewScope,isCurrent,onNext:async (candidate,{isCurrent:continueCurrent}) => {
       // Read both the full video and its review before replacing the saved record on screen.
       const full = (await api(`/api/performance/videos/${encodeURIComponent(candidate.video_id)}`)).video;
@@ -395,7 +521,6 @@
     }});
     $("[data-collect]", drawer)?.addEventListener("click", () => onCollect(v));
     $("[data-video-hook]", drawer).onclick = () => window.MaterialBasket?.openHook(v);
-    $("[data-copy-video-link]", drawer).onclick = () => copyText(videoSourceURL(v),'视频直链已复制');
     window.DrawerResize?.attach(drawer, "video");
   }
   function refreshOpenVideoFacts() {
@@ -429,22 +554,65 @@
 
   // ---- the same drawer opened from any other page, without leaving it ----------
   // Sales rows are read once per shop and kept briefly; the data page's own list is used when it already has them.
-  const floating = {videos: new Map(), drawer: null, openSequence: 0, onClose: null};
-  async function findVideo(id) {
-    const shops = [perf.filters.shop, ...Object.keys(shopNames).filter((shop) => shop !== perf.filters.shop)];
-    for (const shop of shops) {
-      let list = perf.requestedShop === shop && perf.videos ? perf.videos : null;
-      const cached = floating.videos.get(shop);
-      if (!list && cached && Date.now() - cached.at < 60000) list = cached.videos;
-      if (!list) {
-        list = (await api(`/api/performance/videos?shop=${shop}`)).videos || [];
-        floating.videos.set(shop, {at: Date.now(), videos: list});
-      }
-      const found = list.find((item) => item.video_id === id);
+  const floating = {videos: new Map(), drawer: null, openSequence: 0, onClose: null, details: new Map(), reading: new Map()};
+  // A row some list already holds, found without asking the service.
+  function cachedVideo(id) {
+    const lists = [perf.videos, ...[...floating.videos.values()].filter((cache) => Date.now() - cache.at < 60000).map((cache) => cache.videos)];
+    for (const list of lists) {
+      const found = list?.find((item) => item.video_id === id);
       if (found) return found;
     }
-    return null;
+    const detail = floating.details.get(id);
+    return detail && Date.now() - detail.at < 30000 ? detail.video : null;
   }
+  // One video's own record (it already carries comment counts, review status and the week's figures): a few KB, not the
+  // whole sales list. A video the sales data does not have is null; any other failure is thrown.
+  const freshRows = new WeakMap();
+  function readVideo(id) {
+    if (floating.reading.has(id)) return floating.reading.get(id);
+    const reading = api(`/api/performance/videos/${encodeURIComponent(id)}`, {cache: "no-store"}).then((data) => {
+      const video = data?.video || null;
+      if (video) {
+        floating.details.set(id, {at: Date.now(), video});
+        // The drawer will not ask for these figures again straight away.
+        freshRows.set(video, Date.now());
+      }
+      return video;
+    }, (error) => {
+      if (error?.status === 404) return null;
+      throw error;
+    }).finally(() => floating.reading.delete(id));
+    floating.reading.set(id, reading);
+    return reading;
+  }
+  async function findVideo(id) {
+    return cachedVideo(id) || readVideo(id);
+  }
+  // Resting the pointer (or focus) on a video starts its reads, so the drawer has them by the time it is asked for.
+  let hoverTimer = 0, hoveredKey = "", hoveredAt = 0;
+  function warmVideo(id, window_end = "") {
+    clearTimeout(hoverTimer);
+    const key = `${id}|${window_end}`;
+    if (!id || (key === hoveredKey && Date.now() - hoveredAt < 15000)) return;
+    hoverTimer = setTimeout(async () => {
+      hoveredKey = key;hoveredAt = Date.now();
+      try {
+        const video = cachedVideo(id) || await readVideo(id);
+        if (video && !video.registration_only) window.FeedbackChain?.prefetch({...video, ...(window_end ? {window_end} : {})});
+      } catch { /* The click reads it again and reports any failure itself. */ }
+    }, 150);
+  }
+  const hoverTarget = (event) => {
+    if (event.pointerType === "touch" || document.querySelector("dialog.perf-video-drawer[open]")) return null;
+    const row = event.target.closest?.("[data-video-row]");
+    if (row) return {id: row.dataset.videoRow, window: ""};
+    const link = event.target.closest?.("a[href]");
+    const target = link && videoLinkTarget(new URL(link.href, location.href).hash);
+    return target ? {id: target.id, window: target.feedbackWindow} : null;
+  };
+  document.addEventListener("pointerover", (event) => { const target = hoverTarget(event); if (target) warmVideo(target.id, target.window); }, {passive: true});
+  document.addEventListener("focusin", (event) => { const target = hoverTarget(event); if (target) warmVideo(target.id, target.window); });
+  document.addEventListener("pointerout", () => clearTimeout(hoverTimer), {passive: true});
   function floatingDrawer() {
     if (floating.drawer?.isConnected) return floating.drawer;
     const drawer = document.createElement("dialog");
@@ -469,31 +637,74 @@
     const isCurrent = () => sequence === floating.openSequence && location.hash === openedHash && currentProduct() === reviewScope && (!previousDrawer || previousDrawer.open);
     const dataPage = () => { location.hash = pageURL(`#videos?video=${encodeURIComponent(id)}${feedbackWindow ? `&feedback_window=${encodeURIComponent(feedbackWindow)}` : ""}`); };
     if (pageHash().startsWith("#videos")) return dataPage();
-    let video = null;
-    try { video = source?.registration_only && source.video_id === id ? source : await findVideo(id); }
-    catch { if (!isCurrent()) return;toast("带货数据暂时读不到，已为你打开带货数据页。", true); return dataPage(); }
-    if (!isCurrent()) return;
-    if (!video) { toast("销售数据表里没有这条视频，已为你打开带货数据页。"); return dataPage(); }
     const drawer = floatingDrawer();
     floating.onClose = () => {
       if (sequence === floating.openSequence && location.hash === openedHash && currentProduct() === reviewScope) return onClose?.();
     };
+    let video = source?.registration_only && source.video_id === id ? source : cachedVideo(id);
+    if (!video) {
+      // Not at hand: show the drawer straight away and let the video arrive into it, instead of a blank wait.
+      if (!drawer.open) {
+        drawer.classList.remove("perf-creator-drawer");
+        drawer.innerHTML = `<div class="rev-drawer-head"><h2 id="perf-video-title">正在读取视频数据…</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭">${icon("close")}</button></div><div class="rev-drawer-body perf-video-body"><p class="context-note" role="status">正在读取这条视频的表现和复盘…</p></div>`;
+        drawer.showModal();
+      }
+      // Without data to show, the reader stays where they are and is only told why.
+      const leave = (message, problem) => {
+        if (!isCurrent()) return;
+        // Nothing was shown yet, so closing it says nothing to the page that asked.
+        floating.onClose = null;
+        if (drawer.open) drawer.close();
+        toast(message, problem);
+      };
+      try { video = await readVideo(id); }
+      catch { return leave("带货数据暂时读不到，请稍后再试。", true); }
+      if (!isCurrent()) return;
+      if (!video) {
+        // A registered post ID may be a photo post, which lives in the 图文 exports instead.
+        let shop = null;
+        try { shop = await photoShop(id); } catch { return leave("带货数据暂时读不到，请稍后再试。", true); }
+        if (!isCurrent()) return;
+        if (!shop) return leave(noPostData, false);
+        leave("这是一条图文帖子，已为你打开图文数据。", false);
+        location.hash = photoDataURL(id, shop);
+        return;
+      }
+    }
     if (!drawer.open) drawer.showModal();
     renderVideo(drawer, video, feedbackWindow, selected => { drawer.close();location.hash = pageURL(`#videos?video=${encodeURIComponent(selected.video_id)}`); },reviewScope,null,onChanged);
     drawer.scrollTop = 0;
     const body = $('.rev-drawer-body',drawer);if (body) body.scrollTop = 0;
+  }
+  const noPostData = "这条帖子还没有销售数据：视频表和图文表里都查不到，可能还没导入它发布期间的数据。";
+  // The shop whose per-post 图文 export holds this post, or null when none does; other failures are thrown.
+  function photoShop(id) {
+    return api(`/api/performance/photo-items/${encodeURIComponent(id)}`, {cache: "no-store"}).then((data) => data?.shop || null,
+      (error) => { if (error?.status === 404) return null; throw error; });
+  }
+  const photoDataURL = (id, shop) => pageURL(`#videos?tab=photos&shop=${encodeURIComponent(shop)}&photo=${encodeURIComponent(id)}`);
+  // A photo post's data opens in 图文 only when an export has it; otherwise the reader is told and stays put.
+  async function openPhotoFromLink(id) {
+    const openedHash = location.hash;
+    let shop = null;
+    try { shop = await photoShop(id); } catch { toast("带货数据暂时读不到，请稍后再试。", true); return; }
+    if (location.hash !== openedHash) return;
+    if (!shop) { toast("图文数据里还没有这条帖子，可能还没导入它发布当月的「图文」表。"); return; }
+    location.hash = photoDataURL(id, shop);
   }
   // A link to a video's data keeps the reader where they are, unless the data page itself is showing.
   function videoLinkTarget(hash) {
     const legacy = window.WorkbenchShell?.legacyHash?.(hash) || hash;
     if (!legacy.startsWith("#videos?")) return null;
     const params = new URLSearchParams(legacy.split("?")[1] || "");
+    if (params.get("photo")) return {photo: params.get("photo")};
     return params.get("video") ? {id: params.get("video"), feedbackWindow: params.get("feedback_window") || ""} : null;
   }
   function openVideoHash(hash) {
     const target = videoLinkTarget(hash);
     if (!target || pageHash().startsWith("#videos")) return false;
-    void openVideoInPlace(target.id, {feedbackWindow: target.feedbackWindow});
+    if (target.photo) void openPhotoFromLink(target.photo);
+    else void openVideoInPlace(target.id, {feedbackWindow: target.feedbackWindow});
     return true;
   }
   document.addEventListener("click", (event) => {
@@ -596,14 +807,14 @@
     $("#content").innerHTML = `<div class="page-heading perf-heading"><div><h1>带货数据</h1><p>${esc(shop)}：${s.coverage.first ? `视频导出覆盖 ${s.coverage.first} 至 ${s.coverage.last}${gaps ? `，缺 ${gaps}` : ""}。` : "还没有导入后台数据。"}参考价值以人工复盘分类为准。</p></div>
       <div class="perf-actions"><button type="button" class="secondary" id="perf-sync" title="读取数据文件夹里所有店铺的新导出">${icon("refresh")}同步数据</button><button type="button" class="secondary" id="perf-upload" title="选的表格会算作${esc(shop)}的数据">${icon("plus")}导入表格</button><details class="perf-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" id="perf-copy">复制复盘材料</button></div></details><input type="file" id="perf-file" accept=".xlsx" multiple hidden></div></div>
       ${shopBar(s)}
-      <details class="perf-about"><summary>数据来源与口径</summary><p>数据文件夹：${s.sources.length ? s.sources.map((p) => `<code>${esc(p)}</code>`).join("、") : "未设置"} · 已导入 ${s.imports.files} 个文件${s.imports.last ? `，最近一次 ${esc(s.imports.last.replace("T", " "))}` : ""}。</p><p>数据文件夹里按「店铺 / 内容类型（视频、销售、图文、达人）」分开放：放在「跨境店」文件夹里的算跨境店，其余算本土店。图文是另一份按商品汇总的导出，在「图文」标签单独看。</p><p>视频指标是后台导出里逐条视频的归因数据加总；店铺每日汇总来自另一份导出，口径更大，单独展示不与视频明细相加。点击率 = 商品点击 ÷ 播放，CTOR = 订单 ÷ 商品点击，GPM = 每千次播放的归因 GMV。${gaps ? `导出缺口：${esc(gaps)}，缺口所在周在走势里以短横表示。` : ""}</p></details>
+      <details class="perf-about"><summary>数据来源与口径</summary><p>数据文件夹：${s.sources.length ? s.sources.map((p) => `<code>${esc(p)}</code>`).join("、") : "未设置"} · 已导入 ${s.imports.files} 个文件${s.imports.last ? `，最近一次 ${esc(s.imports.last.replace("T", " "))}` : ""}。</p><p>数据文件夹里按「店铺 / 内容类型（视频、销售、图文、达人）」分开放：放在「跨境店」文件夹里的算跨境店，其余算本土店。图文是另一份按商品汇总的导出，在「自制图文」标签单独看。</p><p>视频指标是后台导出里逐条视频的归因数据加总；店铺每日汇总来自另一份导出，口径更大，单独展示不与自制视频相加。点击率 = 商品点击 ÷ 播放，CTOR = 订单 ÷ 商品点击，GPM = 每千次播放的归因 GMV。${gaps ? `导出缺口：${esc(gaps)}，缺口所在周在走势里以短横表示。` : ""}</p></details>
       <div id="perf-import-result" role="status"></div>
       <div class="perf-tabs" role="tablist" aria-label="带货数据视图">${tabs.map(([k, label]) => `<button type="button" role="tab" id="perf-tab-${k}" data-perf-tab="${k}" aria-selected="${k === f.tab}" class="${k === f.tab ? "is-active" : ""}">${label}</button>`).join("")}</div>
       <div class="toolbar perf-toolbar"${bare ? " hidden" : ""}>${PerfDatePicker.trigger(f.period, perf.summary)}${creators ? PerfCreators.toolbar(perf.creators, f) : board || photos ? ""
         : `<label class="search">${icon("search")}<input id="perf-q" aria-label="搜索视频标题或 ID" placeholder="搜索标题或视频 ID…" value="${esc(f.q)}"></label>`}
         ${creators || photos ? "" : `<select id="perf-account" aria-label="账号">${options(accounts, f.account, "全部账号")}</select>`}
         <button type="button" class="subtle perf-reset" id="perf-reset" hidden>清除筛选</button>
-        ${board || creators || photos ? "" : `<span class="result-count">${resultCount(rows)}</span><button type="button" class="secondary compact" id="perf-export" title="把当前筛选的视频导出为 Excel：后台累计播放与公开页播放并排，原导出表不改">导出 Excel</button>`}</div>
+        ${board || creators || photos ? "" : `<span class="result-count">${resultCount(rows)}</span><button type="button" class="secondary compact" id="perf-export" title="把当前筛选的视频导出为 Excel：后台累计播放与公开页播放并排，售出和 GMV 是累计值，原导出表不改">导出 Excel</button>`}</div>
       ${!bare && window.Campaigns ? '<div class="perf-campaign-filter" id="perf-campaign-filter"></div>' : ""}
       ${bare ? `<div class="empty">${icon("chart")}<h3>${esc(shop)}还没有数据</h3><p>把${esc(shop)}的后台导出放进数据文件夹里的「${esc(shop)}」子文件夹（视频、销售、图文、达人分开放），再点「同步数据」；也可以直接点「导入表格」。</p></div>`
         : creators ? `<div id="perf-creators" class="perf-board" role="tabpanel" aria-labelledby="perf-tab-creators">${creatorsMarkup()}</div>`
@@ -654,13 +865,38 @@
     root.innerHTML = photosMarkup();
     PerfDashboard.bind(root);
     syncToolbar();
+    locatePhoto();
+  }
+  // Waits for the 图文 data, then scrolls to the post and marks it; says so when the shown exports do not have it.
+  // The mark survives later redraws of the table (charts and labels arriving), until another page is routed.
+  function locatePhoto() {
+    const root = $("#perf-photos");
+    if (!root || perf.filters.tab !== "photos") return;
+    const located = (id) => $$("[data-photo-item]", root).find((node) => node.dataset.photoItem === id);
+    const mark = (cell) => {
+      let fold = cell.closest("details");
+      while (fold) { fold.open = true; fold = fold.parentElement?.closest("details"); }
+      $$(".is-located", root).forEach((row) => row.classList.remove("is-located"));
+      const row = cell.closest("tr") || cell;
+      row.classList.add("is-located");
+      return row;
+    };
+    const id = perf.pendingPhoto;
+    if (!id) { const cell = perf.locatedPhoto && located(perf.locatedPhoto); if (cell) mark(cell); return; }
+    if (perf.photosError) { perf.pendingPhoto = ""; return; }
+    if (!perf.photos) return;
+    perf.pendingPhoto = "";
+    const cell = located(id);
+    if (!cell) { toast("当前图文数据里没有这条帖子，可能它不属于当前产品，或还没导入它发布当月的「图文」表。"); return; }
+    perf.locatedPhoto = id;
+    mark(cell).scrollIntoView({block: "center"});
   }
 
   async function switchShop(shop) {
     const f = perf.filters;
     if (!(shop in shopNames) || shop === f.shop) return;
-    // Keep the shared activity while resetting the previous shop's own filters.
-    Object.assign(f, { shop, account: "", status: "", q: "", period: "all", list_period: "all", board_period: "all" });
+    // Keep the shared activity and date while resetting the previous shop's own filters.
+    Object.assign(f, { shop, account: "", status: "", q: "" });
     normalizeCampaignFilter();
     syncFilterURL();
     perf.shown = 200;
@@ -695,8 +931,8 @@
     let changed = false;
     if (data) perf.campaignsError = false;
     // Restored list state remembers search/date controls, never an older activity selection.
-    if (f.board_campaign && !selected && f.board_period !== "all") {
-      f.board_period = "all";
+    if (f.board_campaign && !selected && f.period !== "all") {
+      f.period = "all";
       changed = true;
     }
     if (f.campaign !== selected || f.board_campaign !== selected) {
@@ -706,13 +942,8 @@
       changed = true;
     }
     const campaign = data?.campaigns.find(row => row.id === selected);
-    if (campaign && f.board_period !== `${campaign.start}~${campaign.end}`) {
-      f.board_period = `${campaign.start}~${campaign.end}`;
-      changed = true;
-    }
-    const period = f.tab === "list" ? f.list_period : f.board_period;
-    if (f.period !== period) {
-      f.period = period;
+    if (campaign && f.period !== `${campaign.start}~${campaign.end}`) {
+      f.period = `${campaign.start}~${campaign.end}`;
       changed = true;
     }
     if (perf.filters.tab === "creators" && perf.filters.board_campaign && /^p\d+$/.test(perf.filters.csort)) {
@@ -734,9 +965,10 @@
       board: "已切换到活动日期。店铺日度数据按活动起止日统计；视频按活动涉及的整周、图文与达人按重叠的整份导出统计，可能包含活动外日期，无法精确拆分到活动日。",
       photos: "已切换到活动日期。逐条图文按与活动重叠的整份导出统计，周汇总按整周统计；可能包含活动外日期，无法精确拆分到活动日。",
       creators: "已切换到活动日期。达人排行与明细按与活动重叠的整份导出统计，通常为月报；可能包含活动外日期，无法精确拆分到活动日。",
-      list: "观察窗与活动期有重叠的视频会计入，含起止日期；上方日期仍按发布日期筛选。",
+      list: `观察窗与活动期有重叠的视频会计入，含起止日期。${weekSalesNote()}`,
     }[perf.filters.tab];
-    root.innerHTML = `<label for="perf-campaign">活动期</label><select id="perf-campaign" aria-label="活动期快速筛选" ${!data ? "disabled" : ""}><option value="">${data ? "全部活动期" : perf.campaignsError ? "活动读取失败" : "正在读取活动…"}</option>${rows.map(row => `<option value="${esc(row.id)}" ${row.id === selected ? "selected" : ""}>${esc(row.name)} · ${esc(row.start)} 至 ${esc(row.end)}${window.Campaigns.phase(row) === "next" ? " · 未开始" : ""}</option>`).join("")}</select>${perf.campaignsError ? '<span role="status">活动日历暂时无法读取。</span><button type="button" class="subtle compact" data-perf-campaign-retry>重试</button>' : data && !rows.length ? '<span>还没有登记活动。</span>' : ""}${campaign ? `<p id="perf-campaign-hint">${esc(campaign.name)} · ${esc(campaign.start)} 至 ${esc(campaign.end)}（太平洋时间）${campaign.verified ? " · 已核对" : ["planning","disputed"].includes(campaign.confidence) ? " · 日期待核对" : ""}。${basis}</p>` : ""}`;
+    const dateNote = campaign ? "" : weekSalesNote();
+    root.innerHTML = `<label for="perf-campaign">活动期</label><select id="perf-campaign" aria-label="活动期快速筛选" ${!data ? "disabled" : ""}><option value="">${data ? "全部活动期" : perf.campaignsError ? "活动读取失败" : "正在读取活动…"}</option>${rows.map(row => `<option value="${esc(row.id)}" ${row.id === selected ? "selected" : ""}>${esc(row.name)} · ${esc(row.start)} 至 ${esc(row.end)}${window.Campaigns.phase(row) === "next" ? " · 未开始" : ""}</option>`).join("")}</select>${perf.campaignsError ? '<span role="status">活动日历暂时无法读取。</span><button type="button" class="subtle compact" data-perf-campaign-retry>重试</button>' : data && !rows.length ? '<span>还没有登记活动。</span>' : ""}${campaign ? `<p id="perf-campaign-hint">${esc(campaign.name)} · ${esc(campaign.start)} 至 ${esc(campaign.end)}（太平洋时间）${campaign.verified ? " · 已核对" : ["planning","disputed"].includes(campaign.confidence) ? " · 日期待核对" : ""}。${basis}</p>` : dateNote ? `<p id="perf-date-note">${esc(dateNote)}</p>` : ""}`;
     $("#perf-campaign").onchange = event => {
       window.Campaigns.select(event.target.value);
       normalizeCampaignFilter();
@@ -841,7 +1073,7 @@
     const f = perf.filters, q = f.q.trim(), board = f.tab === "board", creators = f.tab === "creators", photos = f.tab === "photos";
     const set = (selector, on) => $(selector)?.classList.toggle("is-set", on);
     set("#perf-cshow", f.cshow !== "sold");
-    $("#perf-date-trigger")?.classList.toggle("is-set", f.period !== "all");
+    PerfDatePicker.sync(f.period, perf.summary);
     set("#perf-account", !!f.account);
     set("#perf-campaign", !!(f.tab !== "list" ? f.board_campaign : f.campaign));
     if ($("#perf-export")) $("#perf-export").disabled = Boolean(campaignPending());
@@ -862,7 +1094,7 @@
   }
 
   function rerenderResults() {
-    if (!$("#perf-results")) return;
+    if (!$("#perf-results") || !perf.summary || !Array.isArray(perf.videos) || perf.requestedShop !== perf.filters.shop) return;
     const rows = filtered();
     $("#perf-results").innerHTML = tableMarkup(rows);
     $(".perf-toolbar .result-count").innerHTML = resultCount(rows);
@@ -903,6 +1135,8 @@
     $$(".perf-seg[data-count]").forEach((segment) => (segment.style.flexGrow = segment.dataset.count));
     const batchButton = $("[data-batch-collect]");
     if (batchButton) batchButton.onclick = () => void batchCollect(batchButton);
+    const draftButton = $("[data-batch-draft]");
+    if (draftButton) draftButton.onclick = () => void batchDraft();
     $$("[data-status-filter]").forEach((button) => (button.onclick = () => {
       const status = button.dataset.statusFilter;
       perf.filters.status = perf.filters.status === status ? "" : status;
@@ -928,8 +1162,8 @@
     PerfDatePicker.bind({ period: () => perf.filters.period, summary: () => perf.summary, choose: (value) => {
       const f = perf.filters;
       f.period = value;
-      if (f.tab === "list") f.list_period = value;
-      else { f.board_period = value; window.Campaigns?.select?.(""); f.campaign = f.board_campaign = ""; }
+      window.Campaigns?.select?.("");
+      f.campaign = f.board_campaign = "";
       perf.shown = 200;
       perf.creatorShown = 100;
       saveFilters();
@@ -960,11 +1194,10 @@
     $("#perf-reset").onclick = () => {
       const f = perf.filters;
       window.Campaigns?.select?.("");
-      if (f.board_campaign || f.tab !== "list") f.board_period = "all";
       f.campaign = f.board_campaign = "";
-      if (f.tab === "creators") Object.assign(f, { period: "all", cq: "", cshow: "sold" });
-      else if (f.tab === "photos") f.period = "all";
-      else Object.assign(f, { account: "", period: "all" }, f.tab === "board" ? {} : { q: "", status: "", list_period: "all" });
+      f.period = "all";
+      if (f.tab === "creators") Object.assign(f, { cq: "", cshow: "sold" });
+      else if (f.tab !== "photos") Object.assign(f, { account: "" }, f.tab === "board" ? {} : { q: "", status: "" });
       perf.shown = 200;
       perf.creatorShown = 100;
       saveFilters();
@@ -1089,8 +1322,6 @@
       for (const key of Object.keys(filterDefaults)) {
         if (typeof restored.filters[key] === typeof filterDefaults[key]) perf.filters[key] = restored.filters[key];
       }
-      if (!Object.hasOwn(restored.filters, "list_period") && restored.filters.tab === "list") perf.filters.list_period = restored.filters.period || "all";
-      if (!Object.hasOwn(restored.filters, "board_period") && restored.filters.tab !== "list") perf.filters.board_period = restored.filters.period || "all";
     }
     if (restored?.filters && restored.review_status_filter_version !== 1) perf.filters.status = "";
     if (restored && Number.isFinite(restored.shown)) perf.shown = Math.max(200, Math.trunc(restored.shown));
@@ -1103,16 +1334,19 @@
     else if (linked.has("status")) perf.filters.status = "";
     if (tabs.some(([key]) => key === linked.get("tab"))) perf.filters.tab = linked.get("tab");
     if (linked.get("video")) perf.filters.tab = "list";
+    // A photo post opened from its publication record: 图文 over all exports, then its row is marked.
+    perf.pendingPhoto = linked.get("photo") || "";
+    perf.locatedPhoto = "";
+    if (perf.pendingPhoto) Object.assign(perf.filters, {tab: "photos", period: "all"});
     if (!restored) {
       const campaignKey = perf.filters.tab === "list" ? "campaign" : "board_campaign";
       const alternateKey = campaignKey === "campaign" ? "board_campaign" : "campaign";
       if (linked.has(campaignKey) || linked.has(alternateKey)) window.Campaigns?.select?.(linked.get(campaignKey) ?? linked.get(alternateKey));
-      else if (perf.filters.tab !== "list" && linked.has("period")) {
+      else if (linked.has("period")) {
         window.Campaigns?.select?.("");
         perf.filters.campaign = perf.filters.board_campaign = "";
       }
     }
-    if (linked.has("period")) perf.filters[perf.filters.tab === "list" ? "list_period" : "board_period"] = linked.get("period");
     if (!(perf.filters.shop in shopNames)) perf.filters.shop = "local";
     // Data read for another shop (a link or the restored list state names a different one) is dropped before the page draws.
     if (perf.requestedShop && perf.requestedShop !== perf.filters.shop) resetData();
@@ -1123,8 +1357,6 @@
     if (!PerfCreators.validSort(perf.filters.csort)) perf.filters.csort = "gmv";
     if (!["asc", "desc"].includes(perf.filters.cdir)) perf.filters.cdir = "desc";
     perf.creatorsError = "";
-    if (window.PerfDashboard && !window.PerfDashboard.validPeriod(perf.filters.list_period)) perf.filters.list_period = "all";
-    if (window.PerfDashboard && !window.PerfDashboard.validPeriod(perf.filters.board_period)) perf.filters.board_period = "all";
     if (!tabs.some(([key]) => key === perf.filters.tab)) perf.filters.tab = "board";
     if (window.PerfDashboard && !window.PerfDashboard.validPeriod(perf.filters.period)) perf.filters.period = "all";
     if (window.PerfDashboard && !(perf.filters.metric in window.PerfDashboard.metrics)) perf.filters.metric = "gmv";
@@ -1148,6 +1380,7 @@
         needsCatalog = perf.catalogLoading;
         render();
         if (perf.pendingVideo) { const id = perf.pendingVideo; perf.pendingVideo = ""; openVideo(id); }
+        locatePhoto();
       });
       // Attach both rejection handlers immediately, including when the core read fails first.
       // Charts and direction labels enrich the mounted page without delaying its route completion.

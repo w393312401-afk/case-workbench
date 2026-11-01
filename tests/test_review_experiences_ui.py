@@ -30,7 +30,7 @@ class ReviewExperiencesUITests(unittest.TestCase):
         self.addCleanup(lambda: self.assertEqual(errors, []))
         page.route("**/*", lambda route: route.fulfill(content_type="text/html", body='<main id="panel"></main>'))
         page.goto("http://127.0.0.1:43220/experience-test")
-        for name in ("style.css", "home.css", "feedback-chain.css", "review-experiences.css"):
+        for name in ("style.css", "buttons.css", "home.css", "feedback-chain.css", "review-experiences.css"):
             page.add_style_tag(path=str(ROOT / "static" / name))
         page.evaluate("""() => {
           window.esc = value => String(value ?? '').replace(/[&<>"']/g,

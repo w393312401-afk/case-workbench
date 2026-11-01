@@ -1,6 +1,7 @@
 """The campaign calendar: honest about how well each date is backed, editable, and visible to the review."""
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 import tempfile
 import unittest
@@ -23,6 +24,21 @@ class CampaignStoreTests(unittest.TestCase):
 
     def by_id(self, result, identifier):
         return next((row for row in result["campaigns"] if row["id"] == identifier), None)
+
+    def test_writing_only_gets_near_campaigns_with_trustworthy_dates(self):
+        names = lambda day: {row["name"]: row["status"] for row in self.store.for_writing(day)}
+        bfcm = "Black Friday / Cyber Monday（黑五网一）"
+        self.assertEqual(names(date(2026, 10, 27)), {}, "Fifteen days out is too early, and the disputed fall sale's dates are unchecked")
+        self.assertEqual(names(date(2026, 10, 28)), {bfcm: "upcoming"})
+        self.assertEqual(names(date(2026, 11, 11)), {bfcm: "running"})
+        self.assertEqual(names(date(2026, 11, 30))[bfcm], "running")
+        self.assertNotIn(bfcm, names(date(2026, 12, 1)), "The day after it ends")
+        self.assertEqual(names(date(2026, 10, 10)), {}, "A disputed date stays out of scripts until someone checks it")
+        fall = self.by_id(self.store.public(), "TKC-2026-fall-deals")
+        checked = {key: fall[key] for key in ("id", "name", "start", "end", "confidence", "source_label", "source_url", "note")}
+        self.store.mutate({"action": "save", "revision": self.store.public()["revision"], "campaign": {**checked, "verified": True}})
+        self.assertEqual(names(date(2026, 10, 10)), {fall["name"]: "running"})
+        self.assertEqual(set(self.store.for_writing(date(2026, 10, 10))[0]), {"name", "start", "end", "status"})
 
     def test_builtin_2026_nodes_say_how_well_their_dates_are_backed(self):
         result = self.store.public()

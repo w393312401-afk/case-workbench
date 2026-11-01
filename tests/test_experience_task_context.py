@@ -9,6 +9,7 @@ from unittest.mock import Mock
 from urllib.parse import urlencode
 from uuid import uuid4
 
+from creation_store import CreationError
 import test_server as fixture
 from test_ai_tasks import FakeBridge
 import test_plan_variant_binding as plans
@@ -66,6 +67,47 @@ class ExperienceTaskContextTests(unittest.TestCase):
             "revision": self.app.creation.public()["revision"], "script": {
                 "product": "202H", "title": "装夹采用稿", "text": "Show the clamp first.",
                 "translation_zh": "先展示装夹。", "confirmed": True, **values}})["script"]
+
+    def test_no_direction_writing_freezes_live_directions_and_points_to_the_skill_rule(self):
+        direction = self.direction()
+        task, _ = self.task(action="variants")
+        raw = self.app.ai._read(task["task_id"])["snapshot"]["creation_context"]["available_directions"]
+        self.assertIn(direction["direction_id"], [row["direction_id"] for row in raw])
+        row = next(row for row in raw if row["direction_id"] == direction["direction_id"])
+        self.assertEqual(row["main_difference"], direction["main_difference"])
+        self.assertEqual(row["concern"], direction["concern"])
+        self.assertEqual(row["closing"], direction["closing"])
+        self.assertLessEqual(set(row), {"direction_id", "main_difference", "audience", "concern", "closing", "notes", "variants"})
+        for call in self.bridge.calls:
+            self.assertIn("available_directions", call["prompt"])
+            self.assertIn("写作参考“没有指定方向时”", call["prompt"])
+        self.bridge.calls.clear()
+        chosen, _ = self.task(action="variants", direction_id=direction["direction_id"])
+        self.assertNotIn("available_directions", self.app.ai._read(chosen["task_id"])["snapshot"]["creation_context"])
+        self.assertNotIn("写作参考“没有指定方向时”", self.bridge.calls[0]["prompt"])
+        self.bridge.calls.clear()
+        reviewed, _ = self.task(action="review")
+        self.assertNotIn("available_directions", self.app.ai._read(reviewed["task_id"])["snapshot"]["creation_context"])
+
+    def test_writing_freezes_campaigns_into_both_stages_and_survives_a_broken_calendar(self):
+        running = {"name": "Black Friday", "start": "2026-11-11", "end": "2026-11-30", "status": "running"}
+        self.app.campaigns.for_writing = Mock(return_value=[running])
+        self.task(action="variants")
+        self.assertEqual(len(self.bridge.calls), 2)
+        for call in self.bridge.calls:
+            self.assertIn('"campaigns"', call["prompt"])
+            self.assertIn("2026-11-30", call["prompt"])
+            self.assertIn("campaigns 按“开头、中段与收口”使用", call["prompt"])
+        self.assertNotIn("购物引导", self.bridge.calls[0]["prompt"].split("当前用户要求")[0].split("<untrusted_creation_context>")[0])
+        self.bridge.calls.clear()
+        self.app.campaigns.for_writing.reset_mock()
+        self.task(action="review")
+        self.app.campaigns.for_writing.assert_not_called()
+        self.bridge.calls.clear()
+        self.app.campaigns.for_writing = Mock(side_effect=CreationError(500, "活动日历无法读取"))
+        task, _ = self.task(action="variants")
+        self.assertEqual(task["status"], "completed")
+        self.assertNotIn('"campaigns"', self.bridge.calls[0]["prompt"])
 
     def test_writing_freezes_and_exposes_sources_for_both_independent_stages(self):
         original = copy.deepcopy(self.items)

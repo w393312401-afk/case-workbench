@@ -40,8 +40,7 @@ class ReviewFocusPageTests(unittest.TestCase):
         page.context.grant_permissions(['clipboard-read', 'clipboard-write'])
         source.locator('[data-copy-label="视频 ID"]').click()
         self.assertEqual(page.evaluate('navigator.clipboard.readText()'), video_id)
-        source.locator('[data-copy-video-link]').click()
-        self.assertEqual(page.evaluate('navigator.clipboard.readText()'), link.get_attribute('href'))
+        self.assertEqual(source.locator('[data-copy-video-link]').count(), 0)
         for scheme in ('light', 'dark'):
             page.emulate_media(color_scheme=scheme)
             box = dialog.bounding_box()

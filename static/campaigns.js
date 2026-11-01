@@ -41,16 +41,21 @@ window.Campaigns = (() => {
   const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
   const md = day => `${Number(day.slice(5, 7))}/${Number(day.slice(8, 10))}`;
   const range = row => row.start === row.end ? md(row.start) : `${md(row.start)} – ${md(row.end)}`;
-  const today = () => {const now = new Date();return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;};
+  // Campaign dates are Pacific days, so "today" is too; a Beijing morning is still yesterday there.
+  const pacificDay = new Intl.DateTimeFormat('en-CA', {timeZone: 'America/Los_Angeles'});
+  const today = () => pacificDay.format(new Date());
   const addDays = (day, count) => {const value = new Date(day + 'T00:00:00Z');value.setUTCDate(value.getUTCDate() + count);return value.toISOString().slice(0, 10);};
   const daysBetween = (from, to) => Math.round((new Date(to + 'T00:00:00Z') - new Date(from + 'T00:00:00Z')) / 86400000);
   const money = value => '$' + Math.round(value).toLocaleString('en-US');
   const phase = (row, now = today()) => row.end < now ? 'past' : row.start > now ? 'next' : 'live';
 
+  const store = data => {state.data = data;window.dispatchEvent(new CustomEvent('workbench:campaignschange'));return data;};
   async function load(force = false) {
     if (state.loading) return state.loading;
     if (state.data && !force) return state.data;
-    state.loading = api('/api/campaigns').then(data => {state.data = data;state.error = '';return data;},
+    // The top bar reads the calendar on every page, so a page arriving after a failed read shares that failure and offers its retry.
+    if (state.error && !force) return null;
+    state.loading = api('/api/campaigns').then(data => {state.error = '';return store(data);},
       error => {state.error = error.message || '活动日历暂时读不到。';return null;}).finally(() => {state.loading = null;});
     return state.loading;
   }
@@ -194,7 +199,7 @@ window.Campaigns = (() => {
     async function submit(body) {
       modal.querySelectorAll('button').forEach(button => {button.disabled = true;});
       try {
-        state.data = await api('/api/campaigns', {method: 'POST', body: {...body, revision: state.data.revision}});
+        store(await api('/api/campaigns', {method: 'POST', body: {...body, revision: state.data.revision}}));
         close();
         onChange?.();
       } catch (error) {
@@ -240,7 +245,7 @@ window.Campaigns = (() => {
 
   async function post(body) {
     try {
-      state.data = await api('/api/campaigns', {method: 'POST', body: {...body, revision: state.data.revision}});
+      store(await api('/api/campaigns', {method: 'POST', body: {...body, revision: state.data.revision}}));
       return true;
     } catch (error) {
       if (error?.status === 409) await load(true).catch(() => null);
@@ -268,7 +273,7 @@ window.Campaigns = (() => {
             ${row.source_url ? `<p class="campaign-meta"><span>现有依据：<a href="${escape(row.source_url)}" target="_blank" rel="noopener noreferrer">${escape(row.source_label || '来源')} ↗</a></span></p>` : ''}
             <div class="campaign-check-actions"><button type="button" class="primary compact" data-check-ok>日期无误，标记已核对</button><button type="button" class="secondary compact" data-check-edit>改日期…</button><button type="button" class="subtle compact flow-delete-archived" data-check-drop>没有这个活动，删除</button></div></li>`;
         }).join('')}</ol>` : '<p class="campaign-empty">没有待核对的活动了。</p>'}</div>
-        <div class="dialog-footer"><span>标记「已核对」后，复盘和 AI 简报不再提示该日期待核对</span><div><button type="button" class="secondary" data-copy ${items.length ? '' : 'disabled'}>复制清单</button><button type="button" class="primary" data-close>完成</button></div></div></form>`;
+        <div class="dialog-footer"><span>标记「已核对」后，复盘和 AI 简报不再提示该日期待核对</span><div><button type="button" class="secondary" data-copy ${items.length ? '' : 'disabled'}>复制清单</button><button type="button" class="secondary" data-close>完成</button></div></div></form>`;
       modal.querySelectorAll('[data-close]').forEach(button => button.onclick = close);
       modal.querySelector('[data-copy]')?.addEventListener('click', () => {
         const text = [`活动日期待核对清单（共 ${items.length} 项，日期为太平洋时间）`, GUIDE, '', ...items.map(itemText)].join('\n');
@@ -314,5 +319,103 @@ window.Campaigns = (() => {
     return `<div class="feedback-campaigns"><strong>观察窗内有平台活动</strong><ul>${items}</ul><p>高客单品在活动期的折扣和流量会直接抬高销量：下结论时把活动带来的增量和内容本身分开看${doubtful ? '；标「待核对」或「说法不一」的日期只能当作可能重叠' : ''}。</p></div>`;
   }
 
-  return {load, current: () => state.data, selection, select, card, bind, impact, weeklyImpact, overlapping, reviewNote, phase, trust, checklist};
+  // ---- the top-bar runway: a big count, then one cell for each day left in the nearest campaign ------------------
+  // Black Friday and Cyber Monday follow the US calendar, so a campaign that covers them needs no extra records.
+  function shoppingDays(year) {
+    const firstThursday = 1 + (11 - new Date(Date.UTC(year, 10, 1)).getUTCDay()) % 7;
+    const friday = `${year}-11-${firstThursday + 22}`;
+    return [{day: friday, label: '黑五'}, {day: addDays(friday, 3), label: '网一'}];
+  }
+  // The first cell is always today and the last is the campaign's final day, so the row shrinks as time passes.
+  function runway(now = today()) {
+    const row = campaigns().find(entry => entry.end >= now);
+    if (!row) return null;
+    const live = row.start <= now, span = daysBetween(now, row.end) + 1;
+    const away = daysBetween(now, live ? row.end : row.start);
+    const name = (row.name.match(/（([^）]+)）/)?.[1] || row.name).slice(0, 12);
+    const days = shoppingDays(Number(row.start.slice(0, 4))).filter(entry => entry.day >= row.start && entry.day <= row.end && entry.day >= now)
+      .map(entry => ({...entry, away: daysBetween(now, entry.day)}));
+    const marks = days.map(entry => ({at: entry.away, label: entry.label, value: entry.away ? `${entry.away}` : '今天'}));
+    if (!marks.length) marks.push({at: span - 1, label: '结束', value: md(row.end)});
+    const tone = live ? 'live' : away <= 3 ? 'danger' : away <= 14 ? 'warn' : 'quiet';
+    const timing = live ? (away ? `进行中，还剩 ${away} 天` : '进行中，今天是最后一天') : `${away} 天后开始`;
+    const nodes = days.filter(entry => entry.away > 0).map(entry => `${entry.label} ${entry.away} 天`).join('，');
+    const summary = `${row.name}，${range(row)}（太平洋时间），${timing}${nodes ? `；${nodes}` : ''}；日期${(trust[row.confidence] || trust.manual)[0]}${row.verified ? '，已核对' : ''}。点击查看活动日历`;
+    return {id: row.id, tone, summary, marks, span, lead: live ? span : away, name, date: md(live ? row.end : row.start),
+      count: live && !away ? '今天' : `${away}`, unit: !live ? '天后开场' : away ? '天后结束' : '最后一天',
+      doubtful: ['planning', 'disputed'].includes(row.confidence) && !row.verified};
+  }
+  const runwayNode = () => document.querySelector('#campaign-runway');
+  const runwayHidden = () => window.WorkbenchGuest || window.PublicTextMode || document.documentElement.classList.contains('public-text-mode') || document.body.classList.contains('public-text-mode');
+  const boardURL = () => window.WorkbenchShell?.url('#videos?tab=board') || '#videos?tab=board';
+  // Close the gaps when the days get thin, keep labels inside the row, then hide any that would sit on an earlier one.
+  function fitRunway(link) {
+    const row = link.querySelector('.runway-days');
+    if (!row?.offsetWidth) return;
+    const each = row.offsetWidth / row.children.length;
+    row.style.setProperty('--runway-gap', each < 3 ? '0px' : each < 6 ? '1px' : '2px');
+    const bounds = row.getBoundingClientRect(), kept = [];
+    row.querySelectorAll('b').forEach(mark => {
+      mark.classList.remove('is-crowded');
+      mark.style.removeProperty('--shift');
+      const box = mark.getBoundingClientRect();
+      const shift = Math.max(bounds.left - box.left, 0) + Math.min(bounds.right - box.right, 0);
+      mark.style.setProperty('--shift', `${shift}px`);
+      const left = box.left + shift, right = box.right + shift;
+      if (kept.some(other => left < other.right + 6 && right > other.left - 6)) mark.classList.add('is-crowded');
+      else kept.push({left, right});
+    });
+  }
+  function paintRunway() {
+    const link = runwayNode();
+    if (!link) return;
+    const plan = runwayHidden() ? null : runway();
+    link.hidden = !plan;
+    if (!plan) return;
+    link.className = `campaign-runway is-${plan.tone}`;
+    link.href = boardURL();
+    link.title = plan.summary;
+    link.setAttribute('aria-label', plan.summary);
+    const cells = Array.from({length: plan.span}, (_, day) => {
+      const mark = plan.marks.find(entry => entry.at === day);
+      return `<span class="runway-day${day < plan.lead ? ' is-lead' : ''}${mark ? ' is-mark' : ''}">${mark ? `<b>${escape(mark.label)} ${escape(mark.value)}</b>` : ''}</span>`;
+    }).join('');
+    link.innerHTML = `<span class="runway-body" aria-hidden="true"><span class="runway-count">${escape(plan.count)}</span>
+      <span class="runway-words"><strong>${plan.unit}${plan.doubtful ? ' · 待核对' : ''}</strong><small>${escape(plan.name)} · ${plan.date}</small></span>
+      <span class="runway-days">${cells}</span></span>`;
+    fitRunway(link);
+  }
+  // The board draws its calendar after the route settles, so wait for the rows before scrolling to them.
+  function revealCalendar() {
+    const reveal = () => {
+      if (!document.querySelector('#perf-campaigns .campaign-row')) return false;
+      document.querySelector('#perf-campaigns').scrollIntoView({block: 'start'});
+      return true;
+    };
+    if (reveal()) return;
+    const watcher = new MutationObserver(() => {if (reveal()) {watcher.disconnect();clearTimeout(timer);}});
+    const timer = setTimeout(() => watcher.disconnect(), 8000);
+    watcher.observe(document.querySelector('#content') || document.body, {childList: true, subtree: true});
+  }
+  function initRunway() {
+    const link = runwayNode();
+    if (!link || runwayHidden()) return;
+    let painted = '';
+    const paint = () => {painted = today();paintRunway();};
+    window.addEventListener('workbench:campaignschange', paint);
+    link.addEventListener('click', event => {
+      link.href = boardURL();
+      if (!event.ctrlKey && !event.metaKey && !event.shiftKey) setTimeout(revealCalendar);
+    });
+    new ResizeObserver(() => fitRunway(link)).observe(link);
+    // The countdown turns over at Pacific midnight, however long the page stays open.
+    setInterval(() => {
+      if (!state.data) void load(true);
+      else if (painted !== today()) paint();
+    }, 60000);
+    void load();
+  }
+  document.addEventListener('DOMContentLoaded', initRunway);
+
+  return {load, current: () => state.data, selection, select, card, bind, impact, weeklyImpact, overlapping, reviewNote, phase, trust, checklist, runway};
 })();

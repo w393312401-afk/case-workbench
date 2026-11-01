@@ -8,11 +8,12 @@ import statistics
 from datetime import date, timedelta
 
 from creation_store import CreationError, text
-from direction_store import product_key
+from direction_store import fingerprint, product_key
 from performance_store import RATE_MIN_VIEWS
 from prepublish_review import parse_card
 from review_policy import review_context, report_window
 from manual_review_status import ManualReviewStatus
+from task_activity import safe_error
 
 JUDGED = {"focus", "follow", "watch", "drop"}
 DRAFT_ACTIONS = {"加码": "scale", "换执行": "execution", "停测": "stop"}
@@ -23,6 +24,7 @@ RECENT_DAYS = 56  # peers are the videos of the eight weeks up to the reviewed v
 MIN_PEERS = 5  # a direction with fewer peers than this for a figure falls back to the whole product
 POOLS = {"direction": "同方向", "product": "同产品"}
 CTOR_EXPECTED_ORDERS = 3  # fewer expected orders than this and zero orders says nothing
+MAX_DRAFT_BATCH = 10
 
 
 def draft_funnel(video, weeks, reference):
@@ -104,11 +106,121 @@ class FeedbackWorkbenchMixin:
             video["review_status"] = snapshot.for_video(video)
         return result
 
-    def review_videos(self, videos=None):
-        """Include registered posts before a sales export arrives, without making up sales."""
-        videos = copy.deepcopy(self.performance.videos() if videos is None else videos)
-        by_id = {str(row["video_id"]): row for row in videos}
-        scripts = self.creation.read()["scripts"]
+    def annotate_review_drafts(self, videos):
+        """Batch eligibility belongs to this exact product/video/window, never to a traffic band."""
+        if not videos:
+            return []
+        with self.lock:
+            drafts = {}
+            unavailable = False
+            try:
+                for task in self.ai.list_tasks():
+                    if task.get("action") != "retrospective":
+                        continue
+                    raw = self.ai._read(task["task_id"], copy_record=False)
+                    context = (raw.get("snapshot") or {}).get("creation_context") or {}
+                    if not context.get("review_draft"):
+                        continue
+                    video = context.get("review_video") or {}
+                    key = (product_key(video.get("product")), str(video.get("video_id") or ""), video.get("window_end"))
+                    busy = task.get("busy") or task.get("stopping") or task.get("status") in {"queued", "running", "stopping"}
+                    if not busy and task.get("status") != "completed":
+                        continue
+                    rank = (bool(busy), task.get("created_at") or "")
+                    if key not in drafts or rank > drafts[key][0]:
+                        drafts[key] = (rank, task)
+            except Exception:
+                # Broken AI history must not hide the sales list or allow duplicate tasks.
+                unavailable = True
+            result = copy.deepcopy(videos)
+            for video in result:
+                key = (product_key(video.get("product")), str(video.get("video_id") or ""), video.get("window_end"))
+                draft = drafts.get(key, (None, None))[1]
+                reason = ""
+                if unavailable:
+                    reason = "起草任务状态暂时无法读取，请稍后刷新。"
+                elif draft:
+                    reason = "已有起草任务"
+                elif (video.get("review_status") or {}).get("key") != "pending":
+                    reason = "已完成人工复盘"
+                elif video.get("registration_only") or not video.get("window_end"):
+                    reason = "待补销售数据"
+                video["review_draft"] = {"eligible": not reason, "reason": reason, **({"unavailable": True} if unavailable else {})}
+                if draft:
+                    video["review_draft"].update(task_id=draft["task_id"], status="stopping" if draft.get("stopping") else draft["status"])
+            return result
+
+    def batch_review_drafts(self, body):
+        """Create normal, independent draft tasks with per-item receipts and safe retries."""
+        if not isinstance(body, dict) or set(body) - {"request_id", "shop", "videos"}:
+            raise CreationError(400, "批量起草参数格式无效。")
+        shop, videos = body.get("shop"), body.get("videos")
+        if not isinstance(shop, str) or shop not in {"local", "cross"}:
+            raise CreationError(400, "请选择要批量起草的店铺。")
+        if not isinstance(videos, list) or not 1 <= len(videos) <= MAX_DRAFT_BATCH:
+            raise CreationError(400, f"每批请选择 1–{MAX_DRAFT_BATCH} 条视频。")
+        refs, seen = [], set()
+        for video in videos:
+            if not isinstance(video, dict) or set(video) != {"product", "video_id", "window_end"}:
+                raise CreationError(400, "批量起草的视频资料格式无效。")
+            product = product_key(text(video.get("product"), "产品", limit=200))
+            video_id, window = video.get("video_id"), video.get("window_end")
+            if product == "all" or not isinstance(video_id, str) or not re.fullmatch(r"\d{6,25}", video_id):
+                raise CreationError(400, "请指定视频编号与具体产品。")
+            try:
+                if date.fromisoformat(window).isoformat() != window:
+                    raise ValueError()
+            except (TypeError, ValueError) as exc:
+                raise CreationError(400, "观察窗须为 YYYY-MM-DD。") from exc
+            key = (product, video_id, window)
+            if key in seen:
+                raise CreationError(400, "同一批视频不能重复。")
+            seen.add(key)
+            refs.append({"product": product, "video_id": video_id, "window_end": window})
+        with self.lock:
+            path, operation = self._operation("review_draft_batch", body)
+            if operation.get("complete"):
+                return {"results": copy.deepcopy(operation["results"]), "replayed": True}
+            operation.setdefault("results", [])
+            # Save the intent before the first task; task-level receipts cover a crash before this journal is updated.
+            self.creation._replace(path, operation)
+            available = self.annotate_review_drafts(self.annotate_review_status(self.performance.videos(shop=shop)))
+            by_id = {str(video["video_id"]): video for video in available}
+            for ref in refs[len(operation["results"]):]:
+                child = {"request_id": "review-batch-" + fingerprint([body["request_id"], ref]), "product": ref["product"],
+                         "action": "retrospective", "instruction": "起草这条视频的复盘结论；仅在必要时建议下一轮动作，由人工决定是否采用。",
+                         "review_video": ref, "include_basket": False, "skill_selection": "auto"}
+                result = {**ref, "status": "failed"}
+                try:
+                    request, digest = self.ai._request(child, "create", None)
+                    prior = self.ai._prior(request, digest)
+                    video = by_id.get(ref["video_id"])
+                    if not prior:
+                        if not video or product_key(video.get("product")) != ref["product"]:
+                            raise CreationError(409, "当前店铺和产品下未找到这条视频，请刷新后重试。")
+                        if video.get("window_end") != ref["window_end"]:
+                            raise CreationError(409, "视频观察窗已更新，请刷新后重试。")
+                        eligibility = video["review_draft"]
+                        if not eligibility["eligible"]:
+                            result.update(status="skipped", message=eligibility["reason"])
+                            if eligibility.get("task_id"):
+                                result["task_id"] = eligibility["task_id"]
+                        else:
+                            prior = self.create_ai_task(child)
+                    if prior:
+                        result.update(status="queued", message="已提交起草，完成后请核对并保存复盘。", task_id=prior["task_id"])
+                except ValueError as exc:
+                    result["message"] = str(exc)[:500]
+                except Exception as exc:
+                    result["message"] = safe_error(exc)
+                operation["results"].append(result)
+                self.creation._replace(path, operation)
+            operation["complete"] = True
+            self.creation._replace(path, operation)
+            return {"results": copy.deepcopy(operation["results"]), "replayed": False}
+
+    def _registrations(self, scripts):
+        """Every post registered on a script or a video order, by post ID, newest correction last."""
         registrations = {}
 
         def add(identifier, published, source):
@@ -128,20 +240,46 @@ class FeedbackWorkbenchMixin:
                 if receipt:
                     source = (receipt.get("source") or {}).get("script") or {}
                     add(receipt.get("post_id"), receipt.get("published_on"), {**source, "account": receipt.get("account") or source.get("account")})
-        for identifier, registration in registrations.items():
+        return registrations
+
+    @staticmethod
+    def _registration_only(registration):
+        return {**registration, "registration_only": True, "status": "incomplete", "status_label": "待补数据",
+                "views": None, "window_views": None, "orders": None, "last_data": None,
+                "observation_coverage_complete": False, "flags": []}
+
+    def review_videos(self, videos=None):
+        """Include registered posts before a sales export arrives, without making up sales."""
+        videos = copy.deepcopy(self.performance.videos() if videos is None else videos)
+        by_id = {str(row["video_id"]): row for row in videos}
+        for identifier, registration in self._registrations(self.creation.read()["scripts"]).items():
             if identifier in by_id:
                 video = by_id[identifier]
                 if product_key(video.get("product")) == registration["product"]:
                     video.update(registered=True, registered_on=registration["posted_on"])
             else:
-                video = {**registration, "registration_only": True, "status": "incomplete", "status_label": "待补数据",
-                         "views": None, "window_views": None, "orders": None, "last_data": None,
-                         "observation_coverage_complete": False, "flags": []}
+                video = self._registration_only(registration)
                 videos.append(video)
                 by_id[identifier] = video
         for video in videos:
             video["review_context"] = review_context(video)
         return self.annotate_review_status(videos)
+
+    def review_video(self, video_id, scripts, video=None):
+        """What review_videos() makes of this one video (its review_context, registered and registered_on), without
+        copying and working out all the others. `video` is its sales row when it has one."""
+        video_id = str(video_id)
+        registration = self._registrations(scripts).get(video_id)
+        if video is not None:
+            row = dict(video)
+            if registration and product_key(row.get("product")) == registration["product"]:
+                row.update(registered=True, registered_on=registration["posted_on"])
+        elif registration:
+            row = self._registration_only(registration)
+        else:
+            return None
+        row["review_context"] = review_context(row)
+        return row
 
     def feedback_chain(self, video_id, product, window_end=None):
         product = product_key(text(product, "产品", limit=200))
@@ -149,8 +287,9 @@ class FeedbackWorkbenchMixin:
         if product == "all" or not re.fullmatch(r"\d{6,25}", video_id):
             raise CreationError(400, "请指定视频编号与具体产品。")
         with self.lock, self.store.index_snapshot():
+            creation = self.creation.read()
             video = self.performance.video(video_id)
-            review_video = next((row for row in self.review_videos() if str(row["video_id"]) == video_id), None)
+            review_video = self.review_video(video_id, creation["scripts"], video)
             if video and review_video:
                 video.update({key: review_video[key] for key in ("review_context", "registered", "registered_on") if key in review_video})
             elif not video:
@@ -168,7 +307,7 @@ class FeedbackWorkbenchMixin:
             review_catalog = self.review_followups.public(product)
             review = next((row for row in review_catalog["entries"] if review_identity(row) == identity), None)
             source = self.review_followups.source_snapshot(review) if review and review["state"] == "reviewed" else None
-            creation, production = self.creation.read(), self.production.records()
+            production = self.production.records()
             scripts = [row for row in creation["scripts"] if product_key(row.get("product")) == product]
             plans = [row for row in creation["plans"] if product_key(row.get("product")) == product
                      and review_identity(row.get("source_review")) == identity]
@@ -207,19 +346,18 @@ class FeedbackWorkbenchMixin:
             publications = self._video_publications().read().get("jobs", {})
             source_script_ids = {row["id"] for row in scripts if str(row.get("video_id") or "") == video_id}
             source_outputs, next_outputs = [], []
-            for key, kind in (("jobs", "video"), ("carousels", "carousel")):
-                for row in production.get(key, []):
-                    if product_key(row.get("product")) != product:
-                        continue
-                    entry = publications.get(row["id"], {}) if kind == "video" else {}
-                    records = [entry.get("publication"), *entry.get("history", [])] if kind == "video" else [row.get("publication"), *row.get("publication_history", [])]
-                    if any(isinstance(record, dict) and str(record.get("post_id") or "") == video_id for record in records):
-                        source_outputs.append(self._feedback_output(row, kind))
-                        for record in records:
-                            if isinstance(record, dict) and str(record.get("post_id") or "") == video_id:
-                                source_script_ids.add(record.get("script_id") or row.get("script_id"))
-                    if row.get("script_id") in next_script_ids:
-                        next_outputs.append(self._feedback_output(row, kind))
+            for row in production.get("jobs", []):
+                if product_key(row.get("product")) != product:
+                    continue
+                entry = publications.get(row["id"], {})
+                records = [entry.get("publication"), *entry.get("history", [])]
+                if any(isinstance(record, dict) and str(record.get("post_id") or "") == video_id for record in records):
+                    source_outputs.append(self._feedback_output(row, "video"))
+                    for record in records:
+                        if isinstance(record, dict) and str(record.get("post_id") or "") == video_id:
+                            source_script_ids.add(record.get("script_id") or row.get("script_id"))
+                if row.get("script_id") in next_script_ids:
+                    next_outputs.append(self._feedback_output(row, "video"))
             cases = [{"id": row["case_id"], "title": (row.get("current") or {}).get("title") or row["case_id"]}
                      for row in self.store.read_index()["cases"] if product_key(row.get("product")) == product and
                      str(((row.get("current") or {}).get("metrics") or {}).get("video_id") or "") == video_id]
@@ -282,7 +420,7 @@ class FeedbackWorkbenchMixin:
         since = (date.fromisoformat(until) - timedelta(days=RECENT_DAYS)).isoformat()
         directions = self._video_directions(product, scripts)
         direction = directions.get(video_id)
-        rows = [row for row in self.performance.videos() if product_key(row.get("product")) == product and str(row["video_id"]) != video_id]
+        rows = [row for row in self.performance.videos_readonly() if product_key(row.get("product")) == product and str(row["video_id"]) != video_id]
         pools = [("direction", [row for row in rows if directions.get(str(row["video_id"])) == direction])] if direction else []
         pools.append(("product", rows))
         reference = {"period": {"start": since, "end": until}, "direction_id": direction or ""}
@@ -320,7 +458,7 @@ class FeedbackWorkbenchMixin:
         """What a review needs before any writing: this video's figures and where they sit among the same product's and
         the same direction's judged videos (observation-window views, the figure every video's status is judged on)."""
         directions = self._video_directions(product, scripts)
-        judged = [row for row in self.performance.videos() if product_key(row.get("product")) == product
+        judged = [row for row in self.performance.videos_readonly() if product_key(row.get("product")) == product
                   and row.get("status") in JUDGED and isinstance(row.get("window_views"), (int, float)) and math.isfinite(row["window_views"])]
 
         def place(rows):

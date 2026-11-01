@@ -42,8 +42,6 @@ import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import openpyxl
-
 from public_stats import COUNTS as PUBLIC_COUNTS
 
 # Internal traffic bands for comparable data and coverage checks. These are
@@ -61,7 +59,7 @@ REFERENCE = ((10, "strong", "累计出单多"), (1, "sold", "有出单"), (0, "n
 
 COLUMNS = {
     "Creator name": "account", "Creator ID": "creator_id", "Video Info": "title", "Video ID": "video_id",
-    "Time": "posted_at", "Products": "products",
+    "Time": "posted_at", "Product ID": "product_id", "Products": "products",
     "VV": "views", "Video views": "views", "Likes": "likes", "Comments": "comments", "Shares": "shares",
     "New followers": "new_followers", "V-to-L clicks": "v2l_clicks",
     "Product Impressions": "impressions", "Product Clicks": "clicks", "Unique customers": "customers",
@@ -74,7 +72,7 @@ COLUMNS = {
 # All-video daily totals; its rates are fractions (0.0244) and stored as percent.
 TOTAL_COLUMNS = {
     "Time": "date", "Video-attributed GMV ($)": "gmv", "Video GMV ($)": "gmv_direct", "Video indirect GMV ($)": "gmv_indirect",
-    "Video views": "views", "GPM ($)": "gpm", "Attributed SKU orders": "orders", "Video SKU orders": "orders_direct",
+    "Video views": "views", "VV": "views", "GPM ($)": "gpm", "Attributed SKU orders": "orders", "Video SKU orders": "orders_direct",
     "Video indirect SKU orders": "orders_indirect", "Avg. daily customers": "customers", "Product viewers": "product_viewers",
     "Product Impressions": "impressions", "Product Clicks": "clicks",
     "Click-through rate (Video)": "ctr_pct", "CTOR (SKU order)": "ctor_pct",
@@ -83,6 +81,8 @@ TOTAL_COLUMNS = {
 SHOPS = {"local": "本土店", "cross": "跨境店"}
 SHOP_FOLDERS = {name: key for key, name in SHOPS.items()}
 DEFAULT_SHOP = "local"
+# Accounts whose videos always count as one shop's, whichever shop's export lists them (by lowercase handle).
+ACCOUNT_SHOPS = {"zackontheedge": "cross"}
 KIND_FOLDERS = {"video": "视频", "totals": "销售", "creators": "达人", "photo": "图文", "photo_items": "图文"}
 # The per-product photo export; its rates are fractions (0.0138) and stored as percent.
 PHOTO_COLUMNS = {
@@ -102,9 +102,23 @@ PHOTO_ITEM_TEXT = ["account", "creator_id", "title", "posted_at", "products"]
 PHOTO_ITEM_METRICS = [c for c in PHOTO_ITEM_COLUMNS.values() if c not in {*PHOTO_ITEM_TEXT, "item_id"}]
 # The all-creator export: every account that sold through a video, ours included.
 CREATOR_COLUMNS = {**COLUMNS, "Creator country": "country"}
+# A shop whose back end is set to Chinese exports the same columns under Chinese names; they are read as the English ones.
+CHINESE_HEADERS = {
+    "达人昵称": "Creator name", "达人ID": "Creator ID", "视频信息": "Video Info", "视频ID": "Video ID", "发布时间": "Time",
+    "商品 ID": "Product ID", "商品": "Products", "点赞数": "Likes", "评论数": "Comments", "分享数": "Shares",
+    "新增粉丝数": "New followers", "引流次数": "V-to-L clicks", "商品曝光次数": "Product Impressions", "商品点击次数": "Product Clicks",
+    "去重客户数": "Unique customers", "归因 SKU 订单数": "Attributed SKU orders", "视频 SKU 订单数": "Video SKU orders",
+    "视频间接 SKU 订单数": "Video indirect SKU orders", "视频归因成交件数": "Video-attributed items sold",
+    "视频商品成交件数": "Video items sold", "视频间接成交件数": "Video indirect items sold", "视频归因 GMV ($)": "Video-attributed GMV ($)",
+    "视频 GMV ($)": "Video GMV ($)", "视频间接 GMV ($)": "Video indirect GMV ($)", "点击率（视频）": "Click-through rate (Video)",
+    "引流率": "V-to-L rate", "视频完播率": "Video Finish Rate", "CTOR（SKU 订单）": "CTOR (SKU order)", "诊断": "Diagnosis",
+    # The all-video daily totals.
+    "时间": "Time", "日均客户数": "Avg. daily customers", "视频商详页访问用户数": "Product viewers",
+    "商品曝光数": "Product Impressions", "商品点击数": "Product Clicks",
+}
 TEXT = {"account", "creator_id", "title", "video_id", "posted_at", "products", "diagnosis", "date", "country", "product", "product_id", "item_id"}
 METRICS = [c for c in dict.fromkeys(COLUMNS.values()) if c not in TEXT]
-TOTAL_METRICS = [c for c in TOTAL_COLUMNS.values() if c != "date"]
+TOTAL_METRICS = [c for c in dict.fromkeys(TOTAL_COLUMNS.values()) if c != "date"]
 VIDEO_TEXT = ["account", "creator_id", "title", "posted_at", "products"]
 CREATOR_TEXT = ["account", "creator_id", "country", "title", "posted_at", "products"]
 # Handles holding the brand name are our own (official) accounts even when no self-made export lists them.
@@ -195,6 +209,7 @@ def _value(column, raw, fraction=False):
 
 
 def _load_rows(path):
+    import openpyxl  # Imported on first use: spreadsheet support costs about a third of a second at start-up.
     try:
         sheet = openpyxl.load_workbook(path, data_only=True).worksheets[0]
     except Exception as error:
@@ -213,7 +228,7 @@ def parse_export(rows):
         if found:
             shop_name = found.group(1)
     at = next((i for i, line in enumerate(rows) if i and sum(c not in (None, "") for c in line) >= 2), 2)
-    header = list(rows[at])
+    header = [CHINESE_HEADERS.get(h, h) for h in rows[at]]
     names = [h for h in header if h]
     if "Photo item ID" in names:
         kind, mapping, fraction = "photo_items", PHOTO_ITEM_COLUMNS, True
@@ -452,17 +467,21 @@ class PerformanceStore:
         else:
             fields = [*VIDEO_TEXT, *METRICS, "diagnosis"]
             rows = [[r.get(c) for c in fields] for r in records]
+            owners = [ACCOUNT_SHOPS.get((r.get("account") or "").casefold(), shop) for r in records]
+            # A new export replaces the same day or range from its own shop's files, wherever their rows were filed.
+            same_shop = "source_file IN (SELECT source_file FROM imports WHERE shop = ?)"
             if start == end:
                 table = "daily"
-                connection.execute("DELETE FROM daily WHERE shop = ? AND date = ?", (shop, start))
+                connection.execute(f"DELETE FROM daily WHERE source_file = ? OR (date = ? AND {same_shop})", (file, start, shop))
                 self._insert(connection, "daily", ["video_id", "date", *fields, "source_file", "shop"],
-                             [[r["video_id"], start, *row, file, shop] for r, row in zip(records, rows)])
+                             [[r["video_id"], start, *row, file, owner] for r, row, owner in zip(records, rows, owners)])
             else:
                 table = "periods"
                 span = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
-                connection.execute("DELETE FROM periods WHERE shop = ? AND range_start = ? AND range_end = ?", (shop, start, end))
+                connection.execute(f"DELETE FROM periods WHERE source_file = ? OR (range_start = ? AND range_end = ? AND {same_shop})",
+                                   (file, start, end, shop))
                 self._insert(connection, "periods", ["video_id", "range_start", "range_end", "span_days", *fields, "source_file", "shop"],
-                             [[r["video_id"], start, end, span, *row, file, shop] for r, row in zip(records, rows)])
+                             [[r["video_id"], start, end, span, *row, file, owner] for r, row, owner in zip(records, rows, owners)])
         connection.execute(
             "INSERT OR REPLACE INTO imports (source_file, kind, range_start, range_end, rows, modified, imported_at, shop, shop_name) VALUES (?,?,?,?,?,?,?,?,?)",
             (file, table, start, end, len(records), _modified(path), datetime.now().isoformat(timespec="seconds"), shop, shop_name))
@@ -634,6 +653,12 @@ class PerformanceStore:
             video["case_id"] = case_links.get(video["video_id"])
         self._with_public_views([(video["video_id"], video) for video in result])
         return result
+
+    def videos_readonly(self):
+        """The rows videos() reads, shared instead of copied: for readers that only look (peer comparisons, rankings).
+        Copying every video costs far more than such a reader does with them. No case links or public views are added,
+        and the rows must not be changed."""
+        return self._read_cached("videos", self._read_videos, lambda value: value)
 
     def _read_videos(self, source=None):
         # Case links belong to the workbench, rather than the sales database cache.
@@ -1119,6 +1144,19 @@ class PerformanceStore:
         rows:    [item index, period index, views, impressions, clicks, sold, gmv, likes, shares, comments]. Clicks are worked
                  back from the rounded click-through rate. "sold" is the first of the file's two same-named columns."""
         return self._read_cached(("photo_items", self._check_shop(shop)), lambda: self._read_photo_items(shop), dict)
+
+    def photo_item_shop(self, item_id):
+        """The shop whose per-post photo export holds this post (the latest export wins), or None when none does."""
+        if not self.database.is_file():
+            return None
+        with self.lock:
+            connection, _ = self._query_connection()
+            try:
+                row = connection.execute("SELECT shop FROM photo_items WHERE item_id = ? ORDER BY range_end DESC LIMIT 1",
+                                         (str(item_id),)).fetchone()
+            finally:
+                connection.close()
+        return row[0] if row else None
 
     def _read_photo_items(self, shop=None):
         scope = {"shop": shop}

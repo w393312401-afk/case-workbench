@@ -52,6 +52,28 @@ class FeedbackChainHTTPTests(unittest.TestCase):
             "revision": self.ok("GET", "/api/review-followups")["revision"], "product": "202H",
             "video_id": self.video_id, "window_end": self.window, "state": "reviewed", "note": note, **values})["entry"]
 
+    def test_one_video_review_row_is_what_the_whole_list_would_hold_for_it(self):
+        app = self.server.app
+        everything = {row["video_id"]: row for row in app.review_videos()}
+        scripts = app.creation.read()["scripts"]
+        for video_id in performance.VIDEOS:
+            with self.subTest(video_id=video_id):
+                mine = app.review_video(video_id, scripts, app.performance.video(video_id))
+                theirs = everything[video_id]
+                for key in ("review_context", "registered", "registered_on"):
+                    self.assertEqual(mine.get(key), theirs.get(key), key)
+        # A post registered before any sales export has only its registration; one nobody knows has nothing.
+        known = [{"video_id": "7999999999999999999", "published_on": "2026-10-01", "product": "202H", "title": "仅登记"}]
+        only = app.review_video("7999999999999999999", known, None)
+        self.assertEqual((only["registration_only"], only["registered"], only["review_context"]["observation"]["posted_on"]),
+                         (True, True, "2026-10-01"))
+        self.assertIsNone(app.review_video("7888888888888888888", known, None))
+
+    def test_the_chain_works_out_one_video_not_all_of_them(self):
+        app = self.server.app
+        with patch.object(type(app), "review_videos", side_effect=AssertionError("the whole list is not needed")):
+            self.assertEqual(self.chain()["video_id"], self.video_id)
+
     def plan_body(self, direction, source=None):
         return {"request_id": uuid4().hex, "revision": self.server.app.creation.public()["revision"],
                 "plan": {"product": "202H", "direction_id": direction["direction_id"], "action": "execution",
@@ -220,6 +242,8 @@ class FeedbackChainHTTPTests(unittest.TestCase):
         self.assertTrue(context["review_draft"])
         self.assertNotIn("source_review", context)
         self.assertEqual(context["review_video"]["video_id"], self.video_id)
+        self.assertIsInstance(context["selling_points"], list)
+        self.assertTrue(all(set(row) == {"code", "title"} for row in context["selling_points"]))
         self.assertIn("metrics", context["review_summary"])
         self.assertIn("建议动作", self.server.app.ai.bridge.calls[0]["prompt"])
         data = self.chain()

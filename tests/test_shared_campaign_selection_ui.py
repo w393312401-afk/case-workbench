@@ -52,13 +52,13 @@ class SharedCampaignSelectionTests(unittest.TestCase):
         page.wait_for_function("({selector,expected,home}) => JSON.stringify([...document.querySelectorAll(selector)].map(row => home ? row.dataset.followupChain.split(':')[1] : row.dataset.videoRow).sort()) === JSON.stringify(expected.sort())", arg={"selector": selector, "expected": list(expected), "home": home})
         self.assertEqual(self.ids(page, home), set(expected))
 
-    def test_dashboard_selection_reaches_video_and_review_without_publication_date_loss(self):
+    def test_dashboard_selection_reaches_video_and_review_by_observation_window(self):
         page = self.open_board()
         self.choose(page)
         self.wait_gmv(page, "$150")
         self.tab(page, "list")
         self.selected(page, CAMPAIGN)
-        self.assertEqual(self.filters(page)["period"], "all")
+        self.assertEqual(self.filters(page)["period"], PERIOD)
         self.wait_ids(page, [LINKED, ANGLE, NEWER])
         # The first two posts predate the activity, but their observation windows still overlap it.
         self.assertIn(LINKED, self.ids(page))
@@ -105,21 +105,9 @@ class SharedCampaignSelectionTests(unittest.TestCase):
         self.home(page)
         self.selected(page, "", home=True)
 
-    def test_video_publication_date_and_review_due_date_remain_independent_of_activity_dates(self):
+    def test_review_due_date_remains_independent_of_activity_dates(self):
         page = self.open_board()
         self.choose(page)
-        self.tab(page, "list")
-        page.locator("#perf-date-trigger").click()
-        page.locator('#perf-date [data-mode="day"]').click()
-        page.locator('#perf-date [data-date="2026-09-09"]').click()
-        self.selected(page, CAMPAIGN)
-        self.wait_ids(page, [NEWER])
-        self.assertEqual(self.filters(page)["list_period"], "2026-09-09~2026-09-09")
-        self.tab(page, "photos")
-        self.assertEqual(self.filters(page)["period"], PERIOD)
-        self.tab(page, "list")
-        self.assertEqual(self.filters(page)["period"], "2026-09-09~2026-09-09")
-        self.wait_ids(page, [NEWER])
         self.home(page)
         page.locator("#followup-date-trigger").click()
         page.locator('#followup-date [data-mode="day"]').click()
@@ -149,31 +137,72 @@ class SharedCampaignSelectionTests(unittest.TestCase):
         self.home(page)
         self.selected(page, SECOND, home=True)
 
-    def test_manual_statistics_and_publication_dates_remain_separate_without_activity(self):
-        page = self.open_board()
+    def pick_day(self, page, day):
         page.locator("#perf-date-trigger").click()
         page.locator('#perf-date [data-mode="day"]').click()
-        page.locator('#perf-date [data-date="2026-09-02"]').click()
+        page.locator(f'#perf-date [data-date="{day}"]').click()
+
+    def test_one_date_follows_every_tab_and_shop_from_wherever_it_was_picked(self):
+        page = self.open_board()
+        self.pick_day(page, "2026-09-02")
         self.wait_gmv(page, "$450")
         self.selected(page, "")
+        day = "2026-09-09~2026-09-09"
         self.tab(page, "list")
-        self.assertEqual(self.filters(page)["period"], "all")
-        self.wait_ids(page, [LINKED, ANGLE, NEWER, OLDER])
-        page.locator("#perf-date-trigger").click()
-        page.locator('#perf-date [data-mode="day"]').click()
-        page.locator('#perf-date [data-date="2026-09-09"]').click()
+        self.assertIn("2026-09-02", page.locator("#perf-date-trigger").inner_text())
+        self.pick_day(page, "2026-09-09")
         self.wait_ids(page, [NEWER])
         for refresh in (False, True):
             with self.subTest(refresh=refresh):
                 if refresh:
                     page.reload()
                     self.wait_ids(page, [NEWER])
-                self.tab(page, "board")
-                self.wait_gmv(page, "$450")
-                self.assertEqual(self.filters(page)["period"], "2026-09-02~2026-09-02")
-                self.tab(page, "list")
+                for tab in ("board", "photos", "creators", "list"):
+                    self.tab(page, tab)
+                    self.assertEqual(self.filters(page)["period"], day)
+                    self.assertIn("2026-09-09", page.locator("#perf-date-trigger").inner_text())
                 self.wait_ids(page, [NEWER])
+        page.locator('[data-perf-shop="cross"]').click()
+        page.wait_for_function("() => JSON.parse(localStorage.getItem('workbench-video-data-filters')).shop === 'cross'")
+        self.assertEqual(page.evaluate("JSON.parse(localStorage.getItem('workbench-video-data-filters')).period"), day)
+        page.locator('[data-perf-shop="local"]').click()
+        self.wait_ids(page, [NEWER])
+        self.assertIn("2026-09-09", page.locator("#perf-date-trigger").inner_text())
+        # Clearing from any tab clears it everywhere.
+        self.tab(page, "photos")
+        page.locator("#perf-reset").click()
+        self.tab(page, "list")
+        self.assertEqual(self.filters(page)["period"], "all")
+        self.assertIn("全部周期", page.locator("#perf-date-trigger").inner_text())
+
+    def test_activity_and_date_replace_each_other_on_every_tab(self):
+        for tab in ("list", "board", "photos", "creators"):
+            with self.subTest(tab=tab):
+                page = self.open_board(query="tab=" + tab)
+                self.pick_day(page, "2026-09-02")
+                self.choose(page)
+                self.selected(page, CAMPAIGN)
+                # The picker shows the activity's dates straight away, without a redraw of the toolbar.
+                page.wait_for_function("period => document.querySelector('#perf-date-trigger').textContent.includes(period.split('~')[0])", arg=PERIOD)
+                self.assertEqual(self.filters(page)["period"], PERIOD)
+                self.pick_day(page, "2026-09-09")
+                self.selected(page, "")
                 self.assertEqual(self.filters(page)["period"], "2026-09-09~2026-09-09")
+                self.choose(page)
+                self.selected(page, CAMPAIGN)
+                page.locator("#perf-campaign").select_option("")
+                self.selected(page, "")
+                page.wait_for_function("document.querySelector('#perf-date-trigger').textContent.includes('全部周期')")
+                self.assertEqual(self.filters(page)["period"], "all")
+
+    def test_list_with_activity_ignores_its_dates_as_publication_dates(self):
+        page = self.open_board(query="tab=list")
+        self.pick_day(page, "2026-09-09")
+        self.wait_ids(page, [NEWER])
+        self.choose(page)
+        # Posts from before the activity stay: it selects by observation window, not by the date shown in the picker.
+        self.wait_ids(page, [LINKED, ANGLE, NEWER])
+        self.assertEqual(self.filters(page)["period"], PERIOD)
 
     def test_failed_calendar_retains_global_choice_and_deletion_clears_every_page(self):
         page = self.open_board(query="tab=board&board_campaign=" + CAMPAIGN, failures=1)

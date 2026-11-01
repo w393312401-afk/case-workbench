@@ -63,13 +63,15 @@ class ManualFeedbackStatusTests(unittest.TestCase):
         source.wait_for()
         self.assertFalse(dialog.locator('.feedback-data-details').evaluate('node => node.open'))
         self.assertTrue(source.get_by_text('7691330683482017055', exact=True).is_visible())
-        link = source.get_by_role('link', name='TikTok 原视频 ↗', exact=True)
+        # The ID carries a copy icon and an open-in-TikTok icon; the link-copy button is gone.
+        link = source.get_by_role('link', name='原视频', exact=True)
         original_url = 'https://www.tiktok.com/@blade.test/video/7691330683482017055'
         self.assertEqual(link.get_attribute('href'), original_url)
         self.assertEqual(link.get_attribute('target'), '_blank')
+        self.assertIn('icon-action', link.get_attribute('class'))
         source.locator('[data-copy-label="视频 ID"]').click()
-        source.locator('[data-copy-label="原视频链接"]').click()
-        self.assertEqual(page.evaluate('copied'), ['7691330683482017055', original_url])
+        self.assertEqual(source.locator('[data-copy-label="原视频链接"]').count(), 0)
+        self.assertEqual(page.evaluate('copied'), ['7691330683482017055'])
         self.assertFalse(dialog.evaluate('node => node.scrollWidth > node.clientWidth'))
         page.evaluate("""() => FeedbackChain.mount(document.querySelector('#panel'), {
           video:{product:chain.product,video_id:chain.video_id,window_end:chain.window_end},

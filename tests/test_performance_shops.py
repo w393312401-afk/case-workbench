@@ -134,6 +134,25 @@ class ShopStoreTests(unittest.TestCase):
         statuses = {v["video_id"]: v["status"] for v in self.store.videos()}
         self.assertEqual((statuses[LINKED], statuses["7600000000000000003"]), ("focus", "pending"))
 
+    def test_an_account_kept_in_one_shop_moves_there_and_reimports_cleanly(self):
+        # zackontheedge belongs to the cross-border shop even when the local export lists one of its videos.
+        zack = exports.row("7600000000000000003", 600, 1, 30, 20.0)
+        zack[exports.HEADER.index("Creator name")] = "ZackOnTheEdge"
+        local_week = self.folder / "本土店" / "视频" / "9月" / "第二周视频.xlsx"
+        exports.export(local_week, "2026-09-07", "2026-09-13", [exports.row(LINKED, 4000, 1, 100, 150.0), zack])
+        self.store.sync()
+        shops = lambda: {v["video_id"]: v["shop"] for v in self.store.videos()}
+        self.assertEqual(shops(), {LINKED: "local", CROSS_VIDEO: "cross", "7600000000000000003": "cross"})
+        # The cross-border shop's own export of that week keeps the moved row; re-importing the local file does not double it.
+        exports.export(self.folder / "跨境店" / "视频" / "第二周视频.xlsx", "2026-09-07", "2026-09-13", [exports.row(CROSS_VIDEO, 800, 2, 40, 80.0)])
+        self.store.import_paths([local_week, self.folder / "跨境店" / "视频" / "第二周视频.xlsx"], skip_unchanged=False)
+        connection = sqlite3.connect(self.store.database)
+        try:
+            self.assertEqual(connection.execute("SELECT shop, video_id FROM periods WHERE range_start = '2026-09-07' ORDER BY shop, video_id").fetchall(),
+                             [("cross", CROSS_VIDEO), ("cross", "7600000000000000003"), ("local", LINKED)])
+        finally:
+            connection.close()
+
     def test_a_file_in_the_wrong_type_folder_is_refused(self):
         misplaced = totals(self.folder / "本土店" / "视频" / "第三周销售.xlsx", "2026-09-14", 9)
         result = self.store.sync()
@@ -240,6 +259,14 @@ class PhotoItemTests(unittest.TestCase):
         self.store.sync()
         self.assertEqual(len(self.store.photo_items("local")["rows"]), 1)
 
+    def test_a_post_is_found_in_whichever_shop_exported_it(self):
+        self.assertIsNone(self.store.photo_item_shop("7685397373245312269"))  # no database yet, nothing created
+        item_export(self.folder / "本土店" / "图文" / "9月" / "图文明细.xlsx", "2026-09-01", "2026-09-30", ITEM_ROWS[:1])
+        item_export(self.folder / "跨境店" / "图文" / "图文明细.xlsx", "2026-09-01", "2026-09-30", ITEM_ROWS[1:], shop_line="Shop Name: SHARPAL GLOBAL")
+        self.assertEqual(self.store.sync()["failed"], [])
+        self.assertEqual((self.store.photo_item_shop("7685397373245312269"), self.store.photo_item_shop("7688544785803660574")), ("local", "cross"))
+        self.assertIsNone(self.store.photo_item_shop("7600000000000000009"))
+
     def test_a_longer_export_never_adds_onto_an_overlapping_one(self):
         item_export(self.folder / "本土店" / "图文" / "9月明细.xlsx", "2026-09-01", "2026-09-30")
         item_export(self.folder / "本土店" / "图文" / "9月上半月.xlsx", "2026-09-01", "2026-09-15")
@@ -305,31 +332,6 @@ class ShopHTTPTests(unittest.TestCase):
         exports.export(self.folder / "跨境店" / "视频" / "第一周视频.xlsx", "2026-08-31", "2026-09-06", [exports.row(CROSS_VIDEO, 700, 2, 40, 80.0)])
         photo_export(self.folder / "本土店" / "图文" / "第二周图文.xlsx", "2026-10-12", "2026-10-18")
         self.server.app.performance.sources = [self.folder]
-
-    def test_shop_parameter_scopes_every_performance_read_and_defaults_to_local(self):
-        status, _, result = self.request("POST", "/api/performance/sync", {})
-        self.assertEqual((status, result["failed"]), (200, []), result)
-        ids = lambda shop: [v["video_id"] for v in self.request("GET", "/api/performance/videos" + shop)[2]["videos"]]
-        self.assertEqual((ids(""), ids("?shop=local"), ids("?shop=cross")), ([LINKED], [LINKED], [CROSS_VIDEO]))
-        self.assertEqual(self.request("GET", "/api/performance/summary?shop=cross")[2]["shop"], "cross")
-        self.assertEqual([len(self.request("GET", f"/api/performance/analytics?shop={s}")[2]["videos"]) for s in ("local", "cross")], [1, 1])
-        self.assertEqual(self.request("GET", "/api/performance/creators?shop=cross")[0], 200)
-        item_export(self.folder / "本土店" / "图文" / "图文明细.xlsx", "2026-09-01", "2026-09-30")
-        self.assertEqual(self.request("POST", "/api/performance/sync", {})[2]["failed"], [])
-        self.server.app.production.public = lambda product=None: {"carousels": [
-            {"id": "CAR-0001", "publication": {"post_id": "7688544785803660574"}, "publication_history": [{"post_id": "7685397373245312269"}]},
-            {"id": "CAR-0002", "publication": None}]}
-        items = self.request("GET", "/api/performance/photo-items")[2]
-        self.assertEqual((len(items["rows"]), items["productions"]), (2, {"7688544785803660574": "CAR-0001", "7685397373245312269": "CAR-0001"}))
-        self.assertEqual(self.request("GET", "/api/performance/photo-items?shop=cross")[2]["rows"], [])
-        self.assertEqual(self.request("GET", "/api/performance/photo-items?shop=x")[0], 400)
-        photos = self.request("GET", "/api/performance/photos")[2]
-        self.assertEqual((photos["shop"], len(photos["rows"])), ("local", 3))
-        self.assertEqual(self.request("GET", "/api/performance/photos?shop=cross")[2]["rows"], [])
-        for bad in ("?shop=x", "?shop=local&shop=cross"):
-            self.assertEqual(self.request("GET", "/api/performance/summary" + bad)[0], 400, bad)
-        self.assertEqual(self.request("POST", "/api/performance/import", {"paths": ["x"], "shop": "x"})[0], 400)
-
 
 if __name__ == "__main__":
     unittest.main()

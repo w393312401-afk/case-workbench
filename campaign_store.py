@@ -7,12 +7,13 @@ node is never overwritten by a later built-in refresh. Dates are Pacific Time ca
 from __future__ import annotations
 
 import copy
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
 import threading
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from creation_store import CreationError
 from direction_store import fingerprint
@@ -23,6 +24,9 @@ MAX_CAMPAIGNS = 200
 # official: platform page; media: several outlets agree; disputed: sources disagree; planning: a third-party planning calendar; manual: entered by hand
 CONFIDENCE = ("official", "media", "disputed", "planning", "manual")
 CAMPAIGN_ID = re.compile(r"TKC-[A-Za-z0-9-]{3,60}\Z")
+# A script may only name dates that are backed by a source or that a person has checked; upcoming means within this many days.
+WRITING_CONFIDENCE = ("official", "media", "manual")
+WRITING_LEAD_DAYS = 14
 
 CALENDAR_SOURCE = "https://moras.ai/blog/tiktok-shop-sales-calendar"
 SELLER_GUIDE = "https://seller-us.tiktok.com/university/essay?knowledge_id=26854147802894"
@@ -87,6 +91,14 @@ CHECKS = {
     "TKC-2026-bfcm": "官方指南写 11/11–11/30，已核实；只需确认结束日是 11/30 还是创作者日历写的 12/1。",
     "TKC-2026-year-end": "今年年末有没有 Holiday Haul 一类的年终大促、起止日是哪天（去年是 12/2–次年 1/1）。官方没公布就先不动。",
 }
+
+
+def pacific_today():
+    try:
+        return datetime.now(ZoneInfo("America/Los_Angeles")).date()
+    except ZoneInfoNotFoundError:
+        # The installed Windows runtime may not ship the IANA timezone database.
+        return datetime.now(timezone(timedelta(hours=-8))).date()
 
 
 def campaign_id(value):
@@ -189,6 +201,15 @@ class CampaignStore:
             return []
         with self.lock:
             return [row for row in self.merged(self.read()) if row["start"] <= end and row["end"] >= start]
+
+    def for_writing(self, today=None):
+        """Running or soon-starting campaigns with trustworthy dates: the only deadlines a script may name."""
+        today = today or pacific_today()
+        first, last = today.isoformat(), (today + timedelta(days=WRITING_LEAD_DAYS)).isoformat()
+        with self.lock:
+            rows = self.merged(self.read())
+        return [{"name": row["name"], "start": row["start"], "end": row["end"], "status": "running" if row["start"] <= first else "upcoming"}
+                for row in rows if row["end"] >= first and row["start"] <= last and (row["verified"] or row["confidence"] in WRITING_CONFIDENCE)]
 
     def mutate(self, body):
         if not isinstance(body, dict) or body.get("action") not in {"save", "delete", "restore"} or not isinstance(body.get("revision"), str):

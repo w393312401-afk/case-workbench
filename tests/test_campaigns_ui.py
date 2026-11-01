@@ -30,6 +30,84 @@ class CampaignBrowserTests(unittest.TestCase):
     def board(self, width=1200):
         return self.open_page(width=width, route="#/202H/videos?tab=board", ready="#perf-campaigns .campaign-row")
 
+    def runway(self, moment, width=1600, timezone="America/Los_Angeles"):
+        context = self.browser.new_context(viewport={"width": width, "height": 800}, timezone_id=timezone)
+        self.addCleanup(context.close)
+        page = context.new_page()
+        page.set_default_timeout(10000)
+        page.clock.set_fixed_time(moment)
+        page.goto(f"{self.base}/#home")
+        page.wait_for_function("() => window.Campaigns.current()")
+        return page
+
+    def marks(self, page):
+        return page.evaluate("""() => [...document.querySelectorAll('#campaign-runway .runway-day b')]
+          .filter(mark => getComputedStyle(mark).visibility !== 'hidden' && mark.offsetWidth)
+          .map(mark => mark.innerText.trim())""")
+
+    def words(self, page):
+        return " ".join(page.locator("#campaign-runway .runway-body").inner_text().split())
+
+    def test_runway_counts_down_one_cell_a_day_and_opens_the_calendar(self):
+        page = self.runway("2026-10-31T12:00:00-07:00")
+        link = page.locator("#campaign-runway")
+        self.assertIn("is-warn", link.get_attribute("class"))
+        self.assertIn("11 天后开场 黑五网一 · 11/11", self.words(page))
+        self.assertEqual(self.marks(page), ["黑五 27", "网一 30"])
+        self.assertEqual(page.locator(".runway-day").count(), 31)
+        self.assertEqual(page.locator(".runway-day.is-lead").count(), 11)
+        self.assertEqual(page.evaluate("() => [...document.querySelectorAll('.runway-day')].flatMap((day, index) => day.matches('.is-mark') ? [index] : [])"), [27, 30])
+        self.assertIn("官方原文", link.get_attribute("title"))
+        link.click()
+        page.locator("#perf-campaigns .campaign-row").first.wait_for()
+        page.wait_for_function("""() => {
+          const top = document.querySelector('#perf-campaigns').getBoundingClientRect().top;
+          return top >= 0 && top < innerHeight / 2;
+        }""")
+
+    def test_runway_and_calendar_share_the_pacific_day(self):
+        page = self.runway("2026-11-01T10:00:00+08:00", timezone="Asia/Shanghai")
+        self.assertIn("11 天后开场", self.words(page))
+        self.assertEqual(page.evaluate("() => window.Campaigns.runway().count"), "11")
+
+    def test_runway_gets_louder_then_shows_only_the_days_left(self):
+        page = self.runway("2026-11-09T12:00:00-08:00")
+        self.assertIn("is-danger", page.locator("#campaign-runway").get_attribute("class"))
+        self.assertIn("2 天后开场", self.words(page))
+        page = self.runway("2026-11-28T12:00:00-08:00")
+        self.assertIn("is-live", page.locator("#campaign-runway").get_attribute("class"))
+        self.assertIn("2 天后结束", self.words(page))
+        self.assertEqual(self.marks(page), ["网一 2"])
+        self.assertEqual(page.locator(".runway-day").count(), 3)
+        self.assertEqual(page.locator(".runway-day.is-lead").count(), 3)
+        page = self.runway("2026-11-30T12:00:00-08:00")
+        self.assertIn("今天 最后一天", self.words(page))
+        self.assertEqual(self.marks(page), ["网一 今天"])
+
+    def test_runway_says_which_dates_are_unconfirmed_and_goes_away_with_no_campaign_left(self):
+        page = self.runway("2026-12-20T12:00:00-08:00")
+        self.assertIn("待核对", self.words(page))
+        self.assertEqual(len(self.marks(page)), 1)
+        self.assertIn("结束", self.marks(page)[0])
+        page = self.runway("2027-02-01T12:00:00-08:00")
+        self.assertTrue(page.locator("#campaign-runway").is_hidden())
+
+    def test_runway_labels_never_collide_and_narrow_bars_keep_the_number(self):
+        for width in (1600, 1200, 1051):
+            page = self.runway("2026-10-20T12:00:00-07:00", width=width)
+            boxes = page.evaluate("""() => [...document.querySelectorAll('#campaign-runway .runway-day b')]
+              .filter(mark => getComputedStyle(mark).visibility !== 'hidden' && mark.offsetWidth)
+              .map(mark => {const box = mark.getBoundingClientRect();return [box.left, box.right];})
+              .sort((a, b) => a[0] - b[0])""")
+            for before, after in zip(boxes, boxes[1:]):
+                self.assertLess(before[1], after[0], f"overlap at {width}")
+        page = self.runway("2026-10-31T12:00:00-07:00", width=900)
+        self.assertTrue(page.locator("#campaign-runway .runway-count").is_visible())
+        self.assertFalse(page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth"))
+        page = self.runway("2026-10-31T12:00:00-07:00", width=740)
+        self.assertTrue(page.locator("#campaign-runway").is_hidden(), "The product picker covers this part of the top bar")
+        self.assertFalse(page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth"))
+
     def test_board_lists_every_node_with_how_far_its_date_can_be_trusted(self):
         page = self.board()
         rows = page.locator("#perf-campaigns .campaign-row")
@@ -173,7 +251,12 @@ class CampaignBrowserTests(unittest.TestCase):
         self.assertIsNone(result["none"])
 
     def test_without_the_calendar_loaded_no_week_is_called_quiet(self):
-        page = self.open_page(route="#/202H/directions", ready="#content")
+        context = self.browser.new_context(viewport={"width": 1080, "height": 800})
+        self.addCleanup(context.close)
+        context.route("**/api/campaigns", lambda route: route.abort())
+        page = context.new_page()
+        page.goto(f"{self.base}/#/202H/directions")
+        page.locator("#content").first.wait_for()
         result = page.evaluate("""() => Campaigns.weeklyImpact({id: 'x', start: '2030-03-04', end: '2030-03-17'}, {
           product: '', matches: () => true, videos: [{video_id: 'A', product: 'p'}], weeks: [{week: '2030-03-04', complete: true}],
           analytics: {videos: [['A']], weekly: [[0, '2030-03-04', 0, 0, 0, 1, 1, 10]]}})""")

@@ -46,3 +46,28 @@
 .campaign-check p>strong{display:inline-block;min-width:3em;margin-right:8px;color:var(--muted-soft);font-weight:600}
 .campaign-check-impact.is-hot{color:var(--warm-ink)}
 .campaign-check-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+
+/* top-bar runway: a big count, then one cell per day left; it only turns loud as the date closes in */
+.campaign-runway{--runway-ink:var(--muted);--runway-lead:var(--muted-soft);flex:1 1 0;min-width:0;align-self:center;padding:3px 10px;border-radius:8px;color:var(--muted);text-decoration:none;container:runway/inline-size}
+.campaign-runway:hover{background:var(--surface-alt);text-decoration:none}
+.campaign-runway.is-warn{--runway-ink:var(--warm-ink);--runway-lead:var(--warn)}
+.campaign-runway.is-danger,.campaign-runway.is-live{--runway-ink:var(--danger-ink);--runway-lead:var(--danger)}
+.runway-body{display:flex;align-items:center;gap:8px;height:40px}
+.runway-count{flex:none;font-size:30px;font-weight:600;line-height:36px;color:var(--runway-ink);font-variant-numeric:tabular-nums}
+.is-live .runway-count{padding:0 8px;border-radius:7px;background:var(--danger);color:var(--on-accent)}
+.runway-words{flex:none;display:flex;flex-direction:column;white-space:nowrap;line-height:15px}
+.runway-words strong{font-size:var(--font-meta);font-weight:600;color:var(--runway-ink)}
+.runway-words small{max-width:170px;overflow:hidden;text-overflow:ellipsis;font-size:var(--font-micro);color:var(--muted-soft)}
+.runway-days{flex:1 1 0;min-width:0;display:flex;gap:var(--runway-gap,2px);margin:0 0 13px 8px}
+.runway-day{position:relative;flex:1 1 0;min-width:0;max-width:24px;height:14px;border-radius:2px;background:var(--line-strong)}
+.runway-day.is-lead{background:var(--runway-lead)}
+.runway-day.is-mark{background:var(--ink)}
+.runway-day b{position:absolute;top:16px;right:0;transform:translateX(var(--shift,0px));font-size:var(--font-micro);font-weight:400;line-height:13px;white-space:nowrap;color:var(--muted);font-variant-numeric:tabular-nums}
+.runway-day b.is-crowded{visibility:hidden}
+#perf-campaigns{scroll-margin-top:calc(var(--topbar-h) + 16px)}
+@container runway (max-width:300px){
+  .runway-days{display:none}
+  .runway-body{justify-content:flex-end}
+}
+/* Below this the fixed product picker sits over the left of the top bar, leaving the runway no room. */
+@media(max-width:760px){.campaign-runway{display:none}}

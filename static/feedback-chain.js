@@ -48,6 +48,22 @@ window.FeedbackChain = (() => {
   const keptNote = video => {try {const kept = JSON.parse(localStorage.getItem(noteKey(video)) || 'null');return kept && typeof kept.text === 'string' && kept.text.trim() ? kept : null;} catch {return null;}};
   const keepNote = (video,text) => {try {if (text.trim()) localStorage.setItem(noteKey(video),JSON.stringify({text,at:Date.now()}));else localStorage.removeItem(noteKey(video));} catch {}};
   const requestURL = video => '/api/feedback-chain?' + new URLSearchParams({product:video.product,video_id:video.video_id,...(video.window_end ? {window_end:video.window_end} : {})});
+  // A hover or focus on a video asks for its review ahead of the click; the drawer that opens takes the answer once.
+  // Kept for seconds only, so what the drawer shows is never older than a moment.
+  const PREFETCH_MS = 20000, prefetched = new Map();
+  function prefetch(video) {
+    if (window.PublicTextMode || !video?.video_id || !video.product) return;
+    const key = requestURL(video), now = Date.now(), hit = prefetched.get(key);
+    if (hit && now - hit.at < PREFETCH_MS) return;
+    for (const [other,entry] of prefetched) if (now - entry.at >= PREFETCH_MS) prefetched.delete(other);
+    if (prefetched.size >= 6) prefetched.delete(prefetched.keys().next().value);
+    prefetched.set(key,{at:now,promise:api(key).catch(() => null)});
+  }
+  function takePrefetched(video) {
+    const key = requestURL(video), hit = prefetched.get(key);
+    prefetched.delete(key);
+    return hit && Date.now() - hit.at < PREFETCH_MS ? hit.promise : null;
+  }
   const count = v => v == null ? '—' : Math.round(v).toLocaleString('en-US');
   const money = v => v == null ? '—' : '$' + Math.round(v).toLocaleString('en-US');
   const pct = v => v == null ? '—' : Number(v).toFixed(2) + '%';
@@ -120,7 +136,7 @@ window.FeedbackChain = (() => {
     const owner = refKey(video), instance = String(++mountGeneration), pageRoute = window.location?.hash;
     const alive = () => host.isConnected && host.dataset.feedbackOwner === owner && host.dataset.feedbackInstance === instance && window.location?.hash === pageRoute && (!host.closest('dialog') || host.closest('dialog').open);
     const current = seq => alive() && sequence === seq;
-    let firstData = initialData;
+    let firstData = initialData ?? takePrefetched(video);
     const actionSelector = action => action ? `[data-feedback-decide="${action}"]` : '[data-feedback-save]';
     const lockReview = (locked, retryAction = null) => {
       host.querySelectorAll('[data-feedback-note],[data-feedback-reference],[data-feedback-direction],[data-feedback-save],[data-feedback-decide],[data-feedback-draft],[data-feedback-refresh]').forEach(node => {node.disabled = locked;});
@@ -135,9 +151,10 @@ window.FeedbackChain = (() => {
       if (!hasContent) host.innerHTML = '<p class="context-note" role="status">正在读取表现、复盘结论和下一轮记录…</p>';
       if (window.PublicTextMode) {host.innerHTML = '<p class="context-note">复盘结论与下一轮执行请在本机工作台查看。</p>';return;}
       try {
-        const data = firstData || await api(requestURL(video));firstData = null;
-        // The note sizes each campaign against quiet weeks, which needs the whole calendar (never throws).
-        await window.Campaigns?.load();
+        // The calendar (it sizes each campaign against quiet weeks; never throws) loads alongside the review, not after it.
+        // A prefetched answer that failed reads as nothing, and the chain is asked for again.
+        const ahead = firstData;firstData = null;
+        const [data] = await Promise.all([Promise.resolve(ahead).then(value => value || api(requestURL(video))), window.Campaigns?.load()]);
         if (!current(seq)) return;
         if (data.video_id !== video.video_id || (window.WorkbenchShell?.normalizeProduct?.(data.product) || data.product) !== (window.WorkbenchShell?.normalizeProduct?.(video.product) || video.product)) throw new Error('复盘来源与当前视频不一致。');
         paint(data,seq);
@@ -167,7 +184,7 @@ window.FeedbackChain = (() => {
       const tasks = [...data.retrospectives.map(item => link('ai',item.task_id,item.review_draft ? 'AI 起草的复盘' : item.title,`${labels[item.status] || '查看回复'}${item.review_draft ? '' : !item.explicit_review ? item.window_known ? ' · 已核对冻结视频窗口' : ' · 旧任务未记录观察窗' : ' · 已冻结此复盘来源'}`)),...data.next_tasks.map(item => link('ai',item.task_id,'下一轮写稿任务',labels[item.status] || '查看任务'))];
       const plans = data.plans.map(plan => `<article class="feedback-plan"><div><strong>${esc(plan.direction_id)} · ${esc({execution:'换执行',scale:'加码',stop:'停测'}[plan.action] || '下一轮')}</strong><small>${esc(labels[plan.status] || plan.status)}${plan.review_current ? '' : ' · 保留发起时结论'}</small><p>${esc(plan.note || plan.source_review.note)}</p>${plan.review_current ? '' : `<details><summary>查看冻结的复盘结论</summary><p>${esc(plan.source_review.note)}</p><small>${esc(plan.source_review.reviewed_at)}</small></details>`}</div><div class="feedback-plan-actions"><a class="subtle" href="${esc(url(`#directions/${encodeURIComponent(plan.direction_id)}`,data.product))}">查看方向</a>${!['done','cancelled'].includes(plan.status) && plan.action !== 'stop' ? `<button type="button" class="secondary compact" data-feedback-write="${esc(plan.id)}">${plan.task_id ? '再写一轮' : '按计划写稿'}</button>` : ''}</div></article>`);
       const scripts = [...data.source_scripts.map(item => link('scripts',item.id,`已发布使用脚本 · 第 ${item.version || 1} 版`,item.title)),...data.next_scripts.map(item => link('scripts',item.id,`下一轮脚本 · 第 ${item.version || 1} 版`,item.title))];
-      const outputs = [...data.source_outputs.map(item => link('production',item.id,`已发布${item.kind === 'carousel' ? '图文' : '视频'}制作单`,item.title,item.kind === 'carousel' ? '?step=delivery' : '?step=publish')),...data.next_outputs.map(item => link('production',item.id,`下一轮${item.kind === 'carousel' ? '图文' : '视频'}制作单`,item.title))];
+      const outputs = [...data.source_outputs.map(item => link('production',item.id,'已发布视频制作单',item.title,'?step=publish')),...data.next_outputs.map(item => link('production',item.id,'下一轮视频制作单',item.title))];
       const variants = data.variants.map(item => `<a class="feedback-record" href="${esc(url(`#directions/${encodeURIComponent(item.direction_id)}?variant=${encodeURIComponent(item.key)}`,data.product))}"><strong>下一轮执行变体 ${item.index + 1}</strong><small>${esc(item.direction_id)} · ${esc(item.snapshot?.execution_change || item.snapshot?.progression || '查看全部输出')}</small></a>`);
       const cases = data.cases.map(item => link('case',item.id,'关联原案例',item.title));
       const records = [...tasks,...variants,...scripts,...outputs,...cases];
@@ -192,7 +209,7 @@ window.FeedbackChain = (() => {
       const experienceActions = canUseExperiences ? `${source ? '<button type="button" class="secondary compact" data-feedback-experience>记一条经验</button>' : ''}${experiences.length ? `<button type="button" class="subtle compact" data-feedback-experiences>查看经验（${experiences.length}）</button>` : ''}` : '';
       const done = `<section class="feedback-conclusion"><div class="feedback-conclusion-head"><strong>已复盘</strong>${savedDecision(review?.decision) ? chip(savedDecision(review.decision)) : ''}</div><div class="feedback-reference-saved"><span>参考价值：<strong data-feedback-reference-label>${esc(manualReviewStatus(data).label)}</strong></span><button type="button" class="subtle compact" data-feedback-classify>${review?.reference_value ? '改分类' : '分类'}</button></div><p>${esc(review?.note || '')}</p><small>${esc(review?.at || '')}</small>${open || experienceActions ? `<div class="feedback-actions">${open ? '<button type="button" class="secondary compact" data-feedback-redo>编辑复盘</button>' : ''}${source && canClose && open ? '<button type="button" class="subtle compact" data-feedback-plan>再安排一轮</button>' : ''}${experienceActions}</div>` : ''}</section>`;
       const originalURL = tiktokLink(data.video_id,data.account || video.account);
-      const sourceRow = externalMetrics ? '' : `<div class="section-title-row feedback-where feedback-source"><p class="context-note">视频 ID <span>${esc(data.video_id)}</span>${typeof copyIdButton === 'function' ? copyIdButton(data.video_id,'视频 ID') : ''} · <a class="feedback-tiktok" href="${esc(originalURL)}" target="_blank" rel="noopener noreferrer" title="在 TikTok 打开这条视频">TikTok 原视频 ↗</a>${typeof copyIdButton === 'function' ? copyIdButton(originalURL,'原视频链接') : ''}</p></div>`;
+      const sourceRow = externalMetrics ? '' : `<div class="section-title-row feedback-where feedback-source"><p class="context-note id-row">视频 ID <span>${esc(data.video_id)}</span>${typeof copyIdButton === 'function' ? copyIdButton(data.video_id,'视频 ID',{icon:true}) + openLinkButton(originalURL,'原视频','在 TikTok 打开这条视频') : ''}</p></div>`;
       const refresh = '<button type="button" class="subtle compact" data-feedback-refresh>刷新</button>', where = `观察窗${data.window_end ? '到 ' + esc(data.window_end) : '未记录'}${data.current_window ? '' : ' · 历史观察窗'}`;
       const evidenceDetails = `<details class="feedback-data-details"><summary>数据与依据</summary><p class="context-note">${where}</p>${contextBlock(context)}${externalMetrics ? '' : window.Campaigns?.reviewNote(data.campaigns) || ''}${data.funnel ? funnelChart(data.funnel,data.summary) + figures(data.summary,true) : figures(data.summary,sameMetricScope(data,externalMetrics))}</details>`;
       host.innerHTML = `${sourceRow}<div class="section-title-row">${heading ? '<h3>复盘</h3>' : ''}<p class="feedback-stage" role="status">${esc(stageLine(data,context,reviewed && !editing))}</p>${refresh}</div>${reviewed && !editing ? done : decide}${evidenceDetails}${plans.length ? `<section><h4>由这次复盘安排的下一轮</h4>${plans.join('')}</section>` : ''}${records.length ? `<details class="feedback-output-history"><summary>相关记录 · ${records.length}</summary><div class="feedback-records">${records.join('')}</div></details>` : ''}`;
@@ -331,7 +348,7 @@ window.FeedbackChain = (() => {
   function form({key,title,body,submitLabel,path,build,onSaved,validate}) {
     if (document.querySelector('.feedback-form-dialog[open]')) return;
     const dialog = document.createElement('dialog');dialog.className = 'feedback-form-dialog';dialog.setAttribute('aria-label',title);
-    dialog.innerHTML = `<form><div class="dialog-heading"><h2>${esc(title)}</h2><button type="button" class="subtle" data-close>关闭</button></div><div class="feedback-fields">${body}<p class="ai-error" role="alert" data-error hidden></p></div><div class="dialog-footer"><span>核对内容后点击按钮才会保存或发起任务。</span><button type="submit" class="primary">${esc(submitLabel)}</button></div></form>`;
+    dialog.innerHTML = `<form><div class="dialog-heading"><h2>${esc(title)}</h2><button type="button" class="icon-button" data-close aria-label="关闭">${typeof icon === 'function' ? icon('close') : '×'}</button></div><div class="feedback-fields">${body}<p class="ai-error" role="alert" data-error hidden></p></div><div class="dialog-footer"><span>核对内容后点击按钮才会保存或发起任务。</span><button type="submit" class="primary">${esc(submitLabel)}</button></div></form>`;
     document.body.append(dialog);let busy = false;const node = dialog.querySelector('form'), error = dialog.querySelector('[data-error]');
     const lock = () => {const waiting = busy || pending.has(key);node.querySelectorAll('input,textarea,select').forEach(item => item.disabled = waiting);node.querySelector('[type=submit]').disabled = busy;};
     dialog.querySelector('[data-close]').onclick = () => {if (!busy) dialog.close();};dialog.addEventListener('cancel',event => {if (busy) event.preventDefault();});dialog.addEventListener('close',() => dialog.remove(),{once:true});
@@ -392,5 +409,5 @@ window.FeedbackChain = (() => {
       (window.keepReadingPlace || (change => change()))(() => {host.innerHTML = html;paintBars(host);host.hidden = !html;host.dataset.source = html;});
     } catch {/* The full analysis below stays readable without the chart. */}
   }
-  return {mount,mountTaskCard,sourceLink,sourceURL,sameMetricScope,manualReviewStatus,continueAfterSave};
+  return {mount,prefetch,mountTaskCard,sourceLink,sourceURL,sameMetricScope,manualReviewStatus,continueAfterSave};
 })();

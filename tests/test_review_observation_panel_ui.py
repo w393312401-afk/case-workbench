@@ -32,7 +32,7 @@ class ObservationPanelTests(unittest.TestCase):
         page.clock.install(time=datetime(2026, 10, 25, 4, tzinfo=timezone.utc))
         page.route("**/*", lambda route: route.fulfill(content_type="text/html", body='<main id="panel"></main>'))
         page.goto("http://127.0.0.1:43220/observation-panel-test")
-        for name in ("style.css", "home.css", "feedback-chain.css"):
+        for name in ("style.css", "buttons.css", "home.css", "feedback-chain.css"):
             page.add_style_tag(path=str(ROOT / "static" / name))
         page.evaluate("""({mature,review,hasContext}) => {
           window.esc = value => String(value ?? '').replace(/[&<>"']/g,

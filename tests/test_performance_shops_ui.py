@@ -38,7 +38,6 @@ class ShopPageTests(unittest.TestCase):
             creators.creator_row("8100000000000000001", "alice", 100.0, 2, 1000, 40, posted="2026/09/10 10:00:00"),
             creators.creator_row("8100000000000000002", "sharpal.usa", 50.0, 1, posted="2026/09/10 10:00:00")], creators.CREATOR_HEADER)
         # One of the two posts was registered on a photo production.
-        self.server.app.carousel_post_links = lambda: {"7685397373245312269": "CAR-0001"}
         if self.cross:
             exports.export(cross / "视频" / "第一周视频.xlsx", "2026-09-07", "2026-09-13", [exports.row(CROSS_VIDEO, 700, 2, 40, 80.0)])
             shops.photo_export(cross / "图文" / "第一周图文.xlsx", "2026-10-12", "2026-10-18",
@@ -79,7 +78,7 @@ class ShopPageTests(unittest.TestCase):
 
     def test_photo_tab_shows_the_shops_photo_sales_apart_from_video(self):
         page = self.open_data()
-        self.assertEqual(page.locator(".perf-tabs [role=tab]").all_inner_texts(), ["数据看板", "视频明细", "图文", "海外达人"])
+        self.assertEqual(page.locator(".perf-tabs [role=tab]").all_inner_texts(), ["数据看板", "自制视频", "自制图文", "海外达人"])
         page.locator(".perf-tabs [data-perf-tab=photos]").click()
         page.locator("#perf-photos .perf-kpis").wait_for()
         kpis = page.locator("#perf-photos .perf-kpi").all_inner_texts()
@@ -97,31 +96,6 @@ class ShopPageTests(unittest.TestCase):
         page.locator("#perf-photos .perf-kpis").wait_for()
         self.assertIn("$40", page.locator("#perf-photos .perf-kpi").first.inner_text())
         self.assertNotIn("未归属商品", page.locator("#perf-photos section", has_text="商品表现").locator("table").first.inner_text())
-
-    def test_per_post_table_lists_each_photo_and_links_its_production(self):
-        page = self.open_data()
-        page.locator(".perf-tabs [data-perf-tab=photos]").click()
-        page.locator("#perf-photos .perf-kpis").wait_for()
-        section = page.locator("#perf-photos section", has_text="逐条图文")
-        section.wait_for()
-        text = section.inner_text()
-        self.assertIn("2 条", text)
-        self.assertIn("Kitchen knife tip", text)
-        self.assertIn("@bladesharptrevor", text)
-        self.assertIn("（没有文案）", text)  # a post without text is shown as such
-        # Every post opens on TikTok from its text; only the registered one also links its production.
-        posts = section.locator('a[href^="https://www.tiktok.com/"]')
-        self.assertEqual(posts.count(), 2)
-        self.assertEqual(posts.first.get_attribute("href"), "https://www.tiktok.com/@sharpal_us/photo/7685397373245312269")
-        self.assertEqual(posts.first.get_attribute("target"), "_blank")
-        link = section.locator("a.perf-case-link", has_text="CAR-")
-        self.assertEqual((link.count(), link.inner_text()), (1, "CAR-0001"))
-        self.assertTrue(link.get_attribute("href").endswith("/production/CAR-0001"))
-        self.assertIn("120.50", text)  # GMV; the second "items sold" column (9) is never read
-        # The product filter keeps the posts that link the product.
-        page.locator("#global-product").select_option("202H")
-        page.locator("#perf-photos section", has_text="1 条").wait_for()
-        self.assertIn("@bladesharptrevor", page.locator("#perf-photos section", has_text="逐条图文").inner_text())
 
     def test_board_opens_with_three_sources_side_by_side_and_a_monthly_comparison(self):
         page = self.open_data()

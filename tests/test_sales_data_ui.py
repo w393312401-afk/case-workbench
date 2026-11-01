@@ -140,6 +140,7 @@ class SalesDataBrowserTests(unittest.TestCase):
         page.locator("#close-comparison").click()
         page.locator("#directions-nav").click()
         page.locator(".direction-card-link").first.click()
+        page.locator(".dir-case-performance > summary").click()
         page.locator(".direction-observations").get_by_text("100001", exact=True).first.wait_for()
         self.assertEqual(page.locator(".direction-observations").get_by_text("0.94%", exact=True).count(), 0)
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#case/{self.identifier}")
