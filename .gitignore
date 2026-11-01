@@ -5,6 +5,8 @@
 !/*.pyw
 !/config.json
 !/README.md
+!/CLAUDE.md
+!/AGENTS.md
 !/LICENSE
 !/CONTRIBUTING.md
 !/SECURITY.md
@@ -25,6 +27,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.test-artifacts/
 node_modules/
 .wrangler/
 .text-site-build-*/
