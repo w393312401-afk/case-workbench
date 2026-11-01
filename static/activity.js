@@ -6,8 +6,8 @@ window.TaskActivity = (() => {
   const activeStates = new Set(["queued", "running", "stopping", "cancelling", "cancel_requested", "saving", "recovering"]);
   const warningStates = new Set(["interrupted", "needs_attention", "awaiting_confirmation", "pending_review", "awaiting_review", "recovery_pending", "result_unpersisted"]);
   const labels = { queued: "排队", running: "进行中", stopping: "正在停止", cancelling: "取消中", cancel_requested: "取消中", saving: "保存中", recovering: "恢复中", completed: "已完成", failed: "失败", interrupted: "已中断", cancelled: "已取消", needs_attention: "待处理", awaiting_confirmation: "待确认", pending_review: "待人工审查", awaiting_review: "待人工审查", recovery_pending: "待恢复", result_unpersisted: "结果待保存" };
-  const phases = { queued: "等待执行", running: "正在执行", draft: "生成初稿", review: "复核", format: "整理交付格式", finished: "执行结束", save: "保存结果", reconciled: "核对恢复状态", stopping: "正在停止", voice: "生成配音", timeline: "建立时间线", edit: "AI 剪辑", validation: "核验工程", stills: "寻找底图", images: "生成图片", image_review: "核对图片", group_review: "整组验收", package: "打包成品", settled: "后续已处理" };
-  const kinds = { ai: "AI 写稿", voice: "配音", timeline: "时间线", edit: "AI 剪辑", validation: "工程核验", stills: "找底图", images: "出图", image_review: "图片核对", group_review: "整组验收", package: "成品包", table: "逐张表", clips: "图文片段", data: "数据备份", case: "自动拆解", prepublish: "发布前审查" };
+  const phases = { queued: "等待执行", running: "正在执行", draft: "生成初稿", review: "复核", format: "整理交付格式", finished: "执行结束", save: "保存结果", reconciled: "核对恢复状态", stopping: "正在停止", voice: "生成配音", timeline: "建立时间线", edit: "AI 剪辑", validation: "核验工程", settled: "后续已处理" };
+  const kinds = { ai: "AI 写稿", voice: "配音", timeline: "时间线", edit: "AI 剪辑", validation: "工程核验", data: "数据备份", case: "自动拆解", prepublish: "发布前审查" };
   const filters = [["current", "当前", "进行中和需处理的任务；今天已完成的折叠在最下方"], ["unread", "未读", ""], ["all", "全部", ""]];
   const modes = [["all", "完整"], ["ai", "AI 说明"], ["key", "关键节点"]];
   const icons = {
@@ -69,7 +69,7 @@ window.TaskActivity = (() => {
 
   function id() { return globalThis.crypto?.randomUUID?.() || `activity-${Date.now()}-${Math.random().toString(36).slice(2)}`; }
   // A scoped panel (opened from an order's log strip) shows that order's whole history; the general panel opens on what is current.
-  function blankPanel(scope = null) { return { items: [], product: scope ? "" : prefs.views[prefs.filter].product ?? product(), filter: scope ? "all" : prefs.filter, kind: scope ? "" : prefs.views[prefs.filter].kind, query: scope ? "" : prefs.views[prefs.filter].query, scope, since: "", open: new Set(), unfold: new Set(), collapsed: Object.fromEntries(filters.map(([value]) => [value, new Set()])), doneOpen: !scope && prefs.doneOpen, tableOpen: false, before: null, hasMore: false, loading: false, error: "" }; }
+  function blankPanel(scope = null) { return { items: [], product: scope ? "" : prefs.views[prefs.filter].product ?? product(), filter: scope ? "all" : prefs.filter, kind: scope ? "" : prefs.views[prefs.filter].kind, query: scope ? "" : prefs.views[prefs.filter].query, scope, since: "", open: new Set(), unfold: new Set(), collapsed: Object.fromEntries(filters.map(([value]) => [value, new Set()])), doneOpen: !scope && prefs.doneOpen, before: null, hasMore: false, loading: false, error: "" }; }
   function collapsedDays() { return panel.scope ? panel.collapsed[panel.filter] : prefs.views[panel.filter].collapsed; }
   function request(path, options) {
     const result = requestTail.catch(() => {}).then(() => api(path, options));
@@ -114,11 +114,12 @@ window.TaskActivity = (() => {
     if (value === null || value === undefined) return "";
     return value < 60 ? `${value} 秒` : value < 3600 ? `${Math.floor(value / 60)} 分` : `${Math.floor(value / 3600)} 小时 ${Math.floor(value / 60) % 60} 分`;
   }
-  function status(run) { return run.owner_archived ? `${labels[run.status] || '已结束'} · 已归档` : run.attention_resolved ? `${labels[run.status] || '已结束'} · 后续已处理` : labels[run.status] || (run.finished_at ? "已结束" : "处理中"); }
-  const isTable = run => run?.kind === "table" || /^table:TBL-[0-9a-f]{12}$/.test(run?.run_id || "");
+  function status(run) { return run.owner_archived ? `${labels[run.status] || '已结束'} · 已归档` : run.attention_resolved ? run.status === "needs_attention" ? "已处理" : `${labels[run.status] || '已结束'} · 后续已处理` : labels[run.status] || (run.finished_at ? "已结束" : "处理中"); }
   function phaseLabel(value) { return phases[value] || value || ""; }
   function tone(run) {
     if (activeStates.has(run?.status)) return "active";
+    // A request for attention that a later step already settled no longer asks anything of the reader.
+    if (run?.owner_archived || run?.attention_resolved) return "muted";
     if (run?.status === "failed") return "danger";
     if (warningStates.has(run?.status)) return "warning";
     return run?.status === "completed" ? "done" : "muted";
@@ -230,7 +231,7 @@ window.TaskActivity = (() => {
       addNotice(event);
       if (!foreground() && event.status !== "cancelled" && storage.get(keys.desktop) === "enabled" && window.Notification?.permission === "granted") {
         try {
-          const notification = new Notification(event.title || "工作台任务", { body: isTable(event) ? "打开逐张表" : event.message || status(event), silent: true, tag: `workbench-${epoch || ""}-${event.event_id}` });
+          const notification = new Notification(event.title || "工作台任务", { body: event.message || status(event), silent: true, tag: `workbench-${epoch || ""}-${event.event_id}` });
           notification.onclick = () => { window.focus(); notification.close(); visit(event); };
           setTimeout(() => notification.close(), 20000);
         } catch { /* Browser restrictions never prevent the in-app alert. */ }
@@ -241,7 +242,7 @@ window.TaskActivity = (() => {
     if (!notices || notices.querySelector(`[data-event-id="${event.event_id}"]`)) return;
     const node = document.createElement("article");
     node.className = "activity-notice"; node.dataset.eventId = event.event_id;
-    node.innerHTML = `<button type="button" class="activity-notice-view"><strong>${escape(event.title || "工作台任务")}</strong>${isTable(event) ? '<small>打开逐张表</small>' : `<span>${escape(event.message || status(event))}</span><small>${escape(event.product || "")} · 查看结果</small>`}</button><button type="button" class="subtle activity-notice-close" aria-label="收起这条提醒">×</button>`;
+    node.innerHTML = `<button type="button" class="activity-notice-view"><strong>${escape(event.title || "工作台任务")}</strong><span>${escape(event.message || status(event))}</span><small>${escape(event.product || "")} · 查看结果</small></button><button type="button" class="icon-button activity-notice-close" aria-label="收起这条提醒">${icons.close}</button>`;
     node.querySelector(".activity-notice-view").onclick = () => { node.remove(); visit(event); };
     node.querySelector(".activity-notice-close").onclick = () => node.remove();
     notices.append(node);
@@ -252,18 +253,12 @@ window.TaskActivity = (() => {
     node.addEventListener("focusin", () => clearTimeout(timeout)); node.addEventListener("focusout", expire); expire();
   }
   function visit(item) {
-    let destination = safeUrl(item.url);
-    const tableId = /^table:(TBL-[0-9a-f]{12})$/.exec(item.run_id || '')?.[1] || (item.kind === 'table' && /^TBL-[0-9a-f]{12}$/.test(item.source_id || '') ? item.source_id : '');
-    if (tableId && destination) {
-      if (window.CaseScripts?.canResumeTableResult && !window.CaseScripts.canResumeTableResult()) {toast('请先完成或关闭当前编辑，再查看逐张表。',true);return;}
-      const parsed = window.WorkbenchShell?.parse?.(destination);
-      if (parsed?.tail.length && ['scripts','content'].includes(parsed.page) && !parsed.params.has('table')) destination += `${destination.includes('?') ? '&' : '?'}table=${encodeURIComponent(tableId)}`;
-    }
+    const destination = safeUrl(item.url);
     // A docked panel stays beside the page it opens; an overlay steps aside.
     if (dialog?.open && dialog.matches(":modal")) dialog.close();
     if (destination) {
       pendingVisit = { item, hash: window.WorkbenchShell?.url?.(destination) || destination };
-      if (location.hash === pendingVisit.hash) {didNavigate(location.hash);if (tableId) void window.CaseScripts?.resumeTableResult?.(tableId,item.owner_id || '');}
+      if (location.hash === pendingVisit.hash) didNavigate(location.hash);
       else location.hash = destination;
     }
     else if (item.run_id) showLogs(item.run_id);
@@ -322,7 +317,7 @@ window.TaskActivity = (() => {
   // Runs are grouped by the order they belong to. A title reads "<step> · <order>": the order names the group, the step names the run inside it.
   const settled = run => run?.status === "completed" || run?.status === "cancelled";
   // A failure stops asking once the same step of the same order has run again; the later run carries the outcome.
-  const superseded = run => !['images','image_review','stills','clips'].includes(run.kind) && (run.status === "failed" || run.status === "interrupted") && [...known.values()].some(other => other.owner_id === run.owner_id && other.kind === run.kind && String(other.started_at || "") > String(run.started_at || ""));
+  const superseded = run => (run.status === "failed" || run.status === "interrupted") && [...known.values()].some(other => other.owner_id === run.owner_id && other.kind === run.kind && String(other.started_at || "") > String(run.started_at || ""));
   const waiting = run => activeStates.has(run.status) || !run.owner_archived && !run.attention_resolved && !settled(run) && !superseded(run);
   const unread = run => !!run.event_id && !run.read && !run.owner_archived && !run.attention_resolved;
   const byUpdate = (a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || ""));
@@ -350,17 +345,19 @@ window.TaskActivity = (() => {
     }).sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
   }
   function goMarkup(run, name) {
-    const label = isTable(run) ? "打开逐张表" : `查看结果：${name}`;
-    return safeUrl(run.url) ? `<button type="button" class="activity-row-go" data-activity-result="${escape(run.run_id)}" aria-label="${escape(label)}" title="${isTable(run) ? '打开逐张表' : '查看结果'}">${icons.go}</button>` : "";
+    const label = `查看结果：${name}`;
+    return safeUrl(run.url) ? `<button type="button" class="activity-row-go" data-activity-result="${escape(run.run_id)}" aria-label="${escape(label)}" title="查看结果">${icons.go}</button>` : "";
   }
+  // A failure something later settled says why, once, instead of repeating the original error.
+  const settledNote = run => run.attention_resolved && !run.owner_archived ? String(run.attention_note || "") : "";
   function rowMarkup(run, title = run.title || "工作台任务") {
-    const fresh = unread(run), selected = viewer?.runId === run.run_id, level = tone(run), spent = brief(seconds(run)), { head } = naming(run), table = isTable(run);
-    return `<article class="activity-row${fresh ? " is-unread" : ""}${selected ? " is-selected" : ""}" data-run-id="${escape(run.run_id)}"><button type="button" class="activity-row-main" data-activity-log="${escape(run.run_id)}"${selected ? ' aria-current="true"' : ""}>${table ? '<span aria-hidden="true"></span>' : `<span class="activity-dot is-${level}" aria-hidden="true"></span>`}<span class="activity-row-text"><span class="activity-row-title">${escape(title)}</span>${table ? '' : `<span class="activity-row-meta"><span class="activity-status is-${level}">${escape(status(run))}</span><span>${escape(`${head}：${run.message || phaseLabel(run.phase)}`)}</span></span>`}</span><span class="activity-row-side"><time datetime="${escape(run.updated_at || "")}">${escape(when(run.updated_at))}</time>${spent && !table ? `<small>${escape(spent)}</small>` : ""}</span>${fresh ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, title)}</article>`;
+    const fresh = unread(run), selected = viewer?.runId === run.run_id, level = tone(run), spent = brief(seconds(run)), { head } = naming(run);
+    return `<article class="activity-row${fresh ? " is-unread" : ""}${selected ? " is-selected" : ""}" data-run-id="${escape(run.run_id)}"><button type="button" class="activity-row-main" data-activity-log="${escape(run.run_id)}"${selected ? ' aria-current="true"' : ""}><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-row-text"><span class="activity-row-title">${escape(title)}</span><span class="activity-row-meta"><span class="activity-status is-${level}">${escape(status(run))}</span><span>${escape(settledNote(run) || `${head}：${run.message || phaseLabel(run.phase)}`)}</span></span></span><span class="activity-row-side"><time datetime="${escape(run.updated_at || "")}">${escape(when(run.updated_at))}</time>${spent ? `<small>${escape(spent)}</small>` : ""}</span>${fresh ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, title)}</article>`;
   }
   // One line per run inside an order: the step, its status and its last message. Identical runs in a row share one line.
   function runMarkup(run, repeat = null) {
-    const fresh = repeat ? repeat.runs.some(unread) : unread(run), selected = viewer?.runId === run.run_id, level = tone(run), { head } = naming(run), table = isTable(run);
-    return `<article class="activity-row activity-sub${fresh ? " is-unread" : ""}${selected ? " is-selected" : ""}" data-run-id="${escape(run.run_id)}"><button type="button" class="activity-row-main" data-activity-log="${escape(run.run_id)}"${selected ? ' aria-current="true"' : ""}>${table ? '<span aria-hidden="true"></span>' : `<span class="activity-dot is-${level}" aria-hidden="true"></span>`}<span class="activity-sub-text"><b>${escape(head)}</b>${table ? '' : `<span class="activity-status is-${level}">${escape(status(run))}</span><span class="activity-sub-message">${escape(run.message || phaseLabel(run.phase))}</span>`}</span><time class="activity-sub-time" datetime="${escape(run.updated_at || "")}">${escape(when(run.updated_at))}</time>${fresh ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${repeat ? `<button type="button" class="activity-sub-repeat" data-activity-unfold="${escape(repeat.key)}" title="展开这 ${repeat.runs.length} 次相同的运行">×${repeat.runs.length}</button>` : ""}${goMarkup(run, head)}</article>`;
+    const fresh = repeat ? repeat.runs.some(unread) : unread(run), selected = viewer?.runId === run.run_id, level = tone(run), { head } = naming(run);
+    return `<article class="activity-row activity-sub${fresh ? " is-unread" : ""}${selected ? " is-selected" : ""}" data-run-id="${escape(run.run_id)}"><button type="button" class="activity-row-main" data-activity-log="${escape(run.run_id)}"${selected ? ' aria-current="true"' : ""}><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-sub-text"><b>${escape(head)}</b><span class="activity-status is-${level}">${escape(status(run))}</span><span class="activity-sub-message">${escape(settledNote(run) || run.message || phaseLabel(run.phase))}</span></span><time class="activity-sub-time" datetime="${escape(run.updated_at || "")}">${escape(when(run.updated_at))}</time>${fresh ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${repeat ? `<button type="button" class="activity-sub-repeat" data-activity-unfold="${escape(repeat.key)}" title="展开这 ${repeat.runs.length} 次相同的运行">×${repeat.runs.length}</button>` : ""}${goMarkup(run, head)}</article>`;
   }
   function runsMarkup(group) {
     const out = [], same = (a, b) => naming(a).head === naming(b).head && a.status === b.status && a.message === b.message;
@@ -376,11 +373,11 @@ window.TaskActivity = (() => {
   }
   function groupMarkup(group) {
     if (group.runs.length === 1) return rowMarkup(group.runs[0], group.label);
-    const run = group.lead, otherRuns = group.runs.filter(item => !isTable(item)), table = !otherRuns.length;
-    const summary = otherRuns.find(item => activeStates.has(item.status)) || otherRuns.find(waiting) || otherRuns[0] || run;
+    const run = group.lead;
+    const summary = group.runs.find(item => activeStates.has(item.status)) || group.runs.find(waiting) || group.runs[0] || run;
     const level = tone(summary), expanded = panel.open.has(group.key), { head } = naming(summary);
     const selected = !expanded && group.runs.some(item => item.run_id === viewer?.runId);
-    return `<article class="activity-row activity-group-row${group.unread ? " is-unread" : ""}${selected ? " is-selected" : ""}"><button type="button" class="activity-row-main" data-activity-group="${escape(group.key)}" aria-expanded="${expanded}">${table ? '<span aria-hidden="true"></span>' : `<span class="activity-dot is-${level}" aria-hidden="true"></span>`}<span class="activity-row-text"><span class="activity-row-title">${escape(group.label)}</span>${table ? '' : `<span class="activity-row-meta"><span class="activity-status is-${level}">${escape(status(summary))}</span><span>${escape(`${head}：${summary.message || phaseLabel(summary.phase)}`)}</span></span>`}</span><span class="activity-row-side"><time datetime="${escape(group.at || "")}">${escape(when(group.at))}</time><small class="activity-group-count">${group.runs.length} 次${icons.chevron}</small></span>${group.unread ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, group.label)}</article>${expanded ? `<div class="activity-group-runs" role="group" aria-label="${escape(group.label)}">${runsMarkup(group)}</div>` : ""}`;
+    return `<article class="activity-row activity-group-row${group.unread ? " is-unread" : ""}${selected ? " is-selected" : ""}"><button type="button" class="activity-row-main" data-activity-group="${escape(group.key)}" aria-expanded="${expanded}"><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-row-text"><span class="activity-row-title">${escape(group.label)}</span><span class="activity-row-meta"><span class="activity-status is-${level}">${escape(status(summary))}</span><span>${escape(`${head}：${summary.message || phaseLabel(summary.phase)}`)}</span></span></span><span class="activity-row-side"><time datetime="${escape(group.at || "")}">${escape(when(group.at))}</time><small class="activity-group-count">${group.runs.length} 次${icons.chevron}</small></span>${group.unread ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, group.label)}</article>${expanded ? `<div class="activity-group-runs" role="group" aria-label="${escape(group.label)}">${runsMarkup(group)}</div>` : ""}`;
   }
   // Folded days are remembered only within their own tab; a new day always starts open.
   function dayed(entries, at, render) {
@@ -398,25 +395,23 @@ window.TaskActivity = (() => {
   // 当前 lists orders still running or waiting on someone; orders that finished today fold into one line below them.
   function visibleGroups() {
     const groups = grouped(panel.filter === 'current' ? panel.items.filter(run => !run.owner_archived || activeStates.has(run.status)) : panel.items);
-    if (panel.filter !== "current") return { groups, shown: groups, done: [], tableDone: [] };
+    if (panel.filter !== "current") return { groups, shown: groups, done: [] };
     const shown = groups.filter(group => group.open), finished = groups.filter(group => !group.open).flatMap(group => group.runs);
-    const done = grouped(finished.filter(run => !isTable(run)));
-    const tableDone = grouped(finished.filter(isTable)).map(group => ({ ...group, key: `table:${group.key}` }));
-    return { groups: [...shown, ...done, ...tableDone], shown, done, tableDone };
+    const done = grouped(finished);
+    return { groups: [...shown, ...done], shown, done };
   }
   function paintList() {
     const list = dialog.querySelector("#activity-list");
-    const focusKey = ["data-activity-log", "data-activity-result", "data-activity-group", "data-activity-done", "data-activity-table-done", "data-activity-day"].find(name => list.contains(document.activeElement) && document.activeElement.hasAttribute(name));
+    const focusKey = ["data-activity-log", "data-activity-result", "data-activity-group", "data-activity-done", "data-activity-day"].find(name => list.contains(document.activeElement) && document.activeElement.hasAttribute(name));
     const focusValue = focusKey && document.activeElement.getAttribute(focusKey);
-    const { groups, shown, done, tableDone } = visibleGroups();
+    const { groups, shown, done } = visibleGroups();
     // A run opened from outside (a notice, a strip) shows inside its order once that order is listed.
     const reveal = viewer && !viewer.revealed && groups.find(group => group.runs.some(run => run.run_id === viewer.runId));
     if (reveal) { viewer.revealed = true; if (reveal.lead.run_id !== viewer.runId) panel.open.add(reveal.key); }
     let html = panel.scope ? dayed([...panel.items].sort(byUpdate), run => run.updated_at, runMarkup) : dayed(shown, group => group.at, groupMarkup);
-    if (!html && done.length && !tableDone.length) html = `<p class="activity-empty">当前没有进行中或需处理的任务</p>`;
+    if (!html && done.length) html = `<p class="activity-empty">当前没有进行中或需处理的任务</p>`;
     if (done.length) html += `<button type="button" class="activity-done-fold" data-activity-done aria-expanded="${panel.doneOpen}">${icons.chevron}今天已完成 ${done.length} 项</button>${panel.doneOpen ? done.map(groupMarkup).join("") : ""}`;
-    if (tableDone.length) html += `<button type="button" class="activity-done-fold" data-activity-table-done aria-expanded="${panel.tableOpen}">${icons.chevron}今天的逐张表 ${tableDone.length} 项</button>${panel.tableOpen ? tableDone.map(groupMarkup).join("") : ""}`;
-    list.innerHTML = html || `<p class="activity-empty">${panel.loading ? "正在读取任务…" : panel.kind === "table" ? "暂无逐张表入口" : { unread: "没有未读提醒", current: "当前没有进行中或需处理的任务" }[panel.filter] || (panel.query || panel.kind ? "没有符合条件的任务" : "暂无运行记录")}</p>`;
+    list.innerHTML = html || `<p class="activity-empty">${panel.loading ? "正在读取任务…" : { unread: "没有未读提醒", current: "当前没有进行中或需处理的任务" }[panel.filter] || (panel.query || panel.kind ? "没有符合条件的任务" : "暂无运行记录")}</p>`;
     if (focusKey) [...list.querySelectorAll(`[${focusKey}]`)].find(node => node.getAttribute(focusKey) === focusValue)?.focus({ preventScroll: true });
     return shown;
   }
@@ -425,8 +420,7 @@ window.TaskActivity = (() => {
     const more = dialog.querySelector("#activity-more"); more.hidden = !panel.hasMore; more.disabled = panel.loading; more.textContent = panel.loading ? "正在读取…" : "加载更多";
     dialog.querySelector("#activity-read-all").disabled = !counts.unread;
     paintConnection();
-    // Other task logs preview automatically; a table's log opens only when requested.
-    const first = panel.scope ? [...panel.items].sort(byUpdate).find(run => !isTable(run)) : shown.map(group => !isTable(group.lead) ? group.lead : group.runs.find(run => !isTable(run))).find(Boolean);
+    const first = panel.scope ? [...panel.items].sort(byUpdate)[0] : shown[0]?.lead;
     if (!viewer && first && !panel.loading) select(first.run_id, false);
     else if (!viewer) paintDetail();
   }
@@ -471,7 +465,6 @@ window.TaskActivity = (() => {
   // The selected run's log: newest lines first loaded, grouped by phase, repeats folded.
   function select(runId, explicit = true) {
     if (!runId || !dialog) return;
-    if (!explicit && isTable(known.get(runId))) return;
     if (viewer?.runId === runId) { if (explicit) { viewer.explicit = true; markOpened(viewer.run); } return; }
     viewer = { runId, run: known.get(runId) || null, rows: [], first: null, next: 0, earlier: false, loading: false, loaded: false, error: "", mode: lastMode, groups: new Map(), folds: new Set(), stick: true, unseen: 0, legacy: false, explicit, revealed: false };
     paintList();
@@ -703,16 +696,14 @@ window.TaskActivity = (() => {
   }
   function runStrip(runs) {
     const run = runs[0], level = tone(run), spent = brief(seconds(run));
-    if (isTable(run)) return `<span class="activity-strip-text">${escape(run.title || '逐张表')}</span><span class="activity-strip-action">日志${icons.chevron}</span>`;
     const detail = [activeStates.has(run.status) && phaseLabel(run.phase) !== run.message ? phaseLabel(run.phase) : "", run.message].filter(Boolean).join(" · ");
     return `<span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-strip-status is-${level}">${escape(status(run))}</span><span class="activity-strip-text">${escape(detail)}</span>${spent ? `<span class="activity-strip-time">${escape(spent)}</span>` : ""}<span class="activity-strip-action">日志${runs.length > 1 ? ` · ${runs.length} 次` : ""}${icons.chevron}</span>`;
   }
   // Only runs that still need someone are named; finished history stays behind 全部日志.
   function ownerStrip(runs, label) {
-    const otherRuns = runs.filter(run => !isTable(run));
-    const active = otherRuns.filter(run => activeStates.has(run.status));
+    const active = runs.filter(run => activeStates.has(run.status));
     const running = active.filter(run => run.status !== "queued"), queued = active.filter(run => run.status === "queued");
-    const attention = otherRuns.filter(run => !activeStates.has(run.status) && waiting(run));
+    const attention = runs.filter(run => !activeStates.has(run.status) && waiting(run));
     const kindsNamed = items => [...new Set(items.map(run => kinds[run.kind] || "任务"))].join("、");
     const summary = [[running, "进行中"], [queued, "排队"]].filter(([items]) => items.length);
     const details = (active.length ? summary : [[attention, "需处理"]]).filter(([items]) => items.length).map(([items, label]) => `${label}：${kindsNamed(items)}`).join("；");
@@ -793,12 +784,11 @@ window.TaskActivity = (() => {
     if (order) {
       const key = order.dataset.activityGroup, group = visibleGroups().groups.find(item => item.key === key);
       if (panel.open.has(key)) panel.open.delete(key); else panel.open.add(key);
-      if (group && panel.open.has(key) && !isTable(group.lead) && !group.runs.some(run => run.run_id === viewer?.runId)) select(group.lead.run_id, true);
+      if (group && panel.open.has(key) && !group.runs.some(run => run.run_id === viewer?.runId)) select(group.lead.run_id, true);
       else paintList();
       return;
     }
     if (target.closest("[data-activity-done]")) { panel.doneOpen = !panel.doneOpen; savePrefs(); paintList(); return; }
-    if (target.closest("[data-activity-table-done]")) { panel.tableOpen = !panel.tableOpen; paintList(); return; }
     const unfold = target.closest("[data-activity-unfold]");
     if (unfold) { panel.unfold.add(unfold.dataset.activityUnfold); paintList(); return; }
     const log = target.closest("[data-activity-log]"), result = target.closest("[data-activity-result]");

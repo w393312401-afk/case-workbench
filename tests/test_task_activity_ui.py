@@ -138,6 +138,7 @@ class TaskActivityBrowserTests(unittest.TestCase):
         page.goto("http://activity.test/")
         page.set_content('''<header class="topbar"><div class="topbar-right"><button class="secondary activity-trigger" id="task-activity-open">任务<span class="activity-count" data-activity-active hidden></span><span class="activity-count" data-activity-unread hidden></span></button></div></header><select id="global-product"><option value="">全部产品</option><option value="202H" selected>202H</option><option value="129N">129N</option></select><main id="content"></main>''')
         page.add_style_tag(path=str(ROOT / "static/style.css"))
+        page.add_style_tag(path=str(ROOT / "static/buttons.css"))
         page.add_style_tag(path=str(ROOT / "static/activity.css"))
         page.add_script_tag(content='''
           window.activityFocused = true; window.activityHidden = false; window.permissionCalls = 0; window.notificationCalls = [];
@@ -282,62 +283,6 @@ class TaskActivityBrowserTests(unittest.TestCase):
         page.wait_for_function("activityApiActive === 0")
         self.assertEqual(self.read, {1})
 
-    def test_runs_group_by_order_and_current_view_folds_what_finished_today(self):
-        now = datetime.now(timezone.utc)
-        stamp = lambda minutes: (now - timedelta(minutes=minutes)).isoformat(timespec="milliseconds")
-        def run(run_id, owner, title, status, minutes):
-            row = self.add_run(run_id, status=status, message=f"{run_id} 的进度")
-            row.update(owner_id=owner, kind="images", title=title, started_at=stamp(minutes + 1), updated_at=stamp(minutes),
-                       finished_at=None if status in ACTIVE else stamp(minutes), url=f"#/202H/production/{owner}?step=images")
-        run("img:a1", "CAR-a", "出图 · 202H-S2 变体 #4 · 身份认同", "completed", 30)
-        run("img:a2", "CAR-a", "出图 · 202H-S2 变体 #4 · 身份认同", "needs_attention", 20)
-        run("pkg:a", "CAR-a", "成品打包 · 202H-S2 变体 #4 · 身份认同", "completed", 10)
-        run("img:b1", "CAR-b", "出图 · 第 1 条「从粗到细」", "completed", 25)
-        run("img:b2", "CAR-b", "出图 · 第 1 条「从粗到细」", "completed", 15)
-        run("img:c", "CAR-c", "出图 · 202H-S1 变体 #2", "completed", 3 * 24 * 60)
-        page = self.page()
-        page.locator("#task-activity-open").click()
-        # One row per order still waiting on someone; it leads with the run that needs attention.
-        expect(page.locator(".activity-group-row")).to_have_count(1)
-        expect(page.locator(".activity-group-row .activity-row-title")).to_have_text("202H-S2 变体 #4 · 身份认同")
-        expect(page.locator(".activity-group-count")).to_have_text("3 次")
-        expect(page.locator(".activity-group-row .activity-row-meta")).to_contain_text("待处理")
-        expect(page.locator(".activity-group-row .activity-row-meta")).to_contain_text("出图：img:a2 的进度")
-        expect(page.locator("#activity-detail-title")).to_have_text("出图 · 202H-S2 变体 #4 · 身份认同")
-        current = next(row["params"] for row in reversed(self.requests) if row["params"].get("filter") == "current")
-        self.assertEqual(current["group"], "owner")
-        self.assertIn("since", current)
-        # Orders that finished today fold into one line.
-        expect(page.locator(".activity-done-fold")).to_have_text("今天已完成 1 项")
-        expect(page.get_by_text("第 1 条「从粗到细」")).to_have_count(0)
-        page.locator(".activity-done-fold").click()
-        expect(page.locator(".activity-group-row .activity-row-title")).to_have_text(["202H-S2 变体 #4 · 身份认同", "第 1 条「从粗到细」"])
-        page.locator("[data-activity-group='CAR-a']").click()
-        expect(page.locator(".activity-group-runs .activity-sub-text b")).to_have_text(["成品打包", "出图", "出图"])
-        expect(page.locator(".activity-group-runs .activity-sub.is-selected")).to_have_attribute("data-run-id", "img:a2")
-        page.locator("[data-activity-group='CAR-a']").click()
-        expect(page.locator(".activity-group-runs")).to_have_count(0)
-        page.get_by_role("button", name="全部", exact=True).click()
-        expect(page.locator(".activity-day")).to_have_count(2)
-        expect(page.locator(".activity-row-title")).to_have_text(["202H-S2 变体 #4 · 身份认同", "第 1 条「从粗到细」", "202H-S1 变体 #2"])
-        # A run opened from elsewhere opens its order so the selection is visible.
-        page.evaluate("TaskActivity.showLogs('img:b1')")
-        expect(page.locator(".activity-sub.is-selected")).to_have_attribute("data-run-id", "img:b1")
-        expect(page.locator(".activity-group-runs")).to_have_count(1)
-        # A day folds under its header, and that fold plus the chosen filter survive a reload.
-        page.locator("[data-activity-day]").nth(1).click()
-        expect(page.locator("[data-activity-day]").nth(1)).to_have_attribute("aria-expanded", "false")
-        expect(page.get_by_text("202H-S1 变体 #2")).to_have_count(0)
-        page.close()
-        page = self.page()
-        page.locator("#task-activity-open").click()
-        expect(page.get_by_role("button", name="全部", exact=True)).to_have_attribute("aria-pressed", "true")
-        expect(page.locator("[data-activity-day]")).to_have_count(2)
-        expect(page.locator("[data-activity-day]").nth(1)).to_have_attribute("aria-expanded", "false")
-        expect(page.get_by_text("202H-S1 变体 #2")).to_have_count(0)
-        page.locator("[data-activity-day]").nth(1).click()
-        expect(page.get_by_text("202H-S1 变体 #2")).to_have_count(1)
-
     def test_each_status_tab_keeps_its_own_product_type_and_search(self):
         self.add_run("run:a", status="completed", message="完成")
         page = self.page()
@@ -450,28 +395,6 @@ class TaskActivityBrowserTests(unittest.TestCase):
         expect(day).to_have_attribute("aria-expanded", "false")
         self.assertEqual(self.read, set())
 
-    def test_retried_failure_settles_and_identical_runs_share_one_line(self):
-        now = datetime.now(timezone.utc)
-        stamp = lambda minutes: (now - timedelta(minutes=minutes)).isoformat(timespec="milliseconds")
-        def run(run_id, owner, status, message, minutes):
-            row = self.add_run(run_id, status=status, message=message)
-            row.update(owner_id=owner, kind="images", title="出图 · 变体 #9", started_at=stamp(minutes + 1), updated_at=stamp(minutes),
-                       finished_at=None if status in ACTIVE else stamp(minutes))
-        run("img:old", "CAR-e", "failed", "出图未全部完成。", 3 * 24 * 60)
-        for minutes, run_id in enumerate(("img:1", "img:2", "img:3")):
-            run(run_id, "CAR-e", "completed", "已人工确认。", minutes + 1)
-        page = self.page()
-        page.locator("#task-activity-open").click()
-        # The later image runs carry the outcome, so the old failure no longer keeps the order in front.
-        expect(page.locator("#activity-list .activity-empty")).to_have_text("当前没有进行中或需处理的任务")
-        expect(page.locator(".activity-done-fold")).to_have_text("今天已完成 1 项")
-        page.get_by_role("button", name="全部", exact=True).click()
-        page.locator("[data-activity-group='CAR-e']").click()
-        expect(page.locator(".activity-group-runs .activity-sub")).to_have_count(2)
-        expect(page.locator(".activity-sub-repeat")).to_have_text("×3")
-        page.locator(".activity-sub-repeat").click()
-        expect(page.locator(".activity-group-runs .activity-sub")).to_have_count(4)
-
     def test_repeated_progress_folds_and_filters_keep_ai_lines(self):
         self.add_run(status="completed")
         page = self.page()
@@ -490,7 +413,8 @@ class TaskActivityBrowserTests(unittest.TestCase):
         self.assertIn("AI：已连接时间线。", page.locator(".activity-log-body").inner_text())
         self.assertNotIn("同一步骤", page.locator(".activity-log-body").inner_text())
         page.get_by_role("button", name="完整", exact=True).click()
-        self.assertEqual(page.locator(".activity-log-phase strong").all_text_contents(), ["AI 剪辑", "执行结束"])
+        # A one-line phase has no fold to open, so its label sits on the line instead of a phase header.
+        self.assertEqual(page.locator(".activity-log-phase strong, .activity-single-phase").all_text_contents(), ["AI 剪辑", "执行结束"])
 
     def test_queued_task_has_its_own_status_counts_and_becomes_running(self):
         def task(run_id, kind, status):

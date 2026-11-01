@@ -20,11 +20,11 @@ from production_naming import production_title
 
 ACTIVE = frozenset({"queued", "running", "stopping"})
 TERMINAL = frozenset({"completed", "failed", "cancelled", "interrupted", "needs_attention"})
-KINDS = frozenset({"ai", "voice", "timeline", "edit", "validation", "stills", "images", "image_review", "group_review", "package",
-                   "table", "clips", "data", "case", "prepublish"})
+KINDS = frozenset({"ai", "voice", "timeline", "edit", "validation", "data", "case", "prepublish"})
 RECOVERY_PHASES = frozenset({"save", "结果待恢复", "登记待恢复", "记录待恢复", "待核实外部结果", "结果已保存，正在登记"})
 IDENTIFIER = re.compile(r"[A-Za-z0-9_:.\-]{1,300}")
 UNAVAILABLE = "运行日志暂时不可用，任务仍按原流程处理。"
+PROJECTION_WAIT = 0.25  # seconds a feed read waits for the attention projection before answering without it
 # Waiting on the service or on someone; the panel's default view keeps these in front. A failure stops
 # asking once the same step of the same order has run again; that later run carries the outcome.
 OPEN_RUN = ("(r.status IN ('queued','running','stopping') OR ((r.owner_archived=0 AND r.content_archived=0) AND r.attention_resolved=0 AND "
@@ -78,8 +78,8 @@ def record_activity(owner, run_id, **fields):
 
 
 def activity_label(item, fallback=""):
-    """Video names share the content list's timeline and topic; carousel labels stay descriptive."""
-    if str(item.get("id") or "").startswith("PRD-") or "timelines" in item or "lines" in item and "slides" not in item:
+    """Video names share the content list's timeline and topic; other labels stay descriptive."""
+    if str(item.get("id") or "").startswith("PRD-") or "timelines" in item or "lines" in item:
         return production_title(item)
     return _plain_label(item, fallback)
 
@@ -88,10 +88,8 @@ def _plain_label(item, fallback=""):
     title = str(item.get("title") or "").strip()
     if title and not GENERIC_TITLE.fullmatch(title):
         return title
-    slides, lines = item.get("slides") or [], item.get("lines") or []
-    if slides and isinstance(slides[0], dict):
-        opening = slides[0].get("title_zh") or slides[0].get("body_zh") or slides[0].get("body")
-    elif lines and isinstance(lines[0], dict):
+    lines = item.get("lines") or []
+    if lines and isinstance(lines[0], dict):
         opening = lines[0].get("zh") or lines[0].get("spoken")
     else:
         opening = next((line for line in str(item.get("translation_zh") or item.get("text") or "").splitlines() if line.strip()), "")
@@ -130,6 +128,7 @@ class ActivityStore:
     def __init__(self, runtime):
         self.path = Path(runtime) / "task-activity.sqlite"
         self.lock = threading.RLock()
+        self.projection_gate = threading.Lock()
         self.error = ""
         try:
             self._initialize()
@@ -212,8 +211,6 @@ class ActivityStore:
         owner = quote(run["owner_id"], safe="")
         if run["kind"] == "ai":
             return f"#/{product}/ai/{owner}?" + urlencode({"round": run["source_id"]})
-        if run["kind"] == "table":
-            return f"#/{product}/scripts/{owner}?" + urlencode({"table": run["source_id"]})
         if run["kind"] == "data":
             return "#/all/settings"
         if run["kind"] == "case":
@@ -513,6 +510,18 @@ class ActivityStore:
         except (OSError, sqlite3.Error, ActivityError):
             self.error = UNAVAILABLE
 
+    def archive_owners(self, marks):
+        """archive_owner for a whole list pass, on one connection instead of one per owner."""
+        try:
+            with self.lock, self._connect() as db:
+                for row in db.execute("SELECT run_id,owner_id,owner_archived FROM runs").fetchall():
+                    if row["owner_id"] in marks and row["owner_archived"] != int(bool(marks[row["owner_id"]])):
+                        version = db.execute("INSERT INTO changes(run_id,kind) VALUES(?,'run')", (row["run_id"],)).lastrowid
+                        db.execute("UPDATE runs SET owner_archived=?,version=? WHERE run_id=?",
+                                   (int(bool(marks[row["owner_id"]])), version, row["run_id"]))
+        except (OSError, sqlite3.Error, ActivityError):
+            self.error = UNAVAILABLE
+
     def project_attention(self, owner_id, resolved):
         """Resolve a request for attention, not its historical failure. Recompute on version changes."""
         try:
@@ -590,37 +599,7 @@ def settle_resolved_activity(app, kind, item, runs=None):
         if mine is not None and not rows:
             return
         resolved = {}
-        if kind == "carousel":
-            slides = {slide.get("number"): slide for slide in item.get("slides", [])}
-            def confirmed(number):
-                slide = slides.get(number) or {}
-                output = next((entry for entry in slide.get("outputs", []) if entry.get("id") == slide.get("output_id")), None)
-                return bool(output and output.get("approved") and not output.get("stale"))
-            generations = {run.get("id"): run for run in item.get("generations", [])}
-            autopilots = {run.get("id"): run for run in item.get("autopilot_runs", [])}
-            searches = {run.get("id"): run for run in item.get("searches", [])}
-            reviewed = {review.get("id"): slide.get("number") for slide in item.get("slides", [])
-                        for output in slide.get("outputs", []) for review in output.get("review_runs", [])}
-            for row in rows:
-                source = row["source_id"]
-                if row["kind"] == "images":
-                    autopilot = row["run_id"] == "autopilot:" + source
-                    run = (autopilots if autopilot else generations).get(source)
-                    numbers = list(slides) if autopilot and run else (run or {}).get("requested_slides") or (run or {}).get("slides") or []
-                    if run and run.get("status") != "running" and numbers and all(confirmed(number) for number in numbers):
-                        resolved[row["run_id"]] = "这些张的当前成图已人工确认；原运行结果保留。"
-                elif row["kind"] == "image_review" and source in reviewed and confirmed(reviewed[source]):
-                    resolved[row["run_id"]] = "这一张的当前成图已人工确认；原核对记录保留。"
-                elif row["kind"] in {"stills", "clips"}:
-                    search = searches.get(source)
-                    numbers = (search or {}).get("slides") or []
-                    # Clip selection covers the entire group; a still search covers only its requested slides.
-                    if row["kind"] == "clips":
-                        numbers = list(slides)
-                    if numbers and all((slides.get(number) or {}).get("base") for number in numbers):
-                        if row["kind"] == "clips" or search and search.get("status") != "running":
-                            resolved[row["run_id"]] = "所需底图已选齐；原运行结果保留。"
-        elif kind == "job":
+        if kind == "job":
             takes = {take.get("id"): take for take in item.get("takes", [])}
             chosen = takes.get(item.get("selected_take")) or {}
             archived_timelines = {timeline.get("unique_id") for timeline in item.get("timelines", []) if timeline.get("archived")}
@@ -644,6 +623,54 @@ def settle_resolved_activity(app, kind, item, runs=None):
         return
 
 
+AI_FAILURE_PREFIX = "本轮未完成，请查看任务详情。"
+
+
+def _failure_reason(message):
+    """'服务连接中断' from '本轮未完成，请查看任务详情。 服务连接中断，请在原任务中核对结果。'."""
+    text = str(message or "").strip()
+    if text.startswith(AI_FAILURE_PREFIX):
+        text = text[len(AI_FAILURE_PREFIX):].strip()
+    return re.split(r"[，。；]", text, maxsplit=1)[0].strip() if text else ""
+
+
+def settle_ai_activity(app, runs=None):
+    """A failed AI run stops asking for attention once a later run settled it (see ai_resolution).
+
+    Only the projection fields change; the run, its log and its message stay as recorded. A rule
+    that no longer holds withdraws its note on the next pass.
+    """
+    activity = getattr(app, "activity", None)
+    if activity is None or getattr(app, "ai", None) is None:
+        return
+    try:
+        rows = [row for row in (activity.existing() if runs is None else runs)
+                if row["owner_id"].startswith("AIT-") and row["status"] in {"failed", "interrupted"}]
+        if not rows:
+            return
+        from ai_resolution import ai_task_resolutions
+        tasks = app.ai.list_tasks()
+        with app.lock:
+            jobs = app.production.public()["jobs"]
+        settled = ai_task_resolutions(tasks, jobs)
+        for owner in {row["owner_id"] for row in rows}:
+            resolution = settled.get(owner)
+            resolved = {}
+            if resolution and resolution["kind"] != "not_written":
+                for row in rows:
+                    if row["owner_id"] == owner:
+                        reason = _failure_reason(row.get("message"))
+                        resolved[row["run_id"]] = f"{reason}，{resolution['note']}" if reason else resolution["note"]
+            if all(bool(row.get("attention_resolved")) == bool(resolved.get(row["run_id"]))
+                   and (row.get("attention_note") or "") == str(resolved.get(row["run_id"]) or "")[:500]
+                   for row in rows if row["owner_id"] == owner and not row.get("reconcile_pending")):
+                continue
+            activity.project_attention(owner, resolved)
+    except Exception:
+        # Observation only: the task panel never fails because a projection could not be computed.
+        return
+
+
 def refresh_activity_projection(app):
     """Recheck current artifacts even when the user stays in the list/task panel.
 
@@ -653,33 +680,52 @@ def refresh_activity_projection(app):
     activity = getattr(app, "activity", None)
     if activity is None:
         return
-    owners = {row["owner_id"] for row in activity.existing()
+    existing = activity.existing()
+    settle_ai_activity(app, existing)
+    owners = {row["owner_id"] for row in existing
               if row["status"] in {"needs_attention", "failed", "interrupted"}
-              and row["owner_id"].startswith(("PRD-", "CAR-"))}
+              and row["owner_id"].startswith("PRD-")}
     if not owners:
         return
     try:
         with app.lock:
             catalog = app.production.public()
-        for kind, key in (("job", "jobs"), ("carousel", "carousels")):
-            for item in catalog.get(key, []):
-                if item.get("id") not in owners:
-                    continue
-                try:
-                    if kind == "carousel":
-                        app.carousel_images_live(item)
+        for item in catalog.get("jobs", []):
+            if item.get("id") not in owners:
+                continue
+            try:
+                app._production_edit_state(item)
+                with app.lock:
+                    if app.production.current_revision() == catalog["revision"]:
+                        settle_resolved_activity(app, "job", item, existing)
                     else:
-                        app._production_edit_state(item)
-                    with app.lock:
-                        if app.production.current_revision() == catalog["revision"]:
-                            settle_resolved_activity(app, kind, item)
-                        else:
-                            activity.project_attention(item["id"], {})
-                except Exception:
-                    activity.project_attention(item["id"], {})
+                        activity.project_attention(item["id"], {})
+            except Exception:
+                activity.project_attention(item["id"], {})
     except Exception:
         for owner in owners:
             activity.project_attention(owner, {})
+
+
+def refresh_activity_projection_briefly(app, wait=PROJECTION_WAIT):
+    """The feed answers from its own database, so a poll never queues behind the workbench lock.
+
+    A projection that cannot finish in time carries on by itself and the next poll shows it;
+    while one is running, later polls do not start another.
+    """
+    activity = getattr(app, "activity", None)
+    if activity is None or not activity.projection_gate.acquire(blocking=False):
+        return
+    def run():
+        try:
+            refresh_activity_projection(app)
+        except Exception:
+            pass  # Observation only: the feed still answers with the last projection.
+        finally:
+            activity.projection_gate.release()
+    worker = threading.Thread(target=run, name="activity-projection", daemon=True)
+    worker.start()
+    worker.join(wait)
 
 
 def reconcile_activity(app):
@@ -693,13 +739,13 @@ def reconcile_activity(app):
     with app.lock:
         try:
             catalog = app.production.read()
-            owners = {item["id"]:item for key in ("jobs","carousels") for item in catalog.get(key,[])}
+            owners = {item["id"]:item for item in catalog.get("jobs",[])}
         except Exception:
             owners = None
         try:
             content_marks = app.content_management.read().get("items", {})
             for row in rows:
-                content_kind = "task" if row["kind"] == "ai" else "carousel" if row["owner_id"].startswith("CAR-") else "video"
+                content_kind = "task" if row["kind"] == "ai" else "video"
                 mark = content_marks.get(f"{content_kind}:{row['owner_id']}") or {}
                 activity.archive_owner(row["owner_id"], mark.get("archived", False), source="content")
         except Exception:
@@ -717,7 +763,6 @@ def reconcile_activity(app):
             try:
                 source = None
                 recovered_fields = {}
-                autopilot = row["kind"] == "images" and row["run_id"] == "autopilot:" + row["source_id"]
                 if row["kind"] == "ai":
                     if row["owner_id"] not in app.ai._locations:
                         activity.delete_owner(row["owner_id"])
@@ -732,13 +777,6 @@ def reconcile_activity(app):
                     title = f"{label} · {task_label}" + (f" · 第 {round_index} 轮" if round_index else "")
                     activity.retitle(row["run_id"], title)
                     source = next((turn for turn in task["rounds"] if turn["round_id"]==row["source_id"]),None)
-                elif row["kind"] == "table":
-                    # A table belongs to a script rather than a production job; its saved folder is the record.
-                    state = app.production.root / "carousel_tables" / row["source_id"] / "state.json"
-                    if not state.is_file():
-                        activity.delete_run(row["run_id"])
-                        continue
-                    source = json.loads(state.read_text(encoding="utf-8"))
                 elif row["kind"] in {"data", "case"}:
                     source = None
                 elif owners is not None:
@@ -754,18 +792,14 @@ def reconcile_activity(app):
                     earlier.update(production_title({**owner, "timelines": [item]}) for item in owner.get("timelines") or [] if isinstance(item, dict))
                     if separator and named in earlier and named != activity_label(owner):
                         activity.retitle(row["run_id"], f"{prefix} · {activity_label(owner)}")
-                    collection={"edit":"edits","validation":"edits","stills":"searches","images":"generations","group_review":"group_reviews","voice":"takes","timeline":"timelines","package":"deliveries"}.get(row["kind"])
-                    if autopilot:
-                        collection = "autopilot_runs"
+                    collection={"edit":"edits","validation":"edits","voice":"takes","timeline":"timelines"}.get(row["kind"])
                     candidates = owner.get(collection,[]) if collection else []
-                    if row["kind"] == "image_review":
-                        candidates = [review for slide in owner.get("slides",[]) for output in slide.get("outputs",[]) for review in output.get("review_runs",[])]
-                    source = next((item for item in candidates if (item.get("id") or item.get("delivery_id") or item.get("unique_id"))==row["source_id"]),None)
-                    if row["kind"] in {"validation","package"}:
+                    source = next((item for item in candidates if (item.get("id") or item.get("unique_id"))==row["source_id"]),None)
+                    if row["kind"]=="validation":
                         request_id=row["run_id"].split(":",2)[-1]
                         saved_request=catalog.get("requests",{}).get(request_id)
-                        source=(saved_request.get("result",{}).get("edit" if row["kind"]=="validation" else "delivery") if saved_request else None)
-                        if source and row["kind"]=="validation" and saved_request["result"].get("approved"):
+                        source=(saved_request.get("result",{}).get("edit") if saved_request else None)
+                        if source and saved_request["result"].get("approved"):
                             source={**source,"status":"approved"}
                 if row["status"] not in ACTIVE and not row["reconcile_pending"]:
                     continue
@@ -792,20 +826,17 @@ def reconcile_activity(app):
                     if row["kind"]=="voice" and (source or {}).get("quality",{}).get("status")=="failed":
                         status="needs_attention"
                         message="配音已保存，但意群对齐未通过，请试听核对。"
-                elif source and row["kind"]=="package":
-                    status="completed"
-                elif source and status=="completed" and row["kind"] in {"stills","images","image_review","edit"} and not autopilot:
+                elif source and status=="completed" and row["kind"]=="edit":
                     status="needs_attention"
-                    message={"stills":"候选底图已保存，待逐张选用。","images":"本次成图已保存，待逐张人工确认。",
-                             "image_review":"图片核对已结束，待人工核对结果。","edit":"剪辑已结束，请核对工程核验与人工审查状态。"}[row["kind"]]
+                    message="剪辑已结束，请核对工程核验与人工审查状态。"
                 elif source and status=="approved" and row["kind"]=="validation":
                     status="completed"
                 if (source or {}).get("result_pending"):
                     status="needs_attention"
                     pending=True
                     message="运行已结束，结果资料仍待恢复，请打开原任务核对。"
-                if status in {"awaiting_review","awaiting_first_approval","needs_material","needs_verification","needs_repair","verification_failed","result_pending"}:
-                    message={"awaiting_review":"剪辑已结束，待人工审查。","awaiting_first_approval":"首张已生成，待确认。"}.get(status,"本次运行已结束，仍有待处理事项，请打开原任务核对。")
+                if status in {"awaiting_review","needs_material","needs_verification","needs_repair","verification_failed","result_pending"}:
+                    message={"awaiting_review":"剪辑已结束，待人工审查。"}.get(status,"本次运行已结束，仍有待处理事项，请打开原任务核对。")
                     status="needs_attention"
                 elif status not in TERMINAL:
                     status="interrupted"
@@ -820,14 +851,7 @@ def reconcile_activity(app):
                 if row["kind"]=="data":
                     # Also reached after a restore: the archive was written while this record still said running.
                     message="服务重启或数据恢复时这次处理已不在运行；结果以设置中的备份记录为准。"
-                phase = "reconciled"
-                if autopilot and source and source.get("status") in TERMINAL:
-                    phase = source.get("phase") or phase
-                    message = source.get("message") or message
-                    completed = source.get("completed_slides")
-                    if isinstance(completed, list):
-                        recovered_fields["result_count"] = len(completed)
-                record_activity(app,row["run_id"],status=status,phase=phase,message=message,reconcile_pending=pending,
+                record_activity(app,row["run_id"],status=status,phase="reconciled",message=message,reconcile_pending=pending,
                                 event_key=f"recovery-reconciled:{row['version']}" if row["reconcile_pending"] and not pending else None,
                                 **recovered_fields)
             except Exception:

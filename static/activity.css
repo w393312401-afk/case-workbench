@@ -30,7 +30,7 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 .activity-heading h2 { font-size: 15px; margin: 0; flex-shrink: 0; }
 .activity-connection { flex: 1; min-width: 0; font-size: 12px; color: var(--warm-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-heading-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; }
-.activity-heading-actions .subtle { padding: 5px 8px; font-size: 12px; font-weight: 500; }
+
 .activity-heading-actions .activity-icon { width: 30px; height: 30px; padding: 0; }
 .activity-icon svg { width: 16px; height: 16px; }
 
@@ -106,7 +106,7 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 .activity-done-fold[aria-expanded="true"] svg { transform: rotate(90deg); }
 .activity-footer { display: flex; justify-content: center; border-top: 1px solid var(--line); padding: 3px; }
 .activity-footer:has(> [hidden]:only-child) { display: none; }
-.activity-footer .subtle { font-size: 12px; padding: 4px 10px; }
+
 .activity-empty { color: var(--muted-soft); font-size: 12px; padding: 18px 12px; text-align: center; }
 
 .activity-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); flex-shrink: 0; }
@@ -128,7 +128,7 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 .activity-log-summary { margin-top: 1px; font-size: 12px; color: var(--muted-soft); }
 .activity-detail-status { margin-right: 6px; }
 .activity-detail-actions { display: flex; gap: 4px; flex-shrink: 0; }
-.activity-detail-actions button { font-size: 12px; padding: 4px 9px; gap: 4px; }
+.activity-detail-actions button { gap: 4px}
 .activity-detail-actions svg { width: 14px; height: 14px; }
 .activity-log-tools { display: flex; align-items: center; gap: 2px; padding: 0 10px 6px 12px; border-bottom: 1px solid var(--line); }
 .activity-log-tools button { padding: 2px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; }
@@ -162,7 +162,7 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 .activity-log-fold b { flex-shrink: 0; font-weight: 600; color: var(--muted); }
 .activity-log-earlier { display: flex; margin: 2px auto 4px; padding: 3px 10px; font-size: 12px; }
 .activity-log-error { margin: 8px 14px 4px; font-size: 12px; color: var(--warm-ink); }
-.activity-log-error + .subtle { margin-left: 8px; font-size: 12px; }
+.activity-log-error + .subtle { margin-left: 8px}
 .activity-log-jump { position: sticky; bottom: 6px; display: block; margin: 6px auto 0; padding: 4px 12px; border-radius: 14px; background: var(--accent); color: var(--on-accent); font-size: 12px; box-shadow: 0 4px 14px #0003; }
 .activity-copy-buffer { position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
@@ -187,7 +187,8 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 .activity-notice-view strong { font-size: 13px; }
 .activity-notice-view span { font-size: 12px; margin: 5px 0; color: var(--muted); }
 .activity-notice-view small { font-size: 12px; color: var(--accent-text); }
-.activity-notice-close { align-self: flex-start; font-size: 18px; padding: 0 8px; }
+.activity-notice-close { align-self: flex-start; width: 28px; height: 28px; padding: 0; }
+.activity-notice-close svg { width: 15px; height: 15px; }
 .activity-settings .settings-actions { margin-top: 10px; }
 /* Leave usable list space when the window is short or a phone is horizontal. */
 @media (max-height: 600px) and (min-width: 620px) {
