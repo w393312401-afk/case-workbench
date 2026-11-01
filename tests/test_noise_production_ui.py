@@ -6,7 +6,6 @@ from pathlib import Path
 import unittest
 
 import test_production_video_review_ui as video
-import test_production_carousel_receipts_ui as carousel
 import test_video_publication_ui as publication
 
 
@@ -104,76 +103,6 @@ class NoiseVideoReviewTests(unittest.TestCase):
         self.assertTrue(page.locator('#edit-panel #edit-form').is_visible())
 
 
-class NoiseCarouselTests(unittest.TestCase):
-    setUpClass = classmethod(carousel.CarouselReceiptsBrowserTests.setUpClass.__func__)
-    tearDownClass = classmethod(carousel.CarouselReceiptsBrowserTests.tearDownClass.__func__)
-    setUp = carousel.CarouselReceiptsBrowserTests.setUp
-    stop_server = carousel.CarouselReceiptsBrowserTests.stop_server
-    request = carousel.CarouselReceiptsBrowserTests.request
-    open_page = carousel.CarouselReceiptsBrowserTests.open_page
-    make_playable_video = carousel.CarouselReceiptsBrowserTests.make_playable_video
-    add_base = carousel.CarouselReceiptsBrowserTests.add_base
-    stop_images = carousel.CarouselReceiptsBrowserTests.stop_images
-    open_images = carousel.CarouselReceiptsBrowserTests.open_images
-    generate = carousel.CarouselReceiptsBrowserTests.generate
-    detail = carousel.CarouselReceiptsBrowserTests.detail
-    body = carousel.CarouselReceiptsBrowserTests.body
-    record_review = carousel.CarouselReceiptsBrowserTests.record_review
-
-    def finish_group(self):
-        page = self.open_images(width=390)
-        self.generate(page)
-        for number in (1, 2, 3):
-            page.locator(f'[data-image-slide="{number}"] [data-approve-output]').click()
-            page.locator(f'[data-image-slide="{number}"] [data-revoke-output]').wait_for()
-        return page
-
-    def test_completed_group_prioritizes_delivery_and_keeps_redo_import_and_audit_available(self):
-        page = self.finish_group()
-        page.reload()
-        page.locator('[data-step="delivery"][aria-selected="true"]').wait_for()
-        self.assertFalse(page.locator('[data-autopilot-start]').is_visible())
-        evidence(page,'carousel-completed-delivery.png')
-        self.assertEqual(page.locator('#carousel-overview').evaluate('node => getComputedStyle(node).position'), 'static')
-        page.locator('[data-step="images"]').click()
-        self.assertFalse(page.locator('#carousel-image-form').is_visible())
-        self.assertFalse(page.locator('#carousel-bulk-actions').is_visible())
-        self.assertTrue(page.locator('#carousel-import-finished').is_visible())
-        self.assertFalse(page.locator('[data-redo-slide="1"]').is_visible())
-        page.locator('[data-image-slide="1"] .image-redo-controls > summary').click()
-        self.assertTrue(page.locator('[data-redo-slide="1"]').is_visible())
-        for empty in page.locator('.image-review-empty').all():
-            self.assertIn('已确认选用', empty.inner_text())
-            self.assertNotIn('请人工核对', empty.inner_text())
-        self.assertFalse(page.locator('#carousel-images-service').is_visible())
-        page.locator('[data-production-controls="images"] > summary').click()
-        self.assertTrue(page.locator('#carousel-image-form').is_visible())
-        self.assertTrue(page.locator('#carousel-bulk-actions').is_visible())
-        self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 391)
-        page.locator('.image-redo-controls,[data-production-controls="images"]').evaluate_all('nodes => nodes.forEach(node => {node.open=false;})')
-        page.set_viewport_size({'width':1280,'height':720})
-        self.assertLessEqual(page.locator('.image-stack-cover').first.evaluate('node => node.getBoundingClientRect().width'), 180)
-        self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 1281)
-        evidence(page,'carousel-completed-images-desktop.png')
-        page.emulate_media(color_scheme='dark')
-        evidence(page,'carousel-completed-images-dark.png')
-
-    def test_review_failure_stays_visible_after_manual_confirmation(self):
-        page = self.finish_group()
-        output = self.detail()['slides'][0]['outputs'][0]
-        self.record_review(output, [{'id': key, 'status': 'fail' if key == 'text' else 'pass',
-                                    'note': '原核对问题仍保留'}
-                                   for key in ('product', 'evidence', 'text', 'visual')], 'needs_fix')
-        page.reload()
-        page.locator('[data-step="images"]').click()
-        card = page.locator(f'[data-output-id="{output["id"]}"]')
-        self.assertTrue(card.locator('[data-review-check="text"]').is_visible())
-        self.assertEqual(card.locator('[data-review-check="text"]').get_attribute('data-review-status'), 'fail')
-        self.assertTrue(page.locator('#carousel-image-form').is_visible())
-        self.assertTrue(page.locator('[data-autopilot-start]').is_visible())
-        self.assertTrue(page.locator('[data-redo-slide="1"]').is_visible())
-
-
 class NoisePublicationTests(unittest.TestCase):
     setUpClass = classmethod(publication.VideoPublicationBrowserTests.setUpClass.__func__)
     tearDownClass = classmethod(publication.VideoPublicationBrowserTests.tearDownClass.__func__)
@@ -193,9 +122,9 @@ class NoisePublicationTests(unittest.TestCase):
         self.assertIn('当时选用配音', receipt.inner_text())
         self.assertNotIn('TAK-frozen', receipt.inner_text())
         self.assertEqual(receipt.locator('[title="TAK-frozen"]').count(), 1)
-        self.assertTrue(page.evaluate("document.querySelector('.video-publication-receipt').compareDocumentPosition(document.querySelector('.video-publish-copy-compact')) & Node.DOCUMENT_POSITION_FOLLOWING"))
+        self.assertTrue(page.evaluate("document.querySelector('.video-publication-receipt').compareDocumentPosition(document.querySelector('.video-publish-copy-row')) & Node.DOCUMENT_POSITION_FOLLOWING"))
         self.assertFalse(page.locator('.video-publish-copy-fold').evaluate('node => node.open'))
-        page.locator('.video-publish-copy-compact > [data-copy-publish]').click()
+        page.locator('.video-publish-copy-row [data-copy-publish]').click()
         self.assertEqual(page.evaluate('window.copiedText'), '中文发布稿\n\nEnglish copy')
         self.assertTrue(receipt.locator('[data-calendar-toggle]').is_visible())
         # One source fold carries the registration facts and the take's copy button; no second trace fold.
@@ -206,25 +135,6 @@ class NoisePublicationTests(unittest.TestCase):
         self.assertEqual(page.evaluate('window.copiedText'), 'TAK-frozen')
         page.locator('.video-publication-editor > summary').click()
         self.assertIn('绑定另一个视频', page.locator('.video-publication-editor > summary').inner_text())
-
-    def test_conversion_starts_folded_but_failed_attempt_keeps_its_recovery_form_open(self):
-        page = self.page
-        page.evaluate("""async () => {
-          window.conversion={runs:[],running:false,source:{available:true,kind:'file',label:'隔离成片'}};
-          window.mountConversion=()=>VideoPublication.mount(document.querySelector('#publication'),{
-            job:{id:'PRD-111111111111'},api:async(url)=>url.endsWith('/video-carousel') ? structuredClone(conversion) :
-              url==='/api/ai/options' ? {models:[],default_settings:{}} : {history:[],source:{},can_register:false}
-          });
-          await mountConversion();
-        }""")
-        page.locator('.video-carousel-again').wait_for()
-        self.assertFalse(page.locator('.video-carousel-form').is_visible())
-        page.locator('.video-carousel-again > summary').click()
-        self.assertTrue(page.locator('.video-carousel-form').is_visible())
-        page.evaluate("""async()=>{conversion.runs=[{id:'TBL-111111111111',status:'failed',error:'隔离失败：已保存部分结果'}];await mountConversion();}""")
-        page.get_by_text('隔离失败：已保存部分结果', exact=False).wait_for()
-        self.assertTrue(page.locator('.video-carousel-form').is_visible())
-
 
 if __name__ == '__main__':
     unittest.main()

@@ -230,7 +230,7 @@ class GuestFullStartupTests(unittest.TestCase):
         self.assertTrue(self.page.locator("[data-home-tab='tasks']").is_hidden())
         self.assertTrue(self.page.locator("#home-tasks-title-panel").is_hidden())
         self.assertTrue(self.page.locator("#home-page > .data-warning").is_hidden())
-        self.assertTrue(self.page.locator("#home-due-title-panel").get_by_text("视频明细", exact=True).is_visible())
+        self.assertTrue(self.page.locator("#home-due-title-panel").get_by_text("自制视频", exact=True).is_visible())
         self.assertEqual(self.page.locator("#connection-text").inner_text(), "访客浏览 · 仅供查看")
         self.assertEqual(self.page.locator("#sync-detail").text_content(), "仅供查看；登录后操作。")
         content_reads = sum(path == "/guest/api/content" for _, path in self.requests)

@@ -148,6 +148,12 @@ class DetailWorkspaceTests(unittest.TestCase):
         page.reload()
         page.locator("#case-player").wait_for()
         self.assertEqual(page.get_by_role("button", name="固定", exact=True).get_attribute("aria-pressed"), "true")
+        # A new tab starts without session storage; the choice is shared by every case and kept.
+        other = page.context.new_page()
+        other.goto(page.url)
+        other.locator("#case-player").wait_for()
+        self.assertEqual(other.get_by_role("button", name="固定", exact=True).get_attribute("aria-pressed"), "true")
+        self.assertEqual(other.evaluate("localStorage.getItem('case-video-mode')"), "fixed")
 
     def test_empty_collaboration_history_does_not_occupy_case_space(self):
         page = self.open_page()

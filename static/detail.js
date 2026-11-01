@@ -168,7 +168,7 @@ async function openComparison() {
   const metricLabels = new Set(metrics.map(([,label]) => label));
   rows.sort((a,b) => Number(metricLabels.has(b[0])) - Number(metricLabels.has(a[0])));
   const common = new Set(rows.filter(([label,get]) => !metricLabels.has(label) && !["统计窗口","数据截至","证据状态","销售数据"].includes(label) && items.every(item => String(get(item) ?? "未提供") === String(get(items[0]) ?? "未提供"))).map(([label]) => label));
-  dialog.innerHTML = `<div class="dialog-heading"><h2>同产品案例对比</h2><button class="secondary" id="close-comparison">关闭</button></div><details class="comparison-note"><summary>来源、口径与对比边界</summary><p>按当前记录并排展示。表现统一读取销售数据表，未匹配时不显示旧截图数值。统计窗口或投流条件不同，不能直接归因于文案优劣；原文与中文对照保留各自来源，屏显文字和历史片段均单独标明。播放、曝光、点击统一显示实际数量。</p></details>${common.size ? `<button type="button" class="subtle" data-comparison-common aria-expanded="false">展开相同或未提供项（${common.size}）</button>` : ""}<div class="comparison-scroll"><table class="comparison-table"><thead><tr><th>对比项</th>${items.map((i) => `<th><a href="#case/${esc(i.case_id)}" data-comparison-link>${esc(shortTitle(i))}</a></th>`).join("")}</tr></thead><tbody>${rows.map(([label, get]) => `<tr ${common.has(label) ? 'data-comparison-common-row hidden' : ""}><th>${esc(label)}</th>${items.map((i) => `<td>${label === "证据与条件" ? `<details><summary>查看来源与条件</summary>${esc(get(i) || "未提供")}</details>` : esc(get(i) ?? "未提供")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+  dialog.innerHTML = `<div class="dialog-heading"><h2>同产品案例对比</h2><button type="button" class="icon-button" id="close-comparison" aria-label="关闭">${icon("close")}</button></div><details class="comparison-note"><summary>来源、口径与对比边界</summary><p>按当前记录并排展示。表现统一读取销售数据表，未匹配时不显示旧截图数值。统计窗口或投流条件不同，不能直接归因于文案优劣；原文与中文对照保留各自来源，屏显文字和历史片段均单独标明。播放、曝光、点击统一显示实际数量。</p></details>${common.size ? `<button type="button" class="subtle" data-comparison-common aria-expanded="false">展开相同或未提供项（${common.size}）</button>` : ""}<div class="comparison-scroll"><table class="comparison-table"><thead><tr><th>对比项</th>${items.map((i) => `<th><a href="#case/${esc(i.case_id)}" data-comparison-link>${esc(shortTitle(i))}</a></th>`).join("")}</tr></thead><tbody>${rows.map(([label, get]) => `<tr ${common.has(label) ? 'data-comparison-common-row hidden' : ""}><th>${esc(label)}</th>${items.map((i) => `<td>${label === "证据与条件" ? `<details><summary>查看来源与条件</summary>${esc(get(i) || "未提供")}</details>` : esc(get(i) ?? "未提供")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
   document.body.append(dialog);
   dialog.querySelector("#close-comparison").onclick = () => dialog.close();
   dialog
@@ -201,7 +201,7 @@ function casePublicOnlyFigures(snapshot) {
   const fields = [['views','播放量'],['likes','点赞'],['comments','评论'],['shares','转发'],['saves','收藏']];
   return `<div data-case-public-stats><h3>公开页数据</h3><div class="facts-grid">${fields.map(([key,label]) => `<div><span class="metric-label">${label}</span><span class="metric-value">${displayValue(snapshot[key])}</span></div>`).join('')}</div>${casePublicStatsNote(snapshot)}</div>`;
 }
-// kind names whose figures these are (case, script, carousel), so an empty state speaks of the right thing.
+// kind names whose figures these are (case, script), so an empty state speaks of the right thing.
 function renderPerformanceSection(item, kind = "case") {
   const m = salesMetrics(item), e = salesEvidence(item), v = item.sales_data?.video || {};
   const publicStats = casePublicStats(item);
@@ -209,11 +209,11 @@ function renderPerformanceSection(item, kind = "case") {
   const reviewLabel = reviewNames[v.review_status?.key] || '待复盘';
   const action = `<a class="secondary" href="${esc(salesDataURL(item))}">${icon("chart")}查看销售数据表</a>`;
   if (!hasPerformanceData(item)) {
-    const status = item.sales_data?.status, subject = kind === "carousel" ? "图文" : "视频";
+    const status = item.sales_data?.status;
     // An unregistered script already says so in its side panel; an empty card would repeat it.
     if (kind === "script" && status === "missing_video_id") return "";
-    const label = kind === "carousel" && status === "not_found" ? "销售数据表未匹配到此图文" : salesStatusLabel(item);
-    const hint = status === "missing_video_id" ? "在编辑案例中填写视频 ID 后，按同一视频匹配销售数据。" : `导入或同步销售数据表后，此处显示对应${subject}的表现。`;
+    const label = salesStatusLabel(item);
+    const hint = status === "missing_video_id" ? "在编辑案例中填写视频 ID 后，按同一视频匹配销售数据。" : `导入或同步销售数据表后，此处显示对应视频的表现。`;
     return `<section class="section-card performance-empty">${casePublicOnlyFigures(publicStats)}<h2 class="visually-hidden">表现数据</h2><div class="performance-empty-row"><p><span class="performance-empty-label">表现数据</span><span>${esc(label)}</span><details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">${esc(hint)}</div></details></p>${action}</div></section>`;
   }
   const interactionValues = publicStats || v;
@@ -684,9 +684,10 @@ function mountVideoWorkspace(item) {
   }
   panel.append(modes, body);
   const compact = matchMedia("(max-width: 900px), (max-height: 650px)");
-  const memoryKey = `case-video-mode:${item.case_id}`;
+  // One choice for every case, kept across visits; screens without a choice start by size.
+  const memoryKey = "case-video-mode";
   let selectedMode = null, frame = 0;
-  try { selectedMode = sessionStorage.getItem(memoryKey); } catch {}
+  try { selectedMode = localStorage.getItem(memoryKey); } catch {}
   const measure = () => {
     frame = 0;
     if (!panel.isConnected || body.hidden) return;
@@ -709,7 +710,7 @@ function mountVideoWorkspace(item) {
   };
   modes.querySelectorAll("button").forEach(button => button.onclick = () => {
     selectedMode = button.dataset.mode;
-    try { sessionStorage.setItem(memoryKey, selectedMode); } catch {}
+    try { localStorage.setItem(memoryKey, selectedMode); } catch {}
     applyMode();
     if (selectedMode === "fixed" && compact.matches) scrollDetailSection(panel);
   });

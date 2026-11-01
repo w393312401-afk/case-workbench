@@ -14,8 +14,7 @@
 .workbench-guest .script-detail-actions,
 .workbench-guest #script-copy,
 .workbench-guest #script-production-choices,
-.workbench-guest #script-production-note,
-.workbench-guest #script-carousel-tables{display:none!important}
+.workbench-guest #script-production-note{display:none!important}
 .workbench-guest .ai-case-actions:has(> .ai-case-history[hidden]){display:none!important}
 .workbench-guest .detail-product > summary{cursor:default;pointer-events:none;border:none;background:none}
 .workbench-guest .detail-product > summary::after{display:none}

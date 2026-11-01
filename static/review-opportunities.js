@@ -5,6 +5,8 @@ window.ReviewOpportunities = (() => {
   const hash = () => window.WorkbenchShell?.legacyHash() || location.hash;
   const product = () => window.WorkbenchShell?.product() || "";
   const url = (path, selected = product()) => window.WorkbenchShell?.url(path, selected) || path;
+  // Back to the comment list with the filters it was left on.
+  const reviewsURL = () => window.WorkbenchShell?.listURL?.("reviews", product()) || url("#reviews");
   const safeURL = value => { try { const parsed = new URL(value); return ["http:", "https:"].includes(parsed.protocol) ? parsed.href : ""; } catch { return ""; } };
   const active = () => hash().startsWith("#reviews") && new URLSearchParams(hash().split("?")[1] || "").get("tab") === "opportunities";
   const planLabels = {pending:"待执行",working:"进行中",done:"已完成",cancelled:"已取消"};
@@ -41,7 +43,7 @@ window.ReviewOpportunities = (() => {
     const current = () => mine === sequence && active() && location.hash === requestedHash && product() === selected;
     const offset = Math.max(0,Number(new URLSearchParams(hash().split("?")[1] || "").get("offset")) || 0);
     $("#breadcrumb").textContent = "用户声音 · 选题机会";
-    $("#content").innerHTML = `<section id="review-opportunities"><div class="page-heading"><div><h1>评论选题机会</h1><nav class="rev-page-tabs" aria-label="用户声音视图"><a href="${esc(url("#reviews"))}">评论</a><span aria-current="page">选题机会</span></nav></div><a class="secondary" href="${esc(url("#reviews"))}">返回评论库</a></div><div id="opportunity-results" role="status">正在读取评论主题…</div></section>`;
+    $("#content").innerHTML = `<section id="review-opportunities"><div class="page-heading"><div><h1>评论选题机会</h1><nav class="rev-page-tabs" aria-label="用户声音视图"><a href="${esc(reviewsURL())}">评论</a><span aria-current="page">选题机会</span></nav></div><a class="secondary" href="${esc(reviewsURL())}">返回评论库</a></div><div id="opportunity-results" role="status">正在读取评论主题…</div></section>`;
     try {
       const data = await api(`/api/reviews/opportunities?${new URLSearchParams({product:selected,limit:"20",offset:String(offset)})}`);
       if (!current()) return;

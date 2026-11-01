@@ -79,6 +79,9 @@ class ReviewOpportunityTests(unittest.TestCase):
         self.assertEqual(item["plans"][0]["id"],"plan")
         self.assertIn("未经核实",item["draft_instruction"])
         self.assertIn("Does it clamp short blades?",item["draft_instruction"])
+        self.assertIn("写带货口播稿",item["draft_instruction"])
+        self.assertIn("过程不写进口播",item["draft_instruction"])
+        self.assertNotIn("可验证的选题",item["draft_instruction"])
         self.creation["theme_links"].clear()
         self.assertEqual(opportunity_catalog(self.app,"202H")["items"][0]["directions"],[])
 

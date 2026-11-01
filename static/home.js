@@ -40,21 +40,21 @@ window.WorkbenchHome = (() => {
   const more = (href, label) => `<a class="home-link" href="${esc(url(href))}">${esc(label)}${icon("arrow")}</a>`;
   const loading = '<div class="home-empty"><p role="status">正在读取…</p></div>';
   const planActions = { scale: ["加码", "good"], execution: ["换执行", "info"], stop: ["停测", "warn"] };
-  const kindNames = { task: "协作候选", script: "脚本", video: "视频制作单", carousel: "图文制作单" };
+  const kindNames = { task: "协作候选", script: "脚本", video: "视频制作单" };
   const decisionOf = plan => plan.experiment?.decision || plan.action;
   // Only scale-up or new-execution plans that nobody has started writing yet are still "to write".
   const needsWriting = plan => ["scale","execution"].includes(decisionOf(plan)) && !plan.task_id;
 
   function contentRow(item) {
-    const typed = /｜(?:候选稿|复盘结果|审稿结果|脚本|视频(?:方案.*)?|图文(?:方案.*)?)$/.test(item.title || '');
+    const typed = /｜(?:候选稿|复盘结果|审稿结果|脚本|视频(?:方案.*)?)$/.test(item.title || '');
     const redundantStage = {待制作:'开始制作',待选稿:'查看并选择候选',待人工审查:'核对剪辑结果'}[item.stage_label] === item.next_label;
     const detail = [typed ? '' : kindNames[item.kind], item.direction_id, item.timeline_name, item.task_started_label, redundantStage ? '' : item.stage_label].filter(Boolean).join(" · ");
-    return `<a class="home-row home-flow-row" href="${esc(url(item.next_hash || "#content", item.product))}"><span class="home-row-main"><strong title="${esc(item.title)}">${esc(item.title)}</strong><small>${esc(detail)}</small></span><span class="home-next">${esc(item.next_label || "继续处理")}${icon("arrow")}</span></a>`;
+    return `<a class="home-row home-flow-row" href="${esc(url(item.next_hash || "#content", item.product))}"><span class="home-row-main"><strong title="${esc([item.title,item.subtitle].filter(Boolean).join('\n'))}">${esc(item.title)}</strong><small>${esc(detail)}</small></span><span class="home-next">${esc(item.next_label || "继续处理")}${icon("arrow")}</span></a>`;
   }
-  // Posted (video or 图文) but not yet on the publish calendar: the row opens the order's publish step, where the mark is set.
+  // Posted but not yet on the publish calendar: the row opens the order's publish step, where the mark is set.
   function calendarRow(item) {
     const detail = [kindNames[item.kind], item.direction_id, item.timeline_name, item.published_on ? `发布于 ${item.published_on}` : ""].filter(Boolean).join(" · ");
-    return `<a class="home-row home-flow-row" href="${esc(url(item.next_hash || "#content", item.product))}"><span class="home-row-main"><strong title="${esc(item.title)}">${esc(item.title)}</strong><small>${esc(detail)}</small></span><span class="home-next">${chip("未上传", "warn")}去标记${icon("arrow")}</span></a>`;
+    return `<a class="home-row home-flow-row" href="${esc(url(item.next_hash || "#content", item.product))}"><span class="home-row-main"><strong title="${esc([item.title,item.subtitle].filter(Boolean).join('\n'))}">${esc(item.title)}</strong><small>${esc(detail)}</small></span><span class="home-next">${chip("未上传", "warn")}去标记${icon("arrow")}</span></a>`;
   }
   function planRow(plan) {
     const decision = decisionOf(plan);
@@ -128,11 +128,11 @@ window.WorkbenchHome = (() => {
     const tabs = [
       { key: "tasks", id: "home-tasks-title", label: "待我处理", count: flow ? attention : null, work: attention + calendarTotal, hint: "等你做下一步的内容，和内容创作里的「待我处理」一致。", link: more("#content", "内容进程"),
         body: !flow ? (pendingRead(4) ? loading : empty("待处理内容暂时无法读取。")) : `${runningLine}${flowItems.length ? `<div class="home-list">${flowItems.map(contentRow).join("")}</div>` : calendarTotal ? "" : empty("现在没有等你处理的内容。", runningLine ? "" : startWriting)}${attention > flowItems.length ? `<p class="home-overflow">另有 ${attention-flowItems.length} 条，${more("#content", "去内容进程查看")}</p>` : ""}${toPublish ? `<p class="home-overflow home-publish">${toPublish} 条已做完、等你发布，${more("#content?view=publish", "去登记发布")}</p>` : ""}${calendarBlock}` },
-      { key: "due", id: "home-due-title", label: "待复盘", count: ready ? ready.length : null, hint: "数字是全部可复盘视频。优先核对已备好的结论、到期复查和异常变化。发布未满14天由系统自动观察，缺数据先补齐。", link: `<div class="home-experience-links">${!window.PublicTextMode && !window.WorkbenchGuest && !window.GuestMode ? '<button type="button" class="subtle compact" data-home-experiences>复盘经验</button>' : ''}${more("#videos?tab=list", "视频明细")}</div>`,
+      { key: "due", id: "home-due-title", label: "待复盘", count: ready ? ready.length : null, hint: "数字是全部可复盘视频。优先核对已备好的结论、到期复查和异常变化。发布未满14天由系统自动观察，缺数据先补齐。", link: `<div class="home-experience-links">${!window.PublicTextMode && !window.WorkbenchGuest && !window.GuestMode ? '<button type="button" class="subtle compact" data-home-experiences>复盘经验</button>' : ''}${more("#videos?tab=list", "自制视频")}</div>`,
         body: !followupReady ? ([0,2,3].some(pendingRead) ? loading : empty("复盘队列暂时无法读取，请重新读取。")) : '<div id="home-followups"></div>' },
       { key: "plans", id: "home-plans-title", label: "下一轮待写", count: creation ? toWrite.length : null, hint: "在方向详情定了加码或换执行、还没开写的安排。", link: more("#directions", "卖点与方向"),
         body: !creation ? (pendingRead(2) ? loading : empty("待写计划暂时无法读取。")) : plans.length ? `${toWrite.length ? `<div class="home-plan-list">${toWrite.map(planRow).join("")}</div>` : empty("没有要开写的安排。")}${otherPlans.length ? `<details class="home-plan-rest"${toWrite.length ? "" : " open"}><summary>其余安排 ${otherPlans.length} 条：停测、已在写或历史安排</summary><div class="home-plan-list">${otherPlans.map(planRow).join("")}</div></details>` : ""}`
-          : empty("还没有待写计划。在方向详情选择加码、换执行或停测，记下下一轮安排。", `<a class="secondary compact" href="${esc(url("#directions"))}">${icon("layers")}去卖点与方向</a>`) },
+          : empty("还没有待写计划。在方向详情选择加码、换执行或停测，记下下一轮安排。", `<a class="secondary compact" href="${esc(window.WorkbenchShell?.listURL?.("directions") || url("#directions"))}">${icon("layers")}去卖点与方向</a>`) },
       { key: "cases", id: "home-cases-title", label: "待补案例", count: casesKnown ? pending.length : null, hint: "缺文案或拆解的案例；自己做的视频还会检查方向和发布。点缺的项直接去补。", link: more("#library", "案例库"),
         body: libraryFailed ? empty("案例资料暂时无法读取。", '<button type="button" class="subtle" data-home-retry>重新读取</button>') : !casesKnown ? loading : pending.length ? `<div class="home-case-list">${pending.slice(0,8).map(caseRow).join("")}</div>${pending.length > 8 ? `<p class="home-overflow">另有 ${pending.length-8} 个，${more("#library", "进入案例库查看")}</p>` : ""}` : empty("当前产品的案例资料已齐备。") },
     ];

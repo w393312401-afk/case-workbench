@@ -248,7 +248,7 @@ window.keepReadingPlace = change => {
     const parentPage = parsed.tail.length && ["content", "ai", "production"].includes(page) ? parse(parentURL(parsed)).page : page;
     crumbs.push({ label: pageLabels[parentPage] || "案例库", href: parsed.tail.length ? parentURL(parsed) : null });
     if (parsed.tail.length) {
-      let label = parsed.page === "case" ? "案例详情" : page === "ai" ? "任务详情" : ["content", "scripts"].includes(page) ? "采用稿" : page === "production" ? (parsed.tail[0].startsWith("CAR-") ? "图文制作单" : "制作单详情") : parsed.tail.join("/");
+      let label = parsed.page === "case" ? "案例详情" : page === "ai" ? "任务详情" : ["content", "scripts"].includes(page) ? "采用稿" : page === "production" ? "制作单详情" : parsed.tail.join("/");
       try { label = decodeURIComponent(label); } catch { /* Show malformed identifiers as plain text. */ }
       crumbs.push({ label });
     }

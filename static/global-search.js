@@ -19,7 +19,7 @@ window.WorkbenchSearch = (() => {
     { key: "page:home", title: "工作概览", words: "首页 本周 待办 home", route: "#home" },
     { key: "page:reviews", title: "用户声音", words: "评论 reviews", route: "#reviews" },
     { key: "page:directions", title: "卖点与方向", words: "方向 卖点 directions", route: "#directions" },
-    { key: "page:content", title: "内容创作 · 内容列表", words: "内容 采用稿 脚本 制作 配音 剪辑 出图 图文 content scripts production", route: "#content" },
+    { key: "page:content", title: "内容创作 · 内容列表", words: "内容 采用稿 脚本 制作 配音 剪辑 content scripts production", route: "#content" },
     { key: "page:ai", title: "内容创作 · 协作记录", words: "写稿 ai 任务 协作 历史", route: "#ai" },
     { key: "page:videos", title: "带货数据", words: "数据 销量 看板 视频数据 图文 跨境 本土 videos", route: "#videos" },
     { key: "page:library", title: "案例库", words: "案例 library", route: "#library" },
@@ -35,12 +35,13 @@ window.WorkbenchSearch = (() => {
   let dialog, input, list, status, scope, feedback, previousFocus;
   let query = "", sequence = 0, timer, controller, active = -1, results = [];
   let sections = {}, pending = false, failures = [], initialized = false;
-  let videoCache = null, videoCacheTime = 0;
 
   const shell = () => window.WorkbenchShell;
   const product = () => shell()?.product() || "";
   const matchesProduct = item => !product() || Boolean(shell()?.matchesProduct(item));
   const url = legacy => shell()?.url(legacy) || legacy;
+  // Page commands reopen a list with the filters it was last left on, like the sidebar.
+  const rowURL = row => (row.key?.startsWith("page:") && shell()?.listURL?.(row.key.slice(5))) || url(row.route);
   const normalize = value => String(value || "").toLocaleLowerCase();
   const plain = value => String(value || "").replace(/\s+/g, " ").trim();
   const rank = (value, term) => normalize(value) === term ? 0 : normalize(value).startsWith(term) ? 1 : 2;
@@ -81,19 +82,23 @@ window.WorkbenchSearch = (() => {
     return { cases, directions: [...directions.values()].sort(byRank(term)).slice(0, LIMIT), commands: found };
   }
 
-  // Lists that change less often than a keystroke are read once per half minute.
-  const cache = new Map();
-  async function cached(path, signal) {
+  // Lists that change less often than a keystroke are read once per half minute. A read is shared by every
+  // search waiting on it and is never aborted, so a fast typist does not restart it; callers check their own signal.
+  const cache = new Map(), inflight = new Map();
+  function cached(path) {
     const hit = cache.get(path);
-    if (hit && Date.now() - hit.at < 30000) return hit.data;
-    const data = await api(path, { signal });
-    if (!signal.aborted) cache.set(path, { at: Date.now(), data });
-    return data;
+    if (hit && Date.now() - hit.at < 30000) return Promise.resolve(hit.data);
+    if (!inflight.has(path)) inflight.set(path, api(path, {}).then(data => { cache.set(path, { at: Date.now(), data }); return data; })
+      .finally(() => inflight.delete(path)));
+    return inflight.get(path);
   }
   const scoped = path => product() ? `${path}${path.includes("?") ? "&" : "?"}product=${encodeURIComponent(product())}` : path;
+  const listPaths = () => [scoped("/api/creation"), scoped("/api/ai/tasks"), scoped("/api/production"), scoped("/api/direction-catalog"), "/api/performance/videos?shop=all"];
+  // Opening the box starts these reads, so by the first keystroke most sources answer locally.
+  const warm = () => listPaths().forEach(path => cached(path).catch(() => {}));
 
   async function scriptResults(term, signal) {
-    const data = await cached(scoped("/api/creation"), signal);
+    const data = await cached(scoped("/api/creation"));
     if (signal.aborted) return [];
     return (data.scripts || []).filter(matchesProduct).filter(item => normalize(`${item.id} ${item.title || ""} ${item.text || ""} ${item.direction_id || ""} ${item.video_id || ""}`).includes(term)).map(item => ({
       key: `script:${item.id}`, title: item.title || "未命名采用稿",
@@ -103,7 +108,7 @@ window.WorkbenchSearch = (() => {
   }
 
   async function taskResults(term, signal) {
-    const data = await cached(scoped("/api/ai/tasks"), signal);
+    const data = await cached(scoped("/api/ai/tasks"));
     if (signal.aborted) return [];
     const title = task => window.CaseAI?.taskDisplayTitle?.(task) || task.display_title || task.case_title || task.context?.title || task.context?.direction_id || task.case_id || ({review:"审稿结论",retrospective:"复盘结论"}[task.action] || "空白写稿");
     return (data.tasks || []).filter(matchesProduct).filter(task => normalize(`${task.task_id} ${title(task)} ${task.case_title || ""} ${task.context?.direction_id || ""} ${task.instruction || ""}`).includes(term)).map(task => ({
@@ -115,22 +120,22 @@ window.WorkbenchSearch = (() => {
 
   // An order is found by its ID, title and script, and also by a DaVinci timeline name or ID or a registered
   // post ID; those open the step where the timeline or the publication is shown.
-  function orderMatch(item, carousel, term) {
+  function orderMatch(item, term) {
     if (normalize(`${item.id} ${item.title || ""} ${item.variant_label || ""} ${item.script_id || ""}`).includes(term)) return { note: "", step: "" };
     const timeline = (item.timelines || []).find(entry => normalize(`${entry.name || ""} ${entry.unique_id || ""}`).includes(term));
     if (timeline) return { note: `时间线 ${timeline.name || timeline.unique_id}`, step: "timeline" };
     if (normalize(item.display_title || "").includes(term)) return { note: "", step: "" };
     const post = [item.current_publication, item.publication, ...(item.publication_history || [])].filter(Boolean)
       .find(entry => normalize(`${entry.post_id || ""} ${entry.post_url || ""}`).includes(term));
-    if (post) return { note: `${carousel ? "图文" : "视频"} ID ${post.post_id}`, step: carousel ? "delivery" : "publish" };
+    if (post) return { note: `视频 ID ${post.post_id}`, step: "publish" };
     return null;
   }
 
   async function orderResults(term, signal) {
-    const data = await cached(scoped("/api/production"), signal);
+    const data = await cached(scoped("/api/production"));
     if (signal.aborted) return [];
-    const orders = [...(data.jobs || []).map(item => ({ item, kind: "视频制作单" })), ...(data.carousels || []).map(item => ({ item, kind: "图文制作单" }))];
-    return orders.filter(({ item }) => matchesProduct(item)).map(row => ({ ...row, match: orderMatch(row.item, row.kind === "图文制作单", term) })).filter(row => row.match).map(({ item, kind, match }) => ({
+    const orders = (data.jobs || []).map(item => ({ item, kind: "视频制作单" }));
+    return orders.filter(({ item }) => matchesProduct(item)).map(row => ({ ...row, match: orderMatch(row.item, term) })).filter(row => row.match).map(({ item, kind, match }) => ({
       key: `order:${item.id}`, title: item.display_title || item.title || item.id,
       description: `${item.product || "未标注产品"} · ${kind}${match.note ? ` · ${match.note}` : ""}${item.archived ? " · 已归档" : ""}`,
       route: `#production/${encodeURIComponent(item.id)}${match.step ? `?step=${match.step}` : ""}`,
@@ -164,13 +169,9 @@ window.WorkbenchSearch = (() => {
   }
 
   async function videoResults(term, signal) {
-    if (!videoCache || Date.now() - videoCacheTime > 30000) {
-      const data = await api("/api/performance/videos?shop=all", { signal });
-      if (signal.aborted) return [];
-      videoCache = data.videos || [];
-      videoCacheTime = Date.now();
-    }
-    return videoCache.filter(matchesProduct).filter(item => normalize(`${item.video_id} ${item.title || ""} ${item.headline || ""}`).includes(term)).map(item => ({
+    const data = await cached("/api/performance/videos?shop=all");
+    if (signal.aborted) return [];
+    return (data.videos || []).filter(matchesProduct).filter(item => normalize(`${item.video_id} ${item.title || ""} ${item.headline || ""}`).includes(term)).map(item => ({
       key: `video:${item.video_id}`, title: item.headline || item.title || item.video_id,
       description: `${item.product || "未标注产品"} · ${item.video_id}${item.account ? ` · @${item.account.replace(/^@/, "")}` : ""}`,
       route: `#videos?video=${encodeURIComponent(item.video_id)}`,
@@ -180,10 +181,11 @@ window.WorkbenchSearch = (() => {
   async function reviewResults(text, signal) {
     // The review API's sku means package variant, not product. Also check returned
     // product fields for compatibility with servers running an older read API.
+    // Small pages: six rows are shown, and a 200-row page of full review text was most of the wait.
     const found = [];
     let offset = 0;
     while (!signal.aborted) {
-      const params = new URLSearchParams({ q: text, limit: "200", offset: String(offset), sort: "likes" });
+      const params = new URLSearchParams({ q: text, limit: "30", offset: String(offset), sort: "likes" });
       if (product()) params.set("product", product());
       const data = await api(`/api/reviews?${params}`, { signal });
       if (signal.aborted) return [];
@@ -228,7 +230,7 @@ window.WorkbenchSearch = (() => {
         const inner = `<span class="global-search-result-icon">${icon(row.command && row.run ? "plus" : group.icon)}</span><span class="global-search-result-copy"><strong>${highlight(excerpt(row.title, query, 100))}</strong>${row.description || row.count ? `<small>${highlight(row.description)}${row.count ? ` · ${row.count} 条案例` : ""}</small>` : ""}${row.hint ? `<span class="global-search-result-hint">${esc(row.hint)}</span>` : ""}</span><span class="global-search-result-arrow" aria-hidden="true">↵</span>`;
         const attributes = `class="global-search-result${row.command ? ' is-command' : ''}" role="option" aria-selected="false" tabindex="-1" id="workbench-search-result-${index}" data-search-index="${index}"${row.identity ? ` title="${esc(row.identity)}"` : ''}`;
         // Actions run in place; everything else stays a real link so modified clicks still open a new tab.
-        return row.run ? `<button type="button" ${attributes}>${inner}</button>` : `<a ${attributes} href="${esc(url(row.route))}"${row.hint ? ` aria-label="${esc(`${row.title}，${row.hint}`)}"` : ""}>${inner}</a>`;
+        return row.run ? `<button type="button" ${attributes}>${inner}</button>` : `<a ${attributes} href="${esc(rowURL(row))}"${row.hint ? ` aria-label="${esc(`${row.title}，${row.hint}`)}"` : ""}>${inner}</a>`;
       }).join("")}</div>`;
     }).join("");
     list.innerHTML = markup;
@@ -245,7 +247,7 @@ window.WorkbenchSearch = (() => {
     controller = null;
   }
 
-  function search(delay = 180) {
+  function search(delay = 120) {
     invalidate();
     const mine = sequence, selectedProduct = product();
     query = input.value.trim();
@@ -260,11 +262,9 @@ window.WorkbenchSearch = (() => {
     const signal = controller.signal, text = query;
     timer = setTimeout(async () => {
       const current = () => !signal.aborted && mine === sequence && dialog.open && selectedProduct === product();
-      const params = new URLSearchParams(), term = normalize(text);
-      if (selectedProduct) params.set("product", selectedProduct);
+      const term = normalize(text);
       // Directions and selling points share one catalog read.
-      let catalogRequest;
-      const catalog = () => (catalogRequest ||= api(`/api/direction-catalog?${params}`, { signal }));
+      const catalog = () => cached(scoped("/api/direction-catalog"));
       const sources = [
         ["videos", "视频", () => videoResults(term, signal)],
         ["directions", "方向", () => directionResults(term, signal, catalog)],
@@ -280,7 +280,8 @@ window.WorkbenchSearch = (() => {
           const rows = await request();
           if (current()) sections[key] = rows;
         } catch (error) {
-          if (current() && error.name !== "AbortError") failures.push(label);
+          // Listed in source order, however the reads happen to finish.
+          if (current() && error.name !== "AbortError") failures = sources.map(source => source[1]).filter(name => name === label || failures.includes(name));
         } finally {
           remaining -= 1;
           if (current()) { pending = remaining > 0; paint(); }
@@ -298,6 +299,7 @@ window.WorkbenchSearch = (() => {
     if (!dialog.open) {
       previousFocus = document.activeElement;
       dialog.showModal();
+      warm();
       search(0);
     }
     input.focus();
@@ -336,7 +338,7 @@ window.WorkbenchSearch = (() => {
         event.preventDefault();
         const row = results[active];
         close();
-        if (row.run) row.run(); else if (!window.CasePerformance?.openVideoHash?.(url(row.route))) location.hash = url(row.route);
+        if (row.run) row.run(); else if (!window.CasePerformance?.openVideoHash?.(rowURL(row))) location.hash = rowURL(row);
       }
     });
     dialog.addEventListener("click", event => {
@@ -371,7 +373,7 @@ window.WorkbenchSearch = (() => {
       const slash = event.key === "/" && !event.ctrlKey && !event.metaKey && !isEditing(event.target);
       if (command || slash) { event.preventDefault(); open(); }
     });
-    window.addEventListener("workbench:productchange", () => { if (dialog.open) search(0); });
+    window.addEventListener("workbench:productchange", () => { if (dialog.open) { warm(); search(0); } });
     window.addEventListener("hashchange", () => { if (dialog.open) close(); });
   }
 

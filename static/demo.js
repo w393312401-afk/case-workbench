@@ -237,7 +237,7 @@ This paper cut? Thirty seconds ago, this knife was useless. Here's the trick: a 
       if (path === "/api/creation") return json({ plans: plans.filter((p) => ["pending", "working"].includes(p.status)), scripts: demoScripts, revision: `demo-${revision}` });
       const oneScript = path.match(/^\/api\/scripts\/(SCR-\d{12})$/);
       if (oneScript) { const s = demoScripts.find((x) => x.id === oneScript[1]); return s ? json(scriptDetail(s)) : json({ error: "这条文案版本不存在。" }, 404); }
-      if (path === "/api/production") return json({ voices: [], defaults: {}, settings: { creators: [], products: {} }, carousels: [], readings: [], jobs: [demoJob],
+      if (path === "/api/production") return json({ voices: [], defaults: {}, settings: { creators: [], products: {} }, readings: [], jobs: [demoJob],
         revision: `demo-${revision}`, product_settings: productSettings, models: productionModels, default_model: "eleven_v4" });
       if (path === `/api/production/jobs/${demoJob.id}`) {
         const spoken = demoJob.lines.map((line) => line.spoken);

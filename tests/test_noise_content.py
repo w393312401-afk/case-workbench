@@ -72,6 +72,20 @@ class NoiseContentTests(unittest.TestCase):
         self.assertIn("script:SCR-exact", {row["id"] for row in rows})
         self.assertEqual([task, script], before)
 
+    def test_unused_script_names_other_orders_with_its_title_but_not_its_own_versions(self):
+        def script(identifier, family, version):
+            return {"id": identifier, "family_id": family, "version": version, "product": "202H",
+                    "title": "会手磨，也可以把日常维护交给导杆", "status": "adopted", "source": {}}
+        older, newer, other = script("SCR-old", "SCR-old", 1), script("SCR-new", "SCR-old", 2), script("SCR-other", "SCR-other", 1)
+        def job(identifier, script_id):
+            return {"id": identifier, "script_id": script_id, "product": "202H", "status": "draft", "lines": [],
+                    "title": "会手磨，也可以把日常维护交给导杆"}
+        rows = {row["id"]: row for row in build_content_items([], [older, newer, other], [job("PRD-own", "SCR-old"), job("PRD-else", "SCR-x")], [])}
+        # The newer version of the produced family only sees the order made from another script.
+        self.assertEqual([order["id"] for order in rows["script:SCR-old"]["same_title_orders"]], ["PRD-else"])
+        self.assertEqual([order["id"] for order in rows["script:SCR-other"]["same_title_orders"]], ["PRD-own", "PRD-else"])
+        self.assertTrue(rows["script:SCR-other"]["needs_attention"])
+
     def test_raw_persisted_task_uses_frozen_video_without_requiring_public_context(self):
         row = self.task("retrospective")
         row.pop("context")

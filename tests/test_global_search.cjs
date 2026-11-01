@@ -86,7 +86,7 @@ function harness(options = {}) {
       if (url.startsWith('/api/direction-catalog') && !options.catalogRequest) return { directions: options.directions || [], selling_points: options.points || [] };
       if (url.startsWith('/api/creation')) return { scripts: options.scripts || [] };
       if (url.startsWith('/api/ai/tasks')) return { tasks: options.tasks || [] };
-      if (url.startsWith('/api/production')) return { jobs: options.jobs || [], carousels: options.carousels || [] };
+      if (url.startsWith('/api/production')) return { jobs: options.jobs || [] };
       if (options.catalogRequest && url.startsWith('/api/direction-catalog')) return options.catalogRequest(url, config, controls);
       if (options.request) return options.request(url, config, controls);
       return url.startsWith('/api/performance') ? { videos: options.videos || [] } : { reviews: options.reviews || [], total: (options.reviews || []).length };
@@ -289,7 +289,8 @@ test('combobox selection wraps, has valid ARIA targets, and Escape closes via na
 test('result text is escaped and IME composition does not issue intermediate requests', async () => {
   const h = harness({ cases: [{ case_id: 'safe', title: 'needle <img src=x onerror=bad()>', product: '202H' }] });
   h.input.value = 'needle'; h.input.emit('input', { isComposing: true }); await h.run();
-  assert.equal(h.controls.requests.length, 0);
+  // Opening warms the shared lists; composing text issues no search request of its own.
+  assert.deepEqual(h.controls.requests.map(r => r.url), ['/api/creation?product=202H', '/api/ai/tasks?product=202H', '/api/production?product=202H', '/api/direction-catalog?product=202H', '/api/performance/videos?shop=all']);
   h.input.emit('compositionend'); await h.run();
   assert.match(h.list.innerHTML, /&lt;img/);
   assert.doesNotMatch(h.list.innerHTML, /<img/);
@@ -349,18 +350,16 @@ test('scripts, tasks, production orders and selling points are searchable within
     scripts: [{ id: 'SCR-aaaaaaaaaaaa', title: 'Paper slice script', product: '202H', direction_id: '202H-S1', version: 2 }, { id: 'SCR-bbbbbbbbbbbb', title: 'Paper other product', product: '152N' }],
     tasks: [{ task_id: 'AIT-aaaaaaaaaaaa', product: '202H', case_title: 'Paper case', instruction: 'write a paper hook' }],
     jobs: [{ id: 'PRD-aaaaaaaaaaaa', title: 'Paper voice order', product: '202H' }],
-    carousels: [{ id: 'CAR-aaaaaaaaaaaa', title: 'Paper carousel', product: '202H', archived: true }],
     points: [{ code: 'S1', title: 'Paper thin edge', product: '202H' }, { code: 'S2', title: 'Paper elsewhere', product: '152N' }],
   });
   await h.search('paper');
   const routes = h.list.options.map(node => node.href);
   assert.deepEqual(routes, [
     '#/202H/directions?q=Paper+thin+edge&product=202H', '#/202H/content/SCR-aaaaaaaaaaaa', '#/202H/ai/AIT-aaaaaaaaaaaa',
-    '#/202H/production/CAR-aaaaaaaaaaaa', '#/202H/production/PRD-aaaaaaaaaaaa',
+    '#/202H/production/PRD-aaaaaaaaaaaa',
   ]);
   assert.doesNotMatch(h.list.innerHTML, /other product|elsewhere/);
   assert.match(h.list.innerHTML, /第 2 版/);
-  assert.match(h.list.innerHTML, /图文制作单 · 已归档/);
   assert.ok(['/api/creation?product=202H', '/api/ai/tasks?product=202H', '/api/production?product=202H'].every(url => h.controls.requests.some(r => r.url === url)));
 });
 
@@ -368,7 +367,6 @@ test('orders are found by DaVinci timeline name or ID and by registered post ID,
   const h = harness({
     jobs: [{ id: 'PRD-aaaaaaaaaaaa', title: 'Voice order', product: '202H', timelines: [{ unique_id: 'uid-77', name: 'Zack261013-202-2' }],
       current_publication: { post_id: '7561234567890123456' } }],
-    carousels: [{ id: 'CAR-aaaaaaaaaaaa', title: 'Photo order', product: '202H', publication: { post_id: '7569999999999999999' } }],
     scripts: [{ id: 'SCR-aaaaaaaaaaaa', title: 'Registered script', product: '202H', video_id: '7561234567890123456' }],
   });
   await h.search('zack261013-202-2');
@@ -380,9 +378,6 @@ test('orders are found by DaVinci timeline name or ID and by registered post ID,
   const routes = h.list.options.map(node => node.href);
   assert.ok(routes.includes('#/202H/production/PRD-aaaaaaaaaaaa?step=publish'));
   assert.ok(routes.includes('#/202H/content/SCR-aaaaaaaaaaaa'));
-  await h.search('7569999999999999999');
-  assert.deepEqual(h.list.options.map(node => node.href), ['#/202H/production/CAR-aaaaaaaaaaaa?step=delivery']);
-  assert.match(h.list.innerHTML, /图文 ID <mark>7569999999999999999<\/mark>/);
 });
 
 test('video search uses the shared display name while keeping old titles and timeline navigation searchable', async () => {
@@ -417,6 +412,23 @@ test('empty search offers pages and actions; an action runs instead of navigatin
   assert.equal(started, 1);
   assert.equal(h.dialog.open, false);
   assert.equal(h.location.hash, '#/202H/home');
+});
+
+test('opening warms each list once, keystrokes reuse it, and reviews are read in small pages', async () => {
+  const slow = deferred();
+  const h = harness({ request: url => url.startsWith('/api/performance') ? slow.promise : { reviews: [], total: 0 } });
+  const lists = () => h.controls.requests.filter(r => !r.url.startsWith('/api/reviews')).map(r => r.url);
+  assert.equal(lists().length, 5, 'opening the box starts every list read');
+  await h.search('a');
+  await h.search('ab');
+  await h.search('abc');
+  assert.equal(lists().length, 5, 'typing waits on the warm reads instead of repeating them');
+  slow.resolve({ videos: [{ video_id: '123456789', title: 'abc video', product: '202H' }] });
+  await flush();
+  assert.match(h.list.innerHTML, /<mark>abc<\/mark> video/);
+  const reviews = h.controls.requests.filter(r => r.url.startsWith('/api/reviews'));
+  assert.ok(reviews.length >= 1);
+  assert.ok(reviews.every(r => new URLSearchParams(r.url.split('?')[1]).get('limit') === '30'));
 });
 
 test('adopted script body search opens the matching content detail', async () => {

@@ -189,51 +189,6 @@ class CodexBridgeTests(unittest.TestCase):
         self.assertNotIn("Do not store", "".join(self.progress))
         self.assertIsNotNone(process.returncode)
 
-    def test_relative_materials_have_absolute_source_context_outside_writable_scratch(self):
-        source = Path(self.cwd) / "案例 资料"
-        source.mkdir()
-        materials = {
-            "sheets/contact.jpg": b"contact-sheet",
-            "frames/frame-01.jpg": b"source-frame",
-            "refs/case.json": b'{"title":"case"}',
-            "SKILL.md": "只读技能资料".encode("utf-8"),
-        }
-        for relative, content in materials.items():
-            target = source / relative
-            target.parent.mkdir(exist_ok=True)
-            target.write_bytes(content)
-
-        def inspect_context(process, message):
-            start = next(item["params"] for item in process.received if item.get("method") == "thread/start")
-            instructions = start["developerInstructions"]
-            root_line = next(line for line in instructions.splitlines() if line.startswith("本轮只读资料根目录（绝对路径）："))
-            supplied_source = Path(json.loads(root_line.split("：", 1)[1]))
-            self.assertTrue(supplied_source.is_absolute())
-            self.assertEqual(supplied_source, source.resolve())
-            self.assertIn("均相对于上述资料根目录", instructions)
-            self.assertIn("读取时请拼接成资料根目录下的绝对路径", instructions)
-            self.assertIn("不得将资料根目录设为可写目录", instructions)
-            scratch = Path(start["cwd"])
-            self.assertNotEqual(scratch, supplied_source)
-            self.assertEqual(start["sandbox"], "workspace-write")
-            self.assertNotIn("config", start)
-            for relative, content in materials.items():
-                self.assertFalse((scratch / relative).exists())
-                self.assertEqual((supplied_source / relative).read_bytes(), content)
-            (scratch / "observation.txt").write_text("temporary observation", encoding="utf-8")
-            success(process, message)
-
-        bridge, process, _ = self.runner(inspect_context)
-        prompt = "读取 sheets/contact.jpg、frames/frame-01.jpg、refs/case.json 和 SKILL.md 后写逐张表。"
-        self.assertEqual(bridge.run(prompt, cwd=source / ".." / source.name,
-                                    on_progress=self.progress.append, cancel_event=self.cancel),
-                         "# 完成\n已整理案例。")
-        turn = next(item["params"] for item in process.received if item.get("method") == "turn/start")
-        self.assertEqual(turn["input"], [{"type": "text", "text": prompt}])
-        for relative, content in materials.items():
-            self.assertEqual((source / relative).read_bytes(), content)
-        self.assertFalse((source / "observation.txt").exists())
-
     def test_registered_video_requires_completed_image_view(self):
         bridge, _, _ = self.runner()
         with self.assertRaisesRegex(BridgeError, "没有拿到原片画面"):

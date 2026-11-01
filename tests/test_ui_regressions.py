@@ -230,7 +230,8 @@ class WorkbenchBrowserTests(unittest.TestCase):
                       [self.identifier, screen_case["case_id"]])
         comparison = page.locator("#case-comparison")
         comparison.get_by_text("中文对照", exact=True).wait_for()
-        comparison.get_by_text("屏显文字", exact=False).first.wait_for()
+        # The collapsed method note also mentions 屏显文字; only table cells label the source.
+        comparison.locator("td").get_by_text("屏显文字", exact=False).first.wait_for()
         comparison.get_by_text("几秒就磨锋利了。").wait_for()
         origin = comparison.get_by_role("row").filter(
             has=page.get_by_role("rowheader", name="内容来源", exact=True))
@@ -457,8 +458,11 @@ class WorkbenchBrowserTests(unittest.TestCase):
         self.assertEqual(status, 200, moved)
         page = self.open_page(f"#case/{self.identifier}")
         badges = page.locator(".case-dock-badges")
+        origin = page.locator(".detail-origin")
         # Manual sidebar placement is independent of the video's maker.
-        badges.get_by_text("内容来源待确认", exact=True).wait_for()
+        # An unknown origin stays in the collapsed 来源与编号; the dock shows only known ones.
+        origin.get_by_text("内容来源待确认", exact=True).wait_for(state="attached")
+        self.assertEqual(badges.get_by_text("内容来源待确认", exact=True).count(), 0)
         self.assertEqual(badges.get_by_text("达人内容参考", exact=True).count(), 0)
 
         previous_value = ""
@@ -478,7 +482,11 @@ class WorkbenchBrowserTests(unittest.TestCase):
                 page.locator('[name="note"]').fill(f"本轮只调整内容来源：{label}")
                 page.locator("#save-button").click()
                 page.wait_for_function("() => !document.querySelector('#edit-dialog').open")
-                badges.get_by_text(label, exact=True).wait_for()
+                origin.get_by_text(label, exact=True).wait_for(state="attached")
+                if value:
+                    badges.get_by_text(label, exact=True).wait_for()
+                else:
+                    self.assertEqual(badges.locator(".content-origin").count(), 0)
                 after = self.store.read_case(self.identifier)
                 if value:
                     self.assertEqual(after["current"]["content_origin"], value)
@@ -513,9 +521,12 @@ class WorkbenchBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator("[data-move-case]").count(), 0)
         open_library_filters(page)
         picker = page.locator("#archive-category-filter")
-        picker.focus()
-        picker.press("ArrowDown")
-        picker.press("Enter")
+        # The native select is hidden behind the shared picker: the first arrow
+        # opens its list, the second moves to the next option, Enter chooses it.
+        page.locator("#archive-category-filter + .workbench-select [data-select-trigger]").focus()
+        page.keyboard.press("ArrowDown")
+        page.keyboard.press("ArrowDown")
+        page.keyboard.press("Enter")
         page.locator(f'.case-card[href="#case/{self.identifier}"]').wait_for()
         self.assertEqual(picker.input_value(), "positive")
         self.assertIn("category=positive", page.url)

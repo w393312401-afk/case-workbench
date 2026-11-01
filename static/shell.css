@@ -202,7 +202,7 @@ label>.workbench-select,.field>.workbench-select{width:100%}
 .product-manager-list li:last-child{border-bottom:0}
 .product-manager-name{display:flex;align-items:flex-start;flex-direction:column;gap:4px;min-width:0;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
 .product-manager-name small{font-size:11px;color:var(--accent-text)}
-.product-manager-list button{flex-shrink:0;padding:6px 11px;font-size:12px}
+.product-manager-list button{flex-shrink:0}
 .product-manager-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
 .product-manager-delete{padding:7px 9px;border-radius:7px;background:transparent;color:var(--danger-ink);font-size:12px;white-space:nowrap}
 .product-manager-delete:hover{background:var(--surface-danger)}
@@ -215,7 +215,7 @@ label>.workbench-select,.field>.workbench-select{width:100%}
 .product-manager-list .product-manager-empty{display:block;padding:32px 8px;text-align:center;color:var(--muted-soft);font-size:13px}
 .product-manager-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 24px;border-top:1px solid var(--line);flex-shrink:0}
 .product-manager-foot>span{font-size:12px;color:var(--muted-soft)}
-.product-manager-foot button{padding:8px 20px}
+
 @media(max-width:760px){
   .global-product .product-picker-trigger{height:40px;font-size:16px;border-color:var(--line);background:var(--surface);color:var(--ink)}
   .global-product .product-picker-trigger>span[data-short]{font-size:0}

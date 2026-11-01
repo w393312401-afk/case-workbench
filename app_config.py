@@ -32,9 +32,4 @@ def load_config(root=APP_ROOT):
     for name in ("skill_root", "runtime_root"):
         config[name] = absolute(config[name])
     config["performance_sources"] = [absolute(path) for path in config["performance_sources"]]
-    if config.get("image_generation"):
-        config["image_generation"] = dict(config["image_generation"])
-        for name in ("parameters_file", "auth_config"):
-            if config["image_generation"].get(name):
-                config["image_generation"][name] = absolute(config["image_generation"][name])
     return config

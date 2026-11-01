@@ -130,17 +130,6 @@ class GuestModeUITests(unittest.TestCase):
         self.page.locator("#read-script").click()
         self.page.wait_for_url(ORIGIN + "/#/202H/content/SCR-000000000001")
 
-    def test_production_settings_and_content_routes_are_readonly_destinations(self):
-        for supplied, expected in (("#/202H/production/CAR-000000000001", "#/202H/ai"),
-                                   ("#production?product=202H", "#ai?product=202H"),
-                                   ("#/202H/settings", "#/202H/library"), ("#content", "#ai"),
-                                   ("#/202H/scripts", "#/202H/ai"),
-                                   ("#/202H/content/SCR-000000000001", "#/202H/content/SCR-000000000001"),
-                                   ("#content/SCR-000000000001?product=202H", "#content/SCR-000000000001?product=202H")):
-            with self.subTest(hash=supplied):
-                self.open(supplied)
-                self.assertEqual(urlsplit(self.page.url).fragment, expected[1:])
-
     def test_new_action_controls_are_hidden_and_guest_banner_works_under_csp(self):
         self.open()
         self.page.evaluate("document.querySelector('#dynamic').innerHTML='<button data-copy-summary>复制小结</button><button data-generate-preview>生成预览</button><button data-detail-tab=history>历史</button>'")

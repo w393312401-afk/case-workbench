@@ -41,8 +41,6 @@ class CatalogLoadingTests(unittest.TestCase):
             {"id": "PRD-000000000001", "script_id": "SCR-1", "product": "202H", "selected_take": None},
             {"id": "PRD-000000000002", "script_id": "SCR-2", "product": "129N", "selected_take": None},
         ]
-        data["carousels"] = [{"id": "CAR-000000000001", "script_id": "SCR-3", "product": "202H",
-                              "publication": {"post_id": "7600000000000000001", "published_on": "2026-10-14"}}]
         data["requests"]["old-request"] = {"payload": "large saved retry" * 20000}
         store.write(data)
         return store
@@ -161,16 +159,6 @@ class CatalogLoadingTests(unittest.TestCase):
         self.assertEqual(store.read()["jobs"][0]["edits"][0]["status"], "running")
         result.unlink()
         self.assertEqual(store.job(job["id"])["status"], "editing")
-
-    def test_script_usage_copies_only_provenance_and_ignores_worker_readback(self):
-        store = self.production()
-        with patch("production_store.public_job", side_effect=AssertionError("full job readback")):
-            usage = store.script_usage("202H")
-        self.assertEqual({row["kind"] for row in usage}, {"video", "carousel"})
-        self.assertEqual({row["script_id"] for row in usage}, {"SCR-1", "SCR-3"})
-        usage[1]["publication"]["post_id"] = "local change"
-        self.assertEqual(store.script_usage("202H")[1]["publication"]["post_id"], "7600000000000000001")
-
 
 class TaskLoadingTests(unittest.TestCase):
     setUp = ai_fixture.TaskTests.setUp

@@ -43,6 +43,7 @@ class SettingsBrowserTests(unittest.TestCase):
         else:
             page.set_content(markup)
         page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(path=str(ROOT / "static" / "buttons.css"))
         page.add_style_tag(path=str(ROOT / "static" / "settings.css"))
         responses = {
             "/api/settings/paths": {"paths": {"records":"C:/isolated/records", "evidence":"C:/isolated/evidence", "library":"C:/isolated/library", "directions":"C:/isolated/directions", "creation":"C:/isolated/creation"}},

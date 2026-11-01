@@ -6,18 +6,18 @@ import unittest
 
 from playwright.sync_api import expect
 
-import test_production_carousel_ui as carousel_fixture
+from production_browser import ProductionBrowserTests
 import server
 
 
 class ServiceStaleTests(unittest.TestCase):
-    setUpClass = classmethod(carousel_fixture.CarouselBrowserTests.setUpClass.__func__)
-    tearDownClass = classmethod(carousel_fixture.CarouselBrowserTests.tearDownClass.__func__)
-    setUp = carousel_fixture.CarouselBrowserTests.setUp
-    stop_server = carousel_fixture.CarouselBrowserTests.stop_server
-    request = carousel_fixture.CarouselBrowserTests.request
-    open_page = carousel_fixture.CarouselBrowserTests.open_page
-    make_playable_video = carousel_fixture.CarouselBrowserTests.make_playable_video
+    setUpClass = classmethod(ProductionBrowserTests.setUpClass.__func__)
+    tearDownClass = classmethod(ProductionBrowserTests.tearDownClass.__func__)
+    setUp = ProductionBrowserTests.setUp
+    stop_server = ProductionBrowserTests.stop_server
+    request = ProductionBrowserTests.request
+    open_page = ProductionBrowserTests.open_page
+    make_playable_video = ProductionBrowserTests.make_playable_video
 
     def test_status_reports_whether_the_code_changed_since_start(self):
         status, _, body = self.request("GET", "/api/service/status")

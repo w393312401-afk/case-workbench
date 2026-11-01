@@ -1,0 +1,50 @@
+/* 按钮体系（A 收敛原生）：外观只在这里定义，各页面样式只调位置与排版 */
+:root{--btn-h-sm:26px;--btn-h:30px;--btn-h-lg:36px;--btn-radius:8px}
+
+/* 层级：主要 / 次要 / 弱 / 危险 */
+:is(.primary,.secondary,.subtle,.danger,.danger-outline){display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:var(--btn-h);padding:4px 12px;border:0;border-radius:var(--btn-radius);font-size:13px;font-weight:500;line-height:1.35;white-space:nowrap;text-decoration:none;transition:background-color .15s,color .15s}
+:is(.primary,.secondary,.subtle,.danger,.danger-outline) svg{width:15px;height:15px}
+.primary{background:var(--accent);color:var(--on-accent)}
+.primary:hover:not(:disabled){background:var(--accent-dark)}
+.secondary{background:var(--fill);color:var(--ink)}
+.secondary:hover:not(:disabled){background:var(--fill-hover)}
+.subtle{background:transparent;color:var(--accent-text);padding-inline:8px}
+.subtle:hover:not(:disabled){background:var(--fill)}
+.danger{background:var(--danger);color:var(--on-accent)}
+.danger:hover:not(:disabled){background:var(--danger-dark)}
+.danger-outline{background:transparent;color:var(--danger-ink);padding-inline:8px}
+.danger-outline:hover:not(:disabled){background:var(--surface-danger)}
+
+/* 尺寸：compact 小 26 / 默认中 30 / large 大 36 */
+:is(.primary,.secondary,.subtle,.danger,.danger-outline).compact{min-height:var(--btn-h-sm);padding:3px 10px;gap:5px;font-size:12px}
+:is(.subtle,.danger-outline).compact{padding-inline:6px}
+:is(.primary,.secondary,.subtle,.danger,.danger-outline).compact svg{width:14px;height:14px}
+:is(.primary,.secondary,.subtle,.danger,.danger-outline).large{min-height:var(--btn-h-lg);padding:6px 16px;font-size:14px}
+
+/* 图标按钮 */
+.icon-button{display:grid;place-content:center;width:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--muted-soft);transition:background-color .15s,color .15s}
+.icon-button svg{width:16px;height:16px}
+.icon-button:hover:not(:disabled){background:var(--fill);color:var(--ink)}
+
+/* 状态：禁用不再显示等待光标；处理中用 aria-busy */
+button:disabled{cursor:default;opacity:.45}
+button[aria-busy="true"]{cursor:progress}
+
+/* 切换控件：灰色底条 + 白色选中块。旧类名作为别名保留，标记不用改 */
+:is(.seg,.perf-segment,.dir-segment,.ai-segment){display:inline-flex}
+:is(.seg,.perf-segment,.dir-segment,.ai-segment,.layout-switch,.video-mode-switch,.perf-date-modes){gap:2px;padding:2px;border:0;border-radius:9px;background:var(--fill)}
+:is(.seg,.perf-segment,.dir-segment,.ai-segment,.layout-switch,.video-mode-switch,.perf-date-modes)>button{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:26px;padding:3px 10px;border:0;border-radius:7px;background:transparent;color:var(--muted);font-size:12px;font-weight:500;line-height:1.35;white-space:nowrap;box-shadow:none;transition:background-color .15s,color .15s}
+:is(.seg,.perf-segment,.dir-segment,.ai-segment,.layout-switch,.video-mode-switch,.perf-date-modes)>button:hover:not(:disabled){color:var(--ink)}
+:is(.seg,.perf-segment,.dir-segment,.ai-segment,.layout-switch,.video-mode-switch,.perf-date-modes)>button:is([aria-pressed="true"],.active,.is-active){background:var(--selected-fill);color:var(--ink);box-shadow:var(--shadow-segment)}
+:is(.seg,.perf-segment,.dir-segment,.ai-segment,.layout-switch,.video-mode-switch,.perf-date-modes)>button small{font-size:12px;color:var(--muted-soft);font-variant-numeric:tabular-nums}
+
+/* 筛选标签：胶囊灰底，选中浅蓝底 */
+:is(.chip,.rev-quick-btn,.source-chapter-chip,.perf-date-presets>button,.settings-sections>button){display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:26px;padding:3px 10px;border:0;border-radius:999px;background:var(--fill);color:var(--muted);font-size:12px;font-weight:500;line-height:1.35;white-space:nowrap;box-shadow:none;transition:background-color .15s,color .15s}
+:is(.chip,.rev-quick-btn,.source-chapter-chip,.perf-date-presets>button,.settings-sections>button):hover:not(:disabled){background:var(--fill-hover);color:var(--ink)}
+:is(.chip,.rev-quick-btn,.source-chapter-chip,.perf-date-presets>button,.settings-sections>button):is([aria-pressed="true"],.is-active,.is-open){background:var(--surface-tint);color:var(--accent-text)}
+:is(.chip,.rev-quick-btn) span{color:var(--muted-soft);font-variant-numeric:tabular-nums}
+:is(.chip,.rev-quick-btn):is([aria-pressed="true"],.is-active) span{color:inherit}
+
+/* 次要按钮加 danger：表示破坏性的次要操作，按"红字无底"呈现 */
+.secondary.danger{background:transparent;color:var(--danger-ink);padding-inline:8px}
+.secondary.danger:hover:not(:disabled){background:var(--surface-danger)}

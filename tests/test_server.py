@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import copy
 import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
+import ntpath
+import os
 from pathlib import Path
+import socket
 import subprocess
 import tempfile
 import threading
@@ -37,9 +41,23 @@ def make_test_server(skill, runtime):
     for _ in range(32):
         server = SERVER.make_server(skill, runtime, port=0, allow_open=False)
         if server.server_port not in CHROMIUM_BLOCKED_PORTS:
+            track_connections(server)
             return server
         server.server_close()
     raise RuntimeError("Could not bind a browser-safe ephemeral test port")
+
+
+def track_connections(server):
+    """Remember accepted sockets so stop_server can end handlers that clients keep open."""
+    server.accepted_connections = []
+    accept = server.get_request
+
+    def get_request():
+        request = accept()
+        server.accepted_connections.append(request[0])
+        return request
+
+    server.get_request = get_request
 
 
 class BrowserPortFixtureTests(unittest.TestCase):
@@ -53,6 +71,34 @@ class BrowserPortFixtureTests(unittest.TestCase):
         self.assertEqual(make.call_count, 2)
         for call in make.call_args_list:
             self.assertEqual(call.kwargs, {"port": 0, "allow_open": False})
+
+
+class ServerStopFixtureTests(unittest.TestCase):
+    def test_stop_returns_while_a_client_still_holds_a_keep_alive_connection(self):
+        class KeepAliveHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), KeepAliveHandler)
+        self.server.daemon_threads = False
+        track_connections(self.server)
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+        self.thread.start()
+        client = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        self.addCleanup(client.close)
+        client.request("GET", "/")
+        client.getresponse().read()
+
+        stopping = threading.Thread(target=WorkbenchHTTPTests.stop_server, args=(self,), daemon=True)
+        stopping.start()
+        stopping.join(5)
+        self.assertFalse(stopping.is_alive(), "stop_server waited on a connection the client never closed")
 
 
 def snapshot(video):
@@ -116,6 +162,19 @@ class WorkbenchHTTPTests(unittest.TestCase):
 
     def stop_server(self):
         self.server.shutdown()
+        # Browser tests turn daemon_threads off, so server_close waits for every handler,
+        # and an idle keep-alive handler only returns once its socket ends. A browser
+        # context whose close failed never lets go, which would hang here forever.
+        # shutdown wakes a blocked recv on POSIX; Windows needs the descriptor closed,
+        # which detach allows while the handler's rfile still references the socket.
+        # Handlers cut off this way raise by design, so their tracebacks are not printed.
+        self.server.handle_error = lambda *args: None
+        for connection in getattr(self.server, "accepted_connections", ()):
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+                socket.close(connection.detach())
+            except OSError:
+                pass
         self.server.server_close()
         self.thread.join(timeout=3)
 
@@ -276,6 +335,32 @@ class WorkbenchHTTPTests(unittest.TestCase):
         cache = self.runtime / "thumbnail-cache" / self.identifier
         self.assertEqual(len(list(cache.glob("*.jpg"))), 2)
         self.assert_old_records_unchanged(before)
+
+    @unittest.skipUnless(os.name == "nt", "Only Windows path resolution can return a \\\\?\\ prefix")
+    def test_thumbnail_survives_cache_root_appearing_during_path_check(self):
+        endpoint = f"/media/{self.identifier}/thumbnail"
+        jpeg = b"\xff\xd8\xfffake-jpeg\xff\xd9"
+        cache_root = self.runtime / "thumbnail-cache"
+        final_path = ntpath._getfinalpathname
+
+        def extract(command, **_kwargs):
+            Path(command[-1]).write_bytes(jpeg)
+            return subprocess.CompletedProcess(command, 0)
+
+        # Another card's request creates the root just after this one first looks.
+        def concurrent_first_request(path):
+            try:
+                return final_path(path)
+            except OSError:
+                if self.identifier in str(path):
+                    cache_root.mkdir(parents=True, exist_ok=True)
+                raise
+
+        self.assertFalse(cache_root.exists())
+        with patch.object(SERVER.subprocess, "run", side_effect=extract), \
+                patch.object(ntpath, "_getfinalpathname", concurrent_first_request):
+            status, _, content = self.request("GET", endpoint)
+        self.assertEqual((status, content), (200, jpeg))
 
     def test_thumbnail_missing_or_failed_video_has_safe_response(self):
         endpoint = f"/media/{self.identifier}/thumbnail"

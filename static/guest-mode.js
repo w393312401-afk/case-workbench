@@ -91,7 +91,7 @@
     "#task-activity-open", "#task-activity-dialog", "#task-activity-log-dialog", ".task-activity-logs",
     "#add-top", "#import-video-top", "#library-video-import", "#detail-video-import", "#sync-button",
     "#library-select-toggle", ".case-select", "#select-all", ".selection-toolbar", ".bulk-actions",
-    "#script-copy", "#script-production-toggle", "#script-production-note", "#script-production-choices", "#script-carousel-tables",
+    "#script-copy", "#script-production-toggle", "#script-production-note", "#script-production-choices",
     "[data-adopted-copy]", "[data-adopted-edit]",
     ".script-more-actions", ".script-detail-actions", ".ai-candidate-actions", ".ai-continue-card", ".ai-run-settings",
     "[data-copy]", "[data-native-copy]", ".ai-copy-round", "[data-export]", "[data-download]", "a[download]",

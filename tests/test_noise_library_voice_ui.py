@@ -69,7 +69,7 @@ class NoiseOpportunityTests(unittest.TestCase):
 
     def setUp(self):
         opportunities_fixture.ReviewOpportunityBrowserTests.setUp(self)
-        for name in ("style.css", "reviews-layout.css", "review-opportunities.css"):
+        for name in ("style.css", "buttons.css", "reviews-layout.css", "review-opportunities.css"):
             self.page.add_style_tag(path=str(ROOT/"static"/name))
         # This isolated page has no navigation shell or real writing dialog.
         self.page.add_style_tag(content="main{margin-left:0}#review-opportunities{padding:12px}#ai-create-instruction{display:none}")
@@ -116,7 +116,7 @@ class NoiseCaseReadingTests(unittest.TestCase):
         self.addCleanup(context.close)
         self.page = context.new_page()
         self.page.set_content('<main id="content"></main><div id="detail-other"></div>')
-        for name in ("style.css", "library.css", "detail.css"):
+        for name in ("style.css", "buttons.css", "library.css", "detail.css"):
             self.page.add_style_tag(path=str(ROOT/"static"/name))
         self.page.add_script_tag(content=r'''
           const $=(q,root=document)=>root.querySelector(q), $$=(q,root=document)=>[...root.querySelectorAll(q)];

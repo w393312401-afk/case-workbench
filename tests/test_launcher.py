@@ -468,6 +468,41 @@ class StartHousekeepingTests(unittest.TestCase):
         self.assertEqual(len(list(folder.glob("business-*.zip"))), LAUNCHER.BACKUP_KEEP)
         self.assertTrue(target.exists())
 
+    def test_parallel_backup_matches_zipfile_output_for_unicode_names_and_dates(self):
+        records = self.base / "runtime" / "directions"
+        (records / "中文 方向.json").write_text(json.dumps({"方向": "口播"}, ensure_ascii=False), encoding="utf-8")
+        (records / "empty.json").write_bytes(b"")
+        (records / "big.json").write_bytes(b"0123456789" * 200000)
+        os.utime(records / "big.json", (1_700_000_000, 1_700_000_000))
+        target = LAUNCHER.backup_business_data(self.root, self.config)
+        entries = [(path, f"runtime/directions/{path.name}") for path in sorted(records.iterdir())]
+        reference = self.base / "reference.zip"
+        with LAUNCHER.zipfile.ZipFile(reference, "w", LAUNCHER.zipfile.ZIP_DEFLATED) as archive:
+            for path, name in entries:
+                archive.write(path, name)
+        with LAUNCHER.zipfile.ZipFile(target) as made, LAUNCHER.zipfile.ZipFile(reference) as expected:
+            self.assertIsNone(made.testzip())
+            for name in expected.namelist():
+                left, right = made.getinfo(name), expected.getinfo(name)
+                self.assertEqual((left.CRC, left.file_size, left.date_time, left.flag_bits, left.compress_type),
+                                 (right.CRC, right.file_size, right.date_time, right.flag_bits, right.compress_type))
+                self.assertEqual(made.read(name), expected.read(name))
+            self.assertTrue(set(expected.namelist()) <= set(made.namelist()))
+
+    def test_backup_falls_back_to_zipfile_when_the_parallel_archive_fails_its_check(self):
+        real = LAUNCHER._deflate
+
+        def bad_checksum(entry):
+            stamp, attributes, crc, size, packed = real(entry)
+            return stamp, attributes, crc ^ 1, size, packed
+
+        with patch.object(LAUNCHER, "_deflate", bad_checksum):
+            target = LAUNCHER.backup_business_data(self.root, self.config)
+        with LAUNCHER.zipfile.ZipFile(target) as archive:
+            self.assertIsNone(archive.testzip())
+            self.assertEqual(sorted(archive.namelist()), ["runtime/directions/catalog.json", "skill/cases/PVR-1/event.json"])
+        self.assertEqual(list(target.parent.glob("*.partial")), [])
+
     def test_nothing_to_back_up_writes_nothing(self):
         self.assertIsNone(LAUNCHER.backup_business_data(self.root, {"skill_root": str(self.base / "none")}))
         self.assertFalse((self.root / "archive").exists())

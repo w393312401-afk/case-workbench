@@ -100,12 +100,10 @@
 }
 /* Section bar: pinned under the top bar on desktop so every group is one click away. */
 .settings-sections { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 20px; padding: 8px 0; background: var(--paper); }
-.settings-sections button { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: var(--font-meta); }
-.settings-sections button:hover { color: var(--accent); border-color: var(--accent); }
 .settings-group { scroll-margin-top: calc(var(--topbar-h) + 64px); }
 @media (min-width: 761px) { .settings-sections { position: sticky; top: var(--topbar-h); z-index: 5; } }
 @media (max-width: 760px) { .settings-sections { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; } .settings-sections button { flex-shrink: 0; } .settings-group { scroll-margin-top: 16px; } }
 
 /* Compact locations keep all five reads and actions discoverable. */
-.settings-location{padding:10px 0;gap:12px}.settings-location-copy{min-width:0}.settings-location-copy h3{font-size:13px;margin:0}.settings-location-copy p{font-size:12px;margin:2px 0}.settings-location .settings-path{margin:3px 0;font-size:12px;overflow-wrap:anywhere}.settings-location .settings-actions{flex-wrap:wrap;gap:3px}.settings-location .settings-actions button{font-size:12px;padding:6px 8px}.settings-location[data-state="failed"] code{color:var(--danger-ink)}.settings-location[data-state="loading"] code,.settings-location[data-state="unconfigured"] code{color:var(--muted-soft)}
+.settings-location{padding:10px 0;gap:12px}.settings-location-copy{min-width:0}.settings-location-copy h3{font-size:13px;margin:0}.settings-location-copy p{font-size:12px;margin:2px 0}.settings-location .settings-path{margin:3px 0;font-size:12px;overflow-wrap:anywhere}.settings-location .settings-actions{flex-wrap:wrap;gap:3px}.settings-location[data-state="failed"] code{color:var(--danger-ink)}.settings-location[data-state="loading"] code,.settings-location[data-state="unconfigured"] code{color:var(--muted-soft)}
 .settings-page .settings-group{margin-bottom:18px}.settings-page .settings-card{padding:16px}.settings-page .settings-status{font-size:14px}.settings-page .settings-note{font-size:12px;line-height:1.5}

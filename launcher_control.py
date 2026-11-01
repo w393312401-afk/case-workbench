@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -17,6 +18,8 @@ import urllib.error
 import urllib.request
 import webbrowser
 import zipfile
+import zlib
+from concurrent.futures import ThreadPoolExecutor
 from app_config import load_config
 
 ROOT = Path(__file__).resolve().parent
@@ -252,6 +255,54 @@ def prune(folder, pattern, keep):
         old.unlink()
 
 
+def _deflate(entry):
+    """Compress one file with the same settings as ZipFile; zlib releases the GIL, so threads run side by side."""
+    path, name = entry
+    data = path.read_bytes()
+    compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15)
+    info = zipfile.ZipInfo.from_file(path, name)
+    return info.date_time, info.external_attr, zlib.crc32(data), len(data), compressor.compress(data) + compressor.flush()
+
+
+def write_zip_parallel(partial, entries):
+    """Write the same deflate archive as ZipFile.write, compressing files on several threads.
+
+    Returns False without leaving a result when the archive would need ZIP64 or fails its read-back check;
+    the caller then writes it the ordinary way, so a backup is never skipped."""
+    limit = 0xFFFFFFFF
+    if len(entries) >= 0xFFFF:
+        return False
+    central, written, offset = [], [], 0
+    try:
+        with ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 1)) as pool, partial.open("wb") as stream:
+            for (path, name), (stamp, attributes, crc, size, packed) in zip(entries, pool.map(_deflate, entries)):
+                encoded = name.encode("utf-8")
+                flags = 0 if name.isascii() else 0x800
+                date = ((stamp[0] - 1980) << 9) | (stamp[1] << 5) | stamp[2]
+                clock = (stamp[3] << 11) | (stamp[4] << 5) | (stamp[5] // 2)
+                if size >= limit or len(packed) >= limit or offset >= limit:
+                    raise OverflowError("ZIP64")
+                fields = (20, flags, 8, clock, date, crc, len(packed), size, len(encoded))
+                stream.write(struct.pack("<L5HL2L2H", 0x04034B50, *fields, 0) + encoded + packed)
+                central.append(struct.pack("<L6H3L5H2L", 0x02014B50, 20, *fields, 0, 0, 0, 0, attributes, offset) + encoded)
+                written.append((name, crc, size))
+                offset += 30 + len(encoded) + len(packed)
+            if offset >= limit:
+                raise OverflowError("ZIP64")
+            directory = b"".join(central)
+            stream.write(directory + struct.pack("<L4H2LH", 0x06054B50, 0, 0, len(central), len(central), len(directory), offset, 0))
+        with zipfile.ZipFile(partial) as archive:
+            # The directory must list exactly what was written; the first and last file are read back in full.
+            if [(info.filename, info.CRC, info.file_size) for info in archive.infolist()] != written:
+                raise ValueError("read-back")
+            for _, name in (entries[:1] + entries[-1:]):
+                archive.read(name)
+    except (OverflowError, ValueError, zipfile.BadZipFile):
+        partial.unlink(missing_ok=True)
+        return False
+    return True
+
+
 def backup_business_data(root, config):
     """Zip the local-only business records while no service is writing them."""
     entries = []
@@ -269,9 +320,10 @@ def backup_business_data(root, config):
     folder.mkdir(parents=True, exist_ok=True)
     target = folder / f"business-{time.strftime('%Y%m%d-%H%M%S')}.zip"
     partial = target.with_suffix(".zip.partial")
-    with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as archive:
-        for path, name in entries:
-            archive.write(path, name)
+    if not write_zip_parallel(partial, entries):
+        with zipfile.ZipFile(partial, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path, name in entries:
+                archive.write(path, name)
     partial.replace(target)
     prune(folder, "business-*.zip", BACKUP_KEEP)
     return target
@@ -371,7 +423,7 @@ def restart(root, config, no_browser=False):
                 return child.pid
         except (OSError, ValueError):
             pass
-        time.sleep(.25)
+        time.sleep(.1)
     raise RuntimeError("工作台尚未就绪，请查看 server.log 后重试。")
 
 

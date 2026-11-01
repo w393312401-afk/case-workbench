@@ -97,7 +97,6 @@ a.home-chip:hover{filter:brightness(1.08);text-decoration:underline}
   .home-tabs{grid-template-columns:repeat(2,minmax(0,1fr));margin:0 -17px;padding:0 9px}
   .home-tabs [role=tab][aria-selected=true]{background:color-mix(in srgb,var(--accent) 8%,var(--surface))}
   .home-heading{align-items:flex-start}
-  .home-heading-actions .secondary{font-size:12px}
 }
 @media(max-width:570px){
   .home-flow-row{flex-direction:column;align-items:flex-start;gap:6px}

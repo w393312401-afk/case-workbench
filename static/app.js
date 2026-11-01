@@ -33,11 +33,18 @@ const icons = {
   close: '<path d="m6 6 12 12M6 18 18 6"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+  filter: '<path d="M4 6h16M7 12h10M10 18h4"/>',
+  sort: '<path d="M7 4v16m0 0-3-3m3 3 3-3M17 20V4m0 0-3 3m3-3 3 3"/>',
+  sliders: '<path d="M4 7h9m4 0h3M4 17h3m4 0h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+  bookmark: '<path d="M6 3h12v18l-6-4-6 4Z"/>',
+  pin: '<path d="M9 3h6l-1 6 3 3v2H7v-2l3-3ZM12 14v7"/>',
+  more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
   play: '<path d="m9 5 11 7-11 7Z"/>',
   arrow: '<path d="M4 12h16m-6-6 6 6-6 6"/>',
   back: '<path d="M20 12H4m6-6-6 6 6 6"/>',
   edit: '<path d="m15 4 5 5-11 11H4v-5ZM12 7l5 5"/>',
   copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v12h5"/>',
+  external: '<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   file: '<path d="M14 3H5v18h14V8ZM14 3v5h5M8 12h8m-8 4h6"/>',
   video:
     '<rect x="3" y="5" width="13" height="14" rx="2"/><path d="m16 10 5-3v10l-5-3"/>',
@@ -388,7 +395,7 @@ async function renewPageToken() {
   if (data?.token) state.token = data.token;
 }
 // Messages stack instead of replacing each other, so a failure is not wiped out by the next success.
-// Warnings stay until closed; the same text shown again moves to the bottom instead of repeating.
+// Warnings stay longer than plain notes; hovering holds either one, and the same text shown again moves to the bottom instead of repeating.
 function toast(message, warning = false) {
   if (state.dataMaintenance?.busy && /总数据.*(?:正在|处理|导入|导出|备份|恢复)/.test(String(message))) return;
   const stack = $("#toast");
@@ -404,7 +411,11 @@ function toast(message, warning = false) {
   stack.append(item);
   while (stack.children.length > 3) dismissToast(stack.firstElementChild);
   stack.hidden = false;
-  if (!warning) item.timer = setTimeout(() => dismissToast(item), 3500);
+  const wait = warning ? 8000 : 3500;
+  const start = () => { clearTimeout(item.timer); item.timer = setTimeout(() => dismissToast(item), wait); };
+  item.onmouseenter = () => clearTimeout(item.timer);
+  item.onmouseleave = start;
+  start();
 }
 function dismissToast(item) {
   clearTimeout(item.timer);

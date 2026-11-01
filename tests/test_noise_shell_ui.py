@@ -8,6 +8,8 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / 'static/app.js').read_text(encoding='utf-8')
 NOTICE = APP[APP.index('let staleNoticeDismissed = false;'):APP.index('setTimeout(checkServiceFresh, 3000);')]
+SHELL = (ROOT / 'static/shell.js').read_text(encoding='utf-8')
+READING_PLACE = SHELL[SHELL.index('window.keepReadingPlace ='):SHELL.index('// Product and URL context')]
 
 
 class NoiseShellBrowserTests(unittest.TestCase):
@@ -28,11 +30,13 @@ class NoiseShellBrowserTests(unittest.TestCase):
         page.route('http://noise.test/**', lambda r: r.fulfill(status=200, content_type='text/html', body='<main><header class="topbar"></header><section id="content">当前结果</section></main>'))
         page.goto('http://noise.test/')
         page.add_style_tag(path=str(ROOT / 'static/style.css'))
+        page.add_style_tag(path=str(ROOT / 'static/buttons.css'))
         self.install(page)
         return page
 
     def install(self, page, pid=100):
         page.add_script_tag(content=f"window.fixtureStatus={{pid:{pid},code_stale:true}}; window.fetch=async()=>({{ok:true,json:async()=>window.fixtureStatus}});window.api=async()=>{{throw Object.assign(new Error('任务仍在运行'),{{status:409}})}};")
+        page.add_script_tag(content=READING_PLACE)
         page.add_script_tag(content=NOTICE)
         page.evaluate('checkServiceFresh()')
 

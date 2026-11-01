@@ -64,17 +64,6 @@ class GlobalLoadingTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 operations._read(path)
 
-    def test_production_catalog_reads_recovery_journals_once_for_all_orders(self):
-        app = self.server.app
-        jobs = [{"id": f"PRD-{number:012x}", "edits": [], "timelines": [], "status": "draft"} for number in range(8)]
-        catalog = {"jobs": jobs, "carousels": []}
-        operations = app._production_operations()
-        with patch.object(app.production, "public", return_value=catalog), \
-                patch.object(operations, "public", return_value=[]) as records, \
-                patch.object(app, "_production_edit_state"), patch.object(app, "attach_content_publications", side_effect=lambda data:data):
-            self.assertEqual(len(app.production_catalog()["jobs"]), 8)
-        self.assertEqual(records.call_count, 1)
-
     def test_same_length_inplace_journal_change_with_restored_mtime_is_visible(self):
         operations = ProductionOperations(self.runtime / "production")
         operations.root.mkdir(parents=True)
@@ -88,35 +77,6 @@ class GlobalLoadingTests(unittest.TestCase):
         path.write_bytes(changed)
         os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
         self.assertEqual(operations._read(path)["state"], "uncertain")
-
-    def test_slow_delivery_check_does_not_block_an_independent_business_read(self):
-        app = self.server.app
-        entered, release = threading.Event(), threading.Event()
-        failures = []
-        catalog = {"jobs": [], "carousels": [{"id": "CAR-111111111111", "slides": [], "deliveries": []}]}
-        def slow(item):
-            entered.set()
-            if not release.wait(5):
-                raise AssertionError("media verification was not released")
-        def read_deliveries():
-            try:
-                app.production_deliveries()
-            except Exception as error:
-                failures.append(error)
-        with patch.object(app.production, "public", return_value=catalog), patch.object(app, "carousel_images_live", side_effect=slow):
-            worker = threading.Thread(target=read_deliveries)
-            worker.start()
-            try:
-                self.assertTrue(entered.wait(2))
-                acquired = app.lock.acquire(timeout=.5)
-                self.assertTrue(acquired, "Slow file reads must not hold the global business lock")
-                if acquired:
-                    app.lock.release()
-                self.assertEqual(self.request("GET", "/api/creation?product=202H")[0], 200)
-            finally:
-                release.set();worker.join(5)
-        self.assertEqual(failures, [])
-
 
 if __name__ == "__main__":
     unittest.main()

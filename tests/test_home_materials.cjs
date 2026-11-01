@@ -72,15 +72,15 @@ test('home lists posted videos that are not on the publish calendar yet and open
   context.$=selector=>({'#home-page':root,'#breadcrumb':breadcrumb}[selector] || null);
   context.window.WorkbenchShell.parse=()=>({page:'home'});
   const row={id:'video:PRD-111111111111',kind:'video',title:'Zack 202',product:'202H',direction_id:'202H-S1',published_on:'2026-10-22',next_hash:'#production/PRD-111111111111?step=publish'};
-  const photo={...row,id:'carousel:CAR-111111111111',kind:'carousel',title:'Zack 202 图文',next_hash:'#production/CAR-111111111111?step=delivery'};
-  context.api=async path=>path.startsWith('/api/content')?{items:[],counts:{attention:0,publish:0},calendar_pending:{total:3,items:[row,photo]}}:path.includes('videos')?{videos:[]}:{tasks:[]};
+  const other={...row,id:'video:PRD-222222222222',title:'Zack 203',next_hash:'#production/PRD-222222222222?step=publish'};
+  context.api=async path=>path.startsWith('/api/content')?{items:[],counts:{attention:0,publish:0},calendar_pending:{total:3,items:[row,other]}}:path.includes('videos')?{videos:[]}:{tasks:[]};
   vm.runInContext(read('home.js'),context);
   await context.window.WorkbenchHome.route();
   assert.ok(root.innerHTML.includes('3 条已发布、还没上传到发布日历'));
   assert.ok(root.innerHTML.includes('#production/PRD-111111111111?step=publish'));
   assert.ok(root.innerHTML.includes('发布于 2026-10-22'));
-  assert.ok(root.innerHTML.includes('#production/CAR-111111111111?step=delivery'));
-  assert.ok(root.innerHTML.includes('图文制作单'));
+  assert.ok(root.innerHTML.includes('#production/PRD-222222222222?step=publish'));
+  assert.ok(root.innerHTML.includes('视频制作单'));
   assert.ok(root.innerHTML.includes('另有 1 条'));
   assert.ok(!root.innerHTML.includes('现在没有等你处理的内容'));
   // Without any, the overview stays as before.

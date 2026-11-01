@@ -53,6 +53,7 @@ class BackupBrowserTests(unittest.TestCase):
             page.clock.install()
         page.set_content('<div id="breadcrumb"></div><main id="content"></main>')
         page.add_style_tag(path=str(ROOT / "static" / "style.css"))
+        page.add_style_tag(path=str(ROOT / "static" / "buttons.css"))
         page.add_style_tag(path=str(ROOT / "static" / "settings.css"))
         fixtures = {
             "/api/ai/status": {"available": True, "providers": {"codex": {"available": True}, "claude": {"available": True}}},

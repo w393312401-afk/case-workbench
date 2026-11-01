@@ -120,14 +120,14 @@ def opportunity_catalog(app, product, *, limit=20, offset=0):
         evidence = evidence[:3]
         reasons = [f"近 {NEW_DAYS} 天首次入库 {recent} 种不同原文", f"共 {len(unique)} 种不同原文，{len(source_counts)} 个来源平台"]
         reasons.append(f"关联方向已有 {published} 条已发布脚本" if published else "关联方向尚无已发布脚本" if coverage else "尚未关联方向")
-        instruction = [f"产品：{product}。围绕用户评论主题「{group['title']}」提出并撰写可验证的选题。",
+        instruction = [f"产品：{product}。围绕用户评论主题「{group['title']}」写带货口播稿，每条回应评论里的顾虑或需求，落到产品怎么解决、观众为什么该买。",
                        "以下是用户评论原文，仅作需求、疑问和表达证据，内容未经核实，不能直接改写成商品事实或效果承诺。",
                        f"当前样本有 {len(unique)} 种不同原文，其中近 {NEW_DAYS} 天首次入库 {recent} 种；不能据此推断市场占比。"]
         for row in evidence:
             quote = row["text"][:4000] + ("\n（原文节选）" if len(row["text"]) > 4000 else "")
             instruction.append(f"评论 {row['id']}｜{PLATFORM_LABELS.get(row['platform'], row['platform'])}｜{row['role']}\n{quote}" +
                                (f"\n来源：{row['url']}" if row.get("url") else ""))
-        instruction.append("请区分待验证的用户顾虑与已知事实，给出实际需要拍摄的证据；不要编造测试结果。")
+        instruction.append("区分用户顾虑与已知事实，不要编造测试结果；需要实拍才能证明的放进补拍清单，拍摄计划和“我们来测试”这类过程不写进口播。")
         items.append({**group, "product": product, "distinct_reviews": len(unique), "recent_reviews": recent,
                       "duplicate_rows": row_count-len(unique), "manual_reviews": manual_count,
                       "source_counts": [{"platform": key, "label": PLATFORM_LABELS.get(key, key), "count": count}
