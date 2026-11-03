@@ -23,5 +23,9 @@ fi
 [ -z "$RESOLVE_MCP" ] && echo "提示：没有找到 ResolveMCP，AI 剪辑暂不可用；找到后用 RESOLVE_MCP 环境变量指向它。"
 
 echo "本机工作台已启动，浏览器会打开导入页。请保持这个窗口，关闭窗口就会停止。"
-( sleep 4; open "http://127.0.0.1:8767/#production/import" ) &
+# 服务加载需要一会儿，等端口真的能连上再打开浏览器，最多等 2 分钟。
+( for _ in $(seq 1 120); do
+    if curl -s -o /dev/null "http://127.0.0.1:8767/"; then open "http://127.0.0.1:8767/#production/import"; break; fi
+    sleep 1
+  done ) &
 .venv/bin/python server.py --no-open

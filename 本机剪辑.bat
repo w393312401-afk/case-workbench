@@ -11,7 +11,7 @@ if not exist ".venv\Scripts\python.exe" (
 ".venv\Scripts\python.exe" -m pip install -q -r requirements.txt
 if errorlevel 1 goto fail
 echo 本机工作台已启动，浏览器会打开导入页。请保持这个窗口，关闭窗口就会停止。
-start "" /b powershell -NoProfile -Command "Start-Sleep 4; Start-Process 'http://127.0.0.1:8767/#production/import'"
+start "" /b powershell -NoProfile -Command "for ($i = 0; $i -lt 120; $i++) { try { $c = New-Object Net.Sockets.TcpClient('127.0.0.1', 8767); $c.Close(); Start-Process 'http://127.0.0.1:8767/#production/import'; break } catch { Start-Sleep 1 } }"
 ".venv\Scripts\python.exe" server.py --no-open
 goto end
 :fail
