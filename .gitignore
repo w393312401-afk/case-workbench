@@ -29,6 +29,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.DS_Store
 .test-artifacts/
 node_modules/
 .wrangler/
