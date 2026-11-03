@@ -70,11 +70,9 @@ class CompletedTaskImportTests(unittest.TestCase):
         self.assertIsNone(task["rounds"][0]["stages"])
         self.assertEqual(task["rounds"][0]["output"], CANDIDATE)
         self.assertEqual(len(app.ai.list_tasks(product="202H", direction_id=body["direction_id"])), 1)
-        for script, variant in zip(result["scripts"], parse_variants(CANDIDATE, loose=False)):
+        for script in result["scripts"]:
             for field in ("id", "family_id", "version", "parent_id", "text", "translation_zh", "status"):
                 self.assertEqual(script[field], old[script["id"]][field])
-            label, records, note = app._spoken_records(script)
-            self.assertEqual((label, records, note), (variant["label"], variant["lines"], ""))
             self.assertEqual(script["source"]["task_id"], task["task_id"])
 
     def test_http_route_imports_task_and_verified_script_sources(self):

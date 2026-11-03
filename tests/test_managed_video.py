@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -53,6 +54,26 @@ class VideoFilesTests(unittest.TestCase):
         self.source.unlink()
         first.unlink()
         self.assertEqual(second.read_bytes(), self.data)
+
+    def test_explicit_old_runtime_alias_resolves_to_owned_file(self):
+        owned, _ = self.files.copy_for_case(self.source, FIRST)
+        alias = self.root / "old-runtime"
+        try:
+            os.symlink(self.files.runtime, alias, target_is_directory=True)
+        except OSError:
+            if os.name != "nt" or subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(self.files.runtime)],
+                                                 capture_output=True).returncode:
+                self.skipTest("Host does not permit directory links")
+        self.addCleanup(lambda: alias.rmdir() if getattr(alias, "is_junction", lambda: False)() else alias.unlink(missing_ok=True))
+        files = ManagedVideoFiles(self.files.runtime, legacy_roots=[alias])
+        old_path = alias / owned.relative_to(self.files.runtime)
+        self.assertTrue(files.info(old_path, FIRST)["owned"])
+        same, created = files.copy_for_case(old_path, FIRST)
+        self.assertEqual(same, owned)
+        self.assertFalse(created)
+        other = self.root / "other"
+        other.mkdir()
+        self.assertFalse(ManagedVideoFiles(self.files.runtime, legacy_roots=[other]).legacy_roots)
 
     def test_same_named_sources_get_separate_complete_copies(self):
         first, _ = self.files.copy_for_case(self.source, FIRST)

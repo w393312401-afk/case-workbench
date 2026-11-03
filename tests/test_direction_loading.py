@@ -64,7 +64,10 @@ class DirectionLoadingTests(unittest.TestCase):
         self.assertLessEqual(read.call_count, 2)
         observations = {item["case_id"]: item for item in detail["group"]["observations"]}
         for case in detail["cases"]:
-            self.assertEqual(case["sales_data"], observations[case["case_id"]]["sales_data"])
+            annotated = copy.deepcopy(case["sales_data"])
+            if annotated.get("video"):
+                annotated["video"].pop("review_status", None)  # Added for the page; the frozen observation has none.
+            self.assertEqual(annotated, observations[case["case_id"]]["sales_data"])
             self.assertEqual(case["sales_data"], app.detail(case["case_id"])["sales_data"])
             self.assertNotIn("performance", case["resolved_direction"])
             self.assertNotIn("lead_tier", case["resolved_direction"])

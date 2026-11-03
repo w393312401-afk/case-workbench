@@ -127,9 +127,24 @@ class DataTransferAPITests(unittest.TestCase):
         self.assertEqual(persisted["settings"]["directory"], str(destination))
         self.assertEqual(persisted["history"][-1]["path"], value["backup"]["path"])
 
+    def test_backup_directory_may_sit_in_archive_but_nowhere_else_in_the_project(self):
+        data = self.isolate_transfer()
+        body = {"enabled": False, "interval_days": 7, "time": "02:00", "keep": 3}
+        destination = data.app_root / "archive" / "完整数据备份"
+        with patch.object(data.schedule, "configure", return_value={"installed": False, "mode": "windows"}):
+            status, _, value = self.request("POST", "/api/data/settings", {**body, "directory": str(destination)})
+            self.assertEqual(status, 200, value)
+            for rejected in (data.app_root, data.app_root / "图文素材", data.app_root / "other", self.server.app.runtime / "backups"):
+                status, _, value = self.request("POST", "/api/data/settings", {**body, "directory": str(rejected)})
+                self.assertEqual(status, 400, rejected)
+                self.assertIn("避免重复打包", value["error"])
+        status, _, value = self.request("POST", "/api/data/backup", {})
+        self.assertEqual(status, 200, value)
+        self.assertEqual(Path(value["backup"]["path"]).parent, destination)
+
     def test_running_creation_blocks_snapshot(self):
         self.isolate_transfer()
-        with patch.object(self.server.app, "image_running", return_value=True):
+        with patch.object(self.server.app, "edit_running", return_value=True):
             status, _, value = self.request("POST", "/api/data/export", {"preferences": {}})
         self.assertEqual(status, 409, value)
         self.assertFalse(self.server.data_maintenance)

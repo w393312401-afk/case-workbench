@@ -172,6 +172,7 @@ class ShellBrowserTests(unittest.TestCase):
         self.assertEqual(page.evaluate("localStorage.getItem('case-library-navigation-v1')"), legacy)
         page.locator('[data-page="library"]').click()
         page.locator("#case-search").wait_for()
+        page.locator(".library-saved-row > summary").click()
         page.locator("#library-saved-view").select_option(custom_id)
         page.locator(f'.case-card[href="#case/{self.identifier}"]').wait_for()
         self.assertTrue(page.locator("#library-navigation").is_hidden())

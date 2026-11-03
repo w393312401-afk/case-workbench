@@ -195,7 +195,7 @@ function guardRequest(request, config) {
     throw new RequestError(403, 'A same-origin browser request is required.');
   }
   // Restart is allowed remotely (fly, 2026-10-15); the workbench still refuses it while work is running.
-  if (/^\/api\/(?:service\/shutdown|remote-account)(\/|$)/.test(pathname)
+  if (/^\/api\/(?:service\/shutdown|remote-account|production\/local-edit\/import)(\/|$)/.test(pathname)
       || (!SAFE_METHODS.has(request.method) && /^\/api\/ai\/claude\/(login|callback|key|install)(\/|$)/.test(pathname))) {
     throw new RequestError(403, 'This action is available only on the local workbench.');
   }

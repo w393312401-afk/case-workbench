@@ -109,7 +109,7 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
         self.assertEqual(saved["current"]["production"]["script_version"], linked["script_id"])
 
     def test_completed_candidate_requires_single_text_and_writeback_conflict_preserves_input(self):
-        task = self.create_task("请只处理临时案例。")
+        task = self.create_task("请只处理临时案例。", action="variants")
         before = self.store.read_case(self.identifier)
         page = self.open_page(f"#/202H/ai/{task['task_id']}")
         page.locator(".ai-candidate-actions .ai-menu summary").first.click()

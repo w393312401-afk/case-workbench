@@ -16,10 +16,10 @@ class NoiseActivityTests(unittest.TestCase):
         self.store = ActivityStore(Path(temporary.name))
         self.app = SimpleNamespace(activity=self.store)
 
-    def fail(self, source="IMG-one", **fields):
-        run = "images:CAR-test:" + source
-        self.store.record(run, kind="images", owner_id="CAR-test", source_id=source,
-                          status="failed", title="生成图片", phase="images", message="连接中断", **fields)
+    def fail(self, source="VOC-one", **fields):
+        run = "voice:PRD-test:" + source
+        self.store.record(run, kind="voice", owner_id="PRD-test", source_id=source,
+                          status="failed", title="生成配音", phase="voice", message="连接中断", **fields)
         return run
 
     def test_ai_failure_settled_by_a_refill_leaves_current_and_comes_back_when_the_rule_stops_holding(self):
@@ -59,17 +59,17 @@ class NoiseActivityTests(unittest.TestCase):
         run = self.fail()
         logs = self.store.logs(run)["logs"]
         cursor = self.store.feed()["cursor"]
-        self.store.archive_owner("CAR-test", True)
-        self.store.archive_owner("CAR-test", True, source="content")
+        self.store.archive_owner("PRD-test", True)
+        self.store.archive_owner("PRD-test", True, source="content")
         delta = self.store.feed(after=cursor, filter="current")
         self.assertIn(run, delta["removed"])
         self.assertEqual(delta["items"], [])
         self.assertEqual(delta["counts"]["unread"], 0)
         self.assertEqual(self.store.logs(run)["logs"], logs)
         self.assertEqual(self.store.feed()["items"][0]["status"], "failed")
-        self.store.archive_owner("CAR-test", False)
+        self.store.archive_owner("PRD-test", False)
         self.assertEqual(self.store.feed(filter="current")["items"], [])
-        self.store.archive_owner("CAR-test", False, source="content")
+        self.store.archive_owner("PRD-test", False, source="content")
         self.assertEqual(self.store.feed(filter="current")["items"][0]["run_id"], run)
 
     def test_archived_timeline_hides_edit_attention_and_restore_reopens_it(self):

@@ -1,4 +1,4 @@
-"""Production orders show one step at a time under a pinned top bar, and only 成品素材 timelines are offered."""
+"""Production orders show pinned steps and offer material timelines whose names contain Chinese."""
 import unittest
 
 import json
@@ -18,7 +18,7 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         self.payload["job"]["selected_take"] = "TAK-0123456789ab"
         self.payload["job"]["timelines"] = [{"unique_id": "uid-own", "name": "Lab261011-202-1", "creator": "Lab", "markers": 1,
             "frames": 60, "fps": "29.97", "take_id": "TAK-0123456789ab", "built_at": "2026-10-11"}]
-        self.timelines = ["蓝点折刀成品素材", "Lab261011-202-1", "户外猎刀成品素材", "混剪素材"]
+        self.timelines = ["蓝点折刀成品素材", "Lab261011-202-1", "户外猎刀成品素材", "混剪素材", "Buck110折刀", "繁體廚刀", "raw-001"]
         page = self.open_page()
         steps = page.locator(".production-steps")
         self.assertEqual(steps.locator("[data-step] span").all_inner_texts(), ["脚本", "配音", "达芬奇时间线", "AI 剪辑与人工审查", "成片与发布"])
@@ -28,7 +28,8 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
             self.assertFalse(page.locator(hidden).is_visible())
         options = page.locator('#edit-form input[name="material"]')
         options.first.wait_for()
-        self.assertEqual([options.nth(i).get_attribute("value") for i in range(options.count())], ["蓝点折刀成品素材", "户外猎刀成品素材"])
+        self.assertEqual([options.nth(i).get_attribute("value") for i in range(options.count())],
+                         ["蓝点折刀成品素材", "户外猎刀成品素材", "混剪素材", "Buck110折刀", "繁體廚刀"])
         self.assertTrue(all(options.nth(i).is_checked() for i in range(options.count())))
 
         steps.locator('[data-step="voice"]').click()
@@ -44,17 +45,27 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         self.assertEqual(pinned["bar"], 0)
         self.assertEqual(pinned["steps"], pinned["height"])
 
-    def test_without_finished_material_timelines_names_can_be_typed(self):
+    def test_without_chinese_material_timelines_names_can_be_typed(self):
         self.payload["job"]["timelines"] = [{"unique_id": "uid-own", "name": "Lab261011-202-1", "creator": "Lab", "markers": 1,
             "frames": 60, "fps": "29.97", "take_id": "", "built_at": "2026-10-11"}]
         self.payload["job"]["edits"] = [self.edit("awaiting_review")]
+        self.timelines = ["Lab261011-202-1", "raw-001"]
+        self.payload["product_settings"]["material_timelines"] = ["Buck110折刀"]
         page = self.open_page()
-        page.locator('#edit-form input[name="material_text"]').wait_for()
+        materials = page.locator('#edit-form input[name="material_text"]')
+        materials.wait_for()
+        self.assertEqual(materials.input_value(), "Buck110折刀")
+        page.locator('#edit-form .context-note').get_by_text("达芬奇里没有名称含中文的素材时间线，可以直接填写（逗号分隔）。", exact=True).wait_for()
         self.assertEqual(page.locator('#edit-form input[name="material"]').count(), 0)
-        page.locator('#edit-form input[name="material_text"]').fill("混剪素材")
+        materials.fill("混剪素材，raw-001")
         page.locator("#edit-panel").get_by_role("button", name="另建时间线并开始剪辑", exact=True).click()
-        page.locator("#edit-form [data-error]").get_by_text("素材时间线只能选名称带「成品素材」的时间线。", exact=True).wait_for()
+        page.locator("#edit-form [data-error]").get_by_text("素材时间线名称需包含中文。", exact=True).wait_for()
         self.assertEqual(self.calls, [])
+        materials.fill("混剪素材，Buck110折刀")
+        page.locator("#edit-panel").get_by_role("button", name="另建时间线并开始剪辑", exact=True).click()
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已另建时间线并加入剪辑任务')")
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0]["body"]["materials"], ["混剪素材", "Buck110折刀"])
 
     def test_selecting_a_take_builds_its_timeline_without_changing_step(self):
         good = [{"number": 1, "start": 0, "end": 1.5, "coverage": 1}]

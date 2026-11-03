@@ -14,7 +14,7 @@ from contextlib import nullcontext
 
 from elevenlabs_client import VoiceError
 from production_operations import TERMINAL
-from production_store import EDIT_ID
+from production_store import EDIT_ID, timeline_edits
 import re
 
 JOB_ID = re.compile(r"PRD-[0-9a-f]{12}")
@@ -51,6 +51,9 @@ class OrderDeleteMixin:
                 folder = root / "edits" / edit["id"]
                 if _safe_folder(folder, root / "edits"):
                     folders.append(folder)
+        replica = root / "replica" / job["id"]
+        if _safe_folder(replica, root / "replica"):
+            folders.append(replica)
         files = [path for path in (root / "handoffs").glob(f"{job['id']}-*.md") if path.is_file() and not path.is_symlink()]
         for path in (root / "operations").glob("*.json"):
             try:
@@ -159,6 +162,122 @@ class OrderDeleteMixin:
             activity = getattr(self, "activity", None)
             if activity is not None:
                 activity.delete_owner(identifier)
+        except Exception:
+            pass
+        return {**result, "warnings": warnings}
+
+    # -- one timeline ----------------------------------------------------------------------------------------------
+    def delete_timeline(self, identifier, body):
+        """Permanently delete one timeline of an order with its AI edit runs and local files; the DaVinci timeline stays.
+
+        body.preview=true only reports what would be removed. A published timeline is refused: its video and sales
+        records would lose their source."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        if not JOB_ID.fullmatch(str(identifier)):
+            raise VoiceError(404, "这张视频制作单不存在。")
+        uid = body.get("timeline_uid")
+        if not isinstance(uid, str) or not uid.strip() or len(uid) > 500:
+            raise VoiceError(400, "时间线标识无效。")
+        guard = getattr(self, "_video_publication_job_guard", None)
+        with guard(identifier) if guard else nullcontext():
+            return self._delete_timeline(identifier, uid, body)
+
+    def _timeline_footprint(self, job, timeline):
+        root = self.production.root
+        folders, files = [], []
+        for edit in timeline_edits(job, timeline):
+            if EDIT_ID.fullmatch(str(edit.get("id"))):
+                folder = root / "edits" / edit["id"]
+                if _safe_folder(folder, root / "edits"):
+                    folders.append(folder)
+        # Handoff notes are named after the order; the timeline's id inside them says which one they are for.
+        for path in (root / "handoffs").glob(f"{job['id']}-*.md"):
+            try:
+                if path.is_file() and not path.is_symlink() and timeline["unique_id"] in path.read_text(encoding="utf-8"):
+                    files.append(path)
+            except (OSError, ValueError):
+                continue
+        key = timeline.get("operation_key")
+        if key:
+            for path in (root / "operations").glob("*.json"):
+                try:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if (isinstance(record, dict) and record.get("kind") == "timeline" and record.get("job_id") == job["id"] and
+                        record.get("operation_key") == key and (record.get("state") in TERMINAL or self._abandoned_build(record))):
+                    files.append(path)
+                    folder = root / "operations" / key
+                    if _safe_folder(folder, root / "operations"):
+                        folders.append(folder)
+        return folders, files
+
+    def _timeline_blockers(self, job, timeline):
+        with self.lock:
+            self._edits()
+            for edit in timeline_edits(job, timeline):
+                if edit.get("status") == "running" or edit["id"] in self._edit_live or edit["id"] in self._edit_pending:
+                    return "这条时间线的 AI 剪辑还在运行或结果尚未保存，请等它结束。"
+        if hasattr(self, "_video_publications"):
+            from workbench_video_publish import timeline_records
+            entry = self._video_publications().read()["jobs"].get(job["id"], {})
+            if timeline_records(entry, timeline["unique_id"]):
+                return "这条时间线已经登记发布，删除会让发布和销售记录失去来源，不能删除。"
+        return ""
+
+    def _delete_timeline(self, identifier, uid, body):
+        preview = body.get("preview") is True
+        if not preview:
+            self._validate_edit_request(body)
+            prior = self.production.replay("timeline_delete", {**body, "job_id": identifier})
+            if prior:
+                return {**prior, "warnings": []}
+        job = self.production.job(identifier)
+        timeline = next((row for row in job.get("timelines", []) if row.get("unique_id") == uid), None)
+        if not timeline:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        problem = self._timeline_blockers(job, timeline)
+        if problem:
+            raise VoiceError(409, problem)
+        folders, files = self._timeline_footprint(job, timeline)
+        edit_ids = [edit["id"] for edit in timeline_edits(job, timeline)]
+        if preview:
+            size = count = 0
+            for folder in folders:
+                part, number = _tree(folder)
+                size, count = size + part, count + number
+            for path in files:
+                try:
+                    size, count = size + path.lstat().st_size, count + 1
+                except OSError:
+                    continue
+            return {"timeline_uid": uid, "name": timeline.get("name", ""), "bytes": size, "files": count, "edits": len(edit_ids)}
+        result = self.production.mutate("timeline_delete", {**body, "job_id": identifier})
+        warnings = []
+
+        def unlock(function, path, _):
+            os.chmod(path, 0o700)
+            function(path)
+        for folder in folders:
+            try:
+                shutil.rmtree(folder, onerror=unlock)
+            except OSError as exc:
+                warnings.append(f"记录已删除，但本地文件夹没有清理干净：{exc}")
+            if folder.exists():
+                warnings.append(f"记录已删除，但本地文件夹仍有残留，可手动删除：{folder}")
+        for path in files:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                warnings.append(f"记录已删除，但有文件没有清理干净：{exc}")
+        try:
+            activity = getattr(self, "activity", None)
+            if activity is not None:
+                for source in (*edit_ids, uid):
+                    activity.delete_source(identifier, source)
         except Exception:
             pass
         return {**result, "warnings": warnings}

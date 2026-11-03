@@ -50,10 +50,10 @@ class VideoPublicationBrowserTests(unittest.TestCase):
             if (url === '/api/content/calendar') {window.calendarCalls.push(structuredClone(options.body));return {};}
             window.calls.push(structuredClone(options.body));
             if (window.responseStatus) throw Object.assign(new Error('测试响应'),{status:window.responseStatus});
-            return {};
+            return window.apiReply || {};
           };
-          await VideoPublication.mount(document.querySelector('#publication'),{job:{id:'PRD-111111111111'},api,
-            onSaved:async () => {window.saved = true;}});
+          await VideoPublication.mount(document.querySelector('#publication'),{job:window.publicationJob || {id:'PRD-111111111111'},api,
+            onSaved:async () => {window.saved = true;},onTimelineChanged:async () => {window.timelineChanged = true;}});
         }""", setup)
 
     def fill(self):
@@ -63,6 +63,63 @@ class VideoPublicationBrowserTests(unittest.TestCase):
         self.page.locator('[name="account"]').fill('fixture')
         self.page.locator('[name="post_id"]').fill('7999999999999999901')
         self.page.locator('[name="file_confirmed"]').check()
+
+    TIMELINE = """window.toast = (text,bad) => {window.toasted = [text,Boolean(bad)];};
+      window.copyText = text => {window.copiedText = text;};
+      window.publicationJob = {id:'PRD-111111111111',edits:[],timelines:[{unique_id:'uid-1',name:'Lab261101-202-1',fps:'30'},{unique_id:'uid-2',name:'Lab261101-202-2',fps:'30'}]};
+      window.publicationDetail.timeline_uid = 'uid-2';
+      window.publicationDetail.timelines = [{unique_id:'uid-2',name:'Lab261101-202-2'},{unique_id:'uid-1',name:'Lab261101-202-1'}];"""
+
+    def mount_timeline(self, setup=""):
+        self.page.add_script_tag(path=str(COPY_ID))
+        self.mount(self.TIMELINE + setup)
+        return self.page.locator('[data-timeline-tools]')
+
+    def test_timeline_tools_copy_the_name_and_open_it_in_resolve(self):
+        tools = self.mount_timeline()
+        self.assertIn('Lab261101-202-2', tools.inner_text())
+        tools.locator('[data-copy-id]').click()
+        self.assertEqual(self.page.evaluate('window.copiedText'), 'Lab261101-202-2')
+        self.page.evaluate("window.responseStatus = 0; window.apiReply = {name:'Lab261101-202-2'}")
+        tools.locator('[data-open-timeline]').click()
+        self.page.wait_for_function("window.toasted?.[0] === '已在达芬奇打开 Lab261101-202-2。'")
+        self.assertEqual(self.page.evaluate('window.calls'), [{'unique_id': 'uid-2'}])
+
+    def test_timeline_tools_are_left_out_when_there_is_no_timeline(self):
+        self.assertEqual(self.page.locator('[data-timeline-tools]').count(), 0)
+
+    def test_subtitle_check_repaints_only_its_row_and_keeps_a_typed_video_id(self):
+        tools = self.mount_timeline()
+        self.page.locator('[name="post_id"]').fill('7999999999999999901')
+        # A typed ID marks the calendar on its own, which also reports a save; only what the check does counts here.
+        self.page.wait_for_function('window.saved === true')
+        self.page.evaluate("""window.responseStatus = 0;window.saved = false;
+          window.apiReply = {timeline:{unique_id:'uid-2',name:'Lab261101-202-2',fps:'30',subtitle_check:{status:'fixed',message:'字幕已自动改 1 处',at:'2026-11-01T09:00:00+00:00',
+            changes:[{start:300,end:330,before:'Sharpeball',after:'SHARPAL'}],review:[]}}}""")
+        tools.locator('[data-check-subtitles]').click()
+        tools.locator('[data-subtitle-state="fixed"]').wait_for()
+        self.page.wait_for_function('window.timelineChanged === true')
+        self.assertEqual(self.page.locator('[name="post_id"]').input_value(), '7999999999999999901')
+        call = self.page.evaluate('window.calls')[0]
+        self.assertEqual(call['timeline_uid'], 'uid-2')
+        self.assertTrue(call['request_id'])
+        tools.locator('summary').click()
+        self.assertIn('10.0 秒：Sharpeball → SHARPAL', tools.inner_text())
+        self.assertTrue(tools.locator('[data-check-subtitles]').is_enabled())
+        self.assertEqual(self.page.evaluate('window.saved'), False)
+
+    def test_a_failed_subtitle_check_says_why_and_can_retry(self):
+        tools = self.mount_timeline()
+        tools.locator('[data-check-subtitles]').click()
+        tools.locator('[data-timeline-tools-error]', has_text='测试响应').wait_for()
+        self.assertEqual(self.page.evaluate('window.toasted'), ['测试响应', True])
+        self.assertTrue(tools.locator('[data-check-subtitles]').is_enabled())
+        self.assertEqual(tools.locator('[data-check-subtitles]').inner_text(), '核对字幕')
+
+    def test_a_timeline_being_edited_cannot_be_checked_but_can_be_opened(self):
+        tools = self.mount_timeline("window.publicationJob.edits = [{timeline_uid:'uid-2',status:'running'}];")
+        self.assertTrue(tools.locator('[data-check-subtitles]').is_disabled())
+        self.assertTrue(tools.locator('[data-open-timeline]').is_enabled())
 
     def test_screen_copy_and_full_text(self):
         self.assertEqual(self.page.locator('[data-copy-screen]').count(), 0)

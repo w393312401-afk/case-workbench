@@ -40,7 +40,7 @@ class VideoGuidanceBrowserTests(ProductionManualCompletionBrowserTests):
         page.locator('[data-step="publish"].done').wait_for()
         page.locator('[data-step="publish"] small').get_by_text('已登记发布', exact=True).wait_for()
         self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-step'), 'edit')
-        page.locator('[data-next-action]').get_by_text('下一步：查看发布登记 →', exact=True).wait_for(state='attached')
+        page.locator('[data-next-action]').get_by_text('下一步：查看发布记录 →', exact=True).wait_for(state='attached')
 
     def test_historical_publication_does_not_complete_current_step(self):
         self.payload['job'].update(status='approved', manual_completion=self.receipt())
@@ -64,7 +64,7 @@ class VideoGuidanceBrowserTests(ProductionManualCompletionBrowserTests):
         }
         page = self.open_edit_step()
         page.locator('[data-step="publish"].done').wait_for()
-        page.locator('[data-next-action]').get_by_text('下一步：查看发布登记 →', exact=True).wait_for(state='attached')
+        page.locator('[data-next-action]').get_by_text('下一步：查看发布记录 →', exact=True).wait_for(state='attached')
 
 
 # Reuse fixture setup without rediscovering inherited test cases.

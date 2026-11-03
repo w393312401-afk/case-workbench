@@ -83,6 +83,19 @@ class SkillRuntimeTests(unittest.TestCase):
         self.assertEqual(catalog[0]["members"], [WRITING, AUDIT, ANALYSIS])
         self.assertEqual(self.snapshot(), before)
 
+    def test_separate_case_data_and_skill_code_load_their_own_references(self):
+        data_root = self.base / "workbench-data"
+        template = data_root / "sources/video-cases/case_template.md"
+        self.write(template, "# 数据目录中的案例模板\n")
+        runtime = SkillRuntime(self.review, case_data_root=data_root)
+        result = runtime.prepare("retrospective")
+        self.assertTrue(result["ready"])
+        self.assertTrue(runtime.catalog()[0]["available"])
+        ref = next(item for item in result["references"] if item["label"] == "案例拆解唯一八章结构")
+        self.assertEqual(Path(ref["path"]), template)
+        self.assertIn("数据目录中的案例模板", ref["text"])
+        self.assertTrue(any(Path(item["path"]).is_relative_to(self.review) for item in result["references"]))
+
     def test_auto_selects_action_skill_and_native_main_is_not_duplicated(self):
         expected = {"variants": WRITING, "review": AUDIT, "retrospective": ANALYSIS}
         for action, name in expected.items():

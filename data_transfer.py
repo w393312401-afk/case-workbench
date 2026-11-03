@@ -205,9 +205,11 @@ class DataTransfer:
         if not target.is_absolute() or (os.name == "nt" and str(target).startswith(("\\\\", "//"))):
             raise TransferError("请使用本机文件夹的完整路径，例如 D:\\工作台备份。")
         target = target.resolve()
+        # archive/ is never packed, so it may hold archives; the project's other folders may not.
+        in_archive = target.is_relative_to(self.app_root / "archive")
         for root in (self.skill_root, self.runtime, self.app_root):
-            if target.is_relative_to(root) or root.is_relative_to(target):
-                raise TransferError("备份文件夹必须放在工作台、案例库和运行资料目录之外，避免重复打包。")
+            if target.is_relative_to(root) and not in_archive or root.is_relative_to(target):
+                raise TransferError("备份文件夹必须放在工作台的 archive 目录内，或工作台、案例库和运行资料目录之外，避免重复打包。")
         try:
             target.mkdir(parents=True, exist_ok=True)
             descriptor, probe = tempfile.mkstemp(prefix=".backup-write-check-", dir=target)

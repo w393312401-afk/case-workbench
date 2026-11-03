@@ -7,12 +7,16 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import Mock, patch
 import urllib.error
+
+from production_store import ProductionStore, VoiceError
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -214,7 +218,7 @@ class LauncherTests(unittest.TestCase):
              patch.object(LAUNCHER, "windows_kernel", return_value=kernel), \
              patch.object(LAUNCHER, "restart") as restart:
             self.assertEqual(LAUNCHER.main(["--no-browser"]), 0)
-        restart.assert_called_once_with(self.root, {**self.config, "performance_sources": []}, no_browser=True)
+        restart.assert_called_once_with(self.root, {**self.config, "performance_sources": [], "legacy_runtime_roots": []}, no_browser=True)
 
     def test_unknown_port_owner_is_never_killed_and_no_service_is_spawned(self):
         with ExitStack() as stack:
@@ -461,7 +465,8 @@ class StartHousekeepingTests(unittest.TestCase):
         folder = self.root / "archive" / "data-backups"
         folder.mkdir(parents=True)
         for index in range(LAUNCHER.BACKUP_KEEP + 2):
-            (folder / f"business-20260101-0000{index:02d}.zip").write_bytes(b"old")
+            with LAUNCHER.zipfile.ZipFile(folder / f"business-20260101-0000{index:02d}.zip", "w") as archive:
+                archive.writestr("runtime/directions/catalog.json", "{}")
         target = LAUNCHER.backup_business_data(self.root, self.config)
         with LAUNCHER.zipfile.ZipFile(target) as archive:
             self.assertEqual(sorted(archive.namelist()), ["runtime/directions/catalog.json", "skill/cases/PVR-1/event.json"])
@@ -520,6 +525,222 @@ class StartHousekeepingTests(unittest.TestCase):
         with patch.object(LAUNCHER, "backup_business_data", side_effect=OSError("disk full")):
             LAUNCHER.prepare_start(self.root, self.config)
         self.assertIn("disk full", (self.root / "launcher-error.log").read_text(encoding="utf-8"))
+
+
+class BackupCoverageTests(unittest.TestCase):
+    """Production records travel with every restart backup; media stays with the full backup."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="workbench-backup-coverage-test-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        self.root = self.base / "app"
+        self.root.mkdir()
+        self.skill, self.runtime = self.base / "skill", self.base / "runtime"
+        self.config = {"skill_root": str(self.skill), "runtime_root": str(self.runtime)}
+        (self.skill / "cases").mkdir(parents=True)
+        (self.skill / "deleted_case_sources.json").write_text("[]", encoding="utf-8")
+
+    def write(self, *names):
+        for name in names:
+            path = self.runtime / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x")
+
+    def restore(self, archive):
+        """The documented recovery: runtime/ goes back to runtime_root and skill/ to skill_root."""
+        with LAUNCHER.zipfile.ZipFile(archive) as source:
+            for name in source.namelist():
+                key, relative = name.split("/", 1)
+                target = Path(self.config[key + "_root"]) / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read(name))
+
+    def test_records_are_backed_up_while_media_caches_and_old_copies_stay_out(self):
+        kept = ["production/catalog.json", "production/backups/old.json", "production/request-results/a.json",
+                "production/audio/PRD-1/TAK-1/voiceover.mp3", "production/audio/PRD-1/TAK-1/alignment.json",
+                "production/edits/EDT-1/candidates.json", "production/edits/EDT-1/result.json", "production/edits/EDT-1/plan.md",
+                "production/operations/key/resolve.json", "production/video-publications/catalog.json",
+                "production/prepublish/PPR-1/review.json", "library/PVR-1/notes.md",
+                "performance/performance.sqlite", "performance/public-stats.sqlite", "performance/uploads/week.xlsx",
+                "evidence/product-catalog.json", "davinci-ledger/202H.json", "task-activity.sqlite", "ai-preferences.json",
+                "creation/backups/still-whole.png"]
+        left_out = ["production/audio/PRD-1/TAK-1/voiceover.wav", "production/edits/EDT-1/stills/a.png",
+                    "production/edits/EDT-1/stills/B.JPG", "production/prepublish/videos/1/1.mp4",
+                    "production/clip-cache/key/frame.json", "production/thumb-cache/a.json", "production/catalog.lock",
+                    "production/video-publications/catalog.lock", "production/.production-1.tmp",
+                    "performance/performance.before-shops-20261024.sqlite", "performance/tiering-20261024-172106/performance.sqlite",
+                    "performance/public-exports/public.xlsx", "evidence/video/clip.mp4",
+                    "remote-access/tunnel.json", "data-transfer/settings.json", "thumbnail-cache/a.json", "work/a.json"]
+        self.write(*kept, *left_out)
+        target = LAUNCHER.backup_business_data(self.root, self.config)
+        with LAUNCHER.zipfile.ZipFile(target) as archive:
+            self.assertEqual(sorted(archive.namelist()),
+                             sorted(["skill/deleted_case_sources.json", *("runtime/" + name for name in kept)]))
+
+    def test_lost_production_data_comes_back_from_the_restart_backup(self):
+        identifier = "PRD-000000000001"
+        store = ProductionStore(self.runtime)
+        data = store.empty()
+        data["jobs"] = [{"id": identifier, "product": "202H", "title": "保留的制作单", "edits": []}]
+        data["requests"]["create-job"] = {"hash": "h", "at": "2026-11-01T00:00:00+00:00",
+                                          "result": {"job": {"id": identifier, "notes": "完整回执" * 8000}}}
+        store.write(data)
+        self.write("production/audio/" + identifier + "/TAK-1/voiceover.mp3", "production/audio/" + identifier + "/TAK-1/voiceover.wav")
+        before = store.read()
+        catalog = store.path.read_bytes()
+        self.assertTrue(next((store.root / "request-results").glob("*.json")).is_file())
+        target = LAUNCHER.backup_business_data(self.root, self.config)
+
+        shutil.rmtree(self.runtime)
+        self.assertEqual(ProductionStore(self.runtime).read()["jobs"], [])
+
+        self.restore(target)
+        restored = ProductionStore(self.runtime)
+        self.assertEqual(restored.path.read_bytes(), catalog)
+        self.assertEqual(restored.read(), before)
+        self.assertEqual(restored.job(identifier)["title"], "保留的制作单")
+        audio = self.runtime / "production" / "audio" / identifier / "TAK-1"
+        self.assertTrue((audio / "voiceover.mp3").is_file())
+        self.assertFalse((audio / "voiceover.wav").exists())
+
+    def test_catalog_alone_could_not_restore_production(self):
+        """Why request-results is in scope: reading the catalog fails without the receipts it points to."""
+        store = ProductionStore(self.runtime)
+        data = store.empty()
+        data["requests"]["large"] = {"hash": "h", "at": "2026-11-01T00:00:00+00:00", "result": {"notes": "完整回执" * 8000}}
+        store.write(data)
+        shutil.rmtree(store.root / "request-results")
+        store.clear_cache()
+        with self.assertRaises(VoiceError):
+            store.read()
+
+
+class BackupRetentionTests(unittest.TestCase):
+    """A wipe must never cost the complete archives, however often the workbench restarts afterwards."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="workbench-backup-retention-test-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        self.root = self.base / "app"
+        self.folder = self.root / "archive" / "data-backups"
+        self.folder.mkdir(parents=True)
+        self.runtime = self.base / "runtime"
+        self.config = {"runtime_root": str(self.runtime)}
+        self.seed()
+
+    def seed(self):
+        for source, count in (("production", 20), ("creation", 20), ("directions", 4)):
+            (self.runtime / source).mkdir(parents=True, exist_ok=True)
+            (self.runtime / source / "catalog.json").write_bytes(b"c" * 2000)
+            for index in range(count - 1):
+                (self.runtime / source / f"{index}.json").write_bytes(b"{}")
+
+    def backup_at(self, stamp):
+        with patch.object(LAUNCHER.time, "strftime", return_value=stamp):
+            return LAUNCHER.backup_business_data(self.root, self.config)
+
+    def age(self, path, days):
+        moment = time.time() - days * 86400
+        os.utime(path, (moment, moment))
+
+    def names(self):
+        return sorted(path.name for path in self.folder.glob("business-*.zip"))
+
+    def log(self):
+        return (self.root / "launcher-error.log").read_text(encoding="utf-8")
+
+    def test_repeated_restarts_after_a_wipe_keep_every_complete_backup(self):
+        complete = [self.backup_at(f"20261031-{index:06d}").name for index in range(LAUNCHER.BACKUP_KEEP)]
+        shutil.rmtree(self.runtime)
+        (self.runtime / "directions").mkdir(parents=True)
+        (self.runtime / "directions" / "catalog.json").write_bytes(b"{}")
+        thin = [self.backup_at(f"20261101-{index:06d}") for index in range(LAUNCHER.BACKUP_KEEP * 2)]
+        self.assertEqual(thin[-1].name, f"business-20261101-{LAUNCHER.BACKUP_KEEP * 2 - 1:06d}-thin.zip")
+        self.assertTrue(thin[-1].is_file())
+        names = self.names()
+        self.assertEqual([name for name in names if "-thin" not in name], complete)
+        self.assertEqual([name for name in names if "-thin" in name], [path.name for path in thin[-LAUNCHER.BACKUP_THIN_KEEP:]])
+        self.assertIn("少了很多", self.log())
+        self.assertIn(thin[-1].name, self.log())
+
+    def test_data_coming_back_is_complete_again_and_compared_with_the_last_complete_backup(self):
+        first = self.backup_at("20261101-100000")
+        shutil.rmtree(self.runtime / "creation")
+        thin = self.backup_at("20261101-110000")
+        self.assertIn("-thin", thin.name)
+        self.assertIn("runtime/creation", self.log())
+        self.assertTrue(first.is_file())
+        self.seed()
+        self.assertNotIn("-thin", self.backup_at("20261101-120000").name)
+
+    def test_one_lost_source_marks_the_backup_even_when_the_others_grew(self):
+        self.backup_at("20261101-100000")
+        shutil.rmtree(self.runtime / "production")
+        for index in range(100):
+            (self.runtime / "creation" / f"new-{index}.json").write_bytes(b"{}")
+        self.assertIn("-thin", self.backup_at("20261101-110000").name)
+        self.assertIn("runtime/production", self.log())
+
+    def test_emptied_catalog_is_caught_although_every_file_remains(self):
+        self.backup_at("20261101-100000")
+        with patch.object(LAUNCHER, "BACKUP_CORE_FILES", ("runtime/production/catalog.json",)):
+            (self.runtime / "production" / "catalog.json").write_bytes(b"{}")
+            self.assertIn("-thin", self.backup_at("20261101-110000").name)
+        self.assertIn("runtime/production/catalog.json", self.log())
+
+    def test_ordinary_changes_stay_complete(self):
+        self.backup_at("20261101-100000")
+        for index in range(5):
+            (self.runtime / "production" / f"{index}.json").unlink()
+        (self.runtime / "performance").mkdir()
+        (self.runtime / "performance" / "performance.sqlite").write_bytes(b"new source")
+        (self.runtime / "creation" / "catalog.json").write_bytes(b"c" * 1000)
+        self.assertNotIn("-thin", self.backup_at("20261101-110000").name)
+        self.assertFalse((self.root / "launcher-error.log").exists())
+
+    def test_existing_unmarked_empty_backup_is_marked_and_stops_counting(self):
+        self.backup_at("20261101-100000")
+        with LAUNCHER.zipfile.ZipFile(self.folder / "business-20261101-110000.zip", "w") as archive:
+            archive.writestr("runtime/directions/catalog.json", "{}")
+        self.backup_at("20261101-120000")
+        self.assertEqual(self.names(), ["business-20261101-100000.zip", "business-20261101-110000-thin.zip", "business-20261101-120000.zip"])
+
+    def test_unreadable_archive_is_never_the_comparison_baseline(self):
+        self.backup_at("20261101-100000")
+        (self.folder / "business-20261101-110000.zip").write_bytes(b"not a zip")
+        self.backup_at("20261101-120000")
+        self.assertEqual(self.names(), ["business-20261101-100000.zip", "business-20261101-110000-thin.zip", "business-20261101-120000.zip"])
+        shutil.rmtree(self.runtime / "production")
+        self.assertIn("-thin", self.backup_at("20261101-130000").name)
+
+    def test_deliberate_cleanup_is_accepted_after_the_baseline_expires(self):
+        old = self.backup_at("20261001-100000")
+        self.age(old, LAUNCHER.BACKUP_BASELINE_DAYS + 1)
+        shutil.rmtree(self.runtime / "production")
+        self.assertNotIn("-thin", self.backup_at("20261101-110000").name)
+        self.assertTrue(old.is_file())
+
+    def test_burst_of_restarts_keeps_one_complete_backup_for_each_recent_day(self):
+        moments = []
+        for days_ago in range(25):
+            for hours in (0, 6):
+                path = self.folder / f"business-{20000000 + 1000 - days_ago * 2 - (hours > 0)}-000000.zip"
+                with LAUNCHER.zipfile.ZipFile(path, "w") as archive:
+                    archive.writestr("runtime/directions/catalog.json", "{}")
+                moment = time.time() - days_ago * 86400 - hours * 3600
+                os.utime(path, (moment, moment))
+                moments.append((moment, path))
+        LAUNCHER.prune_backups(self.folder)
+        moments.sort(reverse=True)
+        for _, path in moments[:LAUNCHER.BACKUP_KEEP]:
+            self.assertTrue(path.is_file())
+        kept = {LAUNCHER.date.fromtimestamp(moment) for moment, path in moments if path.exists()}
+        recent = {LAUNCHER.date.fromtimestamp(moment) for moment, _ in moments if moment > time.time() - (LAUNCHER.BACKUP_DAYS - 1) * 86400}
+        self.assertLessEqual(recent, kept)
+        self.assertLessEqual(len(self.names()), LAUNCHER.BACKUP_KEEP + LAUNCHER.BACKUP_DAYS + 1)
+        self.assertFalse([path for moment, path in moments if path.exists() and moment < time.time() - (LAUNCHER.BACKUP_DAYS + 1) * 86400])
 
 
 if __name__ == "__main__":

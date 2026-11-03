@@ -10,6 +10,7 @@ import openpyxl
 
 import test_server as fixture
 import test_ui_regressions as browser
+import test_publication_match as publication
 from performance_store import PerformanceStore
 
 LINKED = "7664986913497009439"  # the fixture case's TikTok video ID
@@ -227,6 +228,45 @@ class PerformanceHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("POST", "/api/upload?kind=performance&name=a.csv", raw=b"x,y",
                                       headers={"Content-Type": "application/octet-stream"})[0], 400)
 
+    def publication_export(self):
+        app = self.server.app
+        script_id, job_id = "SCR-333333333333", publication.TWIN
+        job = publication.job(job_id, script_id, creator="Zack")
+        job["supplement"] = {"captions": [publication.TITLE]}
+        production = app.production.read()
+        production["jobs"].append(job)
+        app.production.write(production)
+        creation = app.creation.read()
+        creation["scripts"].append({"id": script_id, "version": 1, "product": "202H", "status": "adopted",
+                                    "video_id": "", "published_on": "", "case_id": "", "history": []})
+        app.creation.write(creation)
+        values = row(LINKED, 42)
+        for column, value in {"Creator name": "zackontheedge", "Video Info": publication.TITLE,
+                              "Video ID": publication.NEW, "Time": "2026/10/26 06:00:00"}.items():
+            values[HEADER.index(column)] = value
+        return export(self.root / "new-export.xlsx", "2026-10-26", "2026-11-01", [values])
+
+    def test_upload_registers_unique_video_and_reimport_does_not_duplicate_it(self):
+        source = self.publication_export()
+        status, _, staged = self.request("POST", "/api/upload?kind=performance&name=new.xlsx",
+                                         raw=source.read_bytes(), headers={"Content-Type": "application/octet-stream"})
+        self.assertEqual(status, 200, staged)
+        status, _, result = self.request("POST", "/api/performance/import", {"paths": [staged["path"]]})
+        self.assertEqual((status, result["registered"], result["registration_pending"], result["registration_failures"]), (200, 1, 0, []), result)
+        detail = self.server.app.video_publication_detail(publication.TWIN)
+        self.assertEqual((detail["publication"]["post_id"], detail["publication"]["auto"]["source"]), (publication.NEW, "shop_export"))
+        self.assertEqual(self.server.app.creation.get_script("SCR-333333333333")["video_id"], publication.NEW)
+        status, _, repeated = self.request("POST", "/api/performance/import", {"paths": [staged["path"]]})
+        self.assertEqual((status, repeated["registered"], repeated["registration_failures"]), (200, 0, []))
+        self.assertEqual(self.server.app.video_publication_detail(publication.TWIN)["history"], [])
+
+    def test_folder_sync_also_registers_unique_video(self):
+        source = self.publication_export()
+        self.server.app.performance.sources = [source]
+        status, _, result = self.request("POST", "/api/performance/sync", {})
+        self.assertEqual((status, result["registered"], result["registration_failures"]), (200, 1, []), result)
+        self.assertEqual(self.server.app.video_publication_detail(publication.TWIN)["publication"]["post_id"], publication.NEW)
+
 
 class PerformanceAnalyticsTests(unittest.TestCase):
     setUp = PerformanceStoreTests.setUp
@@ -253,6 +293,7 @@ class PerformanceBrowserTests(unittest.TestCase):
     request = fixture.WorkbenchHTTPTests.request
     open_page = browser.WorkbenchBrowserTests.open_page
     make_playable_video = browser.WorkbenchBrowserTests.make_playable_video
+    publication_export = PerformanceHTTPTests.publication_export
 
     def setUp(self):
         self.setUp_()
@@ -272,6 +313,29 @@ class PerformanceBrowserTests(unittest.TestCase):
                         "original": {"text": "Isolated product context fixture"},
                         "feedback": {"kind": "editorial", "text": "隔离验证"},
                         "current": fixture.new_case_snapshot(self.video)})
+
+    def test_upload_shows_automatic_registration_and_reimport_count(self):
+        source = self.publication_export()
+        page = self.open_page("#videos")
+        page.locator("#perf-file").set_input_files(str(source))
+        note = page.locator("#perf-import-result")
+        note.get_by_text("自动登记 1 条视频", exact=False).wait_for()
+        self.assertEqual(self.server.app.video_publication_detail(publication.TWIN)["publication"]["post_id"], publication.NEW)
+        page.locator("#perf-file").set_input_files(str(source))
+        note.get_by_text("自动登记 0 条视频", exact=False).wait_for()
+
+    def test_import_result_explains_ambiguous_and_failed_registrations(self):
+        page = self.open_page("#videos")
+        page.route("**/api/performance/sync", lambda route: route.fulfill(json={
+            "imported": [], "skipped": 1, "failed": [], "registered": 0, "registration_pending": 2,
+            "registration_failures": [{"job_id": publication.TWIN, "post_id": publication.NEW, "error": "请先核对发布记录。"}],
+        }))
+        page.locator("#perf-sync").click()
+        note = page.locator("#perf-import-result")
+        note.get_by_text("2 条视频的匹配结果不唯一", exact=False).wait_for()
+        self.assertIn("请先核对发布记录", note.inner_text())
+        self.assertIn(publication.NEW, note.inner_text())
+        self.assertIn("data-warning", note.get_attribute("class"))
 
     def test_dashboard_draws_charts_and_follows_filters(self):
         self.add_product_without_video_data()

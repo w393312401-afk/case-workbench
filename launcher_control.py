@@ -1,9 +1,12 @@
 """One-click restart for this workbench, including legacy-instance cleanup."""
 from __future__ import annotations
 
+from collections import Counter
 import ctypes
 from ctypes import wintypes
 from contextlib import contextmanager
+from datetime import date
+from fnmatch import fnmatch
 import hashlib
 import json
 import os
@@ -25,9 +28,27 @@ from app_config import load_config
 ROOT = Path(__file__).resolve().parent
 ACTIVE_TASKS = {"queued", "running", "stopping"}
 # Business records that exist only on this machine; copied on every start.
-BACKUP_SOURCES = (("runtime_root", ("directions", "creation", "ai-tasks", "reviews", "revisions", "navigation-assignments.json")),
-                  ("skill_root", ("cases", "references", "sources")))
+BACKUP_SOURCES = (("runtime_root", ("directions", "creation", "ai-tasks", "reviews", "revisions", "navigation-assignments.json",
+                                    "production", "library", "performance", "evidence", "davinci-ledger",
+                                    "task-activity.sqlite", "ai-preferences.json")),
+                  ("skill_root", ("cases", "references", "sources", "deleted_case_sources.json")))
+# These keep records next to gigabytes of media. Images, video and WAV (rebuilt from the MP3 take) stay with the
+# full backup in data_backup.py, as do caches and one-off database copies. MP3 takes are paid output and stay here.
+BACKUP_RECORDS_ONLY = frozenset({"production", "library", "performance", "evidence"})
+BACKUP_MEDIA_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".m4v", ".webm", ".wav"})
+BACKUP_SKIP_NAMES = ("clip-cache", "thumb-cache", "public-exports", "tiering-*", "*.before-*", "*.lock", "*.tmp")
 BACKUP_KEEP = 14
+BACKUP_DAYS = 14
+# An archive that lost much of what the last complete one held is marked thin and has its own small quota.
+BACKUP_THIN_MARK = "-thin"
+BACKUP_THIN_KEEP = 5
+BACKUP_THIN_RATIO = .5
+BACKUP_CORE_RATIO = .1
+BACKUP_CORE_FILES = ("runtime/production/catalog.json", "runtime/production/video-publications/catalog.json",
+                     "runtime/creation/catalog.json", "runtime/directions/catalog.json",
+                     "runtime/performance/performance.sqlite", "runtime/reviews/reviews.sqlite")
+# A deliberate large cleanup stops counting as loss after this long, so the comparison cannot stay frozen forever.
+BACKUP_BASELINE_DAYS = 30
 LOG_LIMIT = 5 * 1024 * 1024
 LOG_KEEP = 5
 
@@ -303,6 +324,75 @@ def write_zip_parallel(partial, entries):
     return True
 
 
+def backup_files(source):
+    """Every file of one source; record-only sources leave out media and regenerable copies."""
+    if source.is_file():
+        return [source]
+    if not source.is_dir():
+        return []
+    files = sorted(path for path in source.rglob("*") if path.is_file())
+    if source.name not in BACKUP_RECORDS_ONLY:
+        return files
+    return [path for path in files if path.suffix.casefold() not in BACKUP_MEDIA_SUFFIXES
+            and not any(fnmatch(part, pattern) for part in path.relative_to(source).parts for pattern in BACKUP_SKIP_NAMES)]
+
+
+def archive_sizes(path):
+    """File sizes from the zip directory, cheap however large the archive; None when it cannot be read."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return {info.filename: info.file_size for info in archive.infolist()}
+    except (OSError, zipfile.BadZipFile):
+        return None
+
+
+def data_loss(sizes, baseline):
+    """Name what shrank sharply against the last complete archive; empty when nothing did.
+
+    Sources are compared one by one because a wipe can leave the rest intact, and sizes
+    only for core files because large stores legitimately prune their own history."""
+    def counts(files):
+        return Counter("/".join(name.split("/")[:2]) for name in files if not name.endswith(("-wal", "-shm")))
+    found, expected = counts(sizes), counts(baseline)
+    for source, count in expected.items():
+        if found[source] < count * BACKUP_THIN_RATIO:
+            return f"{source} 从 {count} 个文件变成 {found[source]} 个"
+    for name in BACKUP_CORE_FILES:
+        if name in baseline and sizes.get(name, 0) < baseline[name] * BACKUP_CORE_RATIO:
+            return f"{name} 从 {baseline[name]} 字节变成 {sizes.get(name, 0)} 字节"
+    return ""
+
+
+def prune_backups(folder):
+    """Mark thin archives, then prune each group on its own so a wipe cannot push complete copies out.
+
+    Keeps the newest BACKUP_KEEP complete archives and, for BACKUP_DAYS days, the newest one of each day, so a burst
+    of restarts cannot erase yesterday either. Returns {original path: (marked path, reason)} for archives marked now."""
+    complete, thin, marked, baseline, baseline_time = [], [], {}, None, 0
+    for path in sorted(folder.glob("business-*.zip")):
+        if not path.stem.endswith(BACKUP_THIN_MARK):
+            modified, sizes = path.stat().st_mtime, archive_sizes(path)
+            expired = modified - baseline_time > BACKUP_BASELINE_DAYS * 86400
+            reason = "压缩包无法读取" if sizes is None else "" if baseline is None or expired else data_loss(sizes, baseline)
+            if not reason:
+                complete.append((modified, path))
+                baseline, baseline_time = sizes, modified
+                continue
+            original, path = path, path.replace(path.with_name(path.stem + BACKUP_THIN_MARK + path.suffix))
+            marked[original] = (path, reason)
+        thin.append(path)
+    for old in thin[:-BACKUP_THIN_KEEP]:
+        old.unlink()
+    cutoff, days = time.time() - BACKUP_DAYS * 86400, set()
+    for index, (modified, path) in enumerate(reversed(complete)):
+        day = date.fromtimestamp(modified)
+        if index < BACKUP_KEEP or modified >= cutoff and day not in days:
+            days.add(day)
+            continue
+        path.unlink()
+    return marked
+
+
 def backup_business_data(root, config):
     """Zip the local-only business records while no service is writing them."""
     entries = []
@@ -311,9 +401,7 @@ def backup_business_data(root, config):
             continue
         base = Path(config[key])
         for name in names:
-            source = base / name
-            files = [source] if source.is_file() else sorted(path for path in source.rglob("*") if path.is_file()) if source.is_dir() else []
-            entries += [(path, f"{key.removesuffix('_root')}/{path.relative_to(base).as_posix()}") for path in files]
+            entries += [(path, f"{key.removesuffix('_root')}/{path.relative_to(base).as_posix()}") for path in backup_files(base / name)]
     if not entries:
         return None
     folder = root / "archive" / "data-backups"
@@ -325,7 +413,10 @@ def backup_business_data(root, config):
             for path, name in entries:
                 archive.write(path, name)
     partial.replace(target)
-    prune(folder, "business-*.zip", BACKUP_KEEP)
+    marked = prune_backups(folder)
+    if target in marked:
+        target, reason = marked[target]
+        log_housekeeping(root, f"本次备份比上一份完整备份少了很多（{reason}），已标记为 {target.name}，不占完整备份名额。请检查运行目录的数据。")
     return target
 
 
@@ -341,6 +432,11 @@ def rotate_server_log(root):
     return target
 
 
+def log_housekeeping(root, message):
+    with (root / "launcher-error.log").open("a", encoding="utf-8") as log:
+        log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+
+
 def prepare_start(root, config):
     """Housekeeping must never block the restart; failures go to the error log."""
     steps = (("备份业务数据", lambda: backup_business_data(root, config)), ("切分 server.log", lambda: rotate_server_log(root)))
@@ -348,8 +444,7 @@ def prepare_start(root, config):
         try:
             step()
         except Exception as error:
-            with (root / "launcher-error.log").open("a", encoding="utf-8") as log:
-                log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {label}失败（不影响启动）：{error}\n")
+            log_housekeeping(root, f"{label}失败（不影响启动）：{error}")
 
 
 def restart(root, config, no_browser=False):

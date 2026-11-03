@@ -101,6 +101,32 @@ class ProductComboBrowserTests(unittest.TestCase):
             self.assertEqual(panel.locator('[data-product=' + json.dumps(name, ensure_ascii=False) + ']').count(), 0,
                              "Reloading and source discovery must not resurrect a deleted product")
 
+    def test_sales_page_does_not_add_export_titles_to_product_picker(self):
+        connection = self.server.app.performance.connect()
+        try:
+            for index, title in enumerate(("SHARPAL 555H Sales-only fixture", "SHARPAL Dual-Grit Diamond fixture")):
+                connection.execute("INSERT INTO daily (video_id, date, products) VALUES (?, ?, ?)",
+                                   (str(7600000000000000090 + index), "2026-10-01", title))
+        finally:
+            connection.close()
+        page = self.open_page()
+        panel = self.open_picker(page)
+        for value in ("555H", "Dual-Grit Diamond fixture"):
+            self.assertEqual(panel.locator(f'[data-product="{value}"]').count(), 0)
+        page.keyboard.press("Escape")
+        page.goto(self.base + "/#/all/videos")
+        page.locator("#perf-sync").wait_for()
+        panel = self.open_picker(page)
+        for value in ("555H", "Dual-Grit Diamond fixture"):
+            self.assertEqual(panel.locator(f'[data-product="{value}"]').count(), 0)
+        page.keyboard.press("Escape")
+        self.catalog_change("add", "555H")
+        page.reload()
+        page.locator("#perf-sync").wait_for()
+        panel = self.open_picker(page)
+        panel.locator('[data-product="555H"]').wait_for()
+        self.assertEqual(panel.locator('[data-product="Dual-Grit Diamond fixture"]').count(), 0)
+
     def test_picker_groups_models_searches_words_and_restores_focus_after_selection(self):
         self.catalog_change("add", "205H")
         self.catalog_change("add", "Electric portable kitchen sharpener")

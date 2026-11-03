@@ -179,5 +179,5 @@ test('an older running service keeps product discovery until it can restart', as
   };
   h.shell.initialize();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(calls, ['/api/products', '/api/performance/videos', '/api/reviews/summary', '/api/direction-catalog', '/api/creation']);
+  assert.deepEqual(calls, ['/api/products', '/api/reviews/summary', '/api/direction-catalog', '/api/creation']);
 });

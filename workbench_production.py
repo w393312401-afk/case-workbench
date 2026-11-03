@@ -27,6 +27,7 @@ from elevenlabs_client import DEFAULT_MODEL, MODELS, VOICE_ID, VoiceError, clean
 from production_operations import ProductionOperations, durable_json
 from production_store import (FRAME_RATES, JOB_ID, TAKE_ID, apply_readings, current_manual_receipt, skill_delivery_reviewable,
                               supplement_markdown, take_quality, job_status)
+from subtitle_check import compare, summary
 from task_activity import activity_label, record_activity, safe_error, settle_resolved_activity
 from variant_parse import parse_variants, same_lines, spoken_lines, variant_directions, variant_script
 
@@ -76,6 +77,13 @@ def known_location(data, creator, project):
              if item.get("creator") == creator and same_creator_project(item.get("project"), project, creator) and item.get("project_id")]
     newest = max(built, key=lambda item: item.get("built_at", ""), default=None)
     return {key: newest[key] for key in ("folder", "project_id") if newest and newest.get(key)}
+
+
+def hook_lines(hook_text):
+    """The script's 开头屏显 line by line, where a spaced slash marks the break; 「无开头屏显」 means the script chose to have none."""
+    if str(hook_text).strip().startswith("无"):
+        return []
+    return [line.strip() for line in re.split(r"\s+/(?:\s+|$)", str(hook_text).strip()) if line.strip()]
 
 
 def timeline_options(value, config):
@@ -511,6 +519,7 @@ class ProductionWorkbenchMixin:
         if prior:
             return prior
         value = body.get("job") if isinstance(body.get("job"), dict) else {}
+        replica = self._replica_snapshot(str(value.get("script_id") or "")) if hasattr(self, "_replica_snapshot") else None
         with self.lock:
             script = self.creation.get_script(str(value.get("script_id") or ""))
             lines = spoken_lines(script["text"])
@@ -545,6 +554,8 @@ class ProductionWorkbenchMixin:
                         "title": script["title"], "variant_label": label, "lines": copy.deepcopy(records), "problems": problems,
                         "source": {"task_id": source.get("task_id", ""), "round_id": source.get("round_id", ""),
                                    "variant_index": source["variant_index"] if "variant_index" in source else chosen["index"] if chosen else None}}
+            if replica:
+                self.apply_replica(resolved, lines, chinese, replica)
             return self.production.mutate("job", body, resolved)
 
     def _settle_job_fill(self, identifier):
@@ -980,3 +991,77 @@ class ProductionWorkbenchMixin:
             except Exception:
                 pass  # The timeline is open; pinning it is retried on the next open.
         return {"ok": True, **{key: value for key, value in result.items() if key not in {"ok", "project_id", "folder"}}}
+
+    def check_timeline_subtitles(self, identifier, body):
+        """Check a timeline's subtitles against the script its voiceover read and fix wrong words without asking."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        request = {"request_id": body.get("request_id"), "job_id": identifier, "timeline_uid": body.get("timeline_uid")}
+        prior = self.production.replay("timeline_subtitles", request)
+        if prior:
+            return prior
+        job = self.production.job(identifier)
+        record = next((item for item in job.get("timelines", []) if item["unique_id"] == body.get("timeline_uid")), None)
+        if not record:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        if job.get("archived") or record.get("archived"):
+            raise VoiceError(409, "已归档的时间线不能核对字幕，请先恢复。")
+        # An order's spoken lines never change, and they hold the written words rather than the respelled ones sent to the voice.
+        lines = [line["spoken"] for line in job.get("lines", [])]
+        if not any(line.strip() for line in lines):
+            raise VoiceError(409, "这张制作单没有可对照的口播稿。")
+        where = {"project": record["project"], "unique_id": record["unique_id"], "name": record["name"], **timeline_location(record)}
+        if not self.resolve.lock.acquire(blocking=False):
+            raise VoiceError(409, "达芬奇正在执行另一项工作台操作，请稍后再核对字幕。")
+        try:
+            found = self.resolve.run("read_subtitles", where, timeout=60, held=True)
+            plan = compare(found["subtitles"], lines)
+            check = {"at": now(), "version": found.get("version", ""), "subtitles": plan["subtitles"], "similarity": plan["similarity"],
+                     "changes": plan["changes"], "review": plan["review"], "status": "clean"}
+            if not plan["subtitles"]:
+                check["status"] = "no_subtitles"
+            elif plan["different"]:
+                check["status"] = "different"
+            elif plan["changes"] and not found.get("can_replace"):
+                check["status"] = "blocked"
+            elif plan["changes"]:
+                folder = self.production.root / "subtitles" / identifier
+                done = self.resolve.run("replace_subtitles", {**where, "changes": plan["changes"], "folder": str(folder), "audio_bin": "音频字幕"},
+                                        timeout=60 + 30 * len(plan["changes"]), held=True)
+                check.update(changes=done["replaced"], subtitles=len(done["subtitles"]), saved=done["saved"])
+                if done.get("error") or not done["saved"]:
+                    check.update(status="failed", error=done.get("error") or "改动没有保存，请到达芬奇保存工程。")
+                else:
+                    check.update(status="fixed", review=compare(done["subtitles"], lines)["review"])
+            if check["status"] in {"clean", "fixed"} and check["review"]:
+                check["status"] = "needs_review"
+        finally:
+            self.resolve.lock.release()
+        check["message"] = summary(check)
+        return self.production.mutate("timeline_subtitles", request, check)
+
+    def add_timeline_hook(self, identifier, body):
+        """Put the order's opening hook on a timeline as Text+; clicking again rewrites it with the order's current wording."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        request = {"request_id": body.get("request_id"), "job_id": identifier, "timeline_uid": body.get("timeline_uid"), "style": body.get("style") or "", "text": str(body.get("text") or "").strip()[:300]}
+        prior = self.production.replay("timeline_hook", request)
+        if prior:
+            return prior
+        job = self.production.job(identifier)
+        record = next((item for item in job.get("timelines", []) if item["unique_id"] == body.get("timeline_uid")), None)
+        if not record:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        if job.get("archived") or record.get("archived"):
+            raise VoiceError(409, "已归档的时间线不能加屏显，请先恢复。")
+        # The option chosen on the panel, or else the wording the script recommends.
+        lines = hook_lines(request["text"] or (self._video_publish_copy(job) or {}).get("screen_en") or "")
+        if not lines:
+            raise VoiceError(409, "这张制作单还没有开头屏显。")
+        if len(lines) > 2:
+            raise VoiceError(409, "开头屏显最多两行，请先改短。")
+        where = {"project": record["project"], "unique_id": record["unique_id"], "name": record["name"], **timeline_location(record)}
+        done = self.resolve.run("add_hook", {**where, "text": "\n".join(lines), "style": request["style"]}, timeout=90)
+        message = ("屏显已加" if done["created"] else "屏显已更新") if done["saved"] else "屏显已写入，但工程没有保存，请到达芬奇保存"
+        return self.production.mutate("timeline_hook", request, {"at": now(), "status": "saved" if done["saved"] else "unsaved", "created": done["created"],
+                                                                 "text": " / ".join(lines), "start": done["start"], "end": done["end"], "message": message})

@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 import hashlib
 import http.cookiejar
 import json
-import os
 from pathlib import Path
 import re
 import shutil
@@ -24,6 +23,7 @@ from uuid import uuid4
 
 from case_insights import CaseTags, comments, contrasts, funnel, transcript_gate
 from managed_video import MAX_VIDEO_BYTES, VIDEO_EXTENSIONS
+from production_operations import durable_json
 
 CASE_ID = re.compile(r"PVR-[0-9a-f]{12}")
 VIDEO_ID = re.compile(r"\d{6,25}")
@@ -279,11 +279,7 @@ class AutoBreakdown:
             return None
 
     def _write(self, job):
-        self.root.mkdir(parents=True, exist_ok=True)
-        path = self._path(job["case_id"])
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, path)
+        durable_json(self._path(job["case_id"]), job)  # Page polls read this file while the run writes it.
 
     def _update(self, job, **fields):
         job.update(fields, updated_at=now())
@@ -307,7 +303,9 @@ class AutoBreakdown:
         if job and job["status"] in ACTIVE:
             thread = self.threads.get(case_id)
             if not thread or not thread.is_alive():
-                job = self._update(job, status="interrupted", message="工作台重启时这项任务还没做完，点「重试」继续。")
+                job = self._read(case_id)  # The run may have written its result after the first read.
+                if job and job["status"] in ACTIVE:
+                    job = self._update(job, status="interrupted", message="工作台重启时这项任务还没做完，点「重试」继续。")
         return job
 
     def resume_pending(self):

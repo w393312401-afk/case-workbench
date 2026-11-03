@@ -210,6 +210,76 @@ class TimelineLifecycleHTTPTests(unittest.TestCase):
         self.assertEqual(result["job"]["edits"], [])
         self.assertEqual(self.runner.calls, [])
 
+    def seed_two_timelines(self):
+        """Order with two timelines; the first has an edit run, an edit folder and a handoff note on disk."""
+        identifier = self.seed_job()
+        production = self.server.app.production
+        data = production.read()
+        job = data["jobs"][-1]
+        job["timelines"].append({**copy.deepcopy(job["timelines"][0]), "unique_id": "uid-2", "name": "Zack261013-202-2"})
+        job["edits"] = [{"id": "EDT-0123456789ab", "timeline_uid": "uid-1", "timeline_name": "Zack261013-202-1",
+                         "status": "needs_repair", "started_at": now()},
+                        {"id": "EDT-ba9876543210", "timeline_uid": "uid-2", "timeline_name": "Zack261013-202-2",
+                         "status": "needs_repair", "started_at": now()}]
+        production.write(data)
+        for edit_id in ("EDT-0123456789ab", "EDT-ba9876543210"):
+            (production.root / "edits" / edit_id).mkdir(parents=True)
+            (production.root / "edits" / edit_id / "result.json").write_text("{}", encoding="utf-8")
+        (production.root / "handoffs").mkdir(parents=True, exist_ok=True)
+        for name, uid in (("one", "uid-1"), ("two", "uid-2")):
+            (production.root / "handoffs" / f"{identifier}-20261103-0000{name[0]}.md").write_text(
+                f"- 目标时间线：x（UniqueId {uid}）", encoding="utf-8")
+        return identifier
+
+    def test_delete_removes_one_timeline_with_its_edits_files_and_receipt_but_keeps_the_rest(self):
+        identifier = self.seed_two_timelines()
+        production, base = self.server.app.production, f"/api/production/jobs/{identifier}/timeline/delete"
+        completed = self.request("POST", f"/api/production/jobs/{identifier}/completion", {
+            "request_id": uuid4().hex, "completed": True, "timeline_uid": "uid-1", "note": ""})
+        self.assertEqual(completed[0], 200, completed)
+        preview = self.request("POST", base, {"preview": True, "timeline_uid": "uid-1"})
+        self.assertEqual((preview[0], preview[2]["edits"], preview[2]["files"]), (200, 1, 2), preview)
+        self.assertTrue((production.root / "edits" / "EDT-0123456789ab").exists())
+        body = {"request_id": uuid4().hex, "timeline_uid": "uid-1"}
+        status, _, result = self.request("POST", base, body)
+        self.assertEqual((status, result["warnings"], result["edit_ids"]), (200, [], ["EDT-0123456789ab"]), result)
+        job = production.job(identifier)
+        self.assertEqual([row["unique_id"] for row in job["timelines"]], ["uid-2"])
+        self.assertEqual([edit["id"] for edit in job["edits"]], ["EDT-ba9876543210"])
+        self.assertNotIn("manual_completion", job)
+        self.assertEqual(job["status"], "needs_repair")
+        self.assertFalse((production.root / "edits" / "EDT-0123456789ab").exists())
+        self.assertTrue((production.root / "edits" / "EDT-ba9876543210").exists())
+        self.assertEqual([path.name for path in (production.root / "handoffs").glob("*.md")], [f"{identifier}-20261103-0000t.md"])
+        self.assertEqual(self.request("POST", base, body)[2]["edit_ids"], ["EDT-0123456789ab"])
+        self.assertEqual(self.request("POST", base, {"request_id": uuid4().hex, "timeline_uid": "uid-1"})[0], 404)
+        self.assertEqual(self.runner.calls, [])
+
+    def test_delete_refuses_running_edit_published_timeline_and_bad_requests(self):
+        identifier = self.seed_two_timelines()
+        production, base = self.server.app.production, f"/api/production/jobs/{identifier}/timeline/delete"
+        data = production.read()
+        data["jobs"][-1]["edits"][0]["status"] = "running"
+        production.write(data)
+        before = production.path.read_bytes()
+        status, _, result = self.request("POST", base, {"request_id": uuid4().hex, "timeline_uid": "uid-1"})
+        self.assertEqual(status, 409, result)
+        self.assertEqual(self.request("POST", base, {"request_id": uuid4().hex, "timeline_uid": ""})[0], 400)
+        self.assertEqual(self.request("POST", base, {"request_id": uuid4().hex, "timeline_uid": "uid-1"}, authenticated=False)[0], 403)
+        self.assertEqual(production.path.read_bytes(), before)
+        self.assertTrue((production.root / "edits" / "EDT-0123456789ab").exists())
+        # A timeline that has a registered publication keeps its source.
+        data = production.read()
+        data["jobs"][-1]["edits"][0]["status"] = "needs_repair"
+        production.write(data)
+        server = self.server.app
+        server._video_publications = lambda: type("Store", (), {"root": production.root / "video-publications", "read": lambda self: {"jobs": {identifier: {
+            "history": [], "publication": {"source": {"timeline": {"unique_id": "uid-2"}}}}}}})()
+        status, _, result = self.request("POST", base, {"request_id": uuid4().hex, "timeline_uid": "uid-2"})
+        self.assertEqual(status, 409, result)
+        self.assertIn("已经登记发布", result["error"] if "error" in result else str(result))
+        self.assertEqual(self.request("POST", base, {"request_id": uuid4().hex, "timeline_uid": "uid-1"})[0], 200)
+
     def test_routes_reject_unauthorized_invalid_and_stale_requests_without_write(self):
         identifier = self.seed_job()
         base = f"/api/production/jobs/{identifier}/timeline"

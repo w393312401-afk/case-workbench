@@ -42,6 +42,23 @@ class ActivityStoreTests(unittest.TestCase):
         self.assertEqual(self.store.feed()["counts"]["unread"],0)
         self.assertEqual(len(reopened.logs("ai:task:round")["logs"]),2)
 
+    def test_restored_orphan_history_survives_reconciliation_as_archived(self):
+        self.store.record("ai:old:one", kind="ai", owner_id="old", source_id="one",
+                          title="旧任务", status="completed", message="完成。")
+        self.store.record("ai:ordinary:one", kind="ai", owner_id="ordinary", source_id="one",
+                          title="普通任务", status="completed", message="完成。")
+        with self.store._connect() as db:
+            db.execute("INSERT INTO meta(key,value) VALUES('restored_history_owners',?)", (json.dumps(["old"]),))
+        app = SimpleNamespace(activity=self.store, lock=threading.RLock(), runtime=self.runtime,
+                              production=SimpleNamespace(read=lambda: {"jobs": []}),
+                              content_management=SimpleNamespace(read=lambda: {"items": {}}),
+                              ai=SimpleNamespace(_locations={}))
+        reconcile_activity(app)
+        rows = self.store.existing()
+        self.assertEqual([row["owner_id"] for row in rows], ["old"])
+        self.assertEqual(rows[0]["owner_archived"], 1)
+        self.assertTrue(rows[0]["title"].startswith("历史恢复 · "))
+
     def test_atomic_claim_across_tabs_and_explicit_recovery_event(self):
         self.start()
         first=self.store.record("ai:task:round",status="needs_attention",phase="pending",message="待恢复。",event_key="pending")
@@ -145,14 +162,14 @@ class ActivityStoreTests(unittest.TestCase):
         self.start()
         self.store.record("edit:job:one",kind="edit",owner_id="job",source_id="one",product="202H",title="AI 剪辑 · 100%_变体",status="running",message="正在剪辑。")
         self.store.record("voice:job:two",kind="voice",owner_id="job",source_id="two",product="202H",title="生成配音 · 100x变体",status="failed",message="未完成。")
-        self.store.record("images:job:three",kind="images",owner_id="job",source_id="three",product="202H",title="出图",status="needs_attention",message="待确认。")
+        self.store.record("validation:job:three",kind="validation",owner_id="job",source_id="three",product="202H",title="校验",status="needs_attention",message="待确认。")
         ids=lambda **kwargs:{item["run_id"] for item in self.store.feed(**kwargs)["items"]}
         self.assertEqual(ids(kind="voice"),{"voice:job:two"})
         self.assertEqual(ids(q="100"),{"edit:job:one","voice:job:two"})
         # LIKE wildcards in the search text are literal characters.
         self.assertEqual(ids(q="100%_"),{"edit:job:one"})
-        self.assertEqual(ids(filter="attention"),{"voice:job:two","images:job:three"})
-        self.assertEqual(ids(filter="attention",kind="images"),{"images:job:three"})
+        self.assertEqual(ids(filter="attention"),{"voice:job:two","validation:job:three"})
+        self.assertEqual(ids(filter="attention",kind="validation"),{"validation:job:three"})
         for kwargs in ({"kind":"unknown"},{"q":"x"*101}):
             with self.assertRaises(ActivityError):
                 self.store.feed(**kwargs)
@@ -175,8 +192,7 @@ class ActivityStoreTests(unittest.TestCase):
                 self.store.feed(**kwargs)
 
     def test_generic_variant_titles_carry_their_opening_line(self):
-        self.assertEqual(activity_label({"title":"202H-S2 变体 #4 · 身份认同","slides":[{"title_zh":"不用"}]}),"202H-S2 变体 #4 · 身份认同")
-        self.assertEqual(activity_label({"title":"第 1 条","slides":[{"title_zh":"从粗到细，一套配齐"}]}),"第 1 条「从粗到细，一套配齐」")
+        self.assertEqual(activity_label({"title":"202H-S2 变体 #4 · 身份认同","text":"不用"}),"202H-S2 变体 #4 · 身份认同")
         self.assertEqual(activity_label({"title":"第 2 条","direction_id":"202H-S2","lines":[{"spoken":"If you're into knives, you'll get it.","zh":""}]}),
                          "If you're into knives, you'll get it.")
         self.assertEqual(activity_label({"title":"第 1 条","text":"\nHook line\nsecond"}),"第 1 条「Hook line」")

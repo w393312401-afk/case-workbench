@@ -153,9 +153,10 @@ def _section(text, prefix):
 
 
 class SkillRuntime:
-    def __init__(self, store_root, skills_root=None):
+    def __init__(self, store_root, skills_root=None, case_data_root=None):
         raw = Path(store_root)
         self.store_root = _safe(raw, raw).resolve()
+        self.case_data_root = _safe(Path(case_data_root), Path(case_data_root)).resolve() if case_data_root else self.store_root
         base = Path(skills_root) if skills_root else self.store_root.parent
         self.roots = {REVIEW: self.store_root}
         for name in (WRITING, AUDIT, ANALYSIS, MEDIA):
@@ -228,7 +229,7 @@ class SkillRuntime:
     def _references(self, action, *, stage=None):
         result = []
         for owner, relative, label, section in self._specifications(action, stage=stage):
-            root = self.roots[owner]
+            root = self.case_data_root if owner == REVIEW and relative.startswith("sources/") else self.roots[owner]
             path = root / relative
             data, text = _read(path, root)
             if path.suffix == ".json":

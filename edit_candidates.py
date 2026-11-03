@@ -26,15 +26,29 @@ CAPTION_HEIGHT = 24
 NOTE_FIELDS = {"summary": 500, "subject": 120}
 CODE = re.compile(r"[A-Za-z]+\d+")
 UNSURE = "待核"
+# A clip name the labeling skill wrote, or the user kept in its format: words, then a stable code such as BK024 or LD114a.
+NAMED = re.compile(r"\S.*\s[A-Za-z]{1,4}\d{2,4}[a-z]?")
 # What a clip's label is worth to the edit: only a clip-labeling label bound to this clip stands for having seen it.
 LABEL_STATUS = {"verified": "已核标签", "unsure": "标签待核，需看图", "manual": "手写标签，需看图", "none": "无标签，需看图"}
 
 
+def clip_name_label(clip):
+    """The clip's own name when it is a label: it travels with the clip, and a rename in DaVinci is read as it stands."""
+    name = str(clip.get("name") or "").strip()
+    return name if NAMED.fullmatch(name) else ""
+
+
+def clip_labels(clip):
+    """What the clip shows: its name first when that is a label, then its own label markers."""
+    name = clip_name_label(clip)
+    return [name] if name else list(clip.get("labels") or [])
+
+
 def label_status(clip):
-    labels, verified = clip.get("labels") or [], clip.get("verified_labels") or []
+    labels, verified = clip_labels(clip), clip.get("verified_labels") or []
     if any(UNSURE in label for label in labels):
         return "unsure"
-    return "verified" if verified else "manual" if labels else "none"
+    return "verified" if verified or clip_name_label(clip) else "manual" if labels else "none"
 
 
 def _identity(clip):
@@ -44,7 +58,7 @@ def _identity(clip):
 
 def candidate_key(clip):
     """A source range is the same footage whatever its label, position or material timeline."""
-    code = next((found for label in reversed(clip.get("labels") or []) for found in reversed(CODE.findall(label))), "C")
+    code = next((found for label in reversed(clip_labels(clip)) for found in reversed(CODE.findall(label))), "C")
     digest = hashlib.sha1(f"{_identity(clip)}|{clip['source_start']}|{clip['source_end']}".encode("utf-8")).hexdigest()[:8]
     return f"{code}-{digest}"
 
@@ -106,9 +120,9 @@ def build_candidates(listing, *, deduplicate_source_ranges=False, count_usage=Fa
             overlapping = [(a, b, name) for a, b, name in spans if max(a, left) < min(b, right)]
             free = ([list(span) for span in _intervals_uncovered([(a, b) for a, b, _ in overlapping], left, right)]
                     if deduplicate_source_ranges else [[left, right]])
-            found.append({"key": candidate_key(clip), "label": " / ".join(clip.get("labels") or []) or clip.get("name") or "",
+            found.append({"key": candidate_key(clip), "label": " / ".join(clip_labels(clip)) or clip.get("name") or "",
                           "timeline": material["name"], "timeline_uid": material["unique_id"], "item_uid": clip.get("uid"),
-                          "record": [clip["start"], clip["end"]], "source": [left, right], "frames": clip["end"] - clip["start"],
+                          "actions": clip.get("actions") or [], "record": [clip["start"], clip["end"]], "source": [left, right], "frames": clip["end"] - clip["start"],
                           "free": free, "free_frames": sum(b - a for a, b in free),
                           "used_by": sorted({name for _, _, name in overlapping if name}),
                           "use_count": len({name for _, _, name in overlapping if name}),
@@ -301,8 +315,11 @@ def write_task_files(folder, found, index, entries, listing, *, deduplicate_sour
     (Path(folder) / "candidates.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     lines = ["# 候选画面", "",
              f"每行一个素材片段：候选编号｜标签｜标签状态｜素材时间线位置（帧，半开）｜时长｜{'使用次数' if count_usage else '可用范围'}｜对照图｜画面描述。",
-             "「已核标签」是打标签技能看过画面后写的，可直接按标签选片段；其余状态的片段，选用前先看对照图或已有描述。"
-             "标签不说明动作在第几秒，只截取片段的一部分时，都要按技能「定入出点」看画面。",
+             "「已核标签」是片段名称（带 BK024 这类编号、不含“待核”）或打标签技能写的逐片标记，看过画面后写的，可直接按标签选片段；"
+             "其余状态的片段，选用前先看对照图或已有描述。"
+             "标签不说明动作在第几秒，只截取片段的一部分时，都要按技能「定入出点」看画面。"
+             "画面描述列里的「动作区间」是看过画面记下的源帧范围（半开，略偏宽）：要这个动作就直接取这段做入出点，不用再抽静帧；"
+             "标「不完整」的只有动作的一部分。没有动作区间的片段照常处理。",
              ("可用范围按实时工程里其他成片时间线算出，源帧坐标；已被用尽的片段没有列出。"
               if deduplicate_source_ranges else
               "按完整素材源区间提供候选；每行注明这个片段已被几条成片用过（同一成片里用几次都算 1 次），同一素材时间线内按用过次数从少到多排列。"
@@ -318,6 +335,9 @@ def write_task_files(folder, found, index, entries, listing, *, deduplicate_sour
                 text += f"；主体：{item['description']['subject']}"
             if item["description"] and item["description"].get("cta") is not None:
                 text += "；有号召手势" if item["description"]["cta"] else "；无号召手势"
+            if item.get("actions"):
+                text += "；动作区间：" + "、".join(f"{action['name']} [{action['start']}, {action['end']})" + ("" if action.get("complete") else "（不完整）")
+                                             for action in item["actions"])
             lines.append(f"- {item['key']}｜{item['label'] or '无标签'}｜{LABEL_STATUS[item['label_status']]}｜"
                          f"[{item['record'][0]}, {item['record'][1]})｜{item['frames']} 帧｜"
                          f"{_describe_free(item, count_usage)}｜{item['grid'] or '无对照图'}｜{text}")

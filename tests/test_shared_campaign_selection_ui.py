@@ -111,6 +111,8 @@ class SharedCampaignSelectionTests(unittest.TestCase):
         self.home(page)
         page.locator("#followup-date-trigger").click()
         page.locator('#followup-date [data-mode="day"]').click()
+        while not page.locator('#followup-date [data-date="2026-09-13"]').count():  # The picker opens on the current month.
+            page.locator('#followup-date [data-nav="-1"]').click()
         page.locator('#followup-date [data-date="2026-09-13"]').click()
         self.wait_ids(page, [LINKED, ANGLE], home=True)
         self.tab(page, "list")

@@ -15,6 +15,7 @@ import shutil
 import sys
 import time
 import tempfile
+from uuid import uuid4
 
 API_DIRS = (os.environ.get("RESOLVE_SCRIPT_API"), r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting")
 LIB_FILES = (os.environ.get("RESOLVE_SCRIPT_LIB"), r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll",
@@ -642,6 +643,9 @@ def inspect(resolve, request):
         tracks[kind] = []
         for index in range(1, timeline.GetTrackCount(kind) + 1):
             items = timeline.GetItemListInTrack(kind, index) or []
+            # The hook is lettering on top of the cut: it covers no picture and no checks should count it as a shot.
+            if kind == "video" and timeline.GetTrackName(kind, index) == HOOK_TRACK and all(is_title(item) for item in items):
+                continue
             # Speed is read here only: build checkpoints compare inspect_item() replies across workbench versions.
             tracks[kind].append({"index": index, "name": timeline.GetTrackName(kind, index),
                                  "enabled": optional(timeline, "GetIsTrackEnabled", kind, index),
@@ -663,7 +667,7 @@ def inspect(resolve, request):
                 for item in other.GetItemListInTrack("video", index) or []:
                     value = inspect_item(item, minimal=True)
                     if not value["media_id"] and not value["media_path"]:
-                        complete = False
+                        complete = complete and is_title(item)
                         continue
                     if value["media_id"] in source_ids or (value["media_path"] and os.path.normcase(value["media_path"]) in source_paths):
                         related.append({"timeline_uid": other.GetUniqueId(), "timeline_name": other.GetName(), **value})
@@ -695,6 +699,246 @@ def restore(resolve, request):
     if request.get("page") and optional(resolve, "GetCurrentPage") != request["page"]:
         resolve.OpenPage(request["page"])
     return {"name": timeline.GetName(), "timecode": actual_timecode}
+
+
+def subtitle_track(timeline):
+    """The one subtitle track to check: the enabled one, else the only one holding subtitles, as finished timelines often switch theirs off.
+
+    With several to choose from the worker cannot tell which is delivered, so it does not guess."""
+    filled = [index for index in range(1, timeline.GetTrackCount("subtitle") + 1) if timeline.GetItemListInTrack("subtitle", index)]
+    used = [index for index in filled if optional(timeline, "GetIsTrackEnabled", "subtitle", index) is not False] or filled
+    if len(used) > 1:
+        raise WorkerError("这条时间线有多条字幕轨，请只留一条后再核对。")
+    return used[0] if used else None
+
+
+def subtitle_rows(timeline, track):
+    return [{"start": item.GetStart(), "end": item.GetEnd(), "text": item.GetName()} for item in timeline.GetItemListInTrack("subtitle", track) or []] if track else []
+
+
+def can_move(timeline):
+    return callable(getattr(timeline, "MoveItems", None))
+
+
+def read_subtitles(resolve, request):
+    project = request_project(resolve, request)
+    timeline = find_timeline(project, request)
+    return {"name": timeline.GetName(), "version": optional(resolve, "GetVersionString") or "", "can_replace": can_move(timeline),
+            "subtitles": subtitle_rows(timeline, subtitle_track(timeline))}
+
+
+def srt_time(frames, fps):
+    """A timeline frame as SRT time, using the exact rate for the NTSC frame rates."""
+    numerator, denominator = {"23.976": (24000, 1001), "29.97": (30000, 1001), "59.94": (60000, 1001)}.get(str(fps), (float(fps), 1))
+    total = round(frames * 1000 * denominator / numerator)
+    return f"{total // 3600000:02d}:{total // 60000 % 60:02d}:{total // 1000 % 60:02d},{total % 1000:03d}"
+
+
+def same_text(first, second):
+    return " ".join(str(first).split()) == " ".join(str(second).split())
+
+
+def replace_subtitle(timeline, media_pool, track, change, folder_path, fps):
+    """Swap one subtitle. Scripts cannot edit its text, so a one-cue SRT comes in past the timeline end and moves into place.
+
+    The original goes only after the new one has proved correct and movable, so an early failure leaves it untouched."""
+    old = next((item for item in timeline.GetItemListInTrack("subtitle", track) or [] if item.GetStart() == change["start"] and
+                item.GetEnd() == change["end"] and same_text(item.GetName(), change["before"])), None)
+    if not old:
+        raise WorkerError(f"第 {change['start']} 帧的字幕已经变了，这条没有改。")
+    start = timeline.GetStartFrame()
+    path = Path(folder_path) / f"subtitle-{change['start']}-{uuid4().hex[:8]}.srt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"1\n{srt_time(change['start'] - start, fps)} --> {srt_time(change['end'] - start, fps)}\n{change['after']}\n\n", encoding="utf-8")
+    imported = media_pool.ImportMedia([str(path)]) or []
+    if len(imported) != 1:
+        raise WorkerError("达芬奇没有导入字幕文件，这条没有改。")
+    added = media_pool.AppendToTimeline([{"mediaPoolItem": imported[0], "recordFrame": 0, "trackIndex": track}]) or []
+    def discard(message):
+        if added:
+            timeline.DeleteClips(added, False)
+        media_pool.DeleteClips(imported)
+        raise WorkerError(message)
+    if len(added) != 1 or not same_text(added[0].GetName(), change["after"]):
+        discard("新字幕的文字读回不一致，这条没有改。")
+    new = added[0]
+    if new.GetEnd() - new.GetStart() != change["end"] - change["start"]:
+        discard("新字幕的时长和原字幕不一致，这条没有改。")
+    probe = new.GetStart() + 1
+    if not timeline.MoveItems([new], {"startFrame": probe}, False) or new.GetStart() != probe:
+        discard("达芬奇没能移动新字幕，这条没有改。")
+    if not timeline.DeleteClips([old], False):
+        discard("达芬奇没能删除原字幕，这条没有改。")
+    if not timeline.MoveItems([new], {"startFrame": change["start"]}, False) or (new.GetStart(), new.GetEnd()) != (change["start"], change["end"]):
+        raise WorkerError(f"原字幕已删除，但新字幕没能回到第 {change['start']} 帧，目前在第 {new.GetStart()} 帧，请到达芬奇手动移回。")
+
+
+def replace_subtitles(resolve, request):
+    """Make the requested wording fixes on the timeline, then put the user's own timeline and playhead back."""
+    project = request_project(resolve, request)
+    timeline = find_timeline(project, request)
+    if not can_move(timeline):
+        raise WorkerError(f"达芬奇 {optional(resolve, 'GetVersionString') or ''} 不能用脚本把字幕放回原位，需要 21.1.2。")
+    track = subtitle_track(timeline)
+    if not track:
+        raise WorkerError("这条时间线没有字幕。")
+    if optional(timeline, "GetIsTrackLocked", "subtitle", track):
+        raise WorkerError("字幕轨被锁定了，请解锁后再核对。")
+    fps, media_pool = timeline.GetSetting("timelineFrameRate"), project.GetMediaPool()
+    previous, shelf = project.GetCurrentTimeline(), media_pool.GetCurrentFolder()
+    timecode_before = previous.GetCurrentTimecode() if previous else None
+    if not project.SetCurrentTimeline(timeline):
+        raise WorkerError("达芬奇没能切换到这条时间线。")
+    done, failure = [], ""
+    try:
+        media_pool.SetCurrentFolder(folder(media_pool, request["audio_bin"]))
+        for change in request["changes"]:
+            try:
+                replace_subtitle(timeline, media_pool, track, change, request["folder"], fps)
+            except WorkerError as exc:
+                failure = str(exc)
+                break
+            done.append(change)
+    finally:
+        media_pool.SetCurrentFolder(shelf)
+        if previous:
+            project.SetCurrentTimeline(previous)
+            if timecode_before:
+                previous.SetCurrentTimecode(timecode_before)
+    saved = bool(done) and bool(resolve.GetProjectManager().SaveProject())
+    return {"replaced": done, "error": failure, "saved": saved, "subtitles": subtitle_rows(timeline, track)}
+
+
+HOOK_TRACK = "屏显"
+# Text+ settings by style; a new look is one more entry here. full_line is how many characters fit a 1080x1920 frame
+# at this size (21 took 50% of the width, measured 2026-11-01), and longer lines shrink to fit.
+HOOK_STYLES = {"white_outline": {"label": "白字黑边", "seconds": 3, "full_line": 38,
+                                 "inputs": {"Font": "CapCut Sans Text", "Style": "Medium", "Size": 0.0673, "Center": {1: 0.5, 2: 0.809},
+                                            "Red1": 1.0, "Green1": 1.0, "Blue1": 1.0, "Enabled2": 1, "Thickness2": 0.1, "Red2": 0.0, "Green2": 0.0, "Blue2": 0.0}}}
+DEFAULT_HOOK_STYLE = "white_outline"
+
+
+def is_title(item):
+    """A title has no source footage, so it says nothing about which footage a timeline used."""
+    return not optional(item, "GetMediaPoolItem") and bool(optional(item, "GetFusionCompCount"))
+
+
+def hook_track(timeline):
+    return next((index for index in range(1, timeline.GetTrackCount("video") + 1) if timeline.GetTrackName("video", index) == HOOK_TRACK), None)
+
+
+def cut_layout(timeline, skip=None):
+    """Every clip on the timeline apart from the hook's own track."""
+    return {kind: {index: [(item.GetName(), item.GetStart(), item.GetEnd()) for item in timeline.GetItemListInTrack(kind, index) or []]
+                   for index in range(1, timeline.GetTrackCount(kind) + 1) if (kind, index) != ("video", skip)}
+            for kind in ("video", "audio", "subtitle")}
+
+
+def write_hook(item, text):
+    comp = optional(item, "GetFusionCompByIndex", 1)
+    tool = comp.FindTool("Template") if comp else None
+    if not tool:
+        return None
+    tool.SetInput("StyledText", text)
+    return tool if tool.GetInput("StyledText") == text else None
+
+
+def style_hook(tool, style, text):
+    longest = max(len(line) for line in text.split("\n"))
+    for name, value in style["inputs"].items():
+        tool.SetInput(name, value * min(1, style["full_line"] / longest) if name == "Size" else value)
+
+
+def insert_hook(timeline, track, text, style, start, end):
+    """Text+ at the start of the hook track, with everything else locked. Returns the title, or raises with it taken back out."""
+    fps, before = timeline.GetSetting("timelineFrameRate"), cut_layout(timeline, track)
+    item = timeline.InsertFusionTitleIntoTimeline("Text+")
+    def discard(message):
+        if item:
+            timeline.DeleteClips([item], False)
+        raise WorkerError(message if cut_layout(timeline, track) == before else f"{message}时间线可能已经变动，请到达芬奇核对。")
+    if not item:
+        discard("达芬奇没能插入 Text+，屏显没有加。")
+    if item.GetTrackTypeAndIndex() != ["video", track]:
+        discard("Text+ 没有落在屏显轨上，屏显没有加。")
+    if not timeline.MoveItems([item], {"trackIndex": track, "startFrame": start}, False) or item.GetStart() != start:
+        discard("达芬奇没能把 Text+ 移到开头，屏显没有加。")
+    frames = min(round(float(fps) * style["seconds"]), end - start)
+    if not item.SetRightOffset(item.GetRightOffset() + item.GetDuration() - frames, False, False) or item.GetDuration() != frames:
+        discard("达芬奇没能裁短 Text+，屏显没有加。")
+    tool = write_hook(item, text)
+    if not tool:
+        discard("Text+ 的文字读回不一致，屏显没有加。")
+    style_hook(tool, style, text)
+    if cut_layout(timeline, track) != before or timeline.GetEndFrame() != end:
+        discard("加屏显时其他片段动了，屏显没有加。")
+    return item
+
+
+def place_hook(timeline, track, text, style):
+    """Add the hook as Text+. An insert cuts and pushes every unlocked track at the playhead, and the playhead reads back
+    correct even when the insert then uses an older one, so all other tracks are locked first and the playhead does not matter.
+
+    Locks go back as they were, and on failure a track made for the hook goes too."""
+    start, end = timeline.GetStartFrame(), timeline.GetEndFrame()
+    made_track = not track
+    if made_track:
+        if not timeline.AddTrack("video"):
+            raise WorkerError("达芬奇没能新建屏显轨，屏显没有加。")
+        track = timeline.GetTrackCount("video")
+        timeline.SetTrackName("video", track, HOOK_TRACK)
+    locks = {(kind, index): timeline.GetIsTrackLocked(kind, index) for kind in ("video", "audio", "subtitle")
+             for index in range(1, timeline.GetTrackCount(kind) + 1)}
+    try:
+        for (kind, index) in locks:
+            timeline.SetTrackLock(kind, index, (kind, index) != ("video", track))
+        if not all(timeline.GetIsTrackLocked(kind, index) == ((kind, index) != ("video", track)) for kind, index in locks):
+            raise WorkerError("达芬奇没能锁住其他轨道，屏显没有加。")
+        return insert_hook(timeline, track, text, style, start, end)
+    except WorkerError:
+        if made_track:
+            timeline.DeleteTrack("video", track)
+            locks.pop(("video", track))
+        raise
+    finally:
+        for (kind, index), locked in locks.items():
+            timeline.SetTrackLock(kind, index, locked)
+
+
+def add_hook(resolve, request):
+    """Put the opening hook on its own track, or rewrite the one already there and keep how the user has adjusted it unless a style is named."""
+    style = HOOK_STYLES.get(request.get("style") or DEFAULT_HOOK_STYLE)
+    if not style:
+        raise WorkerError(f"没有名为「{request['style']}」的屏显样式。")
+    project = request_project(resolve, request)
+    timeline = find_timeline(project, request)
+    if not can_move(timeline):
+        raise WorkerError(f"达芬奇 {optional(resolve, 'GetVersionString') or ''} 不能用脚本把屏显放到开头，需要 21.1.2。")
+    track = hook_track(timeline)
+    items = (timeline.GetItemListInTrack("video", track) or []) if track else []
+    if not all(is_title(item) for item in items) or len(items) > 1:
+        raise WorkerError("屏显轨上有别的片段，请清理后再加。")
+    previous, page = project.GetCurrentTimeline(), optional(resolve, "GetCurrentPage")
+    timecode_before = previous.GetCurrentTimecode() if previous else None
+    if not project.SetCurrentTimeline(timeline):
+        raise WorkerError("达芬奇没能切换到这条时间线。")
+    try:
+        if page != "edit":
+            resolve.OpenPage("edit")
+        tool = write_hook(items[0], request["text"]) if items else None
+        if items and not tool:
+            raise WorkerError("Text+ 的文字读回不一致，屏显没有改。")
+        if items and request.get("style"):
+            style_hook(tool, style, request["text"])
+        item = items[0] if items else place_hook(timeline, track, request["text"], style)
+    finally:
+        if previous:
+            project.SetCurrentTimeline(previous)
+            if timecode_before:
+                previous.SetCurrentTimecode(timecode_before)
+        if page and page != "edit":
+            resolve.OpenPage(page)
+    return {"created": not items, "start": item.GetStart(), "end": item.GetEnd(), "saved": bool(resolve.GetProjectManager().SaveProject())}
 
 
 SKIPPED_TIMELINES = re.compile(r"备份|草稿|backup|draft|__WB_", re.I)
@@ -732,6 +976,38 @@ def clip_label(item, uid, frame, info):
     return left <= frame < left + item.GetEnd() - item.GetStart()
 
 
+def clip_markers(item):
+    """Named markers describing the visible part of a clip, usage notes aside.
+
+    Items cut from one long media file can all report the markers of that file's other clips, far outside their own
+    range; those describe other footage. A clip with no readable offset keeps all of its markers."""
+    left = optional(item, "GetLeftOffset")
+    length = item.GetEnd() - item.GetStart()
+    return [(frame, info) for frame, info in sorted((optional(item, "GetMarkers") or {}).items())
+            if info.get("name") and info.get("customData") != USAGE_MARKER and not is_action_marker(info)
+            and (left is None or left <= frame < left + length)]
+
+
+def is_action_marker(info):
+    return str(info.get("customData") or "").startswith(ACTION_PREFIX)
+
+
+def clip_actions(item):
+    """Action ranges from this clip's own range markers, in source frames. The marker is the record, so a range the
+    user dragged, renamed or deleted in DaVinci is read back as it now stands."""
+    left, source = optional(item, "GetLeftOffset"), optional(item, "GetSourceStartFrame")
+    if left is None or source is None:
+        return []
+    length = item.GetEnd() - item.GetStart()
+    found = []
+    for frame, info in sorted((optional(item, "GetMarkers") or {}).items()):
+        if is_action_marker(info) and info.get("name") and left <= frame < left + length:
+            end = min(frame + max(int(info.get("duration") or 1), 1), left + length)
+            found.append({"name": str(info["name"]).replace(ACTION_PARTIAL, "").strip(), "start": source + frame - left,
+                          "end": source + end - left, "complete": ACTION_PARTIAL not in str(info["name"])})
+    return found
+
+
 def candidates(resolve, request):
     """List material labels and full source ranges; archived usage scanning requires explicit opt-in."""
     project = request_project(resolve, request)
@@ -749,9 +1025,8 @@ def candidates(resolve, request):
                 value = inspect_item(item, minimal=True)
                 if not value["media_id"] and not value["media_path"]:
                     continue
-                markers = [(frame, info) for frame, info in sorted((optional(item, "GetMarkers") or {}).items())
-                           if info.get("name") and info.get("customData") != USAGE_MARKER]
-                value.update(track=index, labels=[info["name"] for _, info in markers],
+                markers = clip_markers(item)
+                value.update(track=index, actions=clip_actions(item), labels=[info["name"] for _, info in markers],
                              verified_labels=[info["name"] for frame, info in markers if clip_label(item, value["uid"], frame, info)])
                 clips.append(value)
                 media_ids.add(value["media_id"])
@@ -772,7 +1047,7 @@ def candidates(resolve, request):
                 for item in other.GetItemListInTrack("video", index) or []:
                     value = inspect_item(item, minimal=True)
                     if not value["media_id"] and not value["media_path"]:
-                        complete = False
+                        complete = complete and is_title(item)
                     elif value["media_id"] in media_ids or (value["media_path"] and os.path.normcase(value["media_path"]) in media_paths):
                         used.append({"timeline_name": name, **value})
         except Exception:
@@ -785,6 +1060,8 @@ def candidates(resolve, request):
 USAGE_COLORS = ("Orange", "Apricot", "Yellow", "Lime", "Olive", "Green", "Teal", "Navy",
                 "Blue", "Purple", "Violet", "Pink", "Tan", "Beige", "Brown", "Chocolate")
 USAGE_MARKER = "material_usage_v1"
+ACTION_PREFIX = "material_action_v1"  # davinci-clip-labeling's range markers: one action each, name is the action.
+ACTION_PARTIAL = "（不完整）"
 USAGE_LINE = re.compile("^已使用 \\d+ 次$")  # 已使用 N 次
 
 
@@ -891,7 +1168,8 @@ def _mark_item(item, count, summary):
         item.ClearClipColor()
         summary["cleared"] += 1
     changed = 0
-    labels = [(frame, info) for frame, info in markers.items() if info.get("name") and info.get("customData") != USAGE_MARKER]
+    labels = [(frame, info) for frame, info in markers.items()
+              if info.get("name") and info.get("customData") != USAGE_MARKER and not is_action_marker(info)]
     for frame, info in labels:
         note = usage_note(info.get("note"), count)
         if note == str(info.get("note") or ""):
@@ -956,67 +1234,6 @@ def frames(resolve, request):
     return {"shots": results}
 
 
-RENDER_NAME = "timeline"
-
-
-def render_start(resolve, request):
-    """Start rendering a timeline to one MP4 in request['render_dir'] and return at once with the job id.
-
-    Used to review a finished timeline without a manual export. The caller polls render_poll and ends with
-    render_finish, which puts the project's render format back; other render settings are only overwritten."""
-    project = request_project(resolve, request)
-    timeline = find_timeline(project, request)
-    current = project.GetCurrentTimeline()
-    if (not current or current.GetUniqueId() != timeline.GetUniqueId()) and not project.SetCurrentTimeline(timeline):
-        raise WorkerError("达芬奇没能切换到这条时间线。")
-    if timeline.GetEndFrame() <= timeline.GetStartFrame():
-        raise WorkerError("这条时间线是空的，没有可渲染的内容。")
-    folder = Path(request["render_dir"])
-    folder.mkdir(parents=True, exist_ok=True)
-    previous = optional(project, "GetCurrentRenderFormatAndCodec") or {}
-    if not project.SetCurrentRenderFormatAndCodec("mp4", "H264"):
-        raise WorkerError("达芬奇没能切到 MP4 / H.264 渲染格式。")
-    settings = {"SelectAllFrames": True, "TargetDir": str(folder), "CustomName": RENDER_NAME, "UseUniqueFilenames": False,
-                "ExportVideo": True, "ExportAudio": True}
-    # VideoQuality is left alone: Resolve 21 rejects every value for H264 here, and failing the whole dict made the review unusable.
-
-    def restore_format():
-        if previous.get("format") and previous.get("codec"):
-            optional(project, "SetCurrentRenderFormatAndCodec", previous["format"], previous["codec"])
-
-    if not project.SetRenderSettings(settings):
-        restore_format()
-        raise WorkerError("达芬奇没能设置渲染参数。")
-    job = project.AddRenderJob()
-    if not job:
-        restore_format()
-        raise WorkerError("达芬奇没能把这条时间线加入渲染队列。")
-    if not project.StartRendering(job):
-        project.DeleteRenderJob(job)
-        restore_format()
-        raise WorkerError("达芬奇没能开始渲染，请确认渲染队列没有被占用。")
-    return {"job_id": job, "name": timeline.GetName(), "previous_format": previous.get("format") or "",
-            "previous_codec": previous.get("codec") or ""}
-
-
-def render_poll(resolve, request):
-    project = request_project(resolve, request)
-    info = project.GetRenderJobStatus(request["job_id"]) or {}
-    return {"state": info.get("JobStatus") or "", "percent": info.get("CompletionPercentage") or 0, "error": info.get("Error") or ""}
-
-
-def render_finish(resolve, request):
-    """Stop a render still running, delete its job, restore the render format, and report the file it wrote."""
-    project = request_project(resolve, request)
-    if optional(project, "IsRenderingInProgress"):
-        optional(project, "StopRendering")
-    optional(project, "DeleteRenderJob", request["job_id"])
-    if request.get("previous_format") and request.get("previous_codec"):
-        optional(project, "SetCurrentRenderFormatAndCodec", request["previous_format"], request["previous_codec"])
-    found = sorted(Path(request["render_dir"]).glob(RENDER_NAME + ".*"))
-    return {"files": [str(path) for path in found]}
-
-
 def reveal(resolve, request):
     """Show one clip: open its timeline on the edit page and put the playhead on the given absolute timeline frame."""
     project = request_project(resolve, request)
@@ -1041,7 +1258,7 @@ def reveal(resolve, request):
 
 COMMANDS = {"ping": lambda resolve, request: {}, "status": status, "build": build, "open": open_timeline, "inspect": inspect, "restore": restore,
             "candidates": candidates, "frames": frames, "reveal": reveal, "mark_usage": mark_usage,
-            "render_start": render_start, "render_poll": render_poll, "render_finish": render_finish}
+            "read_subtitles": read_subtitles, "replace_subtitles": replace_subtitles, "add_hook": add_hook}
 
 
 def main():

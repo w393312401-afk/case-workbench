@@ -88,7 +88,7 @@ class AIDefaultsBrowserTests(unittest.TestCase):
                       document.querySelector(`[data-ai-action="${action}"]`).click();
                     }""", action)
                 summary = page.locator("#ai-create-defaults-summary")
-                summary.get_by_text("使用全局默认 · GPT-6.1-Sol · 思考高", exact=True).wait_for()
+                summary.get_by_text("使用全局默认 · GPT-6.1-Sol · 思考强度：高", exact=True).wait_for()
                 self.assertEqual(page.locator("#ai-create-model,#ai-create-effort").count(), 0)
                 self.assertIsNone(page.evaluate("localStorage.getItem('case-workbench.ai.last-settings')"))
                 self.assertEqual(page.locator("#ai-create-defaults a").get_attribute("target"), "_blank")
@@ -103,12 +103,12 @@ class AIDefaultsBrowserTests(unittest.TestCase):
     def test_continuation_uses_changed_defaults_preserves_draft_and_keeps_historical_model(self):
         page = self.open_page(continuation=True)
         summary = page.locator("#ai-continue-defaults-summary")
-        summary.get_by_text("使用全局默认 · GPT-6.1-Sol · 思考高", exact=True).wait_for()
+        summary.get_by_text("使用全局默认 · GPT-6.1-Sol · 思考强度：高", exact=True).wait_for()
         self.assertEqual(page.locator("#ai-continue-model,#ai-continue-effort").count(), 0)
         self.assertIn("actual-history-model", page.locator("#ai-rounds").inner_text())
         page.locator("#ai-continue-instruction").fill("保留这份续写要求。")
         page.evaluate("CaseAI.refreshDefaults({model:'claude-sonnet',reasoning_effort:'medium'})")
-        summary.get_by_text("使用全局默认 · Claude Sonnet · 思考中", exact=True).wait_for()
+        summary.get_by_text("使用全局默认 · Claude Sonnet · 思考强度：中", exact=True).wait_for()
         self.assertEqual(page.locator("#ai-continue-instruction").input_value(), "保留这份续写要求。")
         page.locator("#ai-continue-submit").click()
         page.wait_for_function("() => document.querySelector('#ai-continue-instruction').value === ''")
@@ -143,7 +143,7 @@ class AIDefaultsBrowserTests(unittest.TestCase):
         page.evaluate("CaseAI.refreshDefaults({model:'claude-sonnet',reasoning_effort:'medium'})")
         pending[0].fulfill(json={**self.options, "default_settings": {"model": None, "reasoning_effort": None},
                                 "defaults_error": "旧响应：全局配置已损坏。", "defaults_configured": False})
-        page.locator("#ai-create-defaults-summary").get_by_text("使用全局默认 · Claude Sonnet · 思考中", exact=True).wait_for()
+        page.locator("#ai-create-defaults-summary").get_by_text("使用全局默认 · Claude Sonnet · 思考强度：中", exact=True).wait_for()
         self.assertEqual(page.locator("#ai-create-instruction").input_value(), "保留写稿要求。")
         self.assertTrue(page.locator("#submit-ai-create").is_enabled())
 
@@ -162,7 +162,7 @@ class AIDefaultsBrowserTests(unittest.TestCase):
                 page.locator(f"#{prefix}-form").dispatch_event("submit")
                 self.assertEqual(self.posts, [])
                 page.evaluate("CaseAI.refreshDefaults({model:'claude-sonnet',reasoning_effort:'medium'})")
-                page.locator(f"#{prefix}-defaults-summary").get_by_text("使用全局默认 · Claude Sonnet · 思考中", exact=True).wait_for()
+                page.locator(f"#{prefix}-defaults-summary").get_by_text("使用全局默认 · Claude Sonnet · 思考强度：中", exact=True).wait_for()
                 self.assertTrue(page.locator(submit).is_enabled())
                 self.assertTrue(page.locator(f"#{prefix}-settings .ai-settings-issue").is_hidden())
                 self.assertEqual(page.locator(f"#{prefix}-instruction").input_value(), "保留输入，不使用错误的默认值。")
@@ -175,7 +175,7 @@ class AIDefaultsBrowserTests(unittest.TestCase):
                 prefix = "ai-continue" if continuation else "ai-create"
                 if not continuation:
                     page.evaluate("CaseAI.startBlank('202H')")
-                page.locator(f"#{prefix}-defaults-summary").get_by_text("使用全局默认 · GPT-6.1-Sol · 思考高", exact=True).wait_for()
+                page.locator(f"#{prefix}-defaults-summary").get_by_text("使用全局默认 · GPT-6.1-Sol · 思考强度：高", exact=True).wait_for()
                 if continuation:
                     page.evaluate("location.hash='#/202H/ai'")
                     page.locator("#ai-task-list").wait_for()
@@ -187,7 +187,7 @@ class AIDefaultsBrowserTests(unittest.TestCase):
                     page.locator(".ai-task-card").click()
                 else:
                     page.evaluate("CaseAI.startBlank('202H')")
-                page.locator(f"#{prefix}-defaults-summary").get_by_text("使用全局默认 · Claude Sonnet · 思考中", exact=True).wait_for()
+                page.locator(f"#{prefix}-defaults-summary").get_by_text("使用全局默认 · Claude Sonnet · 思考强度：中", exact=True).wait_for()
                 self.assertEqual(self.posts, [])
                 page.close()
 

@@ -34,7 +34,6 @@ class AIActivityDetailBrowserTests(unittest.TestCase):
         self.assertTrue(page.url.endswith("?round=" + first))
         self.assertNotIn("is-collapsed", chosen.get_attribute("class"))
         self.assertEqual(chosen.locator('.task-activity-logs').count(), 1)
-        chosen.locator('.activity-strip').get_by_text("本轮结果已保存，可以查看。", exact=True).wait_for()
         page.wait_for_timeout(2300)
         self.assertFalse(any("%3Fround" in request or "%3fround" in request for request in requests))
         page.evaluate("hash => location.hash = hash", f"#/202H/ai/{task['task_id']}?round={second}")

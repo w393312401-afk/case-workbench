@@ -114,6 +114,35 @@ class DetailProductPickerBrowserTests(unittest.TestCase):
         page.reload()
         page.locator("#detail-product > summary").get_by_text("SHARPAL 198H", exact=False).wait_for()
 
+    def test_manual_product_wins_over_old_title_after_returning_to_library_and_reload(self):
+        product = "Kitchen bench stone fixture"
+        self.catalog_change("add", product)
+        current = self.store.read_case(self.identifier)["current"]
+        current["title"] = "SHARPAL 202H original title"
+        self.store.append(self.identifier, {"kind": "editorial", "text": "Fixture title", "current": current})
+        before = self.case_library_bytes()
+        page = self.open_detail()
+        dialog = self.open_picker(page)
+        dialog.locator(f'[data-product-option="{product}"]').click()
+        dialog.locator("[data-product-save]").click()
+        dialog.wait_for(state="detached")
+        self.assertEqual(self.current_product(), product)
+        self.assertEqual(page.evaluate(
+            "id => productFilterGroup(state.cases.find(row => row.case_id === id))", self.identifier
+        ), product)
+        page.goto(self.base + "/#/202H/library")
+        page.locator("#case-search").wait_for()
+        page.locator("#library-product-filter").select_option(product)
+        page.wait_for_function("id => filteredCases().some(row => row.case_id === id)", arg=self.identifier)
+        page.reload()
+        page.locator("#case-search").wait_for()
+        self.assertEqual(page.locator("#library-product-filter").input_value(), product)
+        self.assertIn(self.identifier, page.locator("[data-selection-card]").evaluate_all(
+            "nodes => nodes.map(node => node.dataset.selectionCard)"
+        ))
+        self.assertEqual(page.evaluate("id => state.cases.find(row => row.case_id === id).product_manual", self.identifier), True)
+        self.assertEqual(self.case_library_bytes(), before)
+
     def test_new_source_products_are_verified_once_without_resurrecting_stale_names(self):
         deleted = "Deleted historical source fixture"
         new_product = "Newly imported fixture product"

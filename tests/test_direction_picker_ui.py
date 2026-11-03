@@ -43,9 +43,13 @@ class DirectionPickerBrowserTests(unittest.TestCase):
         self.store.append(self.identifier, {"kind": "editorial", "text": "隔离方向快照", "current": current})
         return current["test_direction"]
 
-    def inline(self, page):
+    def inline(self, page, empty=False):
         page.locator(".detail-heading").wait_for()
-        page.locator('[data-inline-edit="direction"]').click()
+        if empty:  # A case without a direction offers it among the fields still to fill in.
+            page.locator(".detail-completion > summary").click()
+            page.locator('[data-completion-section="direction"]').click()
+        else:
+            page.locator('[data-inline-edit="direction"]').click()
         form = page.locator('.case-inline-editor[data-edit-section="direction"]')
         form.locator('[data-direction-status]').get_by_text("可选", exact=False).wait_for()
         return form
@@ -94,7 +98,7 @@ class DirectionPickerBrowserTests(unittest.TestCase):
 
     def test_empty_case_uses_catalog_defaults_and_rejects_incomplete_chain(self):
         page = self.open_page(f"#/202H/case/{self.identifier}")
-        form = self.inline(page)
+        form = self.inline(page, empty=True)
         form.locator('[name="direction_direction_id"]').select_option("202H-S1")
         self.assertEqual(form.locator('[name="direction_concern"]').input_value(), FIRST["concern"])
         self.assertEqual(form.locator('[name="direction_closing"]').input_value(), FIRST["closing"])

@@ -57,7 +57,7 @@ class RetroFunnelTests(unittest.TestCase):
         self.assertIsNone(review_draft({"rounds": [{"status": "completed", "output": "结论：x\n建议动作：无结论"}]})["card"])
 
     def test_draft_brief_lists_graded_points_for_the_audience_and_points_conclusion(self):
-        from prepublish_review import draft_prompt
+        from retro_draft import draft_prompt
         brief = draft_prompt([], None, source="成片", review_text="", figures={}, mode="sold",
                              points=[{"code": "S1", "title": "定角不用猜"}, {"code": "B4", "title": "价格"}], audience="徒手磨石用户")
         self.assertIn("S1 定角不用猜\nB4 价格", brief)
@@ -66,7 +66,7 @@ class RetroFunnelTests(unittest.TestCase):
         self.assertIn("S、A、B 都写「未登记」", draft_prompt([], None, source="成片", review_text="", figures={}))
 
     def test_thin_video_conclusion_adds_where_it_stuck_and_one_suspicion(self):
-        from prepublish_review import draft_prompt
+        from retro_draft import draft_prompt
         thin = draft_prompt([], None, source="成片", review_text="", figures={}, mode="thin")
         self.assertIn("结论：人群：……；S：……；A：……；B：……；卡点：……；待验证：……", thin)
         self.assertIn("「参考价值：待定（数据未到）」", thin)
@@ -94,7 +94,7 @@ class PeerReferenceTests(unittest.TestCase):
         calls = []
 
         class Performance:
-            def videos(self):
+            def videos_readonly(self):
                 return rows
 
             def rate_medians(self, ids, since, until):

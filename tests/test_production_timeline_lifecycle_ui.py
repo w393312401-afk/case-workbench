@@ -36,6 +36,27 @@ class ProductionTimelineLifecycleBrowserTests(unittest.TestCase):
             timeline = next(item for item in self.payload['job']['timelines'] if item['unique_id'] == body['unique_id'])
             route.fulfill(status=200, content_type='application/json', body=json.dumps({'name': timeline['name']}))
             return
+        if route.request.url.endswith('/subtitles'):
+            self.assertTrue(body['request_id'])
+            timeline = next(item for item in self.payload['job']['timelines'] if item['unique_id'] == body['timeline_uid'])
+            timeline['subtitle_check'] = {
+                'status': 'needs_review', 'message': '字幕已自动改 1 处，1 处待你确认', 'at': '2026-11-01T09:00:00+00:00',
+                'changes': [{'start': 253, 'end': 300, 'before': 'On the Sharpeball 202H,', 'after': 'On the SHARPAL 202H,'}],
+                'review': [{'start': 310, 'end': 346, 'text': 'use the water', 'wrote': 'water stone', 'expected': 'whetstone'}]}
+            self.payload['revision'] += 1
+            route.fulfill(status=200, content_type='application/json', body=json.dumps({'timeline': timeline}))
+            return
+        if route.request.url.endswith('/timeline/delete'):
+            timeline = next(item for item in self.payload['job']['timelines'] if item['unique_id'] == body['timeline_uid'])
+            if body.get('preview'):
+                result = {'timeline_uid': timeline['unique_id'], 'name': timeline['name'], 'bytes': 3145728, 'files': 4, 'edits': 1}
+            else:
+                self.assertTrue(body['request_id'])
+                self.payload['job']['timelines'].remove(timeline)
+                self.payload['revision'] += 1
+                result = {'warnings': []}
+            route.fulfill(status=200, content_type='application/json', body=json.dumps(result))
+            return
         self.assertEqual(body['revision'], self.payload['revision'])
         self.assertTrue(body['request_id'])
         timeline = next(item for item in self.payload['job']['timelines'] if item['unique_id'] == body['timeline_uid'])
@@ -52,7 +73,40 @@ class ProductionTimelineLifecycleBrowserTests(unittest.TestCase):
         page.locator('.production-steps [data-step="timeline"]').click()
         return page
 
-    def test_archive_history_is_collapsed_and_restore_keeps_order_target_and_drafts(self):
+    def test_subtitle_check_runs_from_the_publish_step_and_keeps_later_saves_current(self):
+        # The fixture answers the publication request with the same payload, so the panel's fields sit beside the job.
+        self.payload.update(timeline_uid='uid-own', timelines=[{'unique_id': 'uid-own', 'name': 'Lab261011-202-2'}])
+        page = self.open_page()
+        expect(page.locator('#timeline-panel [data-check-subtitles]')).to_have_count(0)
+        expect(page.locator('#timeline-panel [data-open-timeline]')).to_have_count(2)
+        page.locator('.production-steps [data-step="publish"]').click()
+        tools = page.locator('#video-publication-panel [data-timeline-tools="uid-own"]')
+        expect(tools).to_contain_text('Lab261011-202-2')
+        page.context.grant_permissions(['clipboard-read', 'clipboard-write'])
+        tools.locator('[data-copy-id]').click()
+        expect(page.locator('#toast')).to_contain_text('时间线名称已复制')
+        self.assertEqual(page.evaluate('navigator.clipboard.readText()'), 'Lab261011-202-2')
+        tools.locator('[data-open-timeline]').click()
+        expect(page.locator('#toast')).to_contain_text('已在达芬奇打开 Lab261011-202-2')
+        expect(tools.locator('[data-subtitle-state]')).to_have_count(0)
+        tools.locator('[data-check-subtitles]').click()
+        expect(page.locator('#toast')).to_contain_text('字幕已自动改 1 处，1 处待你确认')
+        expect(tools.locator('[data-subtitle-state="needs_review"]')).to_contain_text('字幕已自动改 1 处，1 处待你确认')
+        details = tools.locator('.video-publication-subtitle-details')
+        expect(details.locator('summary')).to_have_text('查看 2 处')
+        self.assertFalse(details.evaluate('node => node.open'))
+        details.locator('summary').click()
+        expect(details).to_contain_text('On the SHARPAL 202H,')
+        expect(details).to_contain_text('稿子是“whetstone”')
+        expect(tools.locator('[data-check-subtitles]')).to_be_enabled()
+        expect(tools.locator('[data-check-subtitles]')).to_have_text('核对字幕')
+        # The check moved the revision; the timeline step's next save must send the new one.
+        page.locator('.production-steps [data-step="timeline"]').click()
+        page.locator('[data-timeline-task="uid-old"]').select_option('in_progress')
+        expect(page.locator('#toast')).to_contain_text('已更新任务状态。')
+        self.assertEqual(self.calls[-1]['body']['revision'], 2)
+
+    def test_delete_asks_first_then_removes_the_card_and_keeps_order_target_and_drafts(self):
         page = self.open_page(width=390)
         form = page.locator('#edit-panel #edit-form')
         page.locator('.production-steps [data-step="edit"]').click()
@@ -60,35 +114,47 @@ class ProductionTimelineLifecycleBrowserTests(unittest.TestCase):
         form.locator('[name="timeline"]').select_option('uid-own')
         page.evaluate('window.__editForm=document.querySelector("#edit-panel #edit-form")')
         page.locator('.production-steps [data-step="timeline"]').click()
-        page.locator('[data-archive-timeline="uid-old"]').click()
-        history = page.locator('.timeline-history')
-        expect(history.locator('summary')).to_have_text('历史时间线（1 条）')
-        self.assertFalse(history.evaluate('node => node.open'))
+        expect(page.locator('[data-archive-timeline]')).to_have_count(0)
+        page.locator('[data-delete-timeline="uid-old"]').click()
+        dialog = page.locator('dialog.production-dialog')
+        expect(dialog).to_contain_text('Lab261010-202-1')
+        expect(dialog).to_contain_text('1 次 AI 剪辑记录')
+        expect(dialog).to_contain_text('3 MB')
+        expect(dialog).to_contain_text('不会改动达芬奇里的时间线')
+        dialog.locator('button[data-close]').last.click()
+        expect(page.locator('#timeline-cards > .timeline-card')).to_have_count(2)
+        self.assertEqual([call for call in self.calls if not call['body'].get('preview')], [])
+        page.locator('[data-delete-timeline="uid-old"]').click()
+        page.locator('dialog.production-dialog [data-submit]').click()
+        expect(page.locator('#toast')).to_contain_text('时间线及本地文件已删除')
         expect(page.locator('#timeline-cards > .timeline-card')).to_have_count(1)
         expect(page.locator('[data-timeline-count]')).to_have_text('1 条')
+        expect(page.locator('.timeline-history')).to_have_count(0)
         expect(form.locator('[name="timeline"]')).to_have_value('uid-own')
         expect(form.locator('[name="timeline"] option')).to_have_count(1)
         expect(form.locator('[name="instruction"]')).to_have_value('保留这段尚未提交的剪辑要求')
         self.assertTrue(page.evaluate('window.__editForm===document.querySelector("#edit-panel #edit-form")'))
+        self.assertEqual([call['body']['timeline_uid'] for call in self.calls if not call['body'].get('preview')], ['uid-old'])
+        self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 391)
+
+    def test_legacy_archived_timeline_stays_in_history_with_restore_and_delete(self):
+        self.payload['job']['timelines'][0]['archived'] = True
+        page = self.open_page(width=390)
+        history = page.locator('.timeline-history')
+        expect(history.locator('summary')).to_have_text('历史时间线（1 条）')
+        self.assertFalse(history.evaluate('node => node.open'))
         history.locator('summary').click()
         expect(history).to_contain_text('已归档')
         expect(history).to_contain_text('归档前：待剪辑')
+        expect(history.locator('[data-delete-timeline="uid-old"]')).to_have_text('删除时间线')
         history.locator('[data-open-timeline]').click()
         expect(page.locator('#toast')).to_contain_text('已在达芬奇打开 Lab261010-202-1')
-        page.reload()
-        page.locator('.production-steps [data-step="timeline"]').click()
-        self.assertFalse(history.evaluate('node => node.open'))
-        history.locator('summary').click()
         history.locator('[data-archive-timeline="uid-old"]').click()
         expect(history).to_have_count(0)
         expect(page.locator('#timeline-cards > .timeline-card')).to_have_count(2)
-        self.assertEqual(page.locator('#timeline-cards > .timeline-card').evaluate_all(
-            'nodes => nodes.map(node => node.dataset.timelineId)'), ['uid-own', 'uid-old'])
-        expect(page.locator('.timeline-card.current')).to_have_attribute('data-timeline-id', 'uid-own')
-        expect(form.locator('[name="timeline"]')).to_have_value('uid-own')
+        self.assertEqual([call['body']['archived'] for call in self.calls if '/timeline/archive' in call['url']], [False])
         expect(page.locator('[data-timeline-task="uid-old"]')).to_have_value('pending')
-        self.assertEqual([call['body']['archived'] for call in self.calls if '/timeline/archive' in call['url']], [True, False])
-        self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 391)
+        expect(page.locator('[data-archive-timeline]')).to_have_count(0)
 
     def test_task_completion_and_ai_state_remain_independent_after_save_and_reload(self):
         job = self.payload['job']
@@ -177,17 +243,14 @@ class ProductionTimelineLifecycleBrowserTests(unittest.TestCase):
         job['timelines'][1]['task_status'] = 'in_progress'
         page = self.open_page()
         card = page.locator('[data-timeline-id="uid-own"]')
-        expect(card.locator('[data-archive-timeline]')).to_be_disabled()
+        expect(card.locator('[data-delete-timeline]')).to_be_disabled()
         expect(card.locator('[data-timeline-task]')).to_be_disabled()
         expect(card.locator('[data-timeline-ai-state]')).to_have_text('AI 剪辑：运行中')
         edit.update(status='failed', execution_status='failed')
         job['status'] = 'failed'
         self.payload['revision'] += 1
-        expect(card.locator('[data-archive-timeline]')).to_be_enabled(timeout=8000)
+        expect(card.locator('[data-delete-timeline]')).to_be_enabled(timeout=8000)
         expect(card.locator('[data-timeline-ai-state]')).to_have_text('AI 剪辑：失败')
-        card.locator('[data-archive-timeline]').click()
-        expect(page.locator('.timeline-history [data-timeline-id="uid-own"]')).to_have_count(1)
-        self.assertEqual(self.calls[0]['body']['revision'], 2)
 
     def test_all_archived_has_no_active_completion_target_and_restore_reenables_build_step(self):
         job = self.payload['job']

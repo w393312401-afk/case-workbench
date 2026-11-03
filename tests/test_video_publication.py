@@ -214,6 +214,20 @@ class VideoPublicationTests(unittest.TestCase):
         self.assertEqual(detail["source"], record["source"])
         self.assertEqual(reviewed_source(public_job(self.bench.production.job(JOB))), record["source"])
 
+    def test_subtitle_check_keeps_existing_publication_current(self):
+        record = self.save()["publication"]
+        self.edit_job(lambda job: job["timelines"][0].update(subtitle_check={"status": "fixed", "message": "字幕已自动改 1 处"}))
+        detail = self.bench.video_publication_detail(JOB)
+        self.assertTrue(detail["publication"]["source_current"])
+        self.assertEqual(detail["source_signature"], record["source_signature"])
+
+    def test_hook_record_keeps_existing_publication_current(self):
+        record = self.save()["publication"]
+        self.edit_job(lambda job: job["timelines"][0].update(hook_overlay={"status": "saved", "text": "One line"}))
+        detail = self.bench.video_publication_detail(JOB)
+        self.assertTrue(detail["publication"]["source_current"])
+        self.assertEqual(detail["source_signature"], record["source_signature"])
+
     def test_restoring_same_timeline_restores_publication_version_match(self):
         record = self.save()["publication"]
         self.edit_job(lambda job: job["timelines"][0].update(archived=True, task_status="completed"))

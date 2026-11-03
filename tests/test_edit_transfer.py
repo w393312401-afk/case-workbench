@@ -1,0 +1,179 @@
+"""Two isolated workstations exchange inputs and receipts, never timeline ownership."""
+import io
+import json
+import threading
+import zipfile
+
+import pytest
+
+from edit_transfer import export_package, import_package, export_receipt, import_receipt
+from elevenlabs_client import VoiceError
+from production_store import ProductionStore
+from workbench_production import ProductionWorkbenchMixin
+from creation_store import CreationStore
+
+
+class Bench(ProductionWorkbenchMixin):
+    def __init__(self, root):
+        self.lock = threading.RLock()
+        self.production = ProductionStore(root, self.lock)
+        self.creation = CreationStore(root, self.lock)
+
+
+@pytest.fixture
+def stations(tmp_path):
+    host, local = Bench(tmp_path / 'host'), Bench(tmp_path / 'local')
+    job = dict(id='PRD-0123456789ab', title='Test', product='202H', direction_id='', script_id='SCR-0123456789ab',
+               script_version=1, lines=[dict(number=1, spoken='Test.', zh='', proof='Show', tags='', evidence='')],
+               takes=[dict(id='TAK-0123456789ab', voice_id='VOICE123456789', mp3='old', wav='old',
+                           groups=[dict(number=1, start=0., end=1., coverage=1.)], duration=1.)],
+               selected_take='TAK-0123456789ab', timelines=[], edits=[], archived=False, history=[], problems=[])
+    data = host.production.empty();data['jobs'] = [job];host.production.write(data)
+    for kind in ('mp3', 'wav'):
+        path = host.production.audio / job['id'] / job['selected_take'] / f'voiceover.{kind}'
+        path.parent.mkdir(parents=True, exist_ok=True);path.write_bytes(b'audio-' + kind.encode())
+    return host, local, job['id']
+
+
+def test_import_can_read_full_job_and_generate_markers(stations):
+    host, local, identifier = stations
+    raw = export_package(host, identifier)
+    result = import_package(local, raw)
+    assert result['job_id'] != identifier
+    assert import_package(local, raw) == dict(job_id=result['job_id'], reused=True)
+    job = local.production_job(result['job_id'])['job']
+    assert not job['timelines'] and not job['edits']
+    assert job['script_version'] == 1
+    assert local.production_audio(job['id'], job['selected_take'], 'wav').read_bytes() == b'audio-wav'
+    from workbench_production import meaning_markers
+    markers = meaning_markers(job, job['takes'][0], '30')
+    assert job['id'] in markers[0]['custom']
+
+
+def test_result_preserves_host_timeline_ownership_and_is_idempotent(stations):
+    host, local, identifier = stations
+    imported = import_package(local, export_package(host, identifier))['job_id']
+    data = local.production.read()
+    data['jobs'][0]['timelines'] = [dict(unique_id='LOCAL-UID', name='Local cut', take_id='TAK-0123456789ab')]
+    local.production.write(data)
+    receipt = export_receipt(local, imported)
+    import_receipt(host, identifier, receipt);import_receipt(host, identifier, receipt)
+    job = host.production.job(identifier)
+    assert job['timelines'] == [] and job['edits'] == []
+    assert len(job['local_edit_results']) == 1
+    assert job['local_edit_results'][0]['timelines'][0]['unique_id'] == 'LOCAL-UID'
+
+
+class Feed:
+    """Only the projection call settle_resolved_activity makes; keeps what it resolved."""
+    def __init__(self, rows):
+        self.rows, self.resolved = rows, None
+    def existing(self):
+        return self.rows
+    def archive_owner(self, owner, archived):
+        pass
+    def project_attention(self, owner, resolved):
+        self.resolved = resolved
+
+
+def test_returned_remote_cut_stops_edit_nags_on_the_original_order(stations):
+    from task_activity import settle_resolved_activity
+    host, local, identifier = stations
+    imported = import_package(local, export_package(host, identifier))['job_id']
+    rows = [dict(run_id='RUN-edit', owner_id=identifier, kind='edit', source_id='EDT-1', status='failed', owner_archived=0),
+            dict(run_id='RUN-voice', owner_id=identifier, kind='voice', source_id='TAK-other', status='failed', owner_archived=0)]
+    host.activity = Feed(rows)
+    # A receipt with no timeline yet does not answer the edit request.
+    import_receipt(host, identifier, export_receipt(local, imported))
+    settle_resolved_activity(host, 'job', host.production_job(identifier)['job'])
+    assert 'RUN-edit' not in host.activity.resolved
+    data = local.production.read()
+    data['jobs'][0]['timelines'] = [dict(unique_id='LOCAL-UID', name='Local cut', take_id='TAK-0123456789ab')]
+    local.production.write(data)
+    import_receipt(host, identifier, export_receipt(local, imported))
+    # The detail read and the catalog read must agree, or the nag would flap.
+    for job in (host.production_job(identifier)['job'], host.production.public()['jobs'][0]):
+        settle_resolved_activity(host, 'job', job)
+        assert '另一台电脑' in host.activity.resolved['RUN-edit']
+        assert 'RUN-voice' not in host.activity.resolved
+    # Changing the spoken lines makes the remote cut stale; the nag comes back.
+    data = host.production.read();data['jobs'][0]['lines'][0]['spoken'] = 'Changed.';host.production.write(data)
+    settle_resolved_activity(host, 'job', host.production_job(identifier)['job'])
+    assert 'RUN-edit' not in host.activity.resolved
+
+
+def test_conflicting_script_rejected(stations):
+    host, local, identifier = stations
+    imported = import_package(local, export_package(host, identifier))['job_id']
+    receipt = export_receipt(local, imported)
+    data = host.production.read();data['jobs'][0]['lines'][0]['spoken'] = 'Changed.';host.production.write(data)
+    with pytest.raises(VoiceError, match='已变化'):
+        import_receipt(host, identifier, receipt)
+    assert not host.production.job(identifier).get('local_edit_results')
+
+
+@pytest.mark.parametrize('filename', ['../escape', 'account.json', 'voiceover.mp3'])
+def test_rejects_path_traversal_unknown_and_duplicate_entries(stations, filename):
+    host, local, identifier = stations
+    raw = io.BytesIO(export_package(host, identifier))
+    with zipfile.ZipFile(raw, 'a') as archive:
+        archive.writestr(filename, 'bad')
+    with pytest.raises(VoiceError):
+        import_package(local, raw.getvalue())
+    assert not local.production.read()['jobs']
+
+
+def test_missing_audio_and_bad_manifest_rejected(stations):
+    _, local, _ = stations
+    for value in ({}, {'schema': 1, 'kind': 'workbench-local-edit', 'job': {}}):
+        raw = io.BytesIO()
+        with zipfile.ZipFile(raw, 'w') as archive:
+            archive.writestr('manifest.json', json.dumps(value))
+        with pytest.raises(VoiceError):
+            import_package(local, raw.getvalue())
+
+
+def test_imported_job_builds_timeline_using_local_audio(stations):
+    from uuid import uuid4
+    from resolve_bridge import ResolveBridge
+    from test_production_resolve import FakeRunner
+    host, local, identifier = stations
+    imported = import_package(local, export_package(host, identifier))['job_id']
+    runner = FakeRunner();local.resolve = ResolveBridge(runner=runner)
+    local.production.mutate('settings', {'request_id': uuid4().hex,
+        'revision': local.production.public()['revision'], 'settings': {'creators': ['Lab']}})
+    result = local.build_timeline(imported, {'request_id': uuid4().hex, 'creator': 'Lab'})
+    assert result['timeline']['take_id'] == 'TAK-0123456789ab'
+    assert str(local.production.audio) in runner.calls[-1]['audio']
+    assert imported in runner.calls[-1]['markers'][0]['custom']
+
+
+def test_replica_reference_frames_travel_with_the_job(stations, tmp_path):
+    host, local, identifier = stations
+    data = host.production.read()
+    data['jobs'][0]['replica'] = {'case_id': 'PVR-0123456789ab', 'shots': [{'number': 1}]}
+    host.production.write(data)
+    frames = tmp_path / 'frames';frames.mkdir();(frames / 'shot-01.jpg').write_bytes(b'reference-frame')
+    host.replica_frames = lambda job: frames
+    imported = import_package(local, export_package(host, identifier))['job_id']
+    assert (local.production.root / 'replica' / imported / 'shot-01.jpg').read_bytes() == b'reference-frame'
+
+
+def test_client_contains_current_source_and_fresh_settings_only(tmp_path):
+    from edit_transfer import client_package
+    with zipfile.ZipFile(io.BytesIO(client_package())) as archive:
+        names = set(archive.namelist())
+        assert {'server.py', 'edit_transfer.py', 'static/production.js', 'requirements.txt'} <= names
+        assert not any(name.startswith(('工作台数据/', 'archive/', '.local/', 'deployment/')) for name in names)
+        assert 'config.local.json' not in names
+        assert json.loads(archive.read('config.json')) == {
+            'skill_root': '.local/case-library', 'runtime_root': '.local/runtime', 'port': 8767}
+        archive.extractall(tmp_path / 'client')
+    import os
+    import subprocess
+    import sys
+    env = dict(os.environ);env.pop('PYTHONPATH', None)
+    result = subprocess.run([sys.executable, '-c',
+        "import server; s=server.make_server(server.DEFAULT_CONFIG['skill_root'], server.DEFAULT_CONFIG['runtime_root'],port=0,allow_open=False); s.server_close()"],
+        cwd=tmp_path / 'client', env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr

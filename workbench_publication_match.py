@@ -2,10 +2,10 @@
 
 A post is known from the TK 看板 extension (pushed when one of our accounts' pages is open) or from an imported Shop
 export. It belongs to a waiting timeline when its caption headline is one of the order's 🔴 title lines, it went up
-no earlier than the timeline was built, and its account is the one the timeline's creator has posted from before.
-Only a pair that is unique both ways is registered by itself; every other match waits in the publication panel for
-one click. An automatic registration can be undone, and an undone or refused post is never offered for that
-timeline again.
+no earlier than the timeline was built, and its account is compatible with the creator's known accounts.
+Only a pair that is unique both ways is registered by itself. A Shop import also accepts a creator's first known
+account; an extension push alone still needs an established account. Other matches wait in the publication panel.
+An automatic registration can be undone, and an undone or refused post is never offered for that timeline again.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import re
+import sys
 import time
 import unicodedata
 
@@ -66,13 +67,14 @@ def match_posts(posts, slots, accounts):
     return pairs
 
 
-def unique_pairs(pairs):
-    """The strong pairs whose timeline has no other post and whose post fits no other timeline."""
+def unique_pairs(pairs, *, allow_shop_unknown=False):
+    """Pairs unique in both directions, with an established account or an imported Shop row."""
     slots, posts = {}, {}
     for pair in pairs:
         slots[pair["slot"]["key"]] = slots.get(pair["slot"]["key"], 0) + 1
         posts[pair["post"]["post_id"]] = posts.get(pair["post"]["post_id"], 0) + 1
-    return [pair for pair in pairs if pair["strong"] and slots[pair["slot"]["key"]] == 1 and posts[pair["post"]["post_id"]] == 1]
+    return [pair for pair in pairs if (pair["strong"] or (allow_shop_unknown and pair["post"]["source"] == "shop_export"))
+            and slots[pair["slot"]["key"]] == 1 and posts[pair["post"]["post_id"]] == 1]
 
 
 class PublicationMatchMixin:
@@ -164,7 +166,7 @@ class PublicationMatchMixin:
             durable_json(self._seen_posts_path(), {"posts": posts})
         return posts
 
-    def _match_pool(self, slots, pushed):
+    def _match_pool(self, slots, pushed, *, prefer_shop=False):
         """Posts to match: what the extension pushed, then our own videos in the Shop exports since the earliest build."""
         earliest = min((slot["earliest"] for slot in slots if slot["earliest"]), default="")
         posts = {}
@@ -178,14 +180,17 @@ class PublicationMatchMixin:
                                             "title": video.get("title") or "", "key": key,
                                             "published_on": posted_on(video["video_id"], day), "source": "shop_export"}
         for post_id, post in pushed.items():
+            # On a Shop import, match the actual exported row when a cached extension post has the same ID.
+            if prefer_shop and post_id in posts:
+                continue
             key = headline_key(post.get("title"))
             if key:
                 posts[post_id] = {"post_id": post_id, "account": str(post.get("account") or "").lstrip("@"), "title": post.get("title") or "",
                                   "key": key, "published_on": post.get("published_on") or "", "source": post.get("source") or "tk_lens"}
         return posts
 
-    def auto_register_publications(self, incoming=()):
-        """Register every unique match by itself; returns the registrations made. Never raises for a single match."""
+    def auto_register_publications(self, incoming=(), *, sales_import=False, failures=None, pending_posts=None):
+        """Register unique matches; optionally collect failures and ambiguous Shop posts for the import result."""
         store = self._video_publications()
         try:
             with file_lock(store.root / "match.lock", "发布匹配正在进行。"):
@@ -194,15 +199,29 @@ class PublicationMatchMixin:
                 pushed = self._remember_posts(incoming, {key for slot in slots for key in slot["keys"]})
                 if not slots:
                     return []
-                pairs = match_posts(self._match_pool(slots, pushed), slots, self._creator_accounts(data))
+                pairs = match_posts(self._match_pool(slots, pushed, prefer_shop=sales_import), slots, self._creator_accounts(data))
+                selected = unique_pairs(pairs, allow_shop_unknown=sales_import)
+                if pending_posts is not None:
+                    selected_ids = {id(pair) for pair in selected}
+                    pending_posts.update(pair["post"]["post_id"] for pair in pairs
+                                         if pair["post"]["source"] == "shop_export" and id(pair) not in selected_ids)
                 made = []
-                for pair in unique_pairs(pairs):
+                for pair in selected:
                     try:
                         made.append(self._auto_register(pair))
-                    except (VoiceError, CreationError):
+                    except (VoiceError, CreationError) as exc:
+                        if failures is not None:
+                            failures.append({"job_id": pair["slot"]["job_id"], "post_id": pair["post"]["post_id"], "error": str(exc)})
                         continue
+                    except Exception as exc:  # noqa: BLE001 — one bad registration must not stop the remaining matches
+                        print(f"自动登记 {pair['slot']['job_id']} / {pair['post']['post_id']} 未完成：{exc!r}", file=sys.stderr)
+                        if failures is not None:
+                            failures.append({"job_id": pair["slot"]["job_id"], "post_id": pair["post"]["post_id"],
+                                             "error": "登记时发生异常，请稍后再次同步数据。"})
                 return made
-        except VoiceError:
+        except VoiceError as exc:
+            if failures is not None:
+                failures.append({"error": str(exc)})
             return []
 
     def _auto_register(self, pair):
@@ -212,11 +231,13 @@ class PublicationMatchMixin:
         source = reviewed_source(job, slot["timeline_uid"])
         revision = store.revision(store.entry(store.read(), slot["job_id"]))
         account = post["account"]
-        body = {"request_id": "auto-" + hashlib.sha256(f"{slot['key']}|{post['post_id']}|{revision}".encode()).hexdigest()[:40],
-                "revision": revision, "source_signature": fingerprint(source), "timeline_uid": slot["timeline_uid"],
+        body = {"revision": revision, "source_signature": fingerprint(source), "timeline_uid": slot["timeline_uid"],
                 "post_id": post["post_id"], "published_on": post["published_on"], "account": account,
                 "post_url": f"https://www.tiktok.com/@{account}/video/{post['post_id']}" if account else "",
                 "note": "", "calendar_uploaded": True}
+        # A retry of the same body resumes its journal, while a changed source or post gets a distinct request.
+        # The new prefix also separates this request from obsolete journals left by older automatic registrations.
+        body["request_id"] = "auto2-" + fingerprint([slot["job_id"], body])[:40]
         self.save_video_publication(slot["job_id"], body, auto={"source": post["source"], "title": post["title"][:300], "matched_at": now()})
         return {"job_id": slot["job_id"], "timeline_uid": slot["timeline_uid"], "post_id": post["post_id"]}
 

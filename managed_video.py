@@ -44,13 +44,25 @@ def _stamp(info):
 
 
 class ManagedVideoFiles:
-    def __init__(self, runtime):
+    def __init__(self, runtime, legacy_roots=()):
         self.runtime = no_links(Path(runtime)).resolve()
+        # Only explicit aliases that resolve to this runtime may be translated;
+        # all access after translation still rejects links within the data tree.
+        self.legacy_roots = tuple(Path(root).absolute() for root in legacy_roots
+                                  if Path(root).exists() and Path(root).resolve() == self.runtime)
         self.imports = self.runtime / "evidence" / "workbench-imports"
         self.cases = self.runtime / "evidence" / "cases"
 
+    def canonical_path(self, path):
+        path = Path(path)
+        if path.is_absolute() and ".." not in path.parts:
+            for root in self.legacy_roots:
+                if path.is_relative_to(root):
+                    return self.runtime / path.relative_to(root)
+        return path
+
     def safe(self, path):
-        path = no_links(Path(path))
+        path = no_links(self.canonical_path(path))
         if not path.is_relative_to(self.runtime) or not path.resolve().is_relative_to(self.runtime):
             raise VideoFileError("视频存放位置超出案例资料目录。")
         return path
@@ -133,7 +145,7 @@ class ManagedVideoFiles:
     def copy_for_case(self, source, identifier):
         if not re.fullmatch(r"PVR-[0-9a-f]{12}", identifier):
             raise VideoFileError("案例编号无效。")
-        source = no_links(Path(source))
+        source = no_links(self.canonical_path(source))
         if source.suffix.lower() not in VIDEO_EXTENSIONS or not source.is_file():
             raise VideoFileError("视频不存在或格式不支持，请重新选择。")
         before = source.stat()

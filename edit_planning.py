@@ -45,6 +45,10 @@ MODE_SELECTION_RULES = {
         "不要求逐句或逐词匹配；已有意群标记保留为时间参考。"
         "镜头必须增加有效信息，不能用主题相关但事实或工序不符的画面暗示口播效果。"
     ),
+    "replica": (
+        "1:1 复刻原片：交接里的原片镜头表是本次的主要依据，逐个镜头找同一画面，镜头数量、顺序和切点都照表。"
+        "它的镜头时长优先于技能的分类时长上限和素材防复用；真实动作和工序的边界不变。"
+    ),
 }
 
 
@@ -140,6 +144,8 @@ def prepare_workers(folder, handoff):
         # current task snapshot, without granting access outside this worker.
         if (folder / "skill").is_dir():
             shutil.copytree(folder / "skill", directory / "skill", dirs_exist_ok=True)
+        if (folder / "reference").is_dir():  # A 1:1 edit's planners compare against the original's shots too.
+            shutil.copytree(folder / "reference", directory / "reference", dirs_exist_ok=True)
         workers.append(directory)
     return workers
 

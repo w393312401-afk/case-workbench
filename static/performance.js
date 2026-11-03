@@ -120,7 +120,6 @@
       if (sequence !== perf.loadSequence) return;
       perf.summary = summary;
       perf.videos = data.videos;
-      window.WorkbenchShell?.registerProducts(perf.videos.map(video => video.product));
     });
     const supplements = core.then(async () => {
       // The route renders the table/toolbar in the same turn; yield before optional requests begin.
@@ -1248,10 +1247,13 @@
       if (pageHash() !== hash) return;
       render();
       const note = $("#perf-import-result");
-      const imported = result.imported.length, failed = result.failed || [];
-      note.className = failed.length || result.missing_sources?.length ? "data-warning" : "context-note";
+      const imported = result.imported.length, failed = result.failed || [], registrationFailures = result.registration_failures || [];
+      note.className = failed.length || result.missing_sources?.length || result.registration_pending || registrationFailures.length ? "data-warning" : "context-note";
       note.innerHTML = `导入 ${imported} 个文件${result.skipped ? `，${result.skipped} 个未变化已跳过` : ""}。` +
+        `自动登记 ${Number(result.registered) || 0} 条视频。` +
+        (result.registration_pending ? `${Number(result.registration_pending)} 条视频的匹配结果不唯一，请在制作单确认。` : "") +
         (result.missing_sources?.length ? `找不到文件夹：${result.missing_sources.map(esc).join("、")}。` : "") +
+        registrationFailures.map((f) => `<br>自动登记${f.post_id ? ` ${esc(f.post_id)}（${esc(f.job_id)}）` : ""}未完成：${esc(f.error)}`).join("") +
         failed.map((f) => `<br>未导入 ${esc(f.file)}：${esc(f.error)}`).join("");
     } catch (error) {
       box.className = "data-warning";

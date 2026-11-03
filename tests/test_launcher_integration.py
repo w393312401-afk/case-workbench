@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
@@ -16,7 +17,9 @@ import time
 import unittest
 from unittest.mock import patch
 import urllib.request
+import zipfile
 
+from production_store import ProductionStore
 import test_server as fixture
 
 
@@ -136,6 +139,58 @@ class LauncherIntegrationTests(unittest.TestCase):
             log = (self.app_root / "server.log").read_text(encoding="utf-8")
             self.assertNotIn(first_status["token"], log)
             self.assertNotIn(second_status["token"], log)
+
+    def service_jobs(self):
+        token = LAUNCHER.read_json(self.url + "/api/service/status")["token"]
+        request = urllib.request.Request(self.url + "/api/production", headers={"X-Workbench-Token": token})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return {job["id"]: job for job in json.load(response)["jobs"]}
+
+    def test_wiped_runtime_restores_production_jobs_from_the_complete_backup(self):
+        identifier = "PRD-000000000001"
+        store = ProductionStore(self.runtime)
+        data = store.empty()
+        data["jobs"] = [{"id": identifier, "product": "202H", "title": "保留的制作单", "edits": [], "timelines": []}]
+        data["requests"]["create-job"] = {"hash": "h", "at": "2026-11-01T00:00:00+00:00",
+                                          "result": {"job": {"id": identifier, "notes": "完整回执" * 8000}}}
+        store.write(data)
+        catalog = store.path.read_bytes()
+        real_popen = subprocess.Popen
+
+        def record_temporary_child(command, *args, **kwargs):
+            child = real_popen(command, *args, **kwargs)
+            if command == [sys.executable, "-u", str(self.app_root / "server.py")]:
+                self.children[child.pid] = child
+            return child
+
+        backups = self.app_root / "archive" / "data-backups"
+        with patch.object(LAUNCHER.subprocess, "Popen", side_effect=record_temporary_child), \
+             patch.object(LAUNCHER.webbrowser, "open", side_effect=AssertionError("The integration test must not open a browser")), \
+             patch.object(LAUNCHER.time, "strftime", side_effect=lambda *_: f"20261101-{len(self.children):06d}"):
+            LAUNCHER.restart(self.app_root, self.config, no_browser=True)
+            self.assertIn(identifier, self.service_jobs())
+            self.close_owned_service()
+            complete = backups / "business-20261101-000000.zip"
+            self.assertTrue(complete.is_file())
+
+            shutil.rmtree(self.runtime)  # The whole runtime disappears while nothing is running.
+            LAUNCHER.restart(self.app_root, self.config, no_browser=True)
+            self.assertEqual(self.service_jobs(), {})
+            self.close_owned_service()
+            self.assertTrue(complete.is_file(), "The wiped restart must not displace the complete backup")
+            self.assertTrue((backups / "business-20261101-000001-thin.zip").is_file())
+            self.assertIn("少了很多", (self.app_root / "launcher-error.log").read_text(encoding="utf-8"))
+
+            with zipfile.ZipFile(complete) as archive:
+                for name in archive.namelist():
+                    if name.startswith("runtime/"):
+                        target = self.runtime / name.removeprefix("runtime/")
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(archive.read(name))
+            LAUNCHER.restart(self.app_root, self.config, no_browser=True)
+            self.assertEqual(self.service_jobs()[identifier]["title"], "保留的制作单")
+            self.assertEqual(store.path.read_bytes(), catalog)
+            self.assertTrue((backups / "business-20261101-000002.zip").is_file())
 
     def test_slow_legacy_state_migrates_once_without_changing_records(self):
         before = self.records()

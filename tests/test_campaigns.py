@@ -261,7 +261,7 @@ class CampaignBriefTests(CampaignReviewTests):
         self.assertIn("不等于活动造成的", brief["判读要求"])
         self.assertIn("要同时看订单数", brief["判读要求"])
         # The whole brief, multipliers included, is what the model is shown.
-        from prepublish_review import draft_prompt
+        from retro_draft import draft_prompt
         prompt = draft_prompt([], None, source="测试", review_text="", figures={"观察窗内的平台活动": brief})
         self.assertIn("×3.0", prompt)
         self.assertIn("周均订单 2.0 对 2.0", prompt)

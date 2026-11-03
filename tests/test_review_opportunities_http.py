@@ -45,7 +45,7 @@ class ReviewOpportunityPageTests(unittest.TestCase):
         page.on("pageerror",lambda error:errors.append(str(error)))
         page.on("request",lambda request:writes.append(request.url) if request.method=="POST" and request.url.endswith("/api/ai/tasks") else None)
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#/202H/reviews")
-        page.get_by_role("link",name="评论选题机会",exact=True).click()
+        page.get_by_role("link",name="选题机会",exact=True).click()
         page.locator(".opportunity-card").first.wait_for()
         self.assertIn("tab=opportunities",page.url)
         page.locator("[data-opportunity-write]").first.click()

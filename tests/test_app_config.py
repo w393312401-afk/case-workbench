@@ -1,6 +1,8 @@
 """Configuration must work from a fresh clone without exposing local settings."""
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -36,3 +38,20 @@ class AppConfigTests(unittest.TestCase):
             (Path(folder) / "config.json").write_text("[]", encoding="utf-8")
             with self.assertRaises(ValueError):
                 load_config(folder)
+
+    def test_legacy_runtime_alias_retains_its_spelling(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            target, alias = root / "runtime", root / "old-runtime"
+            target.mkdir()
+            try:
+                os.symlink(target, alias, target_is_directory=True)
+            except OSError:
+                if os.name != "nt" or subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(target)],
+                                                     capture_output=True).returncode:
+                    self.skipTest("Host does not permit directory links")
+            try:
+                (root / "config.local.json").write_text(json.dumps({"legacy_runtime_roots": [str(alias)]}), encoding="utf-8")
+                self.assertEqual(load_config(root)["legacy_runtime_roots"], [str(alias)])
+            finally:
+                alias.rmdir() if getattr(alias, "is_junction", lambda: False)() else alias.unlink()

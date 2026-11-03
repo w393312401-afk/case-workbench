@@ -7,7 +7,7 @@ window.TaskActivity = (() => {
   const warningStates = new Set(["interrupted", "needs_attention", "awaiting_confirmation", "pending_review", "awaiting_review", "recovery_pending", "result_unpersisted"]);
   const labels = { queued: "排队", running: "进行中", stopping: "正在停止", cancelling: "取消中", cancel_requested: "取消中", saving: "保存中", recovering: "恢复中", completed: "已完成", failed: "失败", interrupted: "已中断", cancelled: "已取消", needs_attention: "待处理", awaiting_confirmation: "待确认", pending_review: "待人工审查", awaiting_review: "待人工审查", recovery_pending: "待恢复", result_unpersisted: "结果待保存" };
   const phases = { queued: "等待执行", running: "正在执行", draft: "生成初稿", review: "复核", format: "整理交付格式", finished: "执行结束", save: "保存结果", reconciled: "核对恢复状态", stopping: "正在停止", voice: "生成配音", timeline: "建立时间线", edit: "AI 剪辑", validation: "核验工程", settled: "后续已处理" };
-  const kinds = { ai: "AI 写稿", voice: "配音", timeline: "时间线", edit: "AI 剪辑", validation: "工程核验", data: "数据备份", case: "自动拆解", prepublish: "发布前审查" };
+  const kinds = { ai: "AI 写稿", voice: "配音", timeline: "时间线", edit: "AI 剪辑", validation: "工程核验", data: "数据备份", case: "自动拆解" };
   const filters = [["current", "当前", "进行中和需处理的任务；今天已完成的折叠在最下方"], ["unread", "未读", ""], ["all", "全部", ""]];
   const modes = [["all", "完整"], ["ai", "AI 说明"], ["key", "关键节点"]];
   const icons = {
@@ -837,7 +837,7 @@ window.TaskActivity = (() => {
       prefix: "activity-kind", title: "筛选任务类型", label: "任务类型筛选", getValue: () => panel.kind, getChoices: kindChoices,
       group: (code, selected) => !code ? "" : code === selected ? "当前类型" : "任务类型",
       searchPlaceholder: "搜索任务类型", searchLabel: "搜索任务类型", listLabel: "任务类型",
-      emptyText: "没有找到匹配的任务类型", emptyHint: "试试配音、出图等关键词", countLabel: count => `${count} 种类型`,
+      emptyText: "没有找到匹配的任务类型", emptyHint: "试试配音、剪辑等关键词", countLabel: count => `${count} 种类型`,
     });
     dialog.querySelector("#activity-search").oninput = event => { panel.query = event.target.value; savePrefs(); clearTimeout(searchTimer); searchTimer = setTimeout(() => void loadPanel(), 250); };
     dialog.querySelector("#activity-more").onclick = () => void loadPanel(true);

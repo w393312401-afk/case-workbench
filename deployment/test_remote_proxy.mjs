@@ -150,7 +150,7 @@ test('password mode serves only login assets without authentication and retains 
     assert.equal(JSON.parse(result.body).login_url, '/auth/login');
     assert.ok(!result.body.includes('fixture-admin'));
   }
-  for (const path of ['/api/remote-account', '/api/remote-account/', '/api/service/shutdown']) {
+  for (const path of ['/api/remote-account', '/api/remote-account/', '/api/service/shutdown', '/api/production/local-edit/import']) {
     assert.equal((await request(port, { path, headers: plain })).status, 403);
   }
   assert.equal(seen.length, 0);

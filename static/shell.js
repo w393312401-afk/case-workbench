@@ -1209,6 +1209,8 @@ window.keepReadingPlace = change => {
     }
     const importer = document.querySelector("#import-video-top");
     if (importer) importer.hidden = !["library", "case"].includes(parsed.page);
+    const replica = document.querySelector("#replica-top");
+    if (replica) replica.hidden = parsed.page !== "case";
     registerProducts(state.cases);
     renderBreadcrumb();
   }
@@ -1221,16 +1223,15 @@ window.keepReadingPlace = change => {
     initializeSelects();
     document.querySelectorAll("[data-page]").forEach(button => button.onclick = () => { location.hash = listURL(button.dataset.page); });
     update();
-    // Include products that only have sales rows or user reviews, without opening those pages.
+    // Load products already used in the workbench without opening each page.
     const catalogVersion = productCatalogVersion;
     void refreshProducts().catch(async error => {
       // An already-running service may still use the earlier API until its
       // current editing task finishes and it can restart safely.
       if (error.status !== 404 || catalogVersion !== productCatalogVersion || catalogProducts) return;
-      const results = await Promise.allSettled([api("/api/performance/videos?shop=all"), api("/api/reviews/summary"), api("/api/direction-catalog"), api("/api/creation")]);
+      const results = await Promise.allSettled([api("/api/reviews/summary"), api("/api/direction-catalog"), api("/api/creation")]);
       if (catalogVersion !== productCatalogVersion || catalogProducts) return;
-      const [videos, reviews, catalog, creation] = results;
-      if (videos.status === "fulfilled") registerProducts(videos.value.videos || []);
+      const [reviews, catalog, creation] = results;
       if (reviews.status === "fulfilled") registerProducts(reviews.value.products || []);
       if (catalog.status === "fulfilled") registerProducts([...(catalog.value.selling_points || []), ...(catalog.value.directions || [])]);
       if (creation.status === "fulfilled") registerProducts([...(creation.value.scripts || []), ...(creation.value.materials || [])]);

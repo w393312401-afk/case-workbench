@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 
@@ -29,7 +30,13 @@ def load_config(root=APP_ROOT):
         path = Path(value).expanduser()
         return str((path if path.is_absolute() else root / path).resolve())
 
-    for name in ("skill_root", "runtime_root"):
-        config[name] = absolute(config[name])
+    for name in ("skill_root", "runtime_root", "skill_code_root"):
+        if config.get(name):
+            config[name] = absolute(config[name])
     config["performance_sources"] = [absolute(path) for path in config["performance_sources"]]
+    # Keep the old spelling: resolving a junction here would erase the alias
+    # that stored historical asset paths need in order to be recognized.
+    config["legacy_runtime_roots"] = [os.path.abspath(str(Path(path).expanduser() if Path(path).expanduser().is_absolute()
+                                          else root / Path(path).expanduser()))
+                                      for path in config.get("legacy_runtime_roots", [])]
     return config

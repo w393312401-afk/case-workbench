@@ -104,6 +104,25 @@ class LibraryCategoriesBrowserTests(unittest.TestCase):
         self.assertEqual(set(self.ids(page)), {self.identifier, self.own, self.other})
         self.assertEqual((self.runtime / "navigation-assignments.json").read_bytes(), assignment)
 
+    def test_product_filter_lists_case_products_without_unrelated_catalog_entries(self):
+        status, _, _ = self.request("POST", "/api/products/catalog", {
+            "action": "add", "product": "205H",
+        })
+        self.assertEqual(status, 200)
+        page = self.open_page()
+        page.evaluate("() => WorkbenchShell.refreshProducts()")
+        self.assertIn("205H", page.evaluate("WorkbenchShell.getProductChoices().map(row => row.value)"))
+        values = page.locator("#library-product-filter option").evaluate_all(
+            "nodes => nodes.map(node => node.value)"
+        )
+        self.assertEqual(set(values), {"", "202H", "303X"})
+        page.reload()
+        page.locator("#case-search").wait_for()
+        values = page.locator("#library-product-filter option").evaluate_all(
+            "nodes => nodes.map(node => node.value)"
+        )
+        self.assertEqual(set(values), {"", "202H", "303X"})
+
     def test_local_product_picker_and_global_product_changes_are_independent(self):
         page = self.open_page()
         picker = page.locator("#library-product-filter + .workbench-select [data-select-trigger]")

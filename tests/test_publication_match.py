@@ -1,11 +1,13 @@
 """Posts pushed by TK 看板 or found in Shop exports register their waiting timeline by themselves; disposable stores only."""
 import copy
+import hashlib
 import json
 from pathlib import Path
 import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -14,7 +16,7 @@ from creation_store import CreationStore
 from elevenlabs_client import VoiceError
 from production_store import ProductionStore
 from workbench_publication_match import PublicationMatchMixin, headline_key, posted_on
-from workbench_video_publish import VideoPublishMixin
+from workbench_video_publish import VideoPublicationStore, VideoPublishMixin
 
 TAKE = "TAK-111111111111"
 TAUGHT, WAITING, TWIN = "PRD-111111111111", "PRD-222222222222", "PRD-333333333333"
@@ -159,6 +161,85 @@ class PublicationMatchTests(unittest.TestCase):
         made = self.bench.auto_register_publications()
         self.assertEqual([item["post_id"] for item in made], [NEW])
         self.assertEqual(self.bench.video_publication_detail(WAITING)["publication"]["auto"]["source"], "shop_export")
+
+    def test_shop_import_registers_a_first_account_even_when_extension_already_saw_the_post(self):
+        title = "🔴A Closer Look at Every Pass#x"
+        self.add_job(TWIN, "SCR-333333333333", creator="Zack")
+        self.bench.titles[TWIN] = [title]
+        self.assertEqual(self.bench.auto_register_publications([pushed(NEW, title, "zackontheedge")]), [])
+        self.bench.performance.rows = [{"video_id": NEW, "account": "zackontheedge", "title": title, "posted_on": "2026-10-26"}]
+        made = self.bench.auto_register_publications(sales_import=True)
+        self.assertEqual([(item["job_id"], item["post_id"]) for item in made], [(TWIN, NEW)])
+        record = self.bench.video_publication_detail(TWIN)["publication"]
+        self.assertEqual((record["account"], record["auto"]["source"]), ("zackontheedge", "shop_export"))
+        self.assertEqual(self.bench.auto_register_publications(sales_import=True), [])
+        self.bench.undo_auto_video_publication(TWIN, {"publication_id": record["id"]})
+        self.assertEqual(self.bench.auto_register_publications(sales_import=True), [])
+
+    def test_shop_import_leaves_ambiguous_posts_for_manual_confirmation(self):
+        self.add_job(TWIN, "SCR-333333333333")
+        self.bench.titles[TWIN] = [TITLE]
+        self.bench.performance.rows = [{"video_id": NEW, "account": "sharpaledgelab", "title": TITLE, "posted_on": "2026-10-26"}]
+        pending = set()
+        self.assertEqual(self.bench.auto_register_publications(sales_import=True, pending_posts=pending), [])
+        self.assertEqual(pending, {NEW})
+        self.assertEqual([p["post_id"] for p in self.bench.video_publication_detail(WAITING)["candidates"]], [NEW])
+        self.bench.dismiss_publication_candidate(TWIN, {"post_id": NEW, "timeline_uid": TWIN + "-tl"})
+        self.assertEqual([item["job_id"] for item in self.bench.auto_register_publications(sales_import=True)], [WAITING])
+
+    def test_two_posts_for_one_timeline_are_both_left_for_confirmation(self):
+        self.bench.performance.rows = [
+            {"video_id": post, "account": "sharpaledgelab", "title": TITLE, "posted_on": day}
+            for post, day in ((NEW, "2026-10-26"), (LATER, "2026-10-27"))
+        ]
+        pending = set()
+        self.assertEqual(self.bench.auto_register_publications(sales_import=True, pending_posts=pending), [])
+        self.assertEqual(pending, {NEW, LATER})
+        self.assertEqual({p["post_id"] for p in self.bench.video_publication_detail(WAITING)["candidates"]}, {NEW, LATER})
+
+    def test_shop_import_reports_a_failed_registration_and_keeps_other_matches(self):
+        title = "🔴A Closer Look at Every Pass#x"
+        self.add_job(TWIN, "SCR-333333333333", creator="Zack")
+        self.bench.titles[TWIN] = [title]
+        self.bench.performance.rows = [
+            {"video_id": NEW, "account": "sharpaledgelab", "title": TITLE, "posted_on": "2026-10-26"},
+            {"video_id": LATER, "account": "zackontheedge", "title": title, "posted_on": "2026-10-27"},
+        ]
+        original = self.bench._auto_register
+        def register(pair):
+            if pair["post"]["post_id"] == NEW:
+                raise VoiceError(409, "请先核对发布记录。")
+            return original(pair)
+        failures = []
+        with patch.object(self.bench, "_auto_register", side_effect=register):
+            made = self.bench.auto_register_publications(sales_import=True, failures=failures)
+        self.assertEqual([item["post_id"] for item in made], [LATER])
+        self.assertEqual(failures, [{"job_id": WAITING, "post_id": NEW, "error": "请先核对发布记录。"}])
+
+    def test_shop_import_ignores_a_conflicting_legacy_auto_journal(self):
+        self.bench.performance.rows = [{"video_id": NEW, "account": "sharpaledgelab", "title": TITLE, "posted_on": "2026-10-26"}]
+        store = self.bench._video_publications()
+        revision = store.revision(store.entry(store.read(), WAITING))
+        slot_key = WAITING + "|" + WAITING + "-tl"
+        legacy = "auto-" + hashlib.sha256(f"{slot_key}|{NEW}|{revision}".encode()).hexdigest()[:40]
+        path = store.root / "operations" / (hashlib.sha256(legacy.encode()).hexdigest() + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"request_hash": "different request"}), encoding="utf-8")
+        failures = []
+        made = self.bench.auto_register_publications(sales_import=True, failures=failures)
+        self.assertEqual(([item["post_id"] for item in made], failures), ([NEW], []))
+        self.assertTrue(path.exists())
+        self.assertEqual(self.bench.auto_register_publications(sales_import=True), [])
+
+    def test_interrupted_automatic_registration_resumes_without_duplicate_script_event(self):
+        self.bench.performance.rows = [{"video_id": NEW, "account": "sharpaledgelab", "title": TITLE, "posted_on": "2026-10-26"}]
+        failures = []
+        with patch.object(VideoPublicationStore, "write", side_effect=OSError("interrupted")):
+            self.assertEqual(self.bench.auto_register_publications(sales_import=True, failures=failures), [])
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(len(self.bench.creation.get_script("SCR-222222222222")["history"]), 1)
+        self.assertEqual([item["post_id"] for item in self.bench.auto_register_publications(sales_import=True)], [NEW])
+        self.assertEqual(len(self.bench.creation.get_script("SCR-222222222222")["history"]), 1)
 
     def test_watch_list_names_the_accounts_registrations_used(self):
         self.assertEqual(self.bench.publication_watch_accounts(), {"accounts": ["sharpaledgelab"]})

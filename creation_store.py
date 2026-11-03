@@ -119,6 +119,11 @@ class CreationStore:
         with self.lock:
             return self._snapshot_revision(self._read_catalog())
 
+    def scripts_readonly(self):
+        """The saved scripts, shared instead of copied with every receipt: for readers that only look."""
+        with self.lock:
+            return self._read_catalog().get("scripts", [])
+
     def product_inventory(self):
         """Read only product identifiers, without materializing public records or receipts."""
         with self.lock:
@@ -668,22 +673,24 @@ class CreationStore:
                 raise CreationError(404, "原文案版本不存在。")
             if parent["product"] != product:
                 raise CreationError(409, "新版本不能更换产品。")
-        if source is not None:
+        # A 1:1 replica's words come from a case, read by the server; everything else adopted comes from an AI round.
+        replica = isinstance(source, dict) and source.get("kind") == "case_replica" and bool(source.get("case_id"))
+        if source is not None and not replica:
             if not isinstance(source, dict) or not source.get("task_id") or not source.get("round_id") or not source.get("candidate_text"):
                 raise CreationError(400, "候选来源未完成核验。")
             if product_key(source.get("product")) != product:
                 raise CreationError(409, "候选与文案所属产品不一致。")
-        elif value.get("task_id") or value.get("round_id"):
+        elif source is None and (value.get("task_id") or value.get("round_id")):
             raise CreationError(400, "候选来源必须由服务端核验。")
         if source is not None and parent is None:
             # Adopting the same candidate text again (a retried 制作视频) keeps the version
             # already adopted, so one variant never becomes several identical scripts.
             body_text = text(value.get("text"), "文案正文", limit=500000)
             translation = text(value.get("translation_zh", ""), "中文译文", False, 500000)
+            keys = ("kind", "case_id") if replica else ("task_id", "round_id")
             same = next((item for item in reversed(data["scripts"])
                          if not item.get("archived") and item.get("status") != "archived" and item["product"] == product
-                         and (item.get("source") or {}).get("task_id") == source["task_id"]
-                         and (item.get("source") or {}).get("round_id") == source["round_id"]
+                         and all((item.get("source") or {}).get(key) == source[key] for key in keys)
                          and item["text"] == body_text and item.get("translation_zh", "") == translation), None)
             if same:
                 return {"script": copy.deepcopy(same), "reused": True}

@@ -89,6 +89,32 @@ class ProductCatalogHTTPTests(unittest.TestCase):
     request = fixture.CaseProductTests.request
     products = fixture.CaseProductTests.products
 
+    def test_sales_titles_do_not_create_products_and_can_be_added_explicitly(self):
+        connection = self.app.performance.connect()
+        titles = ["SHARPAL 205H Leather Strop", "SHARPAL Dual-Grit Diamond Sharpening Stone",
+                  "SHARPAL Coarse/Extrafine Dual-Grit Diamond Stone"]
+        try:
+            for index, title in enumerate(titles):
+                connection.execute("INSERT INTO daily (video_id, date, products) VALUES (?, ?, ?)",
+                                   (str(7600000000000000000 + index), "2026-10-01", title))
+            before = connection.execute("SELECT video_id, date, products FROM daily ORDER BY video_id").fetchall()
+        finally:
+            connection.close()
+        status, listed = self.request("GET", "/api/products")
+        self.assertEqual(status, 200, listed)
+        self.assertEqual(set(listed["products"]), {"198H", "电动磨刀器（品牌型号未核实）"})
+        status, added = self.request("POST", "/api/products/catalog", {"action": "add", "product": "205H"})
+        self.assertEqual(status, 200, added)
+        self.assertIn("205H", added["products"])
+        self.app.products_cache = None
+        expected = {key: added[key] for key in ("products", "removed", "deleted")}
+        self.assertEqual(self.request("GET", "/api/products")[1], expected)
+        connection = self.app.performance.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT video_id, date, products FROM daily ORDER BY video_id").fetchall(), before)
+        finally:
+            connection.close()
+
     def test_catalog_changes_preserve_original_records_index_and_case_products(self):
         paths = [self.skill / "cases" / "index.json", *sorted((self.skill / "cases").glob("*/original.json"))]
         originals = {path: path.read_bytes() for path in paths}

@@ -20,6 +20,8 @@ class ReviewBatchDraftBrowserTests(unittest.TestCase):
 
     def setUp(self):
         fixture.ReviewPageTests.setUp(self)
+        # Temporary files cannot be removed while a queued draft is still being written.
+        self.addCleanup(self.server.app.ai._queue.join)
         self.server.app.ai.bridge = FakeBridge(output="结论：人群：磨刀用户；S：无；A：无；B：无\n参考价值：弱（用于下一条）")
         self.server.app.draft_downloader = self.no_download
 

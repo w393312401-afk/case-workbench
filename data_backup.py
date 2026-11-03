@@ -445,6 +445,9 @@ class BackupManager:
                                     # Archived notes sometimes join several absolute paths
                                     # with prose punctuation; those are not filesystem aliases.
                                     continue
+                                if canonical.is_relative_to(destination):
+                                    # A note naming an earlier archive must not pack it into the next one.
+                                    continue
                                 included = None
                                 if canonical == self.skill_root or canonical.is_relative_to(self.skill_root) and any(canonical == self.skill_root / p or canonical.is_relative_to(self.skill_root / p) for p in SKILL_PATHS):
                                     included = _logical_path(canonical, self.skill_root, "skill")

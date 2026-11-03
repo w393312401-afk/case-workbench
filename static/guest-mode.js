@@ -89,7 +89,7 @@
     "#public-text-banner", "#files-nav", "[data-page='settings']", "[data-page='production']", "[data-page='content']",
     "[data-sidebar-target='files-nav']", "[data-sidebar-target='materials-nav']", "#materials-nav", "[data-material-open]",
     "#task-activity-open", "#task-activity-dialog", "#task-activity-log-dialog", ".task-activity-logs",
-    "#add-top", "#import-video-top", "#library-video-import", "#detail-video-import", "#sync-button",
+    "#add-top", "#import-video-top", "#replica-top", "#library-video-import", "#detail-video-import", "#sync-button",
     "#library-select-toggle", ".case-select", "#select-all", ".selection-toolbar", ".bulk-actions",
     "#script-copy", "#script-production-toggle", "#script-production-note", "#script-production-choices",
     "[data-adopted-copy]", "[data-adopted-edit]",

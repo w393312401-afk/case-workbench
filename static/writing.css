@@ -82,7 +82,7 @@
   }
 
   /* The local workbench also shows 收录案例 in the top bar; video import stays a desktop task. */
-  #import-video-top { display: none !important; }
+  #import-video-top, #replica-top { display: none !important; }
   body:not(.public-text-mode) .sidebar .global-product { width: min(calc(100vw - 205px), 220px); }
 
   main { margin-left: 0; padding-bottom: calc(var(--mobile-tabs) + env(safe-area-inset-bottom) + 12px); min-width: 0; }

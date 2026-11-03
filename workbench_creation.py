@@ -468,6 +468,8 @@ class CreationWorkbenchMixin:
 
     def cleanup_creation_case(self, identifier):
         self.creation.forget_case(identifier)
+        if hasattr(self, "forget_replica_case"):
+            self.forget_replica_case(identifier)
         self.ai.scrub_case_references(identifier)
         for path in (self.creation.root / "operations").glob("*.json"):
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -1036,9 +1038,6 @@ class CreationWorkbenchMixin:
                     for point in self.directions.read()["selling_points"]
                     if product_key(point.get("product")) == product and point.get("status") != "merged"]
                 context["sales_data"] = self.sales.resolve_case({"case_id": video["video_id"], "current": {"metrics": {"video_id": video["video_id"]}}})
-                prepublish = self.prepublish_for_video(video["video_id"]) if hasattr(self, "prepublish_for_video") else None
-                if prepublish:  # Written before posting without any performance data; the draft checks its pre-mortem.
-                    context["prepublish_review"] = prepublish
                 context["title"] = f"{video['video_id']} · 复盘起草"
             if context.get("source_review"):
                 ref = context["source_review"]

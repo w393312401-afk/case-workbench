@@ -13,7 +13,7 @@ from unittest.mock import patch
 APP_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_ROOT))
 
-import prepublish_review as review
+import retro_draft as review
 
 
 class MediaProcessTests(unittest.TestCase):
@@ -78,7 +78,7 @@ class MediaProcessTests(unittest.TestCase):
                 "import ctypes, json, sys",
                 "from pathlib import Path",
                 f"sys.path.insert(0, {str(APP_ROOT)!r})",
-                "from prepublish_review import _run",
+                "from retro_draft import _run",
                 "child = _run(sys.argv[1], '-c', 'import ctypes; print(ctypes.windll.kernel32.GetConsoleWindow())', timeout=20)",
                 "Path(sys.argv[2]).write_text(json.dumps({'parent': ctypes.windll.kernel32.GetConsoleWindow(), 'child': child.stdout.strip(), 'returncode': child.returncode}), encoding='utf-8')",
             ]), encoding="utf-8")

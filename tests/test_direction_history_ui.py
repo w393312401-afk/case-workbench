@@ -64,7 +64,7 @@ class DirectionHistoryBrowserTests(unittest.TestCase):
         records.wait_for()
         return records
 
-    def test_linked_historical_video_opens_exact_video_performance_route(self):
+    def test_linked_historical_video_without_sales_stays_and_explains(self):
         page, _ = self.history_page(width=390)
         # Only the stages that need you or are under way speak in the folded row.
         flow = page.locator('[data-variant-state="0"]')
@@ -76,10 +76,10 @@ class DirectionHistoryBrowserTests(unittest.TestCase):
         self.assertEqual(video.get_attribute("href"), "#/202H/videos?video=7664986913497009439")
         self.assertEqual(records.get_by_text("发布登记 · 1", exact=True).count(), 0)
         self.assertFalse(page.evaluate("document.documentElement.scrollWidth>document.documentElement.clientWidth"))
+        # No sales rows in this library: the reader stays on the direction and is told why.
         video.click()
-        page.locator("#perf-q").wait_for()
-        self.assertEqual(page.evaluate("location.hash"), "#/202H/videos?video=7664986913497009439")
-        self.assertEqual(page.locator("#perf-q").input_value(), "7664986913497009439")
+        page.locator("#toast .toast-item").get_by_text("这条帖子还没有销售数据", exact=False).wait_for()
+        self.assertEqual(page.evaluate("location.hash"), "#/202H/directions/202H-S1")
 
     def test_each_record_has_its_own_collapsed_evidence_and_preserves_plain_text(self):
         page, notes = self.history_page()
@@ -109,11 +109,11 @@ class DirectionHistoryBrowserTests(unittest.TestCase):
                          "#/202H/production/PRD-history-ui")
         evidence = production.locator("details.dir-record-association")
         self.assertIn("沿用文案归属", evidence.locator(":scope > summary").inner_text())
-        self.assertFalse(evidence.get_by_role("link", name="查看来源文案", exact=True).is_visible())
+        self.assertFalse(evidence.get_by_role("link", name="查看来源采用稿", exact=True).is_visible())
         evidence.locator(":scope > summary").click()
-        source = evidence.get_by_role("link", name="查看来源文案", exact=True)
+        source = evidence.get_by_role("link", name="查看来源采用稿", exact=True)
         self.assertTrue(source.is_visible())
-        self.assertEqual(source.get_attribute("href"), "#/202H/scripts/SCR-history-ui")
+        self.assertEqual(source.get_attribute("href"), "#/202H/content/SCR-history-ui")
         self.assertEqual(records.get_by_role("link", name="历史已采用文案", exact=True).get_attribute("href"),
                          source.get_attribute("href"))
         self.assertFalse(page.evaluate("document.documentElement.scrollWidth>document.documentElement.clientWidth"))

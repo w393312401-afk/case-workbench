@@ -123,7 +123,7 @@ def reviewed_source(job, timeline_uid=None):
             # signatures compatible with snapshots saved before these fields
             # existed, including archive/restore and public readback defaults.
             "timeline": {key: copy.deepcopy(value) for key, value in timeline.items()
-                         if key not in {"archived", "task_status", "manual_completion", "manual_completion_blocked"}},
+                         if key not in {"archived", "task_status", "manual_completion", "manual_completion_blocked", "subtitle_check", "hook_overlay"}},
             "edit": copy.deepcopy(edit), "manual_completion": receipt}
 
 
@@ -394,7 +394,7 @@ class VideoPublishMixin:
 
     def _video_publish_copy(self, job):
         """Title-and-hashtag lines, Chinese text and English voice-over of the adopted script, for pasting at publish time."""
-        from variant_parse import parse_variants, publish_titles, same_lines, screen_copy, variant_script
+        from variant_parse import parse_variants, publish_titles, same_lines, screen_copy, screen_options, variant_script
         from production_store import supplement_markdown
         try:
             script = self.creation.get_script(job["script_id"])
@@ -415,7 +415,7 @@ class VideoPublishMixin:
         screen_en, screen_zh = screen_copy(markdown)
         return {"script_id": script.get("id"), "version": script.get("version"),
                 "titles": titles,
-                "screen_en": screen_en, "screen_zh": screen_zh,
+                "screen_en": screen_en, "screen_zh": screen_zh, "screen_options": screen_options(markdown),
                 "zh": script.get("translation_zh") or ("\n".join(line["zh"] for line in job["lines"]) if all(line.get("zh") for line in job["lines"]) else ""),
                 "en": script.get("text") or ""}
 
@@ -532,10 +532,6 @@ class VideoPublishMixin:
                 job = self.production.job(identifier)
                 if operation is None:
                     fields = self._video_post_fields(body)
-                    open_findings = self.prepublish_block(identifier) if hasattr(self, "prepublish_block") else []
-                    if open_findings:
-                        raise VoiceError(409, f"发布前审查还有 {len(open_findings)} 条「必须修」没有确认，"
-                                              "请在审查结果里逐条标记「已修改」或「接受风险」后再登记。")
                     source = reviewed_source(job, timeline_uid)
                     entry = store.entry(data, identifier)
                     if body.get("revision") != store.revision(entry) or body.get("source_signature") != fingerprint(source):

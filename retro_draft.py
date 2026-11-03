@@ -1,8 +1,7 @@
-"""Adversarial review of a TikTok product video, by the user's review framework and nothing else.
+"""Footage and brief for the retrospective draft of a posted TikTok product video.
 
 The workbench prepares the footage in one pass (frames every 0.25 s for the opening, every shot after it, a small.en
-transcript with timestamps, each script line's time) so the model only judges. The pre-publish review is blind; the
-retrospective draft checks the same framework against the video's figures.
+transcript with timestamps, each script line's time) so the model only judges.
 """
 from __future__ import annotations
 
@@ -25,18 +24,15 @@ DETAIL_TIMES = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0)  # full frames, for detail
 DETAIL_UNTIL = 8.0  # after 3 s, one full frame per shot that starts before this (an opening often runs past 3 s)
 LONG_SHOT = 1.5
 TRANSCRIPT_CHUNK = 2.5
-KILL_LIST = 5
-# Reading thin details (a mirror bevel, small text) needs the strongest vision model; reviews and drafts use it.
-REVIEW_MODEL = "claude-opus"
-SEVERITIES = {"must_fix": "必须修", "suggest": "建议"}
-CONFIDENCES = {"high": "高", "medium": "中", "low": "低"}
-LAYERS = ("开头3秒", "为什么要买", "会不会被封", "事前验尸")
+# Reading thin details (a mirror bevel, small text) needs the strongest vision model.
+DRAFT_MODEL = "claude-opus"
 FONT = "fontfile='C\\:/Windows/Fonts/arial.ttf'"
 _model_lock = threading.Lock()
 _model = None
 
-# The user's framework, given to the model as written (2026-10-24). Nothing outside it is asked for.
-FRAMEWORK = """在TikTok带货视频里，对抗性审查的作用是：用最挑剔的观众和平台视角攻击这条视频，找出会导致"没人看、没人买、被限流、被投诉"的漏洞。
+
+# A posted video that did not sell is attacked only where it loses viewers: no compliance pass and no kill list.
+DRAFT_FRAMEWORK = """在TikTok带货视频里，对抗性审查的作用是：用最挑剔的观众和平台视角攻击这条视频，找出会导致"没人看、没人买"的漏洞。
 1. 内容层面：攻击"开头3秒"
 * 假设观众是个手指随时要划走的人：前3秒有没有明确的钩子？
 * 问："如果我是路人，为什么不划走？"说不出理由就要重做。
@@ -44,21 +40,12 @@ FRAMEWORK = """在TikTok带货视频里，对抗性审查的作用是：用最�
 * 卖点是真实需求，还是自嗨？
 * 价格、对比、信任背书能否打消"这是不是又一个智商税"的疑虑？
 * 评论区最可能出现的质疑（"效果是假的吧""太贵了"），提前在视频里回应。
-3. 合规层面：攻击"会不会被封"
-* 有没有夸大功效、绝对化用语（"最好""100%有效"）、虚假对比？
-* 医疗、美妆、保健品类尤其敏感，违规会限流甚至封店。
-* 素材、音乐、品牌元素有没有侵权风险？
-4. 数据层面：事前验尸
+3. 数据层面：事前验尸
 * 假设这条视频完播率低、转化率低，最可能的原因是什么？
 * 发布后用数据（完播率、点击率、转化率）真实检验，再迭代。这也是一种"现实在对你做对抗性审查"。
 实操方法
-* 列一张"杀手清单"：写出5个最可能让视频失败的原因，逐一修复。
 * 你没参与制作，只许挑毛病。
 * 小成本A/B测试不同开头和卖点，让数据来当最终裁判。"""
-
-# A posted video that did not sell is attacked only where it loses viewers: no compliance pass and no kill list.
-DRAFT_FRAMEWORK = (FRAMEWORK.split("3. 合规层面")[0] + "3. 数据层面" + FRAMEWORK.split("4. 数据层面")[1]
-                   ).replace('* 列一张"杀手清单"：写出5个最可能让视频失败的原因，逐一修复。\n', "").replace("、被限流、被投诉", "")
 
 MATERIAL_RULES = (
     "只用本轮给出的材料：附图、镜头清单、口播、评论摘要和数据。材料里没有的事实（价格、质保、参数、对比结果）不要写成已知，"
@@ -112,11 +99,11 @@ def _sheet(tiles, path, width=TILE_W, height=TILE_H, cols=COLS):
 
 def _check(cancel):
     if cancel is not None and cancel.is_set():
-        raise PrepareError("本次审查已取消。")
+        raise PrepareError("本次起草已取消。")
 
 
 def prepare(video, spoken, folder, cancel=None, on_step=None):
-    """Frames, sheets and a timed transcript for one video; returns the report kept with the review."""
+    """Frames, sheets and a timed transcript for one video; returns the report the draft works from."""
     step = on_step or (lambda text: None)
     folder = Path(folder)
     frames = folder / "frames"
@@ -273,7 +260,7 @@ def _shot_list(rows):
 
 
 def _materials(lines, report, review_text):
-    """What the reviewer works from: the attached sheets, the spoken words and the comment digest.
+    """What the draft works from: the attached sheets, the spoken words and the comment digest.
     `report` is None when no footage could be had: then only the script (if any) is given."""
     if report is None:
         report = {"lines": [{"start": None, "end": None} for _ in lines]}
@@ -295,26 +282,17 @@ def _materials(lines, report, review_text):
     return images + shots + "\n\n" + spoken + comments
 
 
-def prompt(job, lines, report, *, market, review_text):
-    """Pre-publish brief; the sheets are attached in the order of report['sheets'] and the reply ends in JSON."""
-    return (
-        f"你是这条 TikTok 带货视频（产品 {job.get('product')}，市场 {market}）的对抗性审查员。按下面这份审查框架分析，框架以外的内容都不要写。\n\n"
-        f"<审查框架>\n{FRAMEWORK}\n</审查框架>\n\n" + MATERIAL_RULES + "\n\n" + _materials(lines, report, review_text) + "\n\n"
-        "这条还没发布，没有表现数据。按框架第 1–3 层逐层攻击，第 4 层做事前验尸。\n"
-        "最后单独输出一个 ```json 代码块，格式固定，工作台靠它读取：\n"
-        '{"findings": [{"layer": "开头3秒、为什么要买或会不会被封", "at": "秒数范围或「全片」", "problem": "问题与画面或口播证据",'
-        ' "consequence": "没人看、没人买、被限流还是被投诉", "fix": "怎么修", "severity": "must_fix 或 suggest", "confidence": "high、medium 或 low"}],'
-        ' "premortem": "假设完播率低、转化率低，最可能的原因", "ab_tests": ["A/B 测试建议，开头和卖点各一条"], "summary": "一句话总评"}\n'
-        f"findings 就是杀手清单：最多 {KILL_LIST} 条最可能让视频失败的原因，按严重程度排序；没有就少写，不为凑数挑刺。"
-        "会被限流、封店或投诉、而且你有把握的问题标 must_fix（把握低的会被当成 suggest），其余标 suggest。"
-    )
-
-
 LOW_EXPOSURE = 500  # observation-window views below this leave every rate too noisy to explain a result
 DRAFT_MODES = {"sold": "出过单", "unsold": "没出单", "thin": "曝光太少"}
 
 _FUNNEL = ("读数据的方法：完播率和播放对应「为什么停下来看完」，点击率（CTR）对应「为什么点商品」，点击后转化（CTOR）和订单对应「为什么下单」。"
            "先拿这条的数据和同类对照比，判断每一步是强、弱还是持平，再到画面和口播里找原因。数据只说明相关，不能当作已证实的因果；数据不够时写「判断不了」。\n\n")
+SELLING_POINT_REVIEW = ("卖点分级按相对同行的优势理解：S＝人无我有，A＝人有我优，B＝人人都有。沿用产品已登记的编号，不凭猜测重新评级。\n"
+    "结合数据重点复盘卖点串联：指出实际主打卖点与目标人群、该卖点可能引出的购买顾虑，后续口播或画面是否回应、证据是否充分；"
+    "标明具体秒数，区分实际内容和推测，评论未经核实，不能断言顾虑真实存在；不强求固定层数或每个卖点都串联。\n"
+    "复盘卖点可视化：逐个检查关键卖点对应的画面是否让人看懂具体问题、产品如何解决，以及画面能否支持口播；"
+    "指出具体秒数、已有证据和缺口，并给可执行的下一条画面建议。静帧看不清或无法判断连续动作、效果时写待核，不能推断不存在或证明效果。"
+    "没有成片时不得编造画面；内容与数据的关联只是待验证的假设。\n\n")
 CARD_REASONS = 3
 _CARD = ("在两行结尾之前，另交一个工作台画卡片用的结果块，用 ```retro-card 包住，里面是 JSON，所有文字都是短句中文：\n"
          '```retro-card\n{"verdict": "一句话结论，不超过 40 字", '
@@ -368,7 +346,7 @@ def _points_material(points, audience):
     rows = [f"{row['code']} {row['title']}" for row in points or [] if row.get("code") and row.get("title")]
     if not rows:
         return "本产品还没有登记卖点分级，结论行的 S、A、B 都写「未登记」。\n\n"
-    return ("本产品卖点分级（S 是主购买理由，A 是支撑 S 的具体证据，B 是附加信息）：\n" + "\n".join(rows) + "\n"
+    return ("本产品卖点分级（S＝人无我有，A＝人有我优，B＝人人都有）：\n" + "\n".join(rows) + "\n"
             + (f"方向登记的目标人群（只作对照）：{audience}\n" if audience else "") + "\n")
 
 
@@ -380,7 +358,7 @@ def draft_prompt(lines, report, *, source, review_text, figures, mode="sold", po
     Too little exposure gets the same attack with the plain warning that most rates cannot be judged."""
     material = (MATERIAL_RULES + "\n\n" + f"成片来源：{source}。" + _materials(lines, report, review_text) + "\n\n"
                 "表现数据（比率按每周导出原值读，不要相加或平均；同类对照是每条视频播放最多那一周的中位数）：\n"
-                + json.dumps(figures, ensure_ascii=False, indent=1) + "\n\n" + _points_material(points, audience))
+                + json.dumps(figures, ensure_ascii=False, indent=1) + "\n\n" + _points_material(points, audience) + SELLING_POINT_REVIEW)
     if mode == "sold":
         return (
             "你在复盘一条已经发布、已经出过单的 TikTok 带货视频。结果已经由数据给出，任务是解释这个结果：它为什么出单，"
@@ -391,6 +369,7 @@ def draft_prompt(lines, report, *, source, review_text, figures, mode="sold", po
             "## 1. 为什么停下来看（开头3秒与完播）\n"
             "## 2. 为什么点商品\n"
             "## 3. 为什么下单（评论区最可能的质疑有没有被回应）\n"
+            "## 卖点与顾虑的承接、画面可视化\n"
             "## 4. 可以复制的做法（下一条保留什么；写到秒数和具体做法）\n"
             "## 5. 拖后腿的地方（只写数据显示这一步弱于同类的，最多 3 条，每条写证据和怎么改）\n"
             "## 下一轮（怎么复制这条；如果要测，只改一处做 A/B）\n"
@@ -410,6 +389,7 @@ def draft_prompt(lines, report, *, source, review_text, figures, mode="sold", po
         "## 1. 漏斗对照（播放与完播、点击率、点击后转化，逐项和同类对照比，标出最先掉下去的一步）\n"
         "## 2. 开头3秒：路人为什么划走\n"
         "## 3. 为什么要买：为什么没点、没买（评论区最可能的质疑有没有被回应；最多 3 条，按影响排序）\n"
+        "## 卖点与顾虑的承接、画面可视化\n"
         "## 值得保留的（不比同类差的那几步，保留什么）\n"
         "## 下一轮（只改最先掉下去的那一步，做 A/B）\n"
         "不写合规、限流风险，也不列杀手清单。卡片的 reasons 写最先掉下去那一步的原因。\n" + _CARD + _CLOSING
@@ -437,33 +417,3 @@ def parse_card(output):
     plan = {key: _clip(plan.get(key), 80) for key in ("change", "hold", "judge") if _clip(plan.get(key), 80)}
     card = {"verdict": _clip(data.get("verdict"), 120), "reasons": reasons, "keep": keep, "next": plan}
     return card if card["verdict"] or reasons else None
-
-
-def parse(output):
-    """The fenced JSON block the brief asks for; anything malformed fails the review rather than guessing."""
-    blocks = re.findall(r"```json\s*(\{.*?\})\s*```", output or "", re.S)
-    if not blocks:
-        raise ValueError("审查回复里没有约定的 JSON 结果块。")
-    try:
-        data = json.loads(blocks[-1])
-    except ValueError as exc:
-        raise ValueError("审查结果块不是有效的 JSON。") from exc
-    if not isinstance(data, dict) or not isinstance(data.get("findings"), list):
-        raise ValueError("审查结果缺少 findings 列表。")
-    findings = []
-    for raw in data["findings"][:KILL_LIST]:
-        if not isinstance(raw, dict):
-            continue
-        problem = _clip(raw.get("problem"), 600)
-        if not problem:
-            continue
-        confidence = raw.get("confidence") if raw.get("confidence") in CONFIDENCES else "medium"
-        # 必须修 blocks 登记发布; a guess the reviewer itself rates low may not hold that power.
-        severity = raw.get("severity") if raw.get("severity") in SEVERITIES and confidence != "low" else "suggest"
-        findings.append({"severity": severity, "confidence": confidence,
-                         "layer": raw.get("layer") if raw.get("layer") in LAYERS else "为什么要买",
-                         "at": _clip(raw.get("at"), 40) or "全片", "problem": problem,
-                         "consequence": _clip(raw.get("consequence"), 300), "fix": _clip(raw.get("fix"), 400)})
-    tests = data.get("ab_tests") if isinstance(data.get("ab_tests"), list) else []
-    return {"findings": findings, "premortem": _clip(data.get("premortem"), 600), "summary": _clip(data.get("summary"), 300),
-            "ab_tests": [_clip(item, 300) for item in tests[:4] if _clip(item, 300)]}

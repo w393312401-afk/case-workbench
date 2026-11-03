@@ -32,7 +32,7 @@ JOB_STATUSES = {"draft", "voiced", "timeline", "editing", "awaiting_review", "ap
                 "needs_verification", "verification_failed", "unverified", "failed", "cancelled", "interrupted"}
 TIMELINE_TASK_STATUSES = {"pending", "in_progress", "completed"}
 # Finished voiceovers and timelines are appended whatever else changed while they were being made.
-REVISION_FREE = {"take", "job_fill_start", "job_fill_finish", "timeline", "timeline_location", "job_completion", "edit_start", "edit_bind_timeline", "edit_finish", "edit_recheck", "edit_approve", "edit_baseline", "edit_delete", "job_delete"}
+REVISION_FREE = {"take", "job_fill_start", "job_fill_finish", "timeline", "timeline_location", "timeline_subtitles", "timeline_hook", "job_completion", "edit_start", "edit_bind_timeline", "edit_finish", "edit_recheck", "edit_approve", "edit_baseline", "edit_delete", "timeline_delete", "job_delete"}
 EDIT_ID = re.compile(r"EDT-[0-9a-f]{12}")
 PUBLICATION_ID = re.compile(r"PUB-[0-9a-f]{12}")
 # Timeline frame rates as exact ratios; names are what DaVinci Resolve shows.
@@ -90,6 +90,13 @@ def active_timelines(job):
     """Timelines that can be completed and published: not archived, built for the selected voiceover."""
     take_id = job.get("selected_take")
     return [row for row in job.get("timelines", []) if take_id and row.get("take_id") == take_id and not row.get("archived")]
+
+
+def timeline_edits(job, timeline):
+    """Every AI edit run made on this timeline, including a queued one that never got bound to it."""
+    uid, key = timeline.get("unique_id"), timeline.get("operation_key")
+    return [edit for edit in job.get("edits", [])
+            if edit.get("timeline_uid") == uid or (key and edit.get("timeline_operation_key") == key)]
 
 
 def timeline_running(job, timeline):
@@ -702,8 +709,9 @@ class ProductionStore:
             handlers = {"voice": self._voice, "reading": self._reading, "job": self._job, "job_lines": self._job_lines, "job_fill_start": self._job_fill_start, "job_fill_finish": self._job_fill_finish,
                         "job_archive": self._job_archive, "take": self._take, "select_take": self._select_take,
                         "settings": self._settings, "timeline": self._timeline, "timeline_location": self._timeline_location,
-                        "job_completion": self._job_completion,
-                        "timeline_archive": self._timeline_archive, "timeline_task_status": self._timeline_task_status,
+                        "timeline_subtitles": self._timeline_subtitles, "timeline_hook": self._timeline_hook, "job_completion": self._job_completion,
+                        "timeline_archive": self._timeline_archive, "timeline_delete": self._timeline_delete,
+                        "timeline_task_status": self._timeline_task_status,
                         "edit_start": self._edit_start, "edit_bind_timeline": self._edit_bind_timeline,
                         "edit_finish": self._edit_finish, "edit_recheck": self._edit_recheck,
                         "edit_approve": self._edit_approve, "edit_baseline": self._edit_baseline,
@@ -979,6 +987,32 @@ class ProductionStore:
                 timeline[key] = text(value, "达芬奇项目位置", limit=500)
         return {"timeline": copy.deepcopy(timeline)}
 
+    def _timeline_subtitles(self, data, body, check):
+        """Keep the latest subtitle check on its timeline; the fixes it made also go in the order's history."""
+        job = self._find_job(data, body.get("job_id"))
+        uid = text(body.get("timeline_uid"), "时间线标识", limit=500)
+        timeline = next((row for row in job.get("timelines", []) if row.get("unique_id") == uid), None)
+        if not timeline:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        timeline["subtitle_check"] = copy.deepcopy(check)
+        job["updated_at"] = check["at"]
+        if check["changes"] and check["status"] in {"fixed", "needs_review", "failed"}:
+            job["history"].append({"at": check["at"], "event": "timeline_subtitles",
+                                   "note": f"核对时间线 {timeline.get('name', '')} 的字幕，自动修改 {len(check['changes'])} 处"})
+        return self._timeline_management_result(job, timeline)
+
+    def _timeline_hook(self, data, body, hook):
+        """Remember what the timeline's on-screen hook last said; the order's history keeps each change."""
+        job = self._find_job(data, body.get("job_id"))
+        uid = text(body.get("timeline_uid"), "时间线标识", limit=500)
+        timeline = next((row for row in job.get("timelines", []) if row.get("unique_id") == uid), None)
+        if not timeline:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        timeline["hook_overlay"] = copy.deepcopy(hook)
+        job["updated_at"] = hook["at"]
+        job["history"].append({"at": hook["at"], "event": "timeline_hook", "note": f"给时间线 {timeline.get('name', '')} {'加' if hook['created'] else '更新'}屏显：{hook['text']}"})
+        return self._timeline_management_result(job, timeline)
+
     @staticmethod
     def _managed_timeline(data, body):
         job = ProductionStore._find_job(data, body.get("job_id"))
@@ -1016,6 +1050,29 @@ class ProductionStore:
             job["history"].append({"at": job["updated_at"], "event": "timeline_archived" if archived else "timeline_restored",
                                    "note": f"{'归档' if archived else '恢复'}时间线 {timeline.get('name', '')}"})
         return self._timeline_management_result(job, timeline)
+
+    def _timeline_delete(self, data, body, extra):
+        """Drop one timeline with its AI edit runs, its completion receipt and every saved request that only describes
+        them; files are removed by the caller, and the DaVinci timeline is never touched."""
+        job, timeline = self._managed_timeline(data, body)
+        uid = timeline["unique_id"]
+        edit_ids = [edit["id"] for edit in timeline_edits(job, timeline)]
+        receipts = manual_receipts(job)
+        receipts.pop(uid, None)
+        job["timelines"] = [row for row in job["timelines"] if row is not timeline]
+        job["edits"] = [edit for edit in job.get("edits", []) if edit["id"] not in edit_ids]
+        self._set_receipts(job, receipts)
+        job["updated_at"] = now()
+        job["status"] = job_status(job)
+        job["history"].append({"at": job["updated_at"], "event": "timeline_deleted",
+                               "note": f"删除时间线 {timeline.get('name', '')}"
+                                       + (f"及 {len(edit_ids)} 次剪辑记录" if edit_ids else "") + "，连同本地文件"})
+        for key in [key for key, saved in data["requests"].items() if isinstance(saved.get("result"), dict) and
+                    ((saved["result"].get("timeline") or {}).get("unique_id") == uid or
+                     (saved["result"].get("edit") or {}).get("id") in edit_ids)]:
+            del data["requests"][key]
+        return {"job": public_job(job), "deleted_timeline": uid, "timeline_name": timeline.get("name", ""),
+                "edit_ids": edit_ids, "operation_key": timeline.get("operation_key") or ""}
 
     def _timeline_task_status(self, data, body, extra):
         status = body.get("task_status")

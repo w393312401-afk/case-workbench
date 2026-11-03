@@ -48,6 +48,15 @@ class DataBackupTests(unittest.TestCase):
     def export(self, **kwargs):
         return Path(self.manager.create_archive(self.out, **kwargs)["path"])
 
+    def test_note_naming_an_earlier_archive_does_not_pack_it_into_the_next_one(self):
+        earlier = self.export()
+        beside = self.write(self.out / "recovery-pack.zip", b"older recovery pack")
+        video = self.write(self.root / "outside" / "clip.mp4", b"ordinary external video")
+        self.write(self.skill / "cases" / "note.json", json.dumps({"paths": [str(earlier), str(beside), str(self.out), str(video)]}).encode())
+        with zipfile.ZipFile(self.export()) as packed:
+            manifest = json.loads(packed.read("manifest.json"))
+        self.assertEqual(set(manifest["external_files"]), {str(video)})
+
     def rewrite(self, source, *, mutate_manifest=None, mutate_entries=None):
         with zipfile.ZipFile(source) as incoming:
             entries = [(entry, incoming.read(entry)) for entry in incoming.infolist()]

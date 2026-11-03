@@ -41,16 +41,16 @@ def code_signature():
 CODE_AT_START = code_signature()
 from app_config import load_config
 DEFAULT_CONFIG = load_config(APP_ROOT)
-sys.path.insert(0, str(APP_ROOT))
+sys.path.insert(0, str(Path(DEFAULT_CONFIG.get("skill_code_root", DEFAULT_CONFIG["skill_root"])) / "scripts"))
 sys.path.insert(0, str(APP_ROOT / "scripts"))
-sys.path.insert(0, str(Path(DEFAULT_CONFIG["skill_root"]) / "scripts"))
+sys.path.insert(0, str(APP_ROOT))
 from case_store import CaseStore, StoreError, add_schema, current_schema, current_sources, encode
 from render_case_library import render_library
 from validate_case_structure import DEFAULT_TEMPLATE, validate_case_structure
 from case_deletion import DeletionManager, DeletionError
 from managed_video import ManagedVideoFiles, VideoFileError
 from ai_tasks import AITaskManager, AITaskError
-from performance_store import DEFAULT_SHOP, PerformanceStore, SHOPS, product_short
+from performance_store import DEFAULT_SHOP, PerformanceStore, SHOPS
 from sales_data import SalesDataResolver
 from public_stats import PublicStatsError, PublicStatsStore, clean_record, export_workbook
 from variant_parse import parse_variants, same_lines, variant_script
@@ -75,11 +75,13 @@ from production_store import ProductionStore
 from elevenlabs_client import ElevenLabsClient, VoiceError
 from workbench_production import ProductionWorkbenchMixin
 from resolve_bridge import ResolveBridge
+import edit_transfer
 from workbench_editing import EditingWorkbenchMixin
 from workbench_order_delete import OrderDeleteMixin
 from workbench_video_publish import VideoPublishMixin, VideoPublicationStore
 from workbench_publication_match import PublicationMatchMixin
-from workbench_prepublish import PrepublishWorkbenchMixin
+from workbench_retro_draft import RetroDraftWorkbenchMixin
+from workbench_replica import ReplicaWorkbenchMixin
 from codex_edit_bridge import CodexEditBridge
 from data_transfer import DataTransfer, TransferError, pick_directory
 from data_backup import BackupError, MAX_BYTES
@@ -95,7 +97,7 @@ EXTENSIONS = {
     "video": {".mp4", ".webm", ".mov", ".m4v"},
     "screenshot": {".png", ".jpg", ".jpeg", ".webp"},
     "contact_sheet": {".png", ".jpg", ".jpeg", ".webp"},
-    "transcript": {".txt", ".md", ".json"},
+    "transcript": {".txt", ".md", ".json", ".srt", ".vtt"},
     "source_manifest": {".json"},
     "performance": {".xlsx"},
 }
@@ -394,8 +396,8 @@ def job_fill_result(job, task):
             "markdown": variant_script(output, chosen["index"]), "changed": changed}
 
 
-class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, FeedbackWorkbenchMixin, ContentWorkbenchMixin, CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, OrderDeleteMixin, VideoPublishMixin, PublicationMatchMixin, PrepublishWorkbenchMixin):
-    def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=()):
+class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, FeedbackWorkbenchMixin, ContentWorkbenchMixin, CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, OrderDeleteMixin, VideoPublishMixin, PublicationMatchMixin, RetroDraftWorkbenchMixin, ReplicaWorkbenchMixin):
+    def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=(), skill_code_root=None, legacy_runtime_roots=()):
         self.store = CachedCaseStore(skill_root)
         self.runtime = Path(runtime_root).resolve()
         self.store.product_labels = ProductLabels(self.runtime / "evidence" / "case-products.json")
@@ -411,8 +413,9 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         self.review_product_sources = None
         self.direction_sync_cache = None
         self.thumbnail_lock = threading.Lock()
-        self.deletion = DeletionManager(self.store.root, self.runtime)
-        self.video_files = ManagedVideoFiles(self.runtime)
+        code_root = Path(skill_code_root or skill_root).resolve()
+        self.deletion = DeletionManager(self.store.root, self.runtime, source_root=code_root.parent / "tiktok-video-script-voiceover")
+        self.video_files = ManagedVideoFiles(self.runtime, legacy_roots=legacy_runtime_roots)
         self.reviews = ReviewStore(self.runtime)
         self.performance = PerformanceStore(self.runtime, performance_sources)
         self.public_stats = PublicStatsStore(self.runtime)
@@ -439,14 +442,15 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         self.voices = ElevenLabsClient()
         self.resolve = ResolveBridge()
         self.ai = AITaskManager(self.store, self.runtime, self.lock, bridge=ai_bridge,
-                                review_digest=self.review_digest, sales_resolver=self.sales, activity=self.activity)
+                                review_digest=self.review_digest, sales_resolver=self.sales, activity=self.activity,
+                                skill_code_root=skill_code_root, path_mapper=self.video_files.canonical_path)
         self.ai.on_finished = self._ai_round_finished
         self.ai.draft_media = self.draft_media
         # Editing uses the selected local client with a task-specific restricted tool profile.
         self.editor = getattr(self.ai.bridge, "claude", None)
         codex = getattr(self.ai.bridge, "codex", None)
         self.edit_codex = CodexEditBridge(executable=getattr(codex, "executable", None))
-        self.edit_skill_dir = Path(skill_root).resolve().parent / "davinci-product-video-editing"
+        self.edit_skill_dir = code_root.parent / "davinci-product-video-editing"
         self.ledger_dir = self.runtime / "davinci-ledger"
         self.recover_edit_results()
         self.production.interrupt_running()
@@ -608,17 +612,24 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
             raise ApiError(400, str(exc))
         return {**result, "registered": len(registered)}
 
-    def _auto_register_quietly(self, incoming=()):
+    def _auto_register_quietly(self, incoming=(), *, sales_import=False, failures=None, pending_posts=None):
         """Matching posts to waiting timelines is a convenience: a failure there never fails the push or import."""
         try:
-            return self.auto_register_publications(incoming)
+            return self.auto_register_publications(incoming, sales_import=sales_import, failures=failures, pending_posts=pending_posts)
         except Exception as exc:  # noqa: BLE001 — logged, the caller's own work goes on
             print(f"自动登记发布未完成：{exc!r}", file=sys.stderr)
+            if failures is not None:
+                failures.append({"error": "自动登记暂时无法完成，请稍后再次同步数据。"})
             return []
+
+    def _performance_registration_result(self, result):
+        failures, pending_posts = [], set()
+        registered = self._auto_register_quietly(sales_import=True, failures=failures, pending_posts=pending_posts)
+        return {**result, "registered": len(registered), "registration_pending": len(pending_posts), "registration_failures": failures}
 
     def sync_performance(self):
         result = self.performance.sync()
-        return {**result, "registered": len(self._auto_register_quietly())}
+        return self._performance_registration_result(result)
 
     def push_public_comments(self, body):
         """Import actual comments with the product associated with their video."""
@@ -1008,7 +1019,11 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         return links
 
     def products(self):
-        """Lightweight product inventory, without full lists or analytics."""
+        """Products used in workbench records, plus the manual catalogue.
+
+        Sales exports cover the whole shop and can rename one listing many
+        times. They provide metrics, never new workbench product identifiers.
+        """
         # Preserve discovery of freshly supplied review exports without holding the
         # workbench lock during their import. Unchanged sources skip this entirely.
         review_files = self.reviews.source_files()
@@ -1048,7 +1063,7 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
             except CreationError:
                 creation_revision = file_key(self.creation.path)
             key = (self.store.index_key, self.product_catalog.key(), file_key(self.directions.path), creation_revision,
-                   database_signature(self.performance.database), database_signature(self.reviews.database), grading)
+                   database_signature(self.reviews.database), grading)
             if self.products_cache is not None and self.products_cache[0] == key:
                 return self.products_cache[1]
             values = {product_key(case.get("product")) for case in cases}
@@ -1064,8 +1079,6 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
                     # A broken optional catalog must not hide products from other modules.
                     pass
             values.update(product_key(Path(path).name.removesuffix("-selling-point-grading.md")) for path, _ in grading)
-            values.update(product_short(value) for value in distinct(self.performance.database,
-                "SELECT products FROM daily WHERE products != '' UNION SELECT products FROM periods WHERE products != ''", self.performance.lock))
             values.update(product_key(value) for value in distinct(self.reviews.database,
                 "SELECT DISTINCT product FROM reviews WHERE product != ''", self.reviews.lock))
             listed, removed = self.product_catalog.apply(values)
@@ -1441,7 +1454,7 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
             indexed = {entry["case_id"]: entry for entry in index["cases"]}
             for case in cases:
                 current = case.get("current")
-                summaries.append({key: case[key] for key in ("case_id", "product", "revision", "assets", "current", "sales_data", "resolved_direction", "current_event_id", "archived", "archive_event_id") if key in case} | {
+                summaries.append({key: case[key] for key in ("case_id", "product", "product_manual", "revision", "assets", "current", "sales_data", "resolved_direction", "current_event_id", "archived", "archive_event_id") if key in case} | {
                     "title": current["title"] if current else case["title"],
                     "updated_at": case["events"][-1]["created_at"],
                     "event_count": len(case["events"]),
@@ -1966,6 +1979,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.begin_write(content=path not in READ_ONLY_EXTENSION_PATHS)
                 post_admitted = True
             if self.command in {"GET", "HEAD"}:
+                if path == "/api/production/local-edit/client":
+                    return self.output(200, edit_transfer.client_package(), "application/zip")
+                transfer_download = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/local-edit/(package|result)", path)
+                if transfer_download:
+                    identifier, kind = transfer_download.groups()
+                    if kind == "package":
+                        return self.output(200, edit_transfer.export_package(self.app, identifier), "application/zip")
+                    return self.output(200, edit_transfer.export_receipt(self.app, identifier))
                 if (self.server.data_maintenance and self.server.transfer_operation() == "restore"
                         and path.startswith("/api/") and path not in {"/api/data/status", "/api/service/status"}):
                     raise self.server.transfer_busy_error()
@@ -2055,12 +2076,6 @@ class Handler(BaseHTTPRequestHandler):
                     if len(timelines) != 1:
                         raise ApiError(400, "时间线参数只能出现一次。")
                     return self.output(200, self.app.video_publication_detail(video_publication[1], timelines[0]))
-                prepublish_sheet = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/prepublish/(PPR-[0-9a-f]{12})/sheets/((?:opening|detail\d{2}|shots\d{1,2})\.jpg)", path)
-                if prepublish_sheet:
-                    return self.file(self.app.prepublish_sheet(*prepublish_sheet.groups()))
-                prepublish = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/prepublish", path)
-                if prepublish:
-                    return self.output(200, self.app.prepublish_reviews(prepublish[1]))
                 if path == "/api/production/deliveries":
                     return self.output(200, self.app.production_deliveries(query.get("product", [None])[0]))
                 if path == "/api/production/eleven":
@@ -2267,6 +2282,9 @@ class Handler(BaseHTTPRequestHandler):
                 auto_read = re.fullmatch(r"/api/cases/(PVR-[0-9a-f]{12})/auto-breakdown", path)
                 if auto_read:
                     return self.output(200, {"job": self.app.auto_breakdown.status(auto_read.group(1))})
+                replica_read = re.fullmatch(r"/api/cases/(PVR-[0-9a-f]{12})/replica", path)
+                if replica_read:
+                    return self.output(200, self.app.case_replica_preview(replica_read.group(1)))
                 if path.startswith("/api/cases/"):
                     return self.output(200, self.app.detail(path.split("/")[-1]))
                 if path.startswith("/media/"):
@@ -2280,9 +2298,9 @@ class Handler(BaseHTTPRequestHandler):
                         return self.file(self.app.thumbnail_path(parts[1], events[0]))
                     file = self.app.asset_path(parts[1], parts[2], query.get("event", [None])[0])
                     return self.file(file, download="download" in query)
-                files = {"/": "index.html", "/app.js": "app.js", "/navigation.js": "navigation.js", "/library.js": "library.js", "/bulk.js": "bulk.js", "/detail.js": "detail.js", "/transcript-sync.js": "transcript-sync.js", "/delete.js": "delete.js", "/directions.js": "directions.js", "/editor.js": "editor.js", "/native.js": "native.js", "/ai.js": "ai.js", "/performance.js": "performance.js", "/perf-dashboard.js": "perf-dashboard.js", "/perf-date-picker.js": "perf-date-picker.js", "/perf-creators.js": "perf-creators.js", "/reviews.js": "reviews.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
+                files = {"/": "index.html", "/app.js": "app.js", "/navigation.js": "navigation.js", "/library.js": "library.js", "/bulk.js": "bulk.js", "/detail.js": "detail.js", "/transcript-sync.js": "transcript-sync.js", "/case-replica.js": "case-replica.js", "/case-replica.css": "case-replica.css", "/delete.js": "delete.js", "/directions.js": "directions.js", "/editor.js": "editor.js", "/native.js": "native.js", "/ai.js": "ai.js", "/performance.js": "performance.js", "/perf-dashboard.js": "perf-dashboard.js", "/perf-date-picker.js": "perf-date-picker.js", "/perf-creators.js": "perf-creators.js", "/reviews.js": "reviews.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
                 files.update({"/" + name: name for name in ("shell.js", "shell.css", "settings.js", "settings.css", "global-search.js", "global-search.css", "navigation.css", "library.css", "detail.css", "inline-editor.js", "inline-editor.css", "direction-picker.js", "direction-picker.css", "home.js", "home.css", "material-basket.js", "material-basket.css", "scripts.js", "scripts.css", "production.js", "production.css", "writing.css", "reviews-layout.css", "demo.js")})
-                files.update({"/" + name: name for name in ("review-followups.js", "review-opportunities.js", "review-opportunities.css", "video-publication.js", "video-publication.css", "copy-id.js", "drawer-resize.js", "campaigns.js", "campaigns.css", "prepublish-review.js", "prepublish-review.css", "auto-breakdown.js", "auto-breakdown.css", "content-flow.js", "content-flow.css", "workflow-links.js", "workflow-links.css", "production-needs.js", "production-needs.css", "feedback-chain.js", "feedback-chain.css", "delivery-provenance.js", "delivery-provenance.css")})
+                files.update({"/" + name: name for name in ("review-followups.js", "review-opportunities.js", "review-opportunities.css", "video-publication.js", "video-publication.css", "copy-id.js", "drawer-resize.js", "campaigns.js", "campaigns.css", "auto-breakdown.js", "auto-breakdown.css", "content-flow.js", "content-flow.css", "workflow-links.js", "workflow-links.css", "production-needs.js", "production-needs.css", "feedback-chain.js", "feedback-chain.css", "delivery-provenance.js", "delivery-provenance.css")})
                 files.update({"/review-experiences.js": "review-experiences.js", "/review-experiences.css": "review-experiences.css"})
                 files.update({"/index.html": "index.html", "/remote-session.js": "remote-session.js", "/remote-session.css": "remote-session.css",
                               "/tk-candidates.js": "tk-candidates.js", "/tk-candidates.css": "tk-candidates.css",
@@ -2295,6 +2313,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self.file(APP_ROOT / "static" / "directions.css", cache=True, immutable="v" in query)
                 raise ApiError(404, "页面不存在。")
             if self.command == "POST":
+                if path == "/api/production/local-edit/import":
+                    if (self.client_address[0] not in {"127.0.0.1", "::1"}
+                            or any(self.headers.get(name) for name in ("Forwarded", "X-Forwarded-For", "CF-Connecting-IP"))):
+                        raise ApiError(403, "请在这台电脑的本机工作台导入剪辑包。")
+                    length = self.content_length(edit_transfer.MAX_PACKAGE)
+                    self.connection.settimeout(120)
+                    raw = self.rfile.read(length)
+                    post_body_unread = False
+                    return self.output(200, edit_transfer.import_package(self.app, raw))
                 if path == "/api/upload":
                     post_body_unread = False  # upload handles its own bounded rejection drain.
                     return self.upload(query)
@@ -2317,6 +2344,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError(400, "提交内容不是有效数据。")
                 if not isinstance(body, dict):
                     raise ApiError(400, "提交内容格式错误。")
+                transfer_result = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/local-edit/result", path)
+                if transfer_result:
+                    return self.output(200, edit_transfer.import_receipt(self.app, transfer_result[1], body))
                 if path == "/api/remote-account":
                     with self.app.lock:
                         return self.output(200, RemoteAccounts(self.app.runtime).save(body))
@@ -2464,14 +2494,6 @@ class Handler(BaseHTTPRequestHandler):
                     identifier, edit_id, action = edit_action.groups()
                     handler = {"approval": self.app.approve_edit, "baseline": self.app.adopt_edit_baseline}[action]
                     return self.output(200, handler(identifier, edit_id, body))
-                prepublish = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/prepublish(?:/(PPR-[0-9a-f]{12})/(findings|cancel))?", path)
-                if prepublish:
-                    identifier, review_id, action = prepublish.groups()
-                    if not review_id:
-                        return self.output(200, self.app.start_prepublish_review(identifier, body))
-                    if action == "cancel":
-                        return self.output(200, self.app.cancel_prepublish_review(identifier, review_id))
-                    return self.output(200, self.app.resolve_prepublish_finding(identifier, review_id, body))
                 video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication(/verify|/calendar|/undo-auto|/dismiss|/title-zh)?", path)
                 if video_publication:
                     handler = {"/verify": self.app.verify_video_publication, "/calendar": self.app.set_video_calendar_status,
@@ -2484,17 +2506,18 @@ class Handler(BaseHTTPRequestHandler):
                     identifier, action = timeline_cancel.groups()
                     handler = self.app.cancel_timeline if action == "cancel" else self.app.abandon_timeline
                     return self.output(200, handler(identifier, body))
-                timeline_lifecycle = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/timeline/(archive|task-status)", path)
+                timeline_lifecycle = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/timeline/(archive|delete|task-status)", path)
                 if timeline_lifecycle:
                     identifier, action = timeline_lifecycle.groups()
-                    handler = self.app.archive_timeline if action == "archive" else self.app.set_timeline_task_status
+                    handler = {"archive": self.app.archive_timeline, "delete": self.app.delete_timeline,
+                               "task-status": self.app.set_timeline_task_status}[action]
                     return self.output(200, handler(identifier, body))
-                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|fill|archive|delete|timeline|open|edit|handoff|recover|completion)", path)
+                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|fill|archive|delete|timeline|open|subtitles|hook|edit|handoff|recover|completion)", path)
                 if job_action:
                     identifier, action = job_action.groups()
                     handler = {"takes": self.app.generate_take, "select": self.app.select_take,
                                "lines": self.app.save_job_lines, "fill": self.app.fill_production_job, "archive": self.app.archive_job, "delete": self.app.delete_job_order,
-                               "timeline": self.app.build_timeline, "open": self.app.open_timeline,
+                               "timeline": self.app.build_timeline, "open": self.app.open_timeline, "subtitles": self.app.check_timeline_subtitles, "hook": self.app.add_timeline_hook,
                                "edit": self.app.start_edit, "handoff": self.app.edit_handoff,
                                "recover": self.app.recover_production_operation, "completion": self.app.complete_production_job}[action]
                     return self.output(200, handler(identifier, body))
@@ -2547,7 +2570,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.sync_performance())
                 if path == "/api/performance/import":
                     result = self.app.import_performance_uploads(body)
-                    return self.output(200, {**result, "registered": len(self.app._auto_register_quietly())})
+                    return self.output(200, self.app._performance_registration_result(result))
                 if path == "/api/performance/public-export":
                     return self.output(200, self.app.export_public_views(body))
                 if path == "/api/reviews/sync":
@@ -2576,6 +2599,9 @@ class Handler(BaseHTTPRequestHandler):
                         return self.output(200, {"results": self.app.auto_breakdown.batch_collect(body.get("video_ids"))})
                     except ValueError as exc:
                         raise ApiError(400, str(exc))
+                replica_start = re.fullmatch(r"/api/cases/(PVR-[0-9a-f]{12})/replica", path)
+                if replica_start:
+                    return self.output(200, self.app.start_case_replica(replica_start.group(1), body))
                 transcribe = re.fullmatch(r"/api/cases/(PVR-[0-9a-f]{12})/transcribe", path)
                 if transcribe:
                     try:
@@ -2974,8 +3000,13 @@ def make_server(skill_root, runtime_root, port=8767, allow_open=True, ai_bridge=
         server.data_lease = ServerLease(runtime_root)
         if not server.data_lease.acquire():
             raise RuntimeError("此工作台正在运行或正在离线备份，请稍后重新打开。")
+        code_root = (DEFAULT_CONFIG.get("skill_code_root")
+                     if Path(skill_root).resolve() == Path(DEFAULT_CONFIG["skill_root"]).resolve() else None)
+        legacy_roots = (DEFAULT_CONFIG.get("legacy_runtime_roots", [])
+                        if Path(runtime_root).resolve() == Path(DEFAULT_CONFIG["runtime_root"]).resolve() else ())
         server.app = Workbench(skill_root, runtime_root, allow_open, ai_bridge=ai_bridge,
-                               performance_sources=performance_sources)
+                               performance_sources=performance_sources, skill_code_root=code_root,
+                               legacy_runtime_roots=legacy_roots)
         server.app.data_transfer.maintenance = server.data_operation
         server.app.data_transfer.start(server.server_port)
     except Exception:

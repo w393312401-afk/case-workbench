@@ -110,8 +110,11 @@ function updateLibraryViewControls() {
 function libraryProductOptions() {
   const shell = window.WorkbenchShell;
   const values = new Map([["", "全部产品"]]);
-  const choices = shell?.getProductChoices?.() || [...new Set(state.cases.map(productFilterGroup).filter(Boolean))].map(value => ({ value, label: value }));
-  for (const { value, label } of choices) values.set(value, label);
+  // The shared catalogue also contains sales/review-only products. This filter
+  // classifies cases, so keep only products represented in the library.
+  const present = new Set(state.cases.map(item => shell?.productOf(item) ?? productFilterGroup(item)).filter(Boolean));
+  const choices = shell?.getProductChoices?.() || [...present].map(value => ({ value, label: value }));
+  for (const { value, label } of choices) if (present.has(value)) values.set(value, label);
   if (state.libraryProduct && !values.has(state.libraryProduct)) values.set(state.libraryProduct, shell?.productLabel(state.libraryProduct) || state.libraryProduct);
   return [...values].map(([value, label]) => `<option value="${esc(value)}" ${value === (state.libraryProduct || "") ? "selected" : ""}>${esc(label)}</option>`).join("");
 }

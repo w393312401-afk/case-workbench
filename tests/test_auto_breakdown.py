@@ -95,6 +95,14 @@ class WorkbenchCase(unittest.TestCase):
 
 
 class AutoBreakdownTests(WorkbenchCase):
+    def test_status_keeps_a_result_written_after_its_first_read(self):
+        auto = self.app.auto_breakdown
+        active = {"case_id": self.identifier, "run_id": "ABD-000000000001", "status": "analyzing"}
+        finished = {**active, "status": "analyzer_pending"}
+        with patch.object(auto, "_read", side_effect=[active, finished]), patch.object(auto, "_update") as update:
+            self.assertEqual(auto.status(self.identifier), finished)
+        update.assert_not_called()
+
     def test_download_attaches_video_and_waits_for_analyzer(self):
         self.app.auto_breakdown.downloader = fake_download
         status, body = self.request("POST", f"/api/cases/{self.identifier}/auto-breakdown", {"video_id": VIDEO_ID})

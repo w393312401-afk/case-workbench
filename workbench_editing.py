@@ -23,6 +23,7 @@ from uuid import uuid4
 
 from codex_bridge import BridgeCancelled
 from ai_tasks import AITaskError
+from case_replica import handoff_section, until_filled
 from creation_store import CreationError
 from direction_store import now
 from edit_candidates import (INDEX_DIR, VisualIndex, add_in_progress_usage, build_candidates, compose_grid, merge_notes,
@@ -39,7 +40,7 @@ from workbench_production import creator_project_base, meaning_markers, same_cre
 from task_activity import activity_label, record_activity, safe_error
 
 SKILL_NAME = "davinci-product-video-editing"
-MODES = {"explain": "解释画面逻辑", "sync": "音画同步", "montage": "主题蒙太奇"}
+MODES = {"explain": "解释画面逻辑", "sync": "音画同步", "montage": "主题蒙太奇", "replica": "1:1 复刻原片"}
 EDIT_MODELS = ("claude-default", "claude-opus", "claude-sonnet")
 EFFORTS = (None, "high", "xhigh", "max")
 EDIT_TIMEOUT = 150 * 60
@@ -86,7 +87,7 @@ def candidates_section(stats=None, error=""):
         return "\n".join(["## 候选画面", "", f"- 工作台这次没能整理候选画面（{reason}），按技能自己查看画面。", ""])
     lines = ["## 候选画面（工作台已整理）", "",
              f"- 清单：当前目录 candidates.md（同内容 candidates.json）。素材片段共 {stats['clips']} 个，列出 {stats['listed']} 个。",
-             f"- 标签资料：{stats['verified']} 个片段是「已核标签」（打标签技能看过画面后写的）。",
+             f"- 标签资料：{stats['verified']} 个片段是「已核标签」（片段名称或打标签技能的逐片标记，看过画面后写的）。",
              f"- 其余片段（标签待核、手写标签或无标签）中有 {stats['to_look']} 个没有描述，已有画面描述的 {stats['described']} 个。"
              "对照图位于 candidates/<候选编号>.jpg，同一片段按时间顺序含 3 或 6 帧。",
              *([f"- 另有 {stats['deferred']} 个需看图的片段这次来不及导出对照图，清单里标「无对照图」。"] if stats.get("deferred") else []),
@@ -94,7 +95,8 @@ def candidates_section(stats=None, error=""):
              *(reuse_rules(stats) if stats.get("unused") is not None else []),
              "- 按交接明确选择的画面模式与本次当前个人技能选材。已核标签或已有描述已支持的信息可直接使用；"
              "只有依据未覆盖且影响理解的细节需要再看图，标签未写细节不等于缺素材。"
-             "这只针对选片段；只截取片段的一部分时，入出点按技能「定入出点」看画面后再定，动作镜头按技能「动作完整」取。"
+             "这只针对选片段；清单里带「动作区间」的片段，入出点直接取区间，不导出静帧（可循环动作在区间内任取一段；要接下一镜头时最多看一张尾帧），优先于技能「定入出点」的看图步骤。"
+             "没有动作区间的片段，只截取一部分时入出点按技能「定入出点」看画面后再定，动作镜头按技能「动作完整」取。"
              "入出点拿不准或动作看不出是否完整时，放最接近的一段并写进 questions，不因此留空。",
              "- 看过对照图的片段，把描述写入当前目录 visual-notes.json（一个 JSON 数组，覆盖写入完整数组），工作台会存下来供以后复用。格式：",
              "", "```json", NOTES_EXAMPLE, "```", ""]
@@ -223,7 +225,7 @@ def project_key(config):
             str(config.get("creator") or "").casefold() or config.get("folder") or config.get("project_id") or "")
 
 
-def handoff_markdown(job, take, timeline, config, *, mode, instruction, materials, notes, voice_label, ledger=None, baseline=None):
+def handoff_markdown(job, take, timeline, config, *, mode, instruction, materials, notes, voice_label, ledger=None, baseline=None, reference="reference"):
     # A timeline may have been built with its own format; older records carry only the product settings.
     fps, lead = timeline.get("fps") or config["fps"], timeline.get("lead_frames", 0)
     width, height = timeline.get("width") or config["width"], timeline.get("height") or config["height"]
@@ -270,6 +272,8 @@ def handoff_markdown(job, take, timeline, config, *, mode, instruction, material
         lines += ["## 写稿时给的开头（选材线索）", ""] + [f"- {item}" for item in (notes.get("opening"), notes.get("onscreen")) if item] + [""]
     if notes.get("pickups"):
         lines += ["## 写稿时列的补拍建议（本次先查实际素材，不据此判缺）", ""] + [f"- {item}" for item in notes["pickups"]] + [""]
+    if mode == "replica":
+        lines += [handoff_section(job, take, timeline, fps, lead, reference)]
     lines += ["## 交付", "",
               "- 在目标时间线上按技能剪辑：画面放视频轨，逐片原声放音频 1，配音轨不动；不导出、不渲染。",
               "- 按当前模式查看相关候选，确无合适素材的范围按技能原位留空，不在时间线上打缺素材标记；"
@@ -446,11 +450,21 @@ class EditingWorkbenchMixin:
             raise VoiceError(400, "素材时间线选择无效。")
         return mode, instruction.strip(), [item.strip() for item in materials]
 
+    def _edit_reference(self, identifier, mode):
+        """The original's shot images of a 1:1 edit, ready before the lock is taken; None for the other modes."""
+        if mode != "replica":
+            return None
+        job = self.production.job(identifier)
+        if not job.get("replica"):
+            raise VoiceError(400, "这张制作单不是照原片创建的，不能用 1:1 复刻模式。")
+        return self.replica_frames(job)
+
     def edit_handoff(self, identifier, body):
         """Write a handoff file for running the edit in an interactive Claude Code session instead."""
         if not isinstance(body, dict):
             raise VoiceError(400, "参数格式无效。")
         mode, instruction, materials = self._edit_options(body)
+        reference = self._edit_reference(identifier, mode)
         with self.lock:
             data = self.production.records()
             job = next((item for item in data["jobs"] if item["id"] == identifier), None)
@@ -460,7 +474,7 @@ class EditingWorkbenchMixin:
             timeline, take, notes, voice_label = self._edit_context(job, body.get("timeline"))
             config = with_location(config, timeline)
         text = handoff_markdown(job, take, timeline, config, mode=mode, instruction=instruction, materials=materials,
-                                notes=notes, voice_label=voice_label)
+                                notes=notes, voice_label=voice_label, reference=str(reference or "reference"))
         folder = self.production.root / "handoffs"
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{identifier}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
@@ -529,6 +543,7 @@ class EditingWorkbenchMixin:
         if not (Path(self.edit_skill_dir) / "SKILL.md").is_file():
             raise VoiceError(503, f"没有找到剪辑技能 {SKILL_NAME}（{self.edit_skill_dir}），无法发起 AI 剪辑。")
         mcp = locate_mcp()
+        reference = self._edit_reference(identifier, mode)
         # Everything above can refuse without touching DaVinci, so a refused edit leaves no spare timeline.
         timeline_id, build_request = body.get("timeline"), body.get("timeline_request_id")
         if body.get("recut_from"):
@@ -592,6 +607,8 @@ class EditingWorkbenchMixin:
                 shutil.copytree(self.edit_skill_dir, folder / "skill", ignore=shutil.ignore_patterns("agents"))
                 with open(folder / "skill" / "SKILL.md", "a", encoding="utf-8") as stream:
                     stream.write(REUSE_SKILL_NOTE)
+                if reference:
+                    shutil.copytree(reference, folder / "reference")
                 handoff = ("# 待建线后自动剪辑\n\n等待建线请求 " + pending["request_id"] + " 完成；尚未启动 AI 剪辑。\n" if pending else
                     handoff_markdown(job, take, timeline, config, mode=mode, instruction=instruction, materials=materials,
                                      notes=notes, voice_label=voice_label))
@@ -1265,6 +1282,12 @@ class EditingWorkbenchMixin:
                     (folder / "handoff.md").write_text(handoff, encoding="utf-8")
                     execution_status, output, error, actual = self._run_edit_ai(edit_id, folder, PROMPT_PREFIX + handoff, profile, model, effort,
                         [{"name": SKILL_NAME, "path": str(folder / "skill" / "SKILL.md")}], stopped, provider)
+                    if next(item for item in job.get("edits", []) if item["id"] == edit_id).get("mode") == "replica":
+                        execution_status, output, error, actual = until_filled(
+                            (execution_status, output, error, actual),
+                            lambda prompt: self._run_edit_ai(edit_id, folder, prompt, profile, model, effort,
+                                [{"name": SKILL_NAME, "path": str(folder / "skill" / "SKILL.md")}], stopped, provider),
+                            final_report)
                     # The visual index is shared. Both snapshot preparation and
                     # its read/merge/write happen under the Resolve lease.
                     try:

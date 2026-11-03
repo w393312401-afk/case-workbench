@@ -483,6 +483,9 @@ class AIHTTPTests(unittest.TestCase):
         self.assertEqual(len(replay["task"]["rounds"]), 2)
         self.assertEqual(self.request("POST", path, {**cancel,"request_id":uuid4().hex})[0], 409)
         self.assertEqual(self.request("POST", path, {"request_id":uuid4().hex})[0], 400)
+        latest = {"request_id":uuid4().hex,"round_id":replay["task"]["rounds"][-1]["round_id"]}
+        self.assertEqual(self.request("POST", path, latest)[0], 200)
+        self.wait(task["task_id"])  # Temporary files cannot be removed while the round is still running.
 
     def test_ai_mutations_share_existing_request_guards(self):
         for body, authenticated, headers in ((self.body(), False, {}), (self.body(), True, {"Origin":"https://example.invalid"})):

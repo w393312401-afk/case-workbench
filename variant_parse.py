@@ -289,6 +289,30 @@ def screen_copy(markdown):
     return "\n".join(foreign), "\n".join(chinese)
 
 
+def screen_options(markdown):
+    """The recommended 开头屏显 followed by its 屏显备选, each with the role the writer gave it; empty without a foreign hook."""
+    recommended, reading = screen_copy(markdown)
+    if not recommended:
+        return []
+    options, in_fence = [{"label": "", "en": recommended, "zh": reading}], False
+    for line in str(markdown or "").splitlines():
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        cleaned = re.sub(r"^[\s#>*•\-]+", "", line).replace("**", "").strip()
+        pairing = re.match(r"^屏显搭配\s*[：:]\s*([^\s。，,；;]+)", cleaned)
+        spare = re.match(r"^屏显备选\s*[：:]\s*([^｜|]+)[｜|]\s*(.+)$", cleaned)
+        if in_fence:
+            continue
+        if pairing and not options[0]["label"]:
+            options[0]["label"] = pairing.group(1)
+        if spare:
+            english, chinese = screen_copy("开头屏显：" + spare.group(2))
+            if english:
+                options.append({"label": spare.group(1).strip(), "en": english, "zh": chinese})
+    return options
+
+
 def _title_line(stripped):
     """A variant's own heading or 标题行 (方向编号 · 变体/版本 · 推进结构), shown by the workbench elsewhere."""
     if SPOKEN_HEADING.search(stripped) or re.fullmatch(r"(?:---+|\*\*\*+)", stripped):

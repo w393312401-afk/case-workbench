@@ -259,8 +259,8 @@ class FeedbackChainHTTPTests(unittest.TestCase):
         self.assertEqual(status, 400, result)
 
     def test_draft_reviews_the_posted_video_against_its_figures(self):
-        import workbench_prepublish
-        from test_prepublish_review import fake_prepare
+        import workbench_retro_draft
+        from test_retro_draft import fake_prepare
         seen = []
 
         class ImageBridge(FakeBridge):
@@ -280,14 +280,14 @@ class FeedbackChainHTTPTests(unittest.TestCase):
         self.server.app.draft_downloader = download
         window = {"product": "202H", "video_id": self.video_id, "window_end": self.window}
         # The fixture case carries its own video; unlink it so the draft has to download the post.
-        with patch.object(workbench_prepublish, "prepare", fake_prepare), patch.object(self.server.app, "video_case_links", return_value={}):
+        with patch.object(workbench_retro_draft, "prepare", fake_prepare), patch.object(self.server.app, "video_case_links", return_value={}):
             task, _ = self.task(review_video=window)
             again, _ = self.task(review_video=window)
         self.assertIn(f"/video/{self.video_id}", seen[0])
         self.assertEqual(["opening.jpg", "shots1.jpg"], [Path(path).name for _, path in seen[1]])
-        from prepublish_review import FRAMEWORK
+        from retro_draft import DRAFT_FRAMEWORK
         call = self.server.app.ai.bridge.calls[0]
-        self.assertNotIn(FRAMEWORK, call["prompt"])
+        self.assertNotIn(DRAFT_FRAMEWORK, call["prompt"])
         self.assertIn("## 一句话：这条为什么出单", call["prompt"])
         self.assertIn("ctor_pct_selling", call["prompt"])
         self.assertIn("finish_rate_pct", call["prompt"])

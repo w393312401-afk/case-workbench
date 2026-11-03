@@ -255,14 +255,100 @@ window.VideoPublication = (() => {
     const state = line => line.registered ? `已登记${line.source_current ? '' : '（版本已变）'}` : line.can_register ? '待登记' : '待完成审查';
     return `<div class="video-publication-lines" role="group" aria-label="登记哪条时间线的发布">${lines.map(line => `<button type="button" class="video-publication-line${line.unique_id === chosen ? ' is-current' : ''}" data-publication-timeline="${esc(line.unique_id)}" aria-pressed="${line.unique_id === chosen}"${line.post_id ? ` title="帖子 ${esc(line.post_id)}"` : ''}>${esc(line.name || line.unique_id)} <small>${esc(state(line))}</small></button>`).join('')}</div>`;
   }
-  async function mount(host,{job,api,onSaved,onLoaded} = {}) {
+  // The chosen timeline's own tools, ahead of its registration: copy its name, open it in Resolve, check its subtitles.
+  function subtitleResult(timeline) {
+    const check = timeline.subtitle_check;
+    if (!check) return '';
+    const seconds = frame => `${(frame / Number(timeline.fps)).toFixed(1)} 秒`;
+    const rows = [...(check.changes || []).map(row => `<li>${seconds(row.start)}：${esc(row.before)} → <strong>${esc(row.after)}</strong></li>`),
+      ...(check.review || []).map(row => `<li>${seconds(row.start)}：${esc(row.text)}<small>${!row.wrote ? `字幕里没有“${esc(row.expected)}”` : row.expected ? `字幕写的是“${esc(row.wrote)}”，稿子是“${esc(row.expected)}”` : `字幕多了“${esc(row.wrote)}”，稿子里没有`}，请你确认</small></li>`)];
+    return `<p class="video-publication-subtitles" data-subtitle-state="${esc(check.status)}"><span class="script-status${['clean','fixed'].includes(check.status) ? ' published' : ''}">${esc(check.message)}</span> <small>${esc(localTime(check.at))}</small></p>${rows.length ? `<details class="video-publication-subtitle-details"><summary>查看 ${rows.length} 处</summary><ul>${rows.join('')}</ul></details>` : ''}`;
+  }
+  function hookResult(timeline) {
+    const hook = timeline.hook_overlay;
+    if (!hook) return '';
+    return `<p class="video-publication-subtitles" data-hook-state="${esc(hook.status)}"><span class="script-status${hook.status === 'saved' ? ' published' : ''}">${esc(hook.message)}</span> ${esc(hook.text)} <small>${esc(localTime(hook.at))}</small></p>`;
+  }
+  // The script's hooks to choose from: the recommended one first, then its alternatives.
+  function hookOptions(copy) {
+    const written = copy?.screen_options?.length ? copy.screen_options : copy?.screen_en ? [{label:'',en:copy.screen_en,zh:copy.screen_zh}] : [];
+    return written.filter(option => option.en.trim() && !option.en.trim().startsWith('无'));
+  }
+  const hookWords = value => String(value || '').trim().replace(/\s+\/\s*/g,' / ').replace(/ \/ $/,'');
+  const hookTitle = (lock,text) => lock || (text ? `在开头 3 秒加上：${text}` : '这张制作单还没有开头屏显，可以选“自己写”。');
+  function timelineTools(job,uid,copy) {
+    const timeline = (job.timelines || []).find(row => row.unique_id === uid);
+    if (!timeline) return '';
+    const running = (job.edits || []).some(edit => edit.timeline_uid === uid && edit.status === 'running');
+    const lock = running ? 'AI 正在剪辑，结束后可核对字幕。' : job.archived ? '恢复制作单后可核对字幕。' : '';
+    const hookLock = running ? 'AI 正在剪辑，结束后可加屏显。' : job.archived ? '恢复制作单后可加屏显。' : '';
+    const options = hookOptions(copy), onTimeline = timeline.hook_overlay?.text || '';
+    const picked = onTimeline ? options.findIndex(option => hookWords(option.en) === hookWords(onTimeline)) : options.length ? 0 : -1;
+    const hookText = picked < 0 ? onTimeline : options[picked].en;
+    return `<div class="video-publication-timeline" data-timeline-tools="${esc(uid)}"><div class="video-publication-timeline-bar"><span class="id-row"><strong>${esc(timeline.name)}</strong>${typeof copyIdButton === 'function' ? copyIdButton(timeline.name,'时间线名称',{icon:true}) : ''}</span><button type="button" class="secondary compact" data-open-timeline>在达芬奇打开</button><button type="button" class="secondary compact" data-check-subtitles ${lock ? 'disabled' : ''} title="${esc(lock || '和配音稿对比，用词错误直接改好，拿不准的列出来。')}">核对字幕</button><button type="button" class="secondary compact" data-add-hook data-hook-lock="${esc(hookLock)}" ${hookLock || !hookText ? 'disabled' : ''} title="${esc(hookTitle(hookLock,hookText))}">${timeline.hook_overlay ? '更新屏显' : '加屏显'}</button></div><div class="video-publication-hook-choice"><select data-hook-choice aria-label="选屏显文字" ${hookLock ? 'disabled' : ''}>${options.map((option,index) => `<option value="${index}" ${index === picked ? 'selected' : ''}>${esc(option.label ? `${option.label}：` : '')}${esc(option.en)}</option>`).join('')}<option value="custom" ${picked < 0 ? 'selected' : ''}>自己写…</option></select><input type="text" maxlength="300" data-hook-custom aria-label="自己写的屏显文字" placeholder="第一行 / 第二行" value="${esc(picked < 0 ? onTimeline : '')}" ${picked < 0 ? '' : 'hidden'} ${hookLock ? 'disabled' : ''}><small data-hook-reading>${esc(options[picked]?.zh || '')}</small></div>${subtitleResult(timeline)}${hookResult(timeline)}<p class="ai-error" data-timeline-tools-error role="alert" hidden></p></div>`;
+  }
+  function bindTimelineTools(host,job,api,onTimelineChanged,copy) {
+    const tools = host.querySelector('[data-timeline-tools]');
+    if (!tools) return;
+    const uid = tools.dataset.timelineTools, url = `/api/production/jobs/${encodeURIComponent(job.id)}`;
+    const open = tools.querySelector('[data-open-timeline]'), check = tools.querySelector('[data-check-subtitles]'), hook = tools.querySelector('[data-add-hook]'), error = tools.querySelector('[data-timeline-tools-error]');
+    const problem = failure => {
+      const message = failure.message || '这次操作没有完成，请重试。';
+      error.textContent = message;error.hidden = false;toast(message,true);
+    };
+    const repaint = async timeline => {
+      Object.assign((job.timelines || []).find(row => row.unique_id === uid) || {},timeline);
+      // Only this row repaints, so a video ID being typed below stays. The panel may have moved to another timeline meanwhile.
+      const shown = host.querySelector('[data-timeline-tools]');
+      if (shown?.dataset.timelineTools === uid) {shown.outerHTML = timelineTools(job,uid,copy);bindTimelineTools(host,job,api,onTimelineChanged,copy);}
+      // The result moved the order's revision, which the timeline step saves against.
+      try {await onTimelineChanged?.();} catch {}
+    };
+    open.addEventListener('click',async () => {
+      open.disabled = true;error.hidden = true;
+      try {toast(`已在达芬奇打开 ${(await api(`${url}/open`,{method:'POST',body:{unique_id:uid}})).name}。`);}
+      catch (failure) {problem(failure);}
+      finally {open.disabled = false;}
+    });
+    check.addEventListener('click',async () => {
+      check.disabled = true;check.textContent = '核对中…';error.hidden = true;
+      let result;
+      try {result = await api(`${url}/subtitles`,{method:'POST',body:{timeline_uid:uid,request_id:crypto.randomUUID()}});}
+      catch (failure) {problem(failure);check.disabled = false;check.textContent = '核对字幕';return;}
+      const outcome = result.timeline.subtitle_check;
+      toast(outcome.message,!['clean','fixed'].includes(outcome.status));
+      await repaint(result.timeline);
+    });
+    const choice = tools.querySelector('[data-hook-choice]'), custom = tools.querySelector('[data-hook-custom]'), reading = tools.querySelector('[data-hook-reading]');
+    const options = hookOptions(copy);
+    const chosenText = () => choice.value === 'custom' ? custom.value.trim() : options[Number(choice.value)].en;
+    const chosen = () => {
+      custom.hidden = choice.value !== 'custom';
+      reading.textContent = choice.value === 'custom' ? '' : options[Number(choice.value)].zh || '';
+      hook.disabled = Boolean(hook.dataset.hookLock) || !chosenText();
+      hook.title = hookTitle(hook.dataset.hookLock,chosenText());
+    };
+    choice.addEventListener('change',() => {chosen();if (!custom.hidden) custom.focus();});
+    custom.addEventListener('input',chosen);
+    hook.addEventListener('click',async () => {
+      const label = hook.textContent;
+      hook.disabled = true;hook.textContent = '处理中…';error.hidden = true;
+      let result;
+      try {result = await api(`${url}/hook`,{method:'POST',body:{timeline_uid:uid,request_id:crypto.randomUUID(),text:chosenText()}});}
+      catch (failure) {problem(failure);hook.disabled = false;hook.textContent = label;return;}
+      const outcome = result.timeline.hook_overlay;
+      toast(outcome.message,outcome.status !== 'saved');
+      await repaint(result.timeline);
+    });
+  }
+  async function mount(host,{job,api,onSaved,onLoaded,onTimelineChanged} = {}) {
     if (!host || !job || !api) return;
     const token = Symbol('video-publication');host._videoPublicationToken = token;
     host.classList.add('video-publication');
     host.innerHTML = '<h2>成片与发布</h2><p class="context-note">正在读取发布记录…</p>';
     let data;
     try {data = await api(base(job.id) + (host._videoPublicationTimeline ? `?timeline=${encodeURIComponent(host._videoPublicationTimeline)}` : ''));}
-    catch (error) {if (host._videoPublicationToken === token) host.innerHTML = `<h2>成片与发布</h2><p class="ai-error" role="alert">${esc(error.message || '发布记录暂时无法读取。')}</p><button type="button" class="secondary" data-retry-load>重新读取</button>`;host.querySelector('[data-retry-load]')?.addEventListener('click',() => mount(host,{job,api,onSaved,onLoaded}));return;}
+    catch (error) {if (host._videoPublicationToken === token) host.innerHTML = `<h2>成片与发布</h2><p class="ai-error" role="alert">${esc(error.message || '发布记录暂时无法读取。')}</p><button type="button" class="secondary" data-retry-load>重新读取</button>`;host.querySelector('[data-retry-load]')?.addEventListener('click',() => mount(host,{job,api,onSaved,onLoaded,onTimelineChanged}));return;}
     if (host._videoPublicationToken !== token || !host.isConnected) return;
     const item = data.publication, source = data.source || {};
     // One registration stands for each timeline. With several, a saved-but-unconfirmed request is kept per timeline, and the
@@ -283,8 +369,9 @@ window.VideoPublication = (() => {
       <details class="video-publication-more" ${draft.file_path || item?.file ? 'open' : ''}><summary>账号、帖子链接、备注与成片文件</summary><div class="form-row"><label class="field"><span>发布账号</span><input name="account" maxlength="200" list="video-publication-accounts" value="${esc(draft.account || '')}" autocomplete="off"><datalist id="video-publication-accounts"></datalist></label><label class="field"><span>帖子链接（不填按账号和 ID 生成）</span><input name="post_url" type="url" maxlength="2000" value="${esc(draft.post_url || '')}"></label></div><label class="field"><span>备注</span><textarea name="note" rows="2" maxlength="2000">${esc(draft.note || '')}</textarea></label>
       <label class="field"><span>绑定成片文件：本地完整路径</span><input name="file_path" maxlength="2000" placeholder="C:\Videos\最终成片.mp4" value="${esc(draft.file_path || item?.file?.original_path || '')}"></label>
       <label class="video-publication-confirm"><input name="file_confirmed" type="checkbox">我已核对：该文件就是以上审查版本实际发布的成片。</label></details></form>`;
-    host.innerHTML = `<h2>成片与发布<details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">登记发布后的视频 ID，并保存对应脚本、配音和人工审查版本。以后导入销售表时，会按这个 ID 自动关联到这张制作单和它的变体。成片文件可选绑定，绑定后会复制到工作台，随完整备份保存。发布后在浏览器打开自己账号的主页，TK 看板会把新帖推给工作台，按发布文案标题自动登记；对不上唯一一条时间线的帖子会列在这里，点一下登记。</div></details></h2>
+    host.innerHTML = `<h2>成片与发布<details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">登记发布后的视频 ID，并保存对应脚本、配音和人工审查版本。导入或同步销售视频表时，能唯一匹配的帖子会自动登记；匹配结果不唯一的帖子会列在这里，点一下登记。自动登记可以撤销。发布后在浏览器打开自己账号的主页，TK 看板也会把新帖推给工作台。成片文件可选绑定，绑定后会复制到工作台，随完整备份保存。</div></details></h2>
       ${timelinePicker(lines,data.timeline_uid)}
+      ${lines.some(line => line.unique_id === data.timeline_uid) ? timelineTools(job,data.timeline_uid,data.copy) : ''}
       ${item ? receipt(job,item,true) : canEdit ? candidateRows(data.candidates) + formMarkup(calendarPlanMarkup()) : `<div class="video-publication-bar">${calendarPlanMarkup()}<span class="context-note">${esc(data.blocked_reason)}</span></div>`}
       ${copyRow(data.copy)}
       <div class="video-publication-folds">
@@ -293,21 +380,22 @@ window.VideoPublication = (() => {
       ${historyFold(job,data.history,item)}
       </div>`;
     bindCopy(host,data.copy);
+    bindTimelineTools(host,job,api,onTimelineChanged,data.copy);
     void fillTitleChinese(host,job,api,data.copy);
     host.querySelectorAll('[data-publication-timeline]').forEach(button => button.addEventListener('click',() => {
       if (button.classList.contains('is-current')) return;
       host._videoPublicationTimeline = button.dataset.publicationTimeline;
-      void mount(host,{job,api,onSaved,onLoaded});
+      void mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});
     }));
     host.querySelectorAll('[data-copy-take]').forEach(button => button.addEventListener('click',() => {
       if (typeof copyText === 'function') copyText(button.dataset.copyTake,'配音编号已复制');else navigator.clipboard.writeText(button.dataset.copyTake);
     }));
-    host.querySelector('[data-refresh-publication]')?.addEventListener('click',() => {clearPending(key);mount(host,{job,api,onSaved,onLoaded});});
+    host.querySelector('[data-refresh-publication]')?.addEventListener('click',() => {clearPending(key);mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});});
     host.querySelector('[data-calendar-toggle]')?.addEventListener('click',async event => {
       const button = event.currentTarget;button.disabled = true;
       try {
         await api(`${base(job.id)}/calendar`,{method:'POST',body:{publication_id:button.dataset.publicationId,calendar_uploaded:button.dataset.calendarToggle === '1'}});
-        if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded});
+        if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});
       } catch (problem) {button.disabled = false;toast(problem.message || '没能更新发布日历状态。',true);}
     });
     host.querySelector('[data-undo-auto]')?.addEventListener('click',async event => {
@@ -315,12 +403,12 @@ window.VideoPublication = (() => {
       try {
         const result = await api(`${base(job.id)}/undo-auto`,{method:'POST',body:{publication_id:item.id}});
         toast(result.warning || '已撤销自动登记，这个帖子不会再自动登记到这条时间线。',Boolean(result.warning));
-        if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded});
+        if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});
       } catch (problem) {button.disabled = false;toast(problem.message || '没能撤销自动登记。',true);}
     });
     host.querySelectorAll('[data-candidate-dismiss]').forEach(button => button.addEventListener('click',async () => {
       button.disabled = true;
-      try {await api(`${base(job.id)}/dismiss`,{method:'POST',body:{post_id:button.dataset.candidateDismiss,timeline_uid:data.timeline_uid}});await mount(host,{job,api,onSaved,onLoaded});}
+      try {await api(`${base(job.id)}/dismiss`,{method:'POST',body:{post_id:button.dataset.candidateDismiss,timeline_uid:data.timeline_uid}});await mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});}
       catch (problem) {button.disabled = false;toast(problem.message || '没能忽略这条帖子。',true);}
     }));
     const verify = host.querySelector('[data-verify-video]');
@@ -378,7 +466,7 @@ window.VideoPublication = (() => {
       form.dataset.busy = '1';error.hidden = true;
       form.querySelectorAll('button').forEach(button => button.disabled = true);
       form.querySelector('[data-save-status]').textContent = '正在保存发布登记…';
-      try {await api(base(job.id),{method:'POST',body:request});clearPending(key);if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded});}
+      try {await api(base(job.id),{method:'POST',body:request});clearPending(key);if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});}
       catch (problem) {
         const definitive = Number.isInteger(problem.status) && problem.status >= 400 && problem.status < 500;
         savedRequest.uncertain = !definitive;remember(key,savedRequest);

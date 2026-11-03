@@ -30,7 +30,7 @@ class ActivityKindPickerBrowserTests(unittest.TestCase):
 
     def setUp(self):
         product_activity.ActivityProductPickerBrowserTests.setUp(self)
-        for kind, title in (("images", "出图 · 图片任务"), ("voice", "配音 · 配音任务")):
+        for kind, title in (("edit", "AI 剪辑 · 剪辑任务"), ("voice", "配音 · 配音任务")):
             row = self.add_run(kind + ":fixture", "202H", notify=True)
             row.update(kind=kind, title=title, owner_id="CAR-" + kind,
                        url="#/202H/production/CAR-" + kind)
@@ -77,14 +77,14 @@ class ActivityKindPickerBrowserTests(unittest.TestCase):
         dialog = self.open_tasks(page)
         panel = self.open_kind_picker(page)
         search = panel.locator(".activity-kind-search")
-        search.fill("出图")
+        search.fill("剪辑")
         expect(panel.locator("[data-picker-value]")).to_have_count(1)
-        expect(panel.locator("[data-picker-value]")).to_have_attribute("data-picker-value", "images")
-        panel.locator('[data-picker-value="images"]').click()
-        expect(dialog.locator("#activity-list")).to_contain_text("图片任务")
+        expect(panel.locator("[data-picker-value]")).to_have_attribute("data-picker-value", "edit")
+        panel.locator('[data-picker-value="edit"]').click()
+        expect(dialog.locator("#activity-list")).to_contain_text("剪辑任务")
         expect(dialog.locator("#activity-list")).not_to_contain_text("配音任务")
-        self.assert_list_request("images", "current")
-        expect(page.locator(".activity-kind-trigger")).to_contain_text("出图")
+        self.assert_list_request("edit", "current")
+        expect(page.locator(".activity-kind-trigger")).to_contain_text("AI 剪辑")
         self.assertEqual(page.evaluate("location.hash"), original_hash)
         expect(page.locator("#global-product")).to_have_value("202H")
 
@@ -92,7 +92,7 @@ class ActivityKindPickerBrowserTests(unittest.TestCase):
         expect(page.locator("#activity-kind")).to_have_value("")
         self.choose_kind(page, "voice")
         expect(dialog.locator("#activity-list")).to_contain_text("配音任务")
-        expect(dialog.locator("#activity-list")).not_to_contain_text("图片任务")
+        expect(dialog.locator("#activity-list")).not_to_contain_text("剪辑任务")
         self.assert_list_request("voice", "unread")
         dialog.locator('[data-activity-filter="all"]').click()
         expect(page.locator("#activity-kind")).to_have_value("")
@@ -101,10 +101,10 @@ class ActivityKindPickerBrowserTests(unittest.TestCase):
         self.assert_list_request("ai", "all")
         self.choose_kind(page, "")
         expect(page.locator(".activity-kind-trigger")).to_contain_text("全部类型")
-        expect(dialog.locator("#activity-list")).to_contain_text("图片任务")
+        expect(dialog.locator("#activity-list")).to_contain_text("剪辑任务")
         expect(dialog.locator("#activity-list")).to_contain_text("配音任务")
         self.assert_list_request("", "all")
-        for status, expected in (("current", "images"), ("unread", "voice"), ("all", "")):
+        for status, expected in (("current", "edit"), ("unread", "voice"), ("all", "")):
             dialog.locator('[data-activity-filter="' + status + '"]').click()
             expect(page.locator("#activity-kind")).to_have_value(expected)
         dialog.locator("[data-activity-close]").click()
@@ -112,8 +112,8 @@ class ActivityKindPickerBrowserTests(unittest.TestCase):
         page.locator("#case-search").wait_for()
         dialog = self.open_tasks(page)
         dialog.locator('[data-activity-filter="current"]').click()
-        expect(page.locator("#activity-kind")).to_have_value("images")
-        expect(page.locator(".activity-kind-trigger")).to_contain_text("出图")
+        expect(page.locator("#activity-kind")).to_have_value("edit")
+        expect(page.locator(".activity-kind-trigger")).to_contain_text("AI 剪辑")
 
     def test_product_and_kind_popovers_are_mutually_exclusive_and_aria_targets_are_unique(self):
         page = self.open_page()
@@ -179,9 +179,9 @@ class ActivityKindPickerBrowserTests(unittest.TestCase):
         page = self.open_page(width=390, touch=True)
         dialog = self.open_tasks(page)
         panel = self.open_kind_picker(page)
-        panel.locator('[data-picker-value="images"]').tap()
+        panel.locator('[data-picker-value="edit"]').tap()
         expect(panel).to_be_hidden()
-        expect(page.locator("#activity-kind")).to_have_value("images")
+        expect(page.locator("#activity-kind")).to_have_value("edit")
         expect(dialog).to_be_visible()
 
     def test_both_filter_styles_match_and_fit_small_portrait_and_landscape_in_both_themes(self):

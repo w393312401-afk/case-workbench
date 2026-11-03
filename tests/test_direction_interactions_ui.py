@@ -1,4 +1,5 @@
 """Direction filter reuse and refresh correctness, using an isolated case library."""
+import re
 import unittest
 from urllib.parse import urlparse
 
@@ -142,7 +143,9 @@ class DirectionInteractionTests(unittest.TestCase):
         page.locator("#direction-definition").wait_for()
         page.wait_for_function("()=>document.querySelector('#direction-tasks-panel')?.getAttribute('aria-busy')!=='true'")
         page.wait_for_function("()=>!document.querySelector('#direction-progress-summary')?.textContent.startsWith('正在核对')")
-        self.assertEqual(page.locator("#content").inner_html(), full_html)
+        # Enhanced dropdowns number their generated ids per page render.
+        numbered = lambda html: re.sub(r"select-\d+", "select-N", html)
+        self.assertEqual(numbered(page.locator("#content").inner_html()), numbered(full_html))
 
     def test_pending_search_does_not_navigate_after_leaving_or_product_switch(self):
         page = self.open_page()

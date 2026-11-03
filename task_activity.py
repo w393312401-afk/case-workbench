@@ -20,6 +20,7 @@ from production_naming import production_title
 
 ACTIVE = frozenset({"queued", "running", "stopping"})
 TERMINAL = frozenset({"completed", "failed", "cancelled", "interrupted", "needs_attention"})
+# "prepublish" stays only so the history of the removed pre-publish review still reads back.
 KINDS = frozenset({"ai", "voice", "timeline", "edit", "validation", "data", "case", "prepublish"})
 RECOVERY_PHASES = frozenset({"save", "结果待恢复", "登记待恢复", "记录待恢复", "待核实外部结果", "结果已保存，正在登记"})
 IDENTIFIER = re.compile(r"[A-Za-z0-9_:.\-]{1,300}")
@@ -490,6 +491,16 @@ class ActivityStore:
         except (OSError,sqlite3.Error,ActivityError):
             return []
 
+    def restored_history_owners(self):
+        """Owners from an explicitly restored historical activity snapshot."""
+        try:
+            with self.lock, self._connect() as db:
+                row = db.execute("SELECT value FROM meta WHERE key='restored_history_owners'").fetchone()
+            values = json.loads(row[0]) if row else []
+            return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
+        except (OSError, sqlite3.Error, ActivityError, ValueError):
+            return set()
+
     def attention(self, owner_id):
         try:
             with self.lock,self._connect() as db:
@@ -604,11 +615,15 @@ def settle_resolved_activity(app, kind, item, runs=None):
             chosen = takes.get(item.get("selected_take")) or {}
             archived_timelines = {timeline.get("unique_id") for timeline in item.get("timelines", []) if timeline.get("archived")}
             archived_edits = {edit.get("id") for edit in item.get("edits", []) if edit.get("timeline_uid") in archived_timelines}
+            from edit_transfer import current_remote_cut
+            remote = current_remote_cut(item)
             for row in rows:
                 if row["kind"] in {"edit", "validation"} and row["source_id"] in archived_edits:
                     resolved[row["run_id"]] = "对应时间线已归档；原运行结果保留，恢复后重新显示待处理事项。"
                 elif item.get("status") == "approved" and row["kind"] in {"edit", "validation", "timeline", "voice"}:
                     resolved[row["run_id"]] = "当前制作版本已人工完成；原运行结果保留。"
+                elif remote and row["kind"] in {"edit", "validation", "timeline"}:
+                    resolved[row["run_id"]] = f"已在另一台电脑（{remote.get('computer') or '剪辑电脑'}）剪辑并回传；原运行结果保留。"
                 elif row["kind"] == "voice" and chosen:
                     take = takes.get(row["source_id"])
                     if take and str(take.get("created_at") or "") <= str(chosen.get("created_at") or ""):
@@ -736,6 +751,18 @@ def reconcile_activity(app):
     rows = activity.existing()
     if not rows:
         return
+    restored_owners = activity.restored_history_owners()
+
+    def retain_or_delete(row):
+        if row["owner_id"] in restored_owners:
+            # A historical snapshot may outlive the corresponding order/task.
+            # Keep it archived and clearly labelled, without reviving the work.
+            activity.archive_owner(row["owner_id"], True)
+            if not row["title"].startswith("历史恢复 · "):
+                activity.retitle(row["run_id"], "历史恢复 · " + row["title"])
+        else:
+            activity.delete_owner(row["owner_id"])
+
     with app.lock:
         try:
             catalog = app.production.read()
@@ -765,7 +792,7 @@ def reconcile_activity(app):
                 recovered_fields = {}
                 if row["kind"] == "ai":
                     if row["owner_id"] not in app.ai._locations:
-                        activity.delete_owner(row["owner_id"])
+                        retain_or_delete(row)
                         continue
                     task = app.ai._read(row["owner_id"])
                     activity.archive_owner(row["owner_id"], task.get("archived", False))
@@ -782,7 +809,7 @@ def reconcile_activity(app):
                 elif owners is not None:
                     owner = owners.get(row["owner_id"])
                     if owner is None:
-                        activity.delete_owner(row["owner_id"])
+                        retain_or_delete(row)
                         continue
                     activity.archive_owner(row["owner_id"], owner.get("archived", False))
                     # Runs recorded under an earlier name of the order (generic 第 N 条, its title, an older timeline) take its current one.

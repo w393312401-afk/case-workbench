@@ -736,6 +736,16 @@ class WorkbenchHTTPTests(unittest.TestCase):
         status, _, result = self.request("GET", f"/media/{self.identifier}/video?{query}")
         self.assertEqual((status, result), (200, self.video_bytes))
 
+    def test_case_can_relink_and_read_an_srt_transcript(self):
+        subtitle = self.root / "restored.srt"
+        subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nHello.\n", encoding="utf-8")
+        body = self.body()
+        body["current"].setdefault("assets", {})["transcript"] = str(subtitle)
+        status, _, result = self.save(body)
+        self.assertEqual(status, 200, result)
+        status, _, content = self.request("GET", f"/media/{self.identifier}/transcript")
+        self.assertEqual((status, content), (200, subtitle.read_bytes()))
+
     def test_missing_token_bad_origin_bad_host_and_cross_site_are_rejected(self):
         body = self.body()
         before = self.record_bytes()

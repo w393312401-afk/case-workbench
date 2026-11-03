@@ -517,6 +517,8 @@ function sourceType(item) {
   return item.current?.source_case?.case_type || "review";
 }
 function productFilterGroup(item) {
+  // An explicit assignment is authoritative, even when the title names an old model.
+  if (item.product_manual) return item.product || "";
   const product = item.product || "",
     title = item.current?.title || item.title || "";
   const skus = (text) => [

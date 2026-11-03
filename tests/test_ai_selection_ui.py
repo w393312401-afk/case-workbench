@@ -48,12 +48,12 @@ class AISelectionBrowserTests(unittest.TestCase):
         self.server.app.ai.bridge = FakeBridge()
         self.server.daemon_threads = False
 
-    def create_task(self, instruction):
+    def create_task(self, instruction, action="review"):
         body = {
             "request_id": uuid4().hex,
             "case_id": self.identifier,
             "revision": self.detail()["revision"],
-            "action": "review",
+            "action": action,
             "instruction": instruction,
             "skill_selection": "none",
         }
@@ -150,6 +150,7 @@ class AISelectionBrowserTests(unittest.TestCase):
         entry.wait_for()
         self.assertEqual(page.locator("#ai-list-view").input_value(), "active")
         entry.locator("a").click()
+        page.locator(".ai-task-management-fold > summary").click()
         page.locator("#ai-management-state").wait_for()
         page.locator("#ai-management-state").select_option("abandoned")
         # Refreshes must preserve an unsaved management choice.

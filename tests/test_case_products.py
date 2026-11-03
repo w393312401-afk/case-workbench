@@ -106,6 +106,9 @@ class CaseProductTests(unittest.TestCase):
         self.assertEqual(body["case"]["product"], "SHARPAL 198H")
         self.assertTrue(body["case"]["product_manual"])
         self.assertEqual(self.products()[self.rival], "SHARPAL 198H")
+        _, state = self.request("GET", "/api/state")
+        summary = next(case for case in state["cases"] if case["case_id"] == self.rival)
+        self.assertTrue(summary["product_manual"])
         _, listed = self.request("GET", "/api/products")
         self.assertNotIn("电动磨刀器（品牌型号未核实）", listed["products"])
         self.assertEqual(self.app.store.read_case(self.rival)["product"], "SHARPAL 198H")
@@ -113,6 +116,9 @@ class CaseProductTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(body["case"]["product"], "电动磨刀器（品牌型号未核实）")
         self.assertFalse(body["case"]["product_manual"])
+        _, state = self.request("GET", "/api/state")
+        summary = next(case for case in state["cases"] if case["case_id"] == self.rival)
+        self.assertFalse(summary["product_manual"])
 
     def test_records_and_index_keep_original_names(self):
         self.request("POST", f"/api/cases/{self.rival}/product", {"product": "SHARPAL 198H"})

@@ -53,13 +53,10 @@ class ServiceStaleTests(unittest.TestCase):
         from unittest import mock
         app, launched = self.server.app, []
         with mock.patch.object(server.subprocess, "Popen", side_effect=lambda *a, **k: launched.append(a[0])):
-            app._table_state()["TBL-000000000000"] = {"progress": ""}
-            try:
+            with mock.patch.object(app, "edit_running", return_value=True):
                 status, _, body = self.request("POST", "/api/service/restart", {})
-                self.assertEqual(status, 409, body)
-                self.assertEqual(launched, [])
-            finally:
-                app._table_state().clear()
+            self.assertEqual(status, 409, body)
+            self.assertEqual(launched, [])
             status, _, body = self.request("POST", "/api/service/restart", {})
             self.assertEqual(status, 200, body)
             self.assertTrue(launched[0][-2].endswith("launcher.pyw") and launched[0][-1] == "--no-browser")

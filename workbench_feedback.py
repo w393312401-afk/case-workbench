@@ -10,7 +10,7 @@ from datetime import date, timedelta
 from creation_store import CreationError, text
 from direction_store import fingerprint, product_key
 from performance_store import RATE_MIN_VIEWS
-from prepublish_review import parse_card
+from retro_draft import parse_card
 from review_policy import review_context, report_window
 from manual_review_status import ManualReviewStatus
 from task_activity import safe_error
@@ -96,7 +96,7 @@ def review_draft(task):
 class FeedbackWorkbenchMixin:
     def review_status_snapshot(self):
         with self.lock:
-            return ManualReviewStatus(self.review_followups.read()["entries"], self.creation.read()["scripts"],
+            return ManualReviewStatus(self.review_followups.read()["entries"], self.creation.scripts_readonly(),
                                       publications=self._video_publications().read()["jobs"].values())
 
     def annotate_review_status(self, videos, snapshot=None):

@@ -81,7 +81,7 @@ class BackendLoadingTests(unittest.TestCase):
              patch.object(app.creation, "public", side_effect=AssertionError("full creation list")):
             status, _, result = self.request("GET", "/api/products")
         self.assertEqual(status, 200)
-        self.assertEqual(result["products"], ["129N", "202H", "333H", "444H", "555H", "666H"])
+        self.assertEqual(result["products"], ["129N", "202H", "333H", "444H"])
         self.assertIs(app.products(), app.products())
         creation["materials"].append({"product": "777H"})
         app.creation.write(creation, backup=False)

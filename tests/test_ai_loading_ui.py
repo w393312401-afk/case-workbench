@@ -53,13 +53,13 @@ class AILoadingBrowserTests(unittest.TestCase):
 
     def test_saved_reply_is_readable_before_models_and_status_arrive(self):
         page, pending = self.open_writing("/" + TASK)
-        page.locator("#ai-rounds").get_by_text("保存的完整脚本", exact=False).wait_for()
+        page.locator("#ai-rounds p").get_by_text("保存的完整脚本", exact=False).wait_for()
         self.assertTrue(any("/api/ai/options" in route.request.url for route in pending))
         self.assertEqual(page.locator("#ai-continue-model,#ai-continue-effort").count(), 0)
         self.assertIn("正在读取全局默认配置", page.locator("#ai-continue-defaults-summary").inner_text())
         self.finish_discovery(pending)
         page.locator("#ai-continue-defaults-summary").get_by_text("使用全局默认", exact=False).wait_for()
-        self.assertEqual(page.locator("#ai-rounds").get_by_text("保存的完整脚本", exact=False).count(), 1)
+        self.assertEqual(page.locator("#ai-rounds p").get_by_text("保存的完整脚本", exact=False).count(), 1)
 
 
 if __name__ == "__main__":
