@@ -194,8 +194,9 @@ def adopt_project_location(config, state):
         raise VoiceError(409, "达芬奇当前项目已变化，本次没有开始剪辑；请打开任务绑定的项目后重试。")
     name = state.get("project")
     if name and name != config["project"]:
+        prefixed = not config.get("creator") and name.casefold().endswith(f"-{config['project']}".casefold())
         if not (expected and actual == expected) and not (not expected and actual and
-                same_creator_project(name, config["project"], config.get("creator"))):
+                (prefixed or same_creator_project(name, config["project"], config.get("creator")))):
             raise VoiceError(409, "达芬奇当前项目已变化，本次没有开始剪辑；请打开任务绑定的项目后重试。")
         config["project"] = name
     for key in ("folder", "project_id"):
@@ -450,6 +451,14 @@ class EditingWorkbenchMixin:
             raise VoiceError(400, "素材时间线选择无效。")
         return mode, instruction.strip(), [item.strip() for item in materials]
 
+    def _edit_skill_dir(self, job):
+        """An order imported from another computer edits with the rules it was packaged with."""
+        if job and job.get("local_edit_origin") and JOB_ID.fullmatch(str(job.get("id"))):
+            packaged = self.production.root / "edit-skill" / job["id"]
+            if (packaged / "SKILL.md").is_file():
+                return packaged
+        return Path(self.edit_skill_dir)
+
     def _edit_reference(self, identifier, mode):
         """The original's shot images of a 1:1 edit, ready before the lock is taken; None for the other modes."""
         if mode != "replica":
@@ -540,8 +549,9 @@ class EditingWorkbenchMixin:
             if prior:
                 return prior
             raise
-        if not (Path(self.edit_skill_dir) / "SKILL.md").is_file():
-            raise VoiceError(503, f"没有找到剪辑技能 {SKILL_NAME}（{self.edit_skill_dir}），无法发起 AI 剪辑。")
+        skill_dir = self._edit_skill_dir(self.production.job(identifier))
+        if not (skill_dir / "SKILL.md").is_file():
+            raise VoiceError(503, f"没有找到剪辑技能 {SKILL_NAME}（{skill_dir}），无法发起 AI 剪辑。")
         mcp = locate_mcp()
         reference = self._edit_reference(identifier, mode)
         # Everything above can refuse without touching DaVinci, so a refused edit leaves no spare timeline.
@@ -604,7 +614,7 @@ class EditingWorkbenchMixin:
             try:
                 folder = self.production.root / "edits" / edit_id
                 (folder / "stills").mkdir(parents=True)
-                shutil.copytree(self.edit_skill_dir, folder / "skill", ignore=shutil.ignore_patterns("agents"))
+                shutil.copytree(self._edit_skill_dir(job), folder / "skill", ignore=shutil.ignore_patterns("agents"))
                 with open(folder / "skill" / "SKILL.md", "a", encoding="utf-8") as stream:
                     stream.write(REUSE_SKILL_NOTE)
                 if reference:

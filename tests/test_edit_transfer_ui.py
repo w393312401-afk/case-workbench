@@ -20,7 +20,11 @@ def test_browser_imports_package_and_downloads_receipt(stations, tmp_path):
             try:
                 page = browser.new_page()
                 errors = [];page.on('pageerror', lambda error: errors.append(str(error)))
-                page.goto(f'http://127.0.0.1:{server.server_port}/#production/import')
+                # The import page is reachable from the content page's menu, not only by typing its address.
+                page.goto(f'http://127.0.0.1:{server.server_port}/#content')
+                page.locator('.flow-main-menu > summary').click()
+                page.get_by_role('menuitem', name='导入剪辑包（在这台电脑剪辑）').click()
+                expect(page.get_by_role('heading', name='在这台电脑剪辑')).to_be_visible()
                 page.locator('[data-local-package]').set_input_files(str(package))
                 page.locator('[data-import-local]').click()
                 expect(page.locator('[data-production-title]')).to_have_text('Test')

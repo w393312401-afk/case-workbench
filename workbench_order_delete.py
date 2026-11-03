@@ -54,6 +54,9 @@ class OrderDeleteMixin:
         replica = root / "replica" / job["id"]
         if _safe_folder(replica, root / "replica"):
             folders.append(replica)
+        rules = root / "edit-skill" / job["id"]
+        if _safe_folder(rules, root / "edit-skill"):
+            folders.append(rules)
         files = [path for path in (root / "handoffs").glob(f"{job['id']}-*.md") if path.is_file() and not path.is_symlink()]
         for path in (root / "operations").glob("*.json"):
             try:
@@ -68,6 +71,17 @@ class OrderDeleteMixin:
             publication_folders, publication_files = footprint(job["id"])
             folders.extend(publication_folders)
             files.extend(publication_files)
+        notion = getattr(self, "notion_uploads", None)
+        if notion:
+            for parent in (notion.store.root / "files",):
+                folder = parent / job["id"]
+                if _safe_folder(folder, parent):
+                    folders.append(folder)
+            for row in notion.store.read()["uploads"].values():
+                if row["job_id"] == job["id"]:
+                    preview = notion.store.root / "previews" / (row["id"] + ".mp4")
+                    if preview.is_file() and not preview.is_symlink():
+                        files.append(preview)
         return folders, files
 
     def _abandoned_build(self, record):
@@ -78,6 +92,9 @@ class OrderDeleteMixin:
                 not self._production_operations().recovery_file(record).exists())
 
     def _job_blockers(self, job):
+        notion = getattr(self, "notion_uploads", None)
+        if notion and notion.busy(job["id"]):
+            return "这张制作单正在上传到 Notion，请等它结束。"
         with self.lock:
             self._edits()
             if job["id"] in self._voicing():

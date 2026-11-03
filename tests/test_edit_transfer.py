@@ -177,3 +177,97 @@ def test_client_contains_current_source_and_fresh_settings_only(tmp_path):
         "import server; s=server.make_server(server.DEFAULT_CONFIG['skill_root'], server.DEFAULT_CONFIG['runtime_root'],port=0,allow_open=False); s.server_close()"],
         cwd=tmp_path / 'client', env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+def _skill(folder, rules='规则一'):
+    (folder / 'references').mkdir(parents=True, exist_ok=True);(folder / 'agents').mkdir(exist_ok=True)
+    (folder / 'SKILL.md').write_text(f'---\nname: davinci-product-video-editing\n---\n{rules}', encoding='utf-8')
+    (folder / 'references' / 'rules.md').write_text('素材识别', encoding='utf-8')
+    (folder / 'agents' / 'openai.yaml').write_text('x: 1', encoding='utf-8')
+    (folder / 'helper.py').write_text('print(1)', encoding='utf-8')
+    return folder
+
+
+def test_editing_rules_travel_with_the_package_and_refresh_on_redownload(stations, tmp_path):
+    from edit_transfer import skill_version
+    from workbench_editing import EditingWorkbenchMixin
+    host, local, identifier = stations
+    host.edit_skill_dir = _skill(tmp_path / 'host-skill')
+    local.edit_skill_dir = tmp_path / 'missing-local-skill'
+    imported = import_package(local, export_package(host, identifier))['job_id']
+    job = local.production_job(imported)['job']
+    folder = EditingWorkbenchMixin._edit_skill_dir(local, job)
+    assert folder == local.production.root / 'edit-skill' / imported
+    assert (folder / 'references' / 'rules.md').read_text(encoding='utf-8') == '素材识别'
+    assert not (folder / 'agents').exists() and not (folder / 'helper.py').exists()
+    # The host's other orders and un-imported orders keep using the host's own skill.
+    assert EditingWorkbenchMixin._edit_skill_dir(host, host.production_job(identifier)['job']) == host.edit_skill_dir
+    # Changed rules: downloading the same order again swaps the snapshot, not the order.
+    _skill(tmp_path / 'host-skill', rules='规则二')
+    again = import_package(local, export_package(host, identifier))
+    assert again == dict(job_id=imported, reused=True)
+    assert '规则二' in (folder / 'SKILL.md').read_text(encoding='utf-8')
+    assert local.production_job(imported)['job']['edit_skill_version'] == skill_version(
+        {'skill/SKILL.md': (folder / 'SKILL.md').read_bytes(), 'skill/references/rules.md': b'\xe7\xb4\xa0\xe6\x9d\x90\xe8\xaf\x86\xe5\x88\xab'})
+
+
+def test_order_without_packaged_rules_uses_the_local_skill(stations, tmp_path):
+    from workbench_editing import EditingWorkbenchMixin
+    host, local, identifier = stations
+    local.edit_skill_dir = tmp_path / 'local-skill'
+    imported = import_package(local, export_package(host, identifier))['job_id']
+    assert EditingWorkbenchMixin._edit_skill_dir(local, local.production_job(imported)['job']) == local.edit_skill_dir
+
+
+def test_version_mismatch_stops_the_import_and_tells_what_to_do(stations, monkeypatch):
+    import edit_transfer
+    host, local, identifier = stations
+    raw = export_package(host, identifier)
+    monkeypatch.setattr(edit_transfer, 'source_version', lambda: 'othercomputer000')
+    with pytest.raises(VoiceError, match='git pull') as caught:
+        import_package(local, raw)
+    assert caught.value.status == 409
+    assert not local.production.read()['jobs']
+    legacy = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(raw)) as source, zipfile.ZipFile(legacy, 'w') as target:
+        for entry in source.infolist():
+            content = source.read(entry.filename)
+            if entry.filename == 'manifest.json':
+                manifest = json.loads(content);manifest.pop('source_version');content = json.dumps(manifest).encode()
+            target.writestr(entry.filename, content)
+    with pytest.raises(VoiceError, match='没有程序版本'):
+        import_package(local, legacy.getvalue())
+
+
+def test_version_ignores_line_endings_but_not_content(tmp_path, monkeypatch):
+    import edit_transfer
+    monkeypatch.setattr(edit_transfer, '__file__', str(tmp_path / 'edit_transfer.py'))
+    (tmp_path / 'requirements.txt').write_text('pillow', encoding='utf-8')
+    path = tmp_path / 'a.py'
+    path.write_bytes(b'x = 1\nprint(x)\n');unix = edit_transfer.source_version()
+    path.write_bytes(b'x = 1\r\nprint(x)\r\n');assert edit_transfer.source_version() == unix
+    path.write_bytes(b'x = 2\nprint(x)\n');assert edit_transfer.source_version() != unix
+
+
+def test_tampered_or_unsafe_rules_are_rejected(stations, tmp_path):
+    host, local, identifier = stations
+    host.edit_skill_dir = _skill(tmp_path / 'host-skill')
+    raw = export_package(host, identifier)
+    for name, content in (('skill/SKILL.md', 'changed'), ('skill/../escape.md', 'x'), ('skill/run.py', 'x'), ('skill/C:evil.md', 'x')):
+        tampered = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(raw)) as source, zipfile.ZipFile(tampered, 'w') as target:
+            for entry in source.infolist():
+                if entry.filename != name:
+                    target.writestr(entry.filename, source.read(entry.filename))
+            target.writestr(name, content)
+        with pytest.raises(VoiceError):
+            import_package(local, tampered.getvalue())
+    assert not local.production.read()['jobs'] and not (local.production.root / 'edit-skill').exists()
+
+
+def test_receipt_records_the_version_that_made_it(stations):
+    from edit_transfer import source_version
+    host, local, identifier = stations
+    imported = import_package(local, export_package(host, identifier))['job_id']
+    import_receipt(host, identifier, export_receipt(local, imported))
+    assert host.production.job(identifier)['local_edit_results'][0]['source_version'] == source_version()

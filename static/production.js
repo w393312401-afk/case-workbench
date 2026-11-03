@@ -392,7 +392,7 @@ window.CaseProduction = (() => {
     // Most orders are cut here; moving one to another computer lives in 更多操作.
     const menu = $('.production-more-actions > div');if (!menu) return;
     const tools = document.createElement('div');tools.className = 'local-edit-actions';
-    tools.innerHTML = `<button type="button" class="subtle" data-local-download ${job.selected_take ? '' : 'disabled title="先生成并选用配音"'}>换台剪辑：下载剪辑包</button><button type="button" class="subtle" data-local-pick>换台剪辑：回传结果</button><button type="button" class="subtle" data-local-client>下载本机工作台程序</button><input type="file" accept=".json" data-local-result hidden>`;
+    tools.innerHTML = `<button type="button" class="subtle" data-local-download ${job.selected_take ? '' : 'disabled title="先生成并选用配音"'}>换台剪辑：下载剪辑包${job.selected_take ? '' : '（先生成并选用配音）'}</button><button type="button" class="subtle" data-local-pick>换台剪辑：回传结果</button><button type="button" class="subtle" data-local-client title="首次安装用。已装 Git 的电脑用 git pull 更新，不用重新下载。">下载本机工作台程序</button><input type="file" accept=".json" data-local-result hidden>`;
     menu.prepend(tools);
     $('[data-local-download]',tools).onclick = event => download(event.currentTarget,'package','local-edit.zip');
     $('[data-local-client]',tools).onclick = async event => {

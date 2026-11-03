@@ -17,9 +17,11 @@ import time
 import tempfile
 from uuid import uuid4
 
-API_DIRS = (os.environ.get("RESOLVE_SCRIPT_API"), r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting")
+API_DIRS = (os.environ.get("RESOLVE_SCRIPT_API"), r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting",
+            "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting")
 LIB_FILES = (os.environ.get("RESOLVE_SCRIPT_LIB"), r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll",
-             r"D:\DaVinci Resolve\fusionscript.dll")
+             r"D:\DaVinci Resolve\fusionscript.dll",
+             "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so")
 MARKER_PREFIX = "workbench-group:"
 CONNECT_TRIES, CONNECT_WAIT = 3, 2
 
@@ -32,7 +34,7 @@ def connect():
     api = next((path for path in API_DIRS if path and Path(path, "Modules", "DaVinciResolveScript.py").is_file()), None)
     lib = next((path for path in LIB_FILES if path and Path(path).is_file()), None)
     if not api or not lib:
-        raise WorkerError("没有找到达芬奇脚本组件（fusionscript.dll），请确认已安装 DaVinci Resolve Studio。")
+        raise WorkerError("没有找到达芬奇脚本组件（fusionscript），请确认已安装 DaVinci Resolve Studio；安装在非默认位置时设置环境变量 RESOLVE_SCRIPT_API 和 RESOLVE_SCRIPT_LIB。")
     os.environ["RESOLVE_SCRIPT_API"], os.environ["RESOLVE_SCRIPT_LIB"] = api, lib
     sys.path.append(str(Path(api, "Modules")))
     import DaVinciResolveScript
@@ -51,7 +53,8 @@ def current_project(resolve, expected=None):
     if not project:
         raise WorkerError("达芬奇里没有打开的项目。")
     name = project.GetName()
-    if expected and name != expected:
+    # The product setting is shared by channels; a channel's project may carry its name as a prefix (Zack-202H for 202H).
+    if expected and name != expected and not name.casefold().endswith(f"-{expected}".casefold()):
         raise WorkerError(f"达芬奇当前打开的是项目「{name}」，不是「{expected}」。请先在达芬奇里打开「{expected}」再建时间线；工作台不会替你切换项目。")
     return project
 
