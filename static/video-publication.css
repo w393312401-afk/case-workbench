@@ -97,5 +97,12 @@
 
 .video-publication-unmarked {color:var(--muted-soft);font-size:var(--font-micro);}
 .video-publication-history {display:grid;gap:6px;}
+.notion-upload {display:flex;align-items:center;gap:6px 10px;flex-wrap:wrap;margin:6px 0 10px;font-size:var(--font-meta);}
+.notion-upload [data-notion-status]:empty {display:none;}
+.notion-upload-fields {display:grid;gap:10px;}
+.notion-upload-fields>p {margin:0;}
+.notion-upload-fields pre {white-space:pre-wrap;overflow-wrap:anywhere;font-family:inherit;line-height:1.7;}
+.notion-upload-connection {display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:var(--font-meta);color:var(--muted);}
+.notion-upload-dialog [data-notion-progress]:empty {display:none;}
 .video-publication-superseded>summary {cursor:pointer;color:var(--muted);font-size:var(--font-micro);padding:2px 0;}
 .video-publication-superseded>.video-publication-receipt {margin:6px 0 4px;}

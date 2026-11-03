@@ -44,6 +44,7 @@ DEFAULT_CONFIG = load_config(APP_ROOT)
 sys.path.insert(0, str(Path(DEFAULT_CONFIG.get("skill_code_root", DEFAULT_CONFIG["skill_root"])) / "scripts"))
 sys.path.insert(0, str(APP_ROOT / "scripts"))
 sys.path.insert(0, str(APP_ROOT))
+from workbench_notion import NotionUploads, NotionUploadStore
 from case_store import CaseStore, StoreError, add_schema, current_schema, current_sources, encode
 from render_case_library import render_library
 from validate_case_structure import DEFAULT_TEMPLATE, validate_case_structure
@@ -397,7 +398,7 @@ def job_fill_result(job, task):
 
 
 class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, FeedbackWorkbenchMixin, ContentWorkbenchMixin, CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, OrderDeleteMixin, VideoPublishMixin, PublicationMatchMixin, RetroDraftWorkbenchMixin, ReplicaWorkbenchMixin):
-    def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=(), skill_code_root=None, legacy_runtime_roots=()):
+    def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=(), skill_code_root=None, legacy_runtime_roots=(), notion_settings=None):
         self.store = CachedCaseStore(skill_root)
         self.runtime = Path(runtime_root).resolve()
         self.store.product_labels = ProductLabels(self.runtime / "evidence" / "case-products.json")
@@ -450,6 +451,7 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         self.editor = getattr(self.ai.bridge, "claude", None)
         codex = getattr(self.ai.bridge, "codex", None)
         self.edit_codex = CodexEditBridge(executable=getattr(codex, "executable", None))
+        self.notion_uploads = NotionUploads(self, notion_settings, bridge=None)
         self.edit_skill_dir = code_root.parent / "davinci-product-video-editing"
         self.ledger_dir = self.runtime / "davinci-ledger"
         self.recover_edit_results()
@@ -475,9 +477,12 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         ReviewExperienceStore(runtime).read()
         ProductionStore(runtime).read()
         VideoPublicationStore(Path(runtime) / "production").validate()
+        NotionUploadStore(Path(runtime) / "production").read()
 
     def ensure_data_idle(self):
         with self.lock:
+            if getattr(self, "notion_uploads", None) and self.notion_uploads.busy():
+                raise TransferError("Notion 成片仍在上传，请完成后再操作总数据。", 409)
             tasks = self.ai.list_tasks()
             if any(task.get("busy") or task.get("stopping") or task.get("status") in {"queued", "running", "stopping"} for task in tasks):
                 raise TransferError("AI 协作正在运行，请结束后再导入、导出或备份。", 409)
@@ -2070,6 +2075,14 @@ class Handler(BaseHTTPRequestHandler):
                 if publication_download:
                     return self.file(self.app.video_publication_file(*publication_download.groups()), download=True)
                 video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication", path)
+                notion_upload = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/notion", path)
+                if notion_upload:
+                    values = query.get("timeline", [])
+                    if set(query) != {"timeline"} or len(values) != 1:
+                        raise ApiError(400, "请选择要上传的时间线。")
+                    return self.output(200, self.app.notion_uploads.detail(notion_upload[1], values[0]))
+                if path == "/api/notion/connection":
+                    return self.output(200, self.app.notion_uploads.bridge.status())
                 if video_publication:
                     # One registration per timeline: ?timeline= names it (the order's current timeline when absent).
                     timelines = query.get("timeline", [None])
@@ -2495,6 +2508,13 @@ class Handler(BaseHTTPRequestHandler):
                     handler = {"approval": self.app.approve_edit, "baseline": self.app.adopt_edit_baseline}[action]
                     return self.output(200, handler(identifier, edit_id, body))
                 video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication(/verify|/calendar|/undo-auto|/dismiss|/title-zh)?", path)
+                notion_upload = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/notion", path)
+                if notion_upload:
+                    return self.output(202, self.app.notion_uploads.start(notion_upload[1], body))
+                if path == "/api/notion/connect":
+                    if body:
+                        raise ApiError(400, "Notion 连接只接受空对象。")
+                    return self.output(200, self.app.notion_uploads.bridge.connect())
                 if video_publication:
                     handler = {"/verify": self.app.verify_video_publication, "/calendar": self.app.set_video_calendar_status,
                                "/undo-auto": self.app.undo_auto_video_publication,
@@ -2927,6 +2947,8 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
 
     def _activity_blocker(self):
         """Why the service must not stop right now, or None. Never interrupts: running work is only reported."""
+        if getattr(self.app, "notion_uploads", None) and self.app.notion_uploads.busy():
+            return "Notion 成片仍在上传，请完成后再重新启动。"
         tasks = self.app.ai.list_tasks()
         if any(task.get("status") in {"queued", "running", "stopping"}
                or task.get("busy") or task.get("stopping") for task in tasks):
@@ -3006,7 +3028,8 @@ def make_server(skill_root, runtime_root, port=8767, allow_open=True, ai_bridge=
                         if Path(runtime_root).resolve() == Path(DEFAULT_CONFIG["runtime_root"]).resolve() else ())
         server.app = Workbench(skill_root, runtime_root, allow_open, ai_bridge=ai_bridge,
                                performance_sources=performance_sources, skill_code_root=code_root,
-                               legacy_runtime_roots=legacy_roots)
+                               legacy_runtime_roots=legacy_roots,
+                               notion_settings=DEFAULT_CONFIG.get("notion_upload") if code_root else None)
         server.app.data_transfer.maintenance = server.data_operation
         server.app.data_transfer.start(server.server_port)
     except Exception:

@@ -372,6 +372,7 @@ window.VideoPublication = (() => {
     host.innerHTML = `<h2>成片与发布<details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">登记发布后的视频 ID，并保存对应脚本、配音和人工审查版本。导入或同步销售视频表时，能唯一匹配的帖子会自动登记；匹配结果不唯一的帖子会列在这里，点一下登记。自动登记可以撤销。发布后在浏览器打开自己账号的主页，TK 看板也会把新帖推给工作台。成片文件可选绑定，绑定后会复制到工作台，随完整备份保存。</div></details></h2>
       ${timelinePicker(lines,data.timeline_uid)}
       ${lines.some(line => line.unique_id === data.timeline_uid) ? timelineTools(job,data.timeline_uid,data.copy) : ''}
+      ${data.timeline_uid && window.NotionUpload ? window.NotionUpload.markup(data.timeline_uid) : ''}
       ${item ? receipt(job,item,true) : canEdit ? candidateRows(data.candidates) + formMarkup(calendarPlanMarkup()) : `<div class="video-publication-bar">${calendarPlanMarkup()}<span class="context-note">${esc(data.blocked_reason)}</span></div>`}
       ${copyRow(data.copy)}
       <div class="video-publication-folds">
@@ -381,6 +382,7 @@ window.VideoPublication = (() => {
       </div>`;
     bindCopy(host,data.copy);
     bindTimelineTools(host,job,api,onTimelineChanged,data.copy);
+    if (window.NotionUpload && data.timeline_uid) void window.NotionUpload.bind(host,{job,api,uid:data.timeline_uid});
     void fillTitleChinese(host,job,api,data.copy);
     host.querySelectorAll('[data-publication-timeline]').forEach(button => button.addEventListener('click',() => {
       if (button.classList.contains('is-current')) return;
