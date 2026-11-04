@@ -46,7 +46,7 @@ class GuestSnapshotTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="workbench-guest-fixture-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.runtime = self.root / "private-runtime"
         self.root.joinpath("config.json").write_text(json.dumps({"runtime_root": str(self.runtime),
                                                                 "skill_root": str(self.root / "skill")}), encoding="utf-8")

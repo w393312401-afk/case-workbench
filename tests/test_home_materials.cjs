@@ -9,7 +9,7 @@ const escape = value => String(value ?? '').replaceAll('&','&amp;').replaceAll('
 function harness(selected='202H') {
   let chosen=selected;
   const shell={product:()=>chosen,matchesProduct:value=>!chosen||String(value).replace('SHARPAL ','')===chosen,url:(hash)=>hash};
-  const context=vm.createContext({console,Date,Map,Set,URLSearchParams,JSON,CustomEvent:class{constructor(type){this.type=type;}},crypto:{randomUUID:()=> 'request-1'},esc:escape,icon:()=>'',state:{cases:[]},window:{WorkbenchShell:shell,dispatchEvent:()=>true},document:{querySelector:()=>null,querySelectorAll:()=>[]}});
+  const context=vm.createContext({console,Date,Map,Set,URLSearchParams,JSON,requestAnimationFrame:callback=>queueMicrotask(callback),CustomEvent:class{constructor(type){this.type=type;}},crypto:{randomUUID:()=> 'request-1'},esc:escape,icon:()=>'',state:{cases:[]},window:{WorkbenchShell:shell,dispatchEvent:()=>true},document:{querySelector:()=>null,querySelectorAll:()=>[]}});
   return {context,setProduct:value=>chosen=value};
 }
 test('home calendar week handles Sunday and crossing year without using export dates',()=>{

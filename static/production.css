@@ -313,3 +313,7 @@ main:has(.production-steps) .topbar{position:sticky;top:0;z-index:20}
 /* 正在使用的那一版：配音、时间线、剪辑统一绿色边框 */
 .take-card.selected,#timeline-panel .timeline-card.current,.edit-card.approved{border-color:var(--success);box-shadow:none}
 
+
+.local-edit-import-progress{margin:14px 0;color:var(--muted-soft);font-size:var(--font-meta)}
+.local-edit-import-progress progress{display:block;width:100%;height:10px;margin-bottom:8px}
+.local-edit-import-progress p{margin:0;overflow-wrap:anywhere}

@@ -159,6 +159,13 @@ window.CaseProduction = (() => {
   const seconds = value => value === null || value === undefined ? '—' : `${Number(value).toFixed(2)} 秒`;
   const voiceLabel = voice => [voice.note,voice.name].filter(Boolean).join(' · ') || voice.voice_id;
   const audioURL = (job,take,kind,download = false) => `/api/production/audio/${encodeURIComponent(job)}/${encodeURIComponent(take)}/${kind}${download ? '?download=1' : ''}`;
+  const takeAudioPlayer = (job,take) => {
+    const kind = take.mp3 ? 'mp3' : take.wav ? 'wav' : '';
+    return kind ? `<audio controls preload="none" aria-label="配音试听" src="${esc(audioURL(job,take.id,kind))}"></audio>`
+      : '<p class="context-note">这版配音没有可播放的音频文件，请从来源工作台重新下载并导入剪辑包。</p>';
+  };
+  const takeAudioDownloads = (job,take) => ['wav','mp3'].filter(kind => take[kind])
+    .map(kind => `<a href="${esc(audioURL(job,take.id,kind,true))}">下载 ${kind.toUpperCase()}</a>`).join('');
   // Material names contain Chinese characters; the picker also excludes this job's output timelines.
   const hasChinese = name => /\p{Script=Han}/u.test(name);
   const materialOnly = names => names.filter(hasChinese);
@@ -351,7 +358,6 @@ window.CaseProduction = (() => {
       $('#production-retry').onclick = () => route(true);
     }
   }
-  const localComputer = () => ['127.0.0.1','localhost','[::1]'].includes(location.hostname);
   async function downloadLocalFile(path,name) {
     const response = await fetch(path,{credentials:'same-origin',cache:'no-store'});
     if (!response.ok) {const result = await response.json().catch(() => ({}));throw new Error(result.error || '下载失败，请重新登录后再试。');}
@@ -359,19 +365,109 @@ window.CaseProduction = (() => {
     const anchor = document.createElement('a');anchor.href = objectURL;anchor.download = name;anchor.click();
     setTimeout(() => URL.revokeObjectURL(objectURL),1000);
   }
+  async function importedPackage(file,inventory) {
+    // The exporter puts the small manifest first. Other ZIP layouts fall back
+    // to the normal upload; no audio or reference images are read here.
+    try {
+      const header = new DataView(await file.slice(0,30).arrayBuffer());
+      if (header.byteLength !== 30 || header.getUint32(0,true) !== 0x04034b50 || header.getUint16(6,true) & 9) return null;
+      const method = header.getUint16(8,true), size = header.getUint32(18,true), plain = header.getUint32(22,true);
+      const name = header.getUint16(26,true), extra = header.getUint16(28,true), start = 30+name+extra;
+      if (![0,8].includes(method) || size > 2*1024*1024 || plain > 2*1024*1024 || start+size > file.size || name > 256) return null;
+      if (await file.slice(30,30+name).text() !== 'manifest.json') return null;
+      let stream = file.slice(start,start+size).stream();
+      if (method === 8) stream = stream.pipeThrough(new DecompressionStream('deflate-raw'));
+      const reader = stream.getReader(), decoder = new TextDecoder();let text = '', count = 0;
+      while (true) {
+        const {done,value} = await reader.read();if (done) break;
+        count += value.byteLength;
+        if (count > 2*1024*1024) {await reader.cancel();return null;}
+        text += decoder.decode(value,{stream:true});
+      }
+      if (count !== plain) return null;
+      const manifest = JSON.parse(text+decoder.decode()), origin = manifest.origin;
+      if (manifest.kind !== 'workbench-local-edit' || manifest.schema !== 1 || !/^PRD-[a-f0-9]{12}$/.test(origin?.job_id || '') ||
+          !/^[a-f0-9]{64}$/.test(origin?.fingerprint || '') || !/^[a-f0-9]{16}$/.test(manifest.source_version || '') ||
+          manifest.skill_version && !/^[a-f0-9]{16}$/.test(manifest.skill_version)) return null;
+      for (const key of ['lines','selected_take','product','replica']) {
+        if (JSON.stringify(manifest.job?.[key] ?? null) !== JSON.stringify(origin.inputs?.[key] ?? null)) return null;
+      }
+      const known = await inventory;
+      const found = known?.imports?.find(row => row.origin_job_id === origin.job_id && row.fingerprint === origin.fingerprint &&
+        row.skill_version === (manifest.skill_version || ''));
+      return found ? {job_id:found.job_id,reused:true} : null;
+    } catch {return null;}
+  }
+  function uploadLocalPackage(file,token,onProgress,onProcessing) {
+    return new Promise((resolve,reject) => {
+      const request = new XMLHttpRequest();
+      request.open('POST','/api/production/local-edit/import');request.timeout = 30*60*1000;
+      request.setRequestHeader('X-Workbench-Token',token);request.setRequestHeader('Content-Type','application/zip');
+      request.upload.onprogress = event => onProgress(event.loaded,event.lengthComputable ? event.total : file.size);
+      request.upload.onload = onProcessing;
+      request.onload = () => {
+        let result;
+        try {result = JSON.parse(request.responseText);}
+        catch {reject(new Error(`工作台返回异常（${request.status}），请重试。`));return;}
+        if (request.status === 401 && request.getResponseHeader('X-Workbench-Auth') === 'required') {
+          location.replace('/auth/login?next='+encodeURIComponent(location.pathname+location.search+location.hash));
+        }
+        if (request.status < 200 || request.status >= 300) {
+          const error = new Error(result.error || '导入失败');error.status = request.status;reject(error);return;
+        }
+        if (!/^PRD-[a-f0-9]{12}$/.test(result.job_id || '')) {reject(new Error('导入结果不完整，请重试。'));return;}
+        resolve(result);
+      };
+      request.onerror = () => reject(new Error('上传连接中断，请重试；已完成的制作单不会重复创建。'));
+      request.ontimeout = () => reject(new Error('上传等待超时，请检查网络后重试。'));
+      request.onabort = () => reject(new Error('上传已停止。'));
+      request.send(file);
+    });
+  }
   function renderLocalImport() {
-    $('#content').innerHTML = `<div class="page-heading"><div><h1>在这台电脑剪辑</h1><p>领取共享制作单，使用这台电脑的素材和达芬奇。</p></div></div><section class="section-card"><h2>导入剪辑包</h2><p class="context-note">先在共享工作台的制作单里下载剪辑包。这里会建立独立制作单，保留口播、配音和意群时间；再在本机建立时间线、选择本机素材并剪辑。</p>${localComputer() ? '<label class="field"><span>选择剪辑包（ZIP，最多 80 MB）</span><input type="file" accept=".zip" data-local-package></label><button class="primary" data-import-local>导入并打开制作单</button>' : '<p>请先在这台电脑安装并启动工作台，然后打开 <a href="http://127.0.0.1:8767/#production/import">本机剪辑入口</a>。</p>'}<p class="ai-error" data-error role="alert" hidden></p></section>`;
-    const button = $('[data-import-local]');if (!button) return;
+    if ($('[data-local-import]')) return;
+    $('#content').innerHTML = `<div class="page-heading"><div><h1>导入剪辑包</h1><p>导入到当前工作台，使用工作台所在电脑的素材和达芬奇。</p></div></div><section class="section-card" data-local-import><h2>选择剪辑包</h2><p class="context-note" data-import-target>导入目标：${esc(location.host)}。即使用其他电脑的浏览器上传，制作单和配音也会保存在工作台所在电脑，剪辑在该电脑执行。</p><p class="context-note">先在来源工作台的制作单里下载剪辑包。导入后会建立独立制作单，保留口播、配音和意群时间；再在制作设置选择创作者和达芬奇项目，使用该电脑的素材剪辑。</p><label class="field"><span>选择剪辑包（ZIP，最多 80 MB）</span><input type="file" accept=".zip" data-local-package></label><button class="primary" data-import-local>导入并打开制作单</button><p class="ai-error" data-error role="alert" hidden></p></section>`;
+    const panel = $('[data-local-import]'), button = $('[data-import-local]',panel), input = $('[data-local-package]',panel);
+    const progress = document.createElement('div');progress.className = 'local-edit-import-progress';progress.hidden = true;
+    progress.innerHTML = '<progress max="100" value="0" aria-label="剪辑包上传进度"></progress><p role="status" aria-live="polite" data-import-progress></p>';
+    button.after(progress);
+    const meter = $('progress',progress), status = $('[data-import-progress]',progress);
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(),2000);
+    const inventory = api('/api/production/local-edit/lookup',{signal:controller.signal})
+      .then(result => {if (result.token) state.token = result.token;return result;})
+      .catch(() => null).finally(() => clearTimeout(timeout));
+    let prepared = null;
+    input.onchange = () => {const file = input.files[0];prepared = file ? {file,lookup:importedPackage(file,inventory)} : null;progress.hidden = true;setError(panel,'');};
     button.onclick = async () => {
-      const file = $('[data-local-package]').files[0];
-      if (!file || file.size > 80*1024*1024) {setError($('#content'),'请选择不超过 80 MB 的剪辑包。');return;}
-      button.disabled = true;
+      const file = input.files[0];
+      if (!file || !file.size || file.size > 80*1024*1024) {setError(panel,'请选择不超过 80 MB 的剪辑包。');return;}
+      button.disabled = input.disabled = true;button.textContent = '正在导入…';setError(panel,'');
+      progress.hidden = false;meter.removeAttribute('value');status.textContent = '正在检查剪辑包…';
       try {
-        const service = await api('/api/service/status');
-        const response = await fetch('/api/production/local-edit/import',{method:'POST',headers:{'Content-Type':'application/zip','X-Workbench-Token':service.token},body:file});
-        const result = await response.json();if (!response.ok) throw new Error(result.error || '导入失败');
-        location.hash = `#production/${result.job_id}`;
-      } catch(error) {setError($('#content'),fail(error));button.disabled = false;}
+        let result = await (prepared?.file === file ? prepared.lookup : importedPackage(file,inventory));
+        if (!panel.isConnected) return;
+        if (!result?.job_id) {
+          if (!state.token) {const service = await api('/api/service/status');state.token = service.token;}
+          const send = () => {
+            const started = performance.now();meter.value = 0;status.textContent = '正在上传：0%';
+            return uploadLocalPackage(file,state.token,(loaded,total) => {
+              const percent = Math.min(100,Math.floor(loaded/Math.max(total,1)*100)), elapsed = (performance.now()-started)/1000;
+              meter.value = percent;
+              const speed = elapsed > .5 ? ` · ${(loaded/elapsed/1024).toFixed(0)} KB/s` : '';
+              status.textContent = `正在上传：${percent}% · ${(loaded/1024/1024).toFixed(1)} / ${(total/1024/1024).toFixed(1)} MB${speed}`;
+            },() => {meter.removeAttribute('value');status.textContent = '上传完成，工作台正在校验并保存制作单…';});
+          };
+          try {result = await send();}
+          catch (error) {
+            if (error.status !== 403 || !/页面连接已过期/.test(fail(error))) throw error;
+            const service = await api('/api/service/status');state.token = service.token;result = await send();
+          }
+        }
+        meter.value = 100;status.textContent = result.reused ? '已有同一制作单，正在打开…' : '导入完成，正在打开制作单…';
+        if (panel.isConnected) location.hash = `#production/${result.job_id}`;
+        else toast('剪辑包已导入，可在内容列表查看制作单。');
+      } catch(error) {progress.hidden = true;if (panel.isConnected) setError(panel,fail(error));else toast(`剪辑包导入未完成：${fail(error)}`,true);}
+      finally {button.disabled = input.disabled = false;button.textContent = '导入并打开制作单';}
     };
   }
   function mountLocalEditing(job) {
@@ -384,7 +480,7 @@ window.CaseProduction = (() => {
     if (job.local_edit_origin) {
       // On the editing computer this is the order's own exit, so it stays visible.
       const section = document.createElement('section');section.className = 'section-card';
-      section.innerHTML = `<div class="section-title-row"><h2>本机剪辑制作单</h2><button class="secondary" data-local-download>下载本机剪辑结果</button></div><p class="context-note">素材和达芬奇工程在这台电脑。剪完下载结果，回共享工作台原制作单「更多操作 → 回传剪辑结果」上传。</p>`;
+      section.innerHTML = `<div class="section-title-row"><h2>导入的剪辑制作单</h2><button class="secondary" data-local-download>下载剪辑结果</button></div><p class="context-note">素材和达芬奇工程位于当前工作台所在电脑。剪完下载结果，回来源工作台原制作单「更多操作 → 回传剪辑结果」上传。</p>`;
       $('.page-heading',$('#content'))?.after(section);
       $('[data-local-download]',section).onclick = event => download(event.currentTarget,'result','result.json');
       return;
@@ -1637,7 +1733,7 @@ window.CaseProduction = (() => {
     const modelId = choice.model_id || voices.find(voice => voice.voice_id === voiceId)?.model_id || data.default_model;
     const voiceName = id => {const voice = (data.voices || []).find(item => item.voice_id === id);return voice ? voiceLabel(voice) : id;};
     const modelName = id => models.find(item => item.id === id)?.name || id;
-    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#content',job.product))}">${icon('back')}返回内容</a><div class="page-heading"><div><span class="eyebrow">PRODUCTION JOB</span><h1 data-production-title>${esc(productionTitle(job))}</h1><p>${esc(job.product)} · ${esc(job.direction_id || '未指定方向')}${variantSubtitle(productionTitle(job),job.variant_label) ? ` · ${esc(variantSubtitle(productionTitle(job),job.variant_label))}` : ''} · <span class="script-status ${['voiced','timeline','approved'].includes(job.status) ? 'published' : ''}">${esc(job.archived ? '已归档' : statusLabels[job.status] || job.status)}</span>${data.script ? ` · 采用稿 · 第 ${esc(data.script.version || 1)} 版` : ' · 采用稿已不可读'}${job.replica ? ` · 照原片 <a href="${esc(url(`#case/${encodeURIComponent(job.replica.case_id)}`,job.product))}">${esc(job.replica.case_id)}</a>（${job.replica.shots.length} 个镜头）` : ''}</p></div><details class="script-more-actions production-more-actions"><summary>更多操作</summary><div><button class="subtle" id="job-archive">${job.archived ? '恢复制作单' : '归档制作单'}</button><button class="subtle production-delete" id="job-delete">永久删除</button></div></details></div>${recoverySection(job)}${problemsMarkup(job.problems,scriptGaps(job,data) && !fillRunning(job))}<section class="section-card" id="job-script-panel"><div class="section-title-row"><h2>脚本 <small>${esc(job.variant_label || data.variant?.label || '')}${job.variant_label || data.variant?.label ? ' · ' : ''}${job.lines.length} 个意群</small></h2>${fillControls(job,data)}</div><div id="job-adopted-script"></div><div class="script-lines"><h3>意群表 <small>含画面要求${selected ? '与配音时间' : ''}</small></h3>${linesTable(job.lines,selected ? selected.groups : null)}</div><details class="script-original" id="job-script-original" ${choice.script_original_open ? 'open' : ''}><summary>原稿全文 <small>开头画面、屏显、口播与中文、发布文案等，可逐段复制</small></summary><div class="script-variant markdown-body" id="job-script-body"></div></details></section><section class="section-card" id="voice-panel"><h2>配音</h2>${job.voicing ? '<p class="production-busy">正在生成配音，完成后自动刷新…</p>' : ''}<form id="take-form" class="take-form"><div class="form-row"><label class="field"><span>音色</span><select name="voice">${voices.map(voice => `<option value="${esc(voice.voice_id)}" ${voice.voice_id === voiceId ? 'selected' : ''}>${esc(voiceLabel(voice))}${data.defaults?.[job.product] === voice.voice_id ? '（默认）' : ''}</option>`).join('')}<option value="__new" ${voiceId === '__new' ? 'selected' : ''}>新音色 ID…</option></select></label><label class="field"><span>模型</span><select name="model_id">${models.map(model => `<option value="${esc(model.id)}" ${model.id === modelId ? 'selected' : ''}>${esc(model.name)}</option>`).join('')}</select></label></div><div class="form-row" data-new-voice ${voiceId === '__new' ? '' : 'hidden'}><label class="field"><span>新音色 ID</span><input name="new_voice_id" pattern="[A-Za-z0-9]{10,64}" autocomplete="off" value="${esc(choice.new_voice_id || '')}"></label><label class="field"><span>备注（存入音色库）</span><input name="new_note" maxlength="500" value="${esc(choice.new_note || '')}"></label></div><div class="take-settings" data-settings></div><details class="take-text"><summary>送去配音的文字（${data.tts.characters} 字符${data.tts.substitutions ? `，已套用读法 ${data.tts.substitutions} 处` : ''}）</summary><pre>${esc(data.tts.text)}</pre></details><div class="take-actions"><button class="primary" type="submit" ${job.voicing || job.archived ? 'disabled' : ''}>生成配音</button><span>约消耗 ${data.tts.characters} 字符额度</span></div><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="section-card" id="take-panel"><h2>配音版本 <small>${takes.length} 版</small></h2>${takes.length ? takes.map(take => `<article class="take-card ${take.id === job.selected_take ? 'selected' : ''}" data-take-id="${esc(take.id)}" data-activity-source="${esc(take.id)}"><div class="take-head"><div><strong>${esc(voiceName(take.voice_id))}</strong><small>${esc(modelName(take.model_id))} · ${Object.keys(settingLabels).filter(key => key in (take.settings || {})).map(key => `${settingLabels[key]} ${take.settings[key]}`).join(' · ')} · ${esc(seconds(take.duration))} · ${esc(readableDate(take.created_at))}</small></div>${takeSelectionMarkup(data,take)}</div><audio controls preload="none" src="${esc(audioURL(job.id,take.id,'mp3'))}"></audio>${voiceSegments(take,job.lines)}${(take.warnings || []).length ? `<ul class="take-warnings">${take.warnings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}<details><summary>意群时间（${esc(sourceLabels[take.alignment_source] || take.alignment_source)}）</summary><table class="production-table compact"><thead><tr><th>#</th><th>开始</th><th>结束</th><th>对上的字</th></tr></thead><tbody>${voiceTimingRows(take)}</tbody></table></details><div class="take-links" title="${esc(take.id)}">${take.wav ? `<a href="${esc(audioURL(job.id,take.id,'wav',true))}">下载 WAV</a>` : ''}<a href="${esc(audioURL(job.id,take.id,'mp3',true))}">下载 MP3</a></div></article>`).join('') : '<p class="context-note">还没有配音。</p>'}</section>${timelineSection(data,choice,selected)}${editSection(data,choice)}`;
+    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#content',job.product))}">${icon('back')}返回内容</a><div class="page-heading"><div><span class="eyebrow">PRODUCTION JOB</span><h1 data-production-title>${esc(productionTitle(job))}</h1><p>${esc(job.product)} · ${esc(job.direction_id || '未指定方向')}${variantSubtitle(productionTitle(job),job.variant_label) ? ` · ${esc(variantSubtitle(productionTitle(job),job.variant_label))}` : ''} · <span class="script-status ${['voiced','timeline','approved'].includes(job.status) ? 'published' : ''}">${esc(job.archived ? '已归档' : statusLabels[job.status] || job.status)}</span>${data.script ? ` · 采用稿 · 第 ${esc(data.script.version || 1)} 版` : ' · 采用稿已不可读'}${job.replica ? ` · 照原片 <a href="${esc(url(`#case/${encodeURIComponent(job.replica.case_id)}`,job.product))}">${esc(job.replica.case_id)}</a>（${job.replica.shots.length} 个镜头）` : ''}</p></div><details class="script-more-actions production-more-actions"><summary>更多操作</summary><div><button class="subtle" id="job-archive">${job.archived ? '恢复制作单' : '归档制作单'}</button><button class="subtle production-delete" id="job-delete">永久删除</button></div></details></div>${recoverySection(job)}${problemsMarkup(job.problems,scriptGaps(job,data) && !fillRunning(job))}<section class="section-card" id="job-script-panel"><div class="section-title-row"><h2>脚本 <small>${esc(job.variant_label || data.variant?.label || '')}${job.variant_label || data.variant?.label ? ' · ' : ''}${job.lines.length} 个意群</small></h2>${fillControls(job,data)}</div><div id="job-adopted-script"></div><div class="script-lines"><h3>意群表 <small>含画面要求${selected ? '与配音时间' : ''}</small></h3>${linesTable(job.lines,selected ? selected.groups : null)}</div><details class="script-original" id="job-script-original" ${choice.script_original_open ? 'open' : ''}><summary>原稿全文 <small>开头画面、屏显、口播与中文、发布文案等，可逐段复制</small></summary><div class="script-variant markdown-body" id="job-script-body"></div></details></section><section class="section-card" id="voice-panel"><h2>配音</h2>${job.voicing ? '<p class="production-busy">正在生成配音，完成后自动刷新…</p>' : ''}<form id="take-form" class="take-form"><div class="form-row"><label class="field"><span>音色</span><select name="voice">${voices.map(voice => `<option value="${esc(voice.voice_id)}" ${voice.voice_id === voiceId ? 'selected' : ''}>${esc(voiceLabel(voice))}${data.defaults?.[job.product] === voice.voice_id ? '（默认）' : ''}</option>`).join('')}<option value="__new" ${voiceId === '__new' ? 'selected' : ''}>新音色 ID…</option></select></label><label class="field"><span>模型</span><select name="model_id">${models.map(model => `<option value="${esc(model.id)}" ${model.id === modelId ? 'selected' : ''}>${esc(model.name)}</option>`).join('')}</select></label></div><div class="form-row" data-new-voice ${voiceId === '__new' ? '' : 'hidden'}><label class="field"><span>新音色 ID</span><input name="new_voice_id" pattern="[A-Za-z0-9]{10,64}" autocomplete="off" value="${esc(choice.new_voice_id || '')}"></label><label class="field"><span>备注（存入音色库）</span><input name="new_note" maxlength="500" value="${esc(choice.new_note || '')}"></label></div><div class="take-settings" data-settings></div><details class="take-text"><summary>送去配音的文字（${data.tts.characters} 字符${data.tts.substitutions ? `，已套用读法 ${data.tts.substitutions} 处` : ''}）</summary><pre>${esc(data.tts.text)}</pre></details><div class="take-actions"><button class="primary" type="submit" ${job.voicing || job.archived ? 'disabled' : ''}>生成配音</button><span>约消耗 ${data.tts.characters} 字符额度</span></div><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="section-card" id="take-panel"><h2>配音版本 <small>${takes.length} 版</small></h2>${takes.length ? takes.map(take => `<article class="take-card ${take.id === job.selected_take ? 'selected' : ''}" data-take-id="${esc(take.id)}" data-activity-source="${esc(take.id)}"><div class="take-head"><div><strong>${esc(voiceName(take.voice_id))}</strong><small>${esc(modelName(take.model_id))} · ${Object.keys(settingLabels).filter(key => key in (take.settings || {})).map(key => `${settingLabels[key]} ${take.settings[key]}`).join(' · ')} · ${esc(seconds(take.duration))} · ${esc(readableDate(take.created_at))}</small></div>${takeSelectionMarkup(data,take)}</div>${takeAudioPlayer(job.id,take)}${voiceSegments(take,job.lines)}${(take.warnings || []).length ? `<ul class="take-warnings">${take.warnings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}<details><summary>意群时间（${esc(sourceLabels[take.alignment_source] || take.alignment_source)}）</summary><table class="production-table compact"><thead><tr><th>#</th><th>开始</th><th>结束</th><th>对上的字</th></tr></thead><tbody>${voiceTimingRows(take)}</tbody></table></details><div class="take-links" title="${esc(take.id)}">${takeAudioDownloads(job.id,take)}</div></article>`).join('') : '<p class="context-note">还没有配音。</p>'}</section>${timelineSection(data,choice,selected)}${editSection(data,choice)}`;
     window.CaseScripts?.mountAdopted?.($('#job-adopted-script'),data.script,{productionId:job.id,kind:'video'});
     window.WorkbenchLinks?.mount({kind:'video',record:job,script:data.script});
     mountProductionNeeds(data,'video');

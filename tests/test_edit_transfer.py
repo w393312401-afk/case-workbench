@@ -7,6 +7,7 @@ import zipfile
 import pytest
 
 from edit_transfer import export_package, import_package, export_receipt, import_receipt
+from edit_transfer import find_imported_package
 from elevenlabs_client import VoiceError
 from production_store import ProductionStore
 from workbench_production import ProductionWorkbenchMixin
@@ -48,6 +49,34 @@ def test_import_can_read_full_job_and_generate_markers(stations):
     from workbench_production import meaning_markers
     markers = meaning_markers(job, job['takes'][0], '30')
     assert job['id'] in markers[0]['custom']
+
+
+def test_lookup_reuses_checked_inputs_only_when_rules_and_media_are_present(stations, tmp_path):
+    host, local, identifier = stations
+    host.edit_skill_dir = _skill(tmp_path / 'rules')
+    raw = export_package(host, identifier)
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        manifest = json.loads(archive.read('manifest.json'))
+    origin, rules = manifest['origin'], manifest['skill_version']
+    args = (origin['job_id'], origin['fingerprint'], rules)
+    assert find_imported_package(local, *args)['job_id'] is None
+    imported = import_package(local, raw)['job_id']
+    assert find_imported_package(local, *args) == {'job_id': imported, 'reused': True}
+    assert find_imported_package(local, origin['job_id'], '0'*64, rules)['job_id'] is None
+    assert find_imported_package(local, origin['job_id'], origin['fingerprint'], '0'*16)['job_id'] is None
+    assert find_imported_package(local, origin['job_id'], origin['fingerprint'])['job_id'] is None
+    local.production_audio(imported, manifest['job']['selected_take'], 'wav').unlink()
+    assert find_imported_package(local, *args)['job_id'] is None
+    assert len(local.production.read()['jobs']) == 1
+
+
+@pytest.mark.parametrize('identifier,fingerprint,rules', [('bad','0'*64,''), ('PRD-0123456789ab','bad',''),
+                                                        ('PRD-0123456789ab','0'*64,'bad')])
+def test_lookup_rejects_invalid_identifiers_without_creating_records(stations, identifier, fingerprint, rules):
+    _, local, _ = stations
+    with pytest.raises(VoiceError):
+        find_imported_package(local, identifier, fingerprint, rules)
+    assert not local.production.read()['jobs']
 
 
 def test_result_preserves_host_timeline_ownership_and_is_idempotent(stations):
@@ -219,24 +248,54 @@ def test_order_without_packaged_rules_uses_the_local_skill(stations, tmp_path):
     assert EditingWorkbenchMixin._edit_skill_dir(local, local.production_job(imported)['job']) == local.edit_skill_dir
 
 
-def test_version_mismatch_stops_the_import_and_tells_what_to_do(stations, monkeypatch):
-    import edit_transfer
-    host, local, identifier = stations
-    raw = export_package(host, identifier)
-    monkeypatch.setattr(edit_transfer, 'source_version', lambda: 'othercomputer000')
-    with pytest.raises(VoiceError, match='git pull') as caught:
-        import_package(local, raw)
-    assert caught.value.status == 409
-    assert not local.production.read()['jobs']
-    legacy = io.BytesIO()
-    with zipfile.ZipFile(io.BytesIO(raw)) as source, zipfile.ZipFile(legacy, 'w') as target:
+def package_with_manifest(raw, **changes):
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(raw)) as source, zipfile.ZipFile(output, 'w') as target:
         for entry in source.infolist():
             content = source.read(entry.filename)
             if entry.filename == 'manifest.json':
-                manifest = json.loads(content);manifest.pop('source_version');content = json.dumps(manifest).encode()
+                manifest = json.loads(content);manifest.update(changes)
+                content = json.dumps(manifest).encode()
             target.writestr(entry.filename, content)
-    with pytest.raises(VoiceError, match='没有程序版本'):
-        import_package(local, legacy.getvalue())
+    return output.getvalue()
+
+
+def test_supported_package_imports_across_program_updates_and_records_versions(stations, tmp_path, monkeypatch):
+    import edit_transfer
+    host, local, identifier = stations
+    host.edit_skill_dir = _skill(tmp_path / 'rules')
+    hosted = edit_transfer.source_version()
+    raw = export_package(host, identifier)
+    monkeypatch.setattr(edit_transfer, 'source_version', lambda: 'f00dbabe12345678')
+    result = import_package(local, raw)
+    job = local.production_job(result['job_id'])['job']
+    assert job['local_edit_package'] == {'schema': 1, 'source_version': hosted, 'imported_with_version': 'f00dbabe12345678'}
+    assert not job['timelines'] and not job['edits']
+    assert local.production_audio(job['id'], job['selected_take'], 'wav').read_bytes() == b'audio-wav'
+    assert '规则一' in (local.production.root / 'edit-skill' / job['id'] / 'SKILL.md').read_text(encoding='utf-8')
+    monkeypatch.setattr(edit_transfer, 'source_version', lambda: 'f00dbabe87654321')
+    assert import_package(local, raw) == {'job_id': job['id'], 'reused': True}
+    assert len(local.production.read()['jobs']) == 1
+    assert local.production_job(job['id'])['job']['local_edit_package']['imported_with_version'] == 'f00dbabe87654321'
+
+
+@pytest.mark.parametrize('schema', [2, True, '1', None])
+def test_unsupported_package_schema_is_rejected_without_creating_an_order(stations, schema):
+    host, local, identifier = stations
+    raw = package_with_manifest(export_package(host, identifier), schema=schema)
+    with pytest.raises(VoiceError, match='格式版本') as caught:
+        import_package(local, raw)
+    assert caught.value.status == 409
+    assert not local.production.read()['jobs']
+
+
+@pytest.mark.parametrize('version', [None, '', 'invalid', ['0123456789abcdef']])
+def test_missing_or_invalid_program_provenance_is_rejected(stations, version):
+    host, local, identifier = stations
+    raw = package_with_manifest(export_package(host, identifier), source_version=version)
+    with pytest.raises(VoiceError):
+        import_package(local, raw)
+    assert not local.production.read()['jobs']
 
 
 def test_version_ignores_line_endings_but_not_content(tmp_path, monkeypatch):
@@ -249,10 +308,12 @@ def test_version_ignores_line_endings_but_not_content(tmp_path, monkeypatch):
     path.write_bytes(b'x = 2\nprint(x)\n');assert edit_transfer.source_version() != unix
 
 
-def test_tampered_or_unsafe_rules_are_rejected(stations, tmp_path):
+def test_tampered_or_unsafe_rules_are_rejected(stations, tmp_path, monkeypatch):
+    import edit_transfer
     host, local, identifier = stations
     host.edit_skill_dir = _skill(tmp_path / 'host-skill')
     raw = export_package(host, identifier)
+    monkeypatch.setattr(edit_transfer, 'source_version', lambda: 'f00dbabe12345678')
     for name, content in (('skill/SKILL.md', 'changed'), ('skill/../escape.md', 'x'), ('skill/run.py', 'x'), ('skill/C:evil.md', 'x')):
         tampered = io.BytesIO()
         with zipfile.ZipFile(io.BytesIO(raw)) as source, zipfile.ZipFile(tampered, 'w') as target:

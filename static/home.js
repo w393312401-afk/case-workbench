@@ -4,7 +4,7 @@
 // One counted tab list keeps the work waiting on you together; trends live in Video Data.
 window.WorkbenchHome = (() => {
   let sequence = 0, chosenTab = null, undoTimer = null, renderedProduct = null;
-  let repaintLibrary = null;
+  let repaintLibrary = null, lastRender = null;
   // Last data per product: a refresh keeps the old numbers on screen until each new read arrives.
   const cache = new Map(), pointTitles = new Map();
   const url = (hash, product) => window.WorkbenchShell?.url(hash, product) || hash;
@@ -100,6 +100,16 @@ window.WorkbenchHome = (() => {
 
   function render(data, results, product, week) {
     const root = $("#home-page"); if (!root) return;
+    const signature = JSON.stringify([data, results.map((result,index) => [result.status === "pending" && data[index] ? "fulfilled" : result.status, result.reason?.message || ""]), product, week, state.signature, state.libraryReadError]);
+    if (lastRender?.root === root && lastRender.signature === signature && lastRender.tab === chosenTab) return;
+    const focused = document.activeElement;
+    const hadFocus = Boolean(focused && root.contains(focused));
+    const focusedId = hadFocus ? focused.id : null;
+    const focusedTab = hadFocus ? focused.dataset?.homeTab : null;
+    const focusedSearch = hadFocus && focused.matches?.('[data-followup-search]');
+    const selection = focusedSearch ? [focused.selectionStart, focused.selectionEnd] : null;
+    const controlsOpen = root.querySelector('.followup-controls')?.open;
+    lastRender = {root,signature,tab:chosenTab};
     renderedProduct = product;
     const [videosData, tasksData, creation, followups, flow] = data;
     const libraryReady = Boolean(state.signature), libraryFailed = !libraryReady && Boolean(state.libraryReadError);
@@ -148,6 +158,7 @@ window.WorkbenchHome = (() => {
     }});
     const select = (key, focus = false) => {
       chosenTab = key;
+      if (lastRender?.root === root) lastRender.tab = key;
       root.querySelectorAll("[data-home-tab]").forEach(tab => { const on = tab.dataset.homeTab === key; tab.setAttribute("aria-selected", on); tab.tabIndex = on ? 0 : -1; if (on && focus) tab.focus(); });
       root.querySelectorAll(".home-panel").forEach(panel => panel.hidden = panel.getAttribute("aria-labelledby") !== tabs.find(tab => tab.key === key).id);
     };
@@ -192,6 +203,12 @@ window.WorkbenchHome = (() => {
     }));
     bindRetry(root);
     void labelPlans(root, plans, product);
+    if (controlsOpen) {const controls = root.querySelector('.followup-controls');if (controls) controls.open = true;}
+    const nextFocus = focusedSearch ? root.querySelector('[data-followup-search]') : focusedTab ? root.querySelector(`[data-home-tab="${focusedTab}"]`) : focusedId ? document.getElementById(focusedId) : null;
+    if (nextFocus && root.contains(nextFocus)) {
+      nextFocus.focus({preventScroll:true});
+      if (selection) try {nextFocus.setSelectionRange(...selection);} catch {}
+    }
   }
 
   // The change is already saved; undo saves the plan's earlier status back.
@@ -224,12 +241,17 @@ window.WorkbenchHome = (() => {
     const isCurrent = () => seq === sequence && selectedProduct() === product && window.WorkbenchShell?.parse().page === "home";
     const previous = cache.get(product), data = previous ? [...previous] : Array(5).fill(null);
     const results = Array.from({length:5}, () => ({status:"pending"}));
-    const paint = () => { if (isCurrent()) render(data, results, product, week); };
+    let paintQueued = false;
+    const paint = () => {
+      if (!isCurrent() || paintQueued) return;
+      paintQueued = true;
+      requestAnimationFrame(() => {paintQueued = false;if (isCurrent()) render(data, results, product, week);});
+    };
     // The library starts in parallel with these independent lists. Reuse this
     // view when it arrives, without another network read or a route reset.
     repaintLibrary = paint;
     // A first visit shows the frame at once; a refresh keeps the numbers already on screen until new ones arrive.
-    if (!previous || renderedProduct !== product || !$("[data-home-tab]")) paint();
+    if (!previous || renderedProduct !== product || !$("[data-home-tab]")) render(data, results, product, week);
     const read = (index,path) => api(path).then(value => { results[index] = {status:"fulfilled",value}; data[index] = value; }, reason => { results[index] = {status:"rejected",reason}; data[index] = null; })
       .then(() => { if (isCurrent()) { cache.set(product, [...data]); paint(); } });
     await Promise.all([read(0,`/api/performance/videos?${new URLSearchParams({projection:"home",...(product ? {product} : {})})}`),read(1,"/api/ai/tasks"),read(2,`/api/creation?product=${encodeURIComponent(product)}`),read(3,`/api/review-followups?product=${encodeURIComponent(product)}`),

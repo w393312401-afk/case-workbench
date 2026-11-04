@@ -3,14 +3,16 @@ import { test } from 'node:test';
 import http from 'node:http';
 import net from 'node:net';
 import { once } from 'node:events';
+import { spawn } from 'node:child_process';
 import { generateKeyPairSync, sign, scryptSync } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { createAccessVerifier, createJwksResolver, createRemoteProxy, validateConfig } from './remote_proxy.mjs';
 
-const fixturePassword = 'local-test-password-12345';
+const fixturePassword = 'fixture9!';
 const fixtureSalt = '12'.repeat(32);
 const fixtureHash = scryptSync(fixturePassword, Buffer.from(fixtureSalt, 'hex'), 64,
   { N: 32768, r: 8, p: 3, maxmem: 64 * 1024 * 1024 }).toString('hex');
@@ -32,8 +34,11 @@ async function passwordFixture(t, { guest = false } = {}) {
   }
   const seen = [];
   const upstream = http.createServer((req, res) => {
-    seen.push({ url: req.url, cookie: req.headers.cookie });
-    req.resume(); req.on('end', () => res.end('protected-workbench'));
+    const received = { url: req.url, cookie: req.headers.cookie, token: req.headers['x-workbench-token'],
+      contentType: req.headers['content-type'], bytes: 0 };
+    seen.push(received);
+    req.on('data', chunk => { received.bytes += chunk.length; });
+    req.on('end', () => res.end('protected-workbench'));
   });
   const upstreamPort = await listen(upstream);
   const proxy = createRemoteProxy({ hostname: config.hostname, authMode: 'password', guestEnabled: guest },
@@ -44,7 +49,7 @@ async function passwordFixture(t, { guest = false } = {}) {
   const post = { ...plain, origin: `https://${config.hostname}`, 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' };
   const login = (body = { username: account.username, password: fixturePassword }, extra = {}) => request(port,
     { path: '/auth/login', method: 'POST', headers: { ...post, ...extra }, body: JSON.stringify(body) });
-  return { port, seen, account, accountFile, plain, post, login, guestSite };
+  return { port, upstreamPort, seen, account, accountFile, plain, post, login, guestSite };
 }
 
 test('guest browsing reads only the prepared snapshot and never sends private requests upstream', async t => {
@@ -143,17 +148,38 @@ test('password mode serves only login assets without authentication and retains 
   const navigation = await request(port, { path: '/?view=home', headers: { ...plain, accept: 'text/html' } });
   assert.equal(navigation.status, 303);
   assert.equal(navigation.headers.location, '/auth/login?next=%2F%3Fview%3Dhome');
-  for (const path of ['/api/state', '/auth/session', '/style.css']) {
+  for (const path of ['/api/state', '/api/production/local-edit/lookup', '/api/production/jobs/PRD-0123456789ab/preview/PVW-0123456789ab/video', '/auth/session', '/style.css']) {
     const result = await request(port, { path, headers: headers() });
     assert.equal(result.status, 401, 'Cloudflare identity cannot replace the password session');
     assert.equal(result.headers['x-workbench-auth'], 'required');
     assert.equal(JSON.parse(result.body).login_url, '/auth/login');
     assert.ok(!result.body.includes('fixture-admin'));
   }
-  for (const path of ['/api/remote-account', '/api/remote-account/', '/api/service/shutdown', '/api/production/local-edit/import']) {
+  for (const path of ['/api/remote-account', '/api/remote-account/', '/api/service/shutdown']) {
     assert.equal((await request(port, { path, headers: plain })).status, 403);
   }
   assert.equal(seen.length, 0);
+});
+
+test('package uploads require login and the same origin before forwarding ZIP bytes and the page token', async t => {
+  const { port, post, login, seen } = await passwordFixture(t, { guest: true });
+  const path = '/api/production/local-edit/import';
+  const body = Buffer.from([80, 75, 3, 4, 0, 255, 10]);
+  const upload = { ...post, 'content-type': 'application/zip', 'x-workbench-token': 'import-page-token' };
+  assert.equal((await request(port, { path, method: 'POST', headers: upload, body })).status, 401);
+  const signed = await login();
+  const cookie = signed.headers['set-cookie'][0].split(';')[0];
+  for (const extra of [{ origin: 'https://other.example' }, { 'sec-fetch-site': 'cross-site' }]) {
+    assert.equal((await request(port, { path, method: 'POST', headers: { ...upload, cookie, ...extra }, body })).status, 403);
+  }
+  assert.equal(seen.length, 0);
+  assert.equal((await request(port, { path, method: 'POST', headers: { ...upload, cookie }, body })).status, 200);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].url, path);
+  assert.equal(seen[0].token, 'import-page-token');
+  assert.equal(seen[0].contentType, 'application/zip');
+  assert.equal(seen[0].bytes, body.length);
+  assert.equal(seen[0].cookie, undefined);
 });
 
 test('password login, session, protected requests and logout use a private revocable cookie', async t => {
@@ -251,6 +277,61 @@ test('configuration requires explicit team, audience, hostname, and email allowl
     { teamDomain: 'attacker.example.com' }, { audience: '' }, { allowedEmails: [] },
     { allowedEmails: ['*@example.com'] }, { allowedEmails: [''] }, { upstream: 'http://attacker.example.com' },
   ]) assert.throws(() => validateConfig({ ...config, ...change }));
+});
+
+test('custom ports retain loopback-only origins in both authentication modes', () => {
+  for (const base of [config, { hostname: config.hostname, authMode: 'password' }]) {
+    assert.equal(validateConfig(base).listenPort, 8768);
+    assert.equal(validateConfig(base).upstream, 'http://127.0.0.1:8767');
+    const custom = validateConfig({ ...base, upstream: 'http://127.0.0.1:18768', listenPort: 18769 });
+    assert.equal(custom.upstream, 'http://127.0.0.1:18768');
+    assert.equal(custom.listenPort, 18769);
+    for (const upstream of ['https://127.0.0.1:8768', 'http://example.com:8768', 'http://127.0.0.1:8768/api',
+      'http://user:pass@127.0.0.1:8768', 'http://127.0.0.1:8768/?key=x', 'http://127.0.0.1:8768/#secret']) {
+      assert.throws(() => validateConfig({ ...base, upstream }));
+    }
+    for (const listenPort of [0, -1, 65536, 1.5, '8769', true]) {
+      assert.throws(() => validateConfig({ ...base, listenPort }));
+    }
+  }
+});
+
+test('CLI uses configured ports and preserves authentication before reaching the origin', async t => {
+  const fixture = await passwordFixture(t);
+  const probe = http.createServer();
+  const port = await listen(probe);
+  await close(probe);
+  const configFile = join(dirname(fixture.accountFile), 'custom-ports.json');
+  await writeFile(configFile, JSON.stringify({ hostname: config.hostname, authMode: 'password',
+    upstream: `http://127.0.0.1:${fixture.upstreamPort}`, listenPort: port }));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./remote_proxy.mjs', import.meta.url)), '--config', configFile],
+    { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const stopped = once(child, 'exit');
+      child.kill('SIGTERM');
+      await stopped;
+    }
+  });
+  const deadline = Date.now() + 5000;
+  while (!output.includes(`listening on 127.0.0.1:${port}`)) {
+    assert.equal(child.exitCode, null, output);
+    assert.ok(Date.now() < deadline, 'CLI startup timed out: ' + output);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal((await request(port, { headers: fixture.plain })).status, 401);
+  assert.equal(fixture.seen.length, 0);
+  const login = await request(port, { path: '/auth/login', method: 'POST', headers: fixture.post,
+    body: JSON.stringify({ username: fixture.account.username, password: fixturePassword }) });
+  assert.equal(login.status, 200);
+  const cookie = login.headers['set-cookie'][0].split(';')[0];
+  const result = await request(port, { path: '/api/state', headers: { ...fixture.plain, cookie } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body, 'protected-workbench');
+  assert.equal(fixture.seen.length, 1);
 });
 
 test('RS256 verification pins issuer, audience, exact email, validity and signature', async () => {
@@ -442,6 +523,12 @@ test('HTTP forwarding authenticates every route and protects origins and local-o
   assert.equal(forwarded.bytes, 11);
   assert.equal(forwarded.headers.cookie, 'app=value');
   for (const name of ['x-forwarded-host', 'x-forwarded-for', 'forwarded', 'cf-access-jwt-assertion', 'cf-access-authenticated-user-email', 'x-remove-me']) assert.equal(forwarded.headers[name], undefined);
+  const imported = await request(port, { path: '/api/production/local-edit/import', method: 'POST', headers: headers({
+    origin: `https://${config.hostname}`, 'content-type': 'application/zip', 'x-workbench-token': 'import-token',
+  }), body: Buffer.from([80, 75, 0, 255]) });
+  assert.equal(imported.status, 200);
+  assert.equal(JSON.parse(imported.body).bytes, 4);
+  assert.equal(JSON.parse(imported.body).headers['x-workbench-token'], 'import-token');
   assert.equal((await request(port, { path: '/api/ai/claude/login' })).status, 200, 'read-only login state remains available');
   const navigation = headers({ 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' });
   const entered = await request(port, { headers: navigation });

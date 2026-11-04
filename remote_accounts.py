@@ -118,7 +118,11 @@ class RemoteAccounts:
         public_ready = False
         try:
             deployment = json.loads((self.directory / "deployment.json").read_text(encoding="utf-8-sig"))
-            public_ready = isinstance(deployment, dict) and deployment.get("auth_method") == "password_with_guest"
+            method = deployment.get("auth_method") if isinstance(deployment, dict) else None
+            public_ready = mode == "password" and (
+                method == "password_with_guest" and config.get("guestEnabled") is True
+                or method == "password" and config.get("guestEnabled") is not True and account is not None
+            )
         except (OSError, ValueError, TypeError):
             pass
         return {"configured": account is not None, "username": account["username"] if account else "",
@@ -134,8 +138,8 @@ class RemoteAccounts:
         username = username.strip()
         if not 3 <= len(username) <= 64 or any(unicodedata.category(char).startswith("C") for char in username):
             raise RemoteAccountError("账号名称须为 3–64 个字符，且不能包含控制字符。")
-        if not isinstance(password, str) or len(password) < 12:
-            raise RemoteAccountError("密码至少需要 12 个字符。")
+        if not isinstance(password, str) or len(password) < 8:
+            raise RemoteAccountError("密码至少需要 8 个字符。")
         try:
             encoded_password = password.encode("utf-8")
         except UnicodeError:
@@ -187,6 +191,9 @@ class RemoteAccounts:
                     rollback_failed = True
             raise RemoteAccountError("账号设置未能完整保存，请检查本机文件权限后重试。", 500) from None
         metadata = self.metadata()
-        notice = ("公网账号已更新，已登录的设备需要重新登录；访客浏览不受影响。" if metadata["public_ready"] else
-                  "本机账号密码已就绪；Cloudflare 公网入口仍需切换后才能直接使用账号密码登录。修改账号密码后，旧登录会话将失效。")
+        if metadata["public_ready"]:
+            notice = ("公网账号已更新，已登录的设备需要重新登录；访客浏览不受影响。" if metadata["guest_enabled"] else
+                      "公网账号已更新，已登录的设备需要重新登录。")
+        else:
+            notice = "本机账号密码已就绪；Cloudflare 公网入口仍需切换后才能直接使用账号密码登录。修改账号密码后，旧登录会话将失效。"
         return {**metadata, "saved": True, "reload_requested": request is not None, "notice": notice}

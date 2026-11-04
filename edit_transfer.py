@@ -2,7 +2,8 @@
 
 Packages contain selected voice audio, script data and the editing skill's text rules, never
 Resolve projects, credentials, source footage or code. Returned receipts stay separate from host timelines.
-Both computers must run the same application version; the rules travel with each order.
+The package schema defines input compatibility; application versions are provenance.
+The destination runs its own editing code, and the rules travel with each order.
 """
 from __future__ import annotations
 
@@ -109,7 +110,8 @@ def client_package():
             'AI 剪辑还需要本机 AI 客户端登录；程序包不包含账号。\n'
             '达芬奇需要支持脚本连接，并配置 ResolveMCP.exe；其他位置可设置 RESOLVE_MCP。\n'
             '完成后下载本机剪辑结果，回到共享工作台原制作单上传。\n'
-            '更新：本机程序要和共享工作台同一版本，版本不一致时剪辑包会被拒绝并提示。\n'
+            '更新：剪辑包按格式版本检查兼容性，普通界面更新不影响已有有效包导入。\n'
+            '若提示剪辑包格式不受支持，请更新剪辑工作台后重新下载剪辑包。\n'
             '已安装 Git 的电脑建议改用 git clone 获取程序，之后用 git pull 更新，更新后重启服务；\n'
             '没有 Git 时重新下载本程序包，解压覆盖程序文件（保留 .local 和 config.json）。\n'
             '剪辑规则随每个剪辑包送达，不需要单独安装剪辑技能。\n'
@@ -178,6 +180,45 @@ def export_package(app, identifier):
         return output.getvalue()
 
 
+def find_imported_package(app, identifier, fingerprint, rules_version=''):
+    """Read-only lookup: reuse already checked inputs without uploading their media again."""
+    if (not isinstance(identifier, str) or not JOB_ID.fullmatch(identifier)
+            or not isinstance(fingerprint, str) or not re.fullmatch(r'[0-9a-f]{64}', fingerprint)
+            or not isinstance(rules_version, str) or rules_version and not re.fullmatch(r'[0-9a-f]{16}', rules_version)):
+        raise VoiceError(400, '剪辑包识别信息无效。')
+    for row in imported_packages(app):
+        if (row['origin_job_id'], row['fingerprint'], row['skill_version']) == (identifier, fingerprint, rules_version):
+            return {'job_id': row['job_id'], 'reused': True}
+    return {'job_id': None, 'reused': False}
+
+
+def imported_packages(app):
+    """Small private index, preloaded while the user chooses a ZIP."""
+    rows = []
+    with app.lock:
+        for job in app.production.read()['jobs']:
+            origin = job.get('local_edit_origin') or {}
+            if not origin:
+                continue
+            take = next((row for row in job.get('takes', [])
+                         if row.get('id') == (origin.get('inputs') or {}).get('selected_take')), None)
+            if not take:
+                continue
+            required = [app.production.audio / job['id'] / take['id'] / f'voiceover.{kind}'
+                        for kind in ('mp3', 'wav') if take.get(kind)]
+            if not required:
+                continue
+            required.extend(app.production.root / 'replica' / job['id'] / f"shot-{shot['number']:02d}.jpg"
+                            for shot in (job.get('replica') or {}).get('shots', []))
+            rules_version = job.get('edit_skill_version') or ''
+            if rules_version:
+                required.append(app.production.root / 'edit-skill' / job['id'] / 'SKILL.md')
+            if required and all(path.is_file() for path in required):
+                rows.append({'job_id': job['id'], 'origin_job_id': origin['job_id'],
+                             'fingerprint': origin['fingerprint'], 'skill_version': rules_version})
+    return rows
+
+
 def import_package(app, raw):
     if not raw or len(raw) > MAX_PACKAGE:
         raise VoiceError(413, '剪辑包为空或超过 80 MB。')
@@ -191,13 +232,18 @@ def import_package(app, raw):
             if sum(e.file_size for e in entries) > MAX_PACKAGE or archive.getinfo('manifest.json').file_size > MAX_MANIFEST:
                 raise ValueError('剪辑包展开后过大')
             manifest = json.loads(archive.read('manifest.json'))
-            if manifest.get('schema') != 1 or manifest.get('kind') != 'workbench-local-edit':
+            if not isinstance(manifest, dict) or manifest.get('kind') != 'workbench-local-edit':
                 raise ValueError('不是工作台剪辑包')
+            if type(manifest.get('schema')) is not int or manifest['schema'] != 1:
+                raise VoiceError(409, '剪辑包格式版本不受当前工作台支持，请更新工作台后重新下载剪辑包。')
             hosted, here = manifest.get('source_version'), source_version()
-            if hosted != here:
-                raise VoiceError(409, ('这个剪辑包没有程序版本信息，请更新共享工作台后重新下载剪辑包。' if not hosted else
-                    f'本机程序版本（{here}）和共享工作台（{hosted}）不一致，剪辑规则可能对不上。'
-                    '请先在共享工作台的电脑提交并推送最新代码，再在本机执行 git pull、重启工作台，然后重新导入。'))
+            if not hosted:
+                raise VoiceError(409, '这个剪辑包没有程序版本信息，请更新来源工作台后重新下载剪辑包。')
+            if not isinstance(hosted, str) or not re.fullmatch(r'[0-9a-f]{16}', hosted):
+                raise ValueError('来源程序版本无效')
+            # Inputs, not executable code, cross this boundary. A UI or unrelated
+            # feature update must not invalidate a supported, fully checked ZIP.
+            package_version = {'schema': manifest['schema'], 'source_version': hosted, 'imported_with_version': here}
             job, origin = manifest['job'], manifest['origin']
             if not JOB_ID.fullmatch(origin['job_id']) or digest(origin['inputs']) != origin['fingerprint']:
                 raise ValueError('来源信息无效')
@@ -230,10 +276,14 @@ def import_package(app, raw):
         data = app.production.read()
         prior = next((row for row in data['jobs'] if row.get('local_edit_origin') == origin), None)
         if prior:
+            changed = prior.get('local_edit_package') != package_version
+            prior['local_edit_package'] = package_version
             # Downloading the package again is how an order picks up newer editing rules.
             if skill and prior.get('edit_skill_version') != manifest['skill_version']:
                 _store_skill(app, prior['id'], skill)
                 prior['edit_skill_version'] = manifest['skill_version']
+                changed = True
+            if changed:
                 app.production.write(data)
             return {'job_id': prior['id'], 'reused': True}
         # A new local order cannot accidentally reuse an origin machine's Resolve UID.
@@ -245,7 +295,7 @@ def import_package(app, raw):
         local.setdefault('problems', [])
         local.setdefault('source', {})
         local.update(id=identifier, status='voiced', archived=False, timelines=[], edits=[], history=[],
-                     updated_at=now(), local_edit_origin=origin)
+                     updated_at=now(), local_edit_origin=origin, local_edit_package=package_version)
         take = local['takes'][0]
         folder = app.production.audio / identifier / take['id']
         folder.mkdir(parents=True, exist_ok=False)

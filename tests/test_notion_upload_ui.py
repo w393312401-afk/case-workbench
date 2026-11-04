@@ -37,7 +37,7 @@ class NotionUploadBrowserTests(unittest.TestCase):
           window.api = async (path,options) => {
             if (path === '/api/notion/connection') return {status:window.connectorState || 'connected',authorization_url:window.connectorState === 'waiting' ? 'https://mcp.notion.com/authorize-fixture' : ''};
             if (path === '/api/notion/connect') {window.connectorState = 'waiting';return {status:'waiting'};}
-            if (path.startsWith('/api/content/calendar')) return {};
+            if (path.startsWith('/api/content/calendar')) return {calendar_date:'2026-11-03'};
             if (path.startsWith('/api/performance/videos')) return {videos:[]};
             if (path.includes('/notion')) {
               if (options) {

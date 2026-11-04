@@ -75,6 +75,24 @@ class ModuleLoadingTests(unittest.TestCase):
         self.assertEqual(page.locator("#home-page .data-warning").count(), 0)
         self.assertEqual(chart_calls, [])
 
+    def test_state_prefetch_starts_before_program_and_is_consumed_once(self):
+        page, program, states = self.page(), [], []
+        page.add_init_script("""window.prefetchFinished=false;const originalFetch=window.fetch;
+          window.fetch=(...args)=>originalFetch(...args).then(response=>{
+            if(args[0]==='/api/state')window.prefetchFinished=true;return response;
+          });""")
+        page.on("request", lambda request: states.append(request.url) if request.url.endswith("/api/state") else None)
+        page.route("**/workbench-program-0.js?*", lambda route: program.append(route))
+        page.goto(f"{self.base}/#/202H/home", wait_until="commit")
+        page.wait_for_function("() => window.prefetchFinished")
+        self.assertEqual(len(states), 1)
+        self.assertEqual(page.locator(".home-tabs").count(), 0)
+        self.assertEqual(len(program), 1)
+        program.pop().continue_()
+        page.locator(".home-tabs").wait_for()
+        page.wait_for_function("() => [...document.querySelectorAll('.home-tab-count')].every(node=>node.textContent!=='—')")
+        self.assertEqual(len(states), 1)
+
     def test_video_table_opens_before_charts_and_direction_catalog(self):
         page, held = self.page(), []
         self.hold_read(page, ANALYTICS, held)
@@ -228,6 +246,32 @@ class ModuleLoadingTests(unittest.TestCase):
         page.locator("#home-page .data-warning").wait_for(state="detached")
         self.assertEqual(len(calls), 2)
         self.assertEqual(page.locator('[data-home-tab="cases"]').get_attribute("aria-selected"), "true")
+
+    def test_home_partial_reads_preserve_keyboard_focus_and_selected_tab(self):
+        page, held = self.page(), []
+        self.hold_read(page, "**/api/creation?product=202H", held, "creation")
+        page.goto(f"{self.base}/#/202H/home")
+        page.wait_for_function("() => window.heldReads?.creation")
+        page.locator('[data-home-tab="cases"]').click()
+        page.locator('[data-home-tab="cases"]').focus()
+        held.pop().continue_()
+        page.wait_for_function("() => document.querySelector('[data-home-tab=plans] .home-tab-count').textContent !== '—'")
+        self.assertEqual(page.locator('[data-home-tab="cases"]').get_attribute("aria-selected"), "true")
+        self.assertTrue(page.locator('[data-home-tab="cases"]').evaluate("node=>node===document.activeElement"))
+
+    def test_unchanged_home_refresh_retains_the_existing_controls(self):
+        page = self.page()
+        page.goto(f"{self.base}/#/202H/home")
+        page.wait_for_function("() => [...document.querySelectorAll('.home-tab-count')].every(node=>node.textContent!=='—')")
+        page.locator('[data-home-tab="due"]').click()
+        page.locator('.followup-controls summary').click()
+        page.locator('[data-followup-search]').fill("keep my search")
+        page.evaluate("window.keptHomeControl=document.querySelector('[data-followup-search]')")
+        page.evaluate("() => WorkbenchHome.route()")
+        page.evaluate("() => new Promise(resolve=>requestAnimationFrame(resolve))")
+        self.assertTrue(page.evaluate("keptHomeControl.isConnected"))
+        self.assertEqual(page.locator('[data-followup-search]').input_value(), "keep my search")
+        self.assertTrue(page.locator('.followup-controls').evaluate("node=>node.open"))
 
     def test_unknown_review_labels_are_corrected_after_speculative_error(self):
         page = self.page()

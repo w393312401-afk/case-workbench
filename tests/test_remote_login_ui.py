@@ -242,11 +242,8 @@ class RemoteSessionServerIntegrationTests(unittest.TestCase):
                 route.fulfill(status=200, content_type="application/json", body='{"authenticated":true,"username":"fixture-reader"}')
                 return
             status, headers, content = self.request("GET", parsed.path + ("?" + parsed.query if parsed.query else ""))
-            # Only the account feature executes; its HTML, stylesheet, script and
-            # CSP still come from the actual server/static-route allowlist.
-            if parsed.path.endswith(".js") and parsed.path != "/remote-session.js":
-                content = b""
-                headers.pop("Content-Length", None)
+            # The real shell bundles the account feature with other scripts.
+            # Keep those bytes intact so this checks the actual CSP and styles.
             if isinstance(content, dict):
                 content = json.dumps(content)
             route.fulfill(status=status, headers=headers, body=content)

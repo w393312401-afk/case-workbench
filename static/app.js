@@ -296,7 +296,9 @@ async function requestApi(path, options = {}) {
     options = { ...options, body: JSON.stringify(options.body) };
     headers["Content-Type"] = "application/json";
   }
-  const response = await fetch(path, { ...options, headers });
+  const bootstrap = path === "/api/state" && !Object.keys(options).length ? window.WorkbenchBootstrap?.state : null;
+  if (bootstrap) delete window.WorkbenchBootstrap.state;
+  const response = await (bootstrap || fetch(path, { ...options, headers }));
   const result = await response.json();
   if (!response.ok) {
     const error = new Error(result.error || "操作失败");

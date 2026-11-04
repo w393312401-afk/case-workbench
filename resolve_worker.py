@@ -15,6 +15,7 @@ import shutil
 import sys
 import time
 import tempfile
+import xml.etree.ElementTree as ET
 from uuid import uuid4
 
 API_DIRS = (os.environ.get("RESOLVE_SCRIPT_API"), r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting",
@@ -1259,9 +1260,114 @@ def reveal(resolve, request):
     return {"name": timeline.GetName(), "timecode": reached}
 
 
+def render_preview(resolve, request):
+    """Render only the requested timeline; leave the project and other queued jobs intact."""
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project or not project_matches(project, request):
+        raise WorkerError("请先在达芬奇打开这张制作单对应的项目，再生成预览。")
+    if project.IsRenderingInProgress():
+        raise WorkerError("达芬奇已有渲染任务，请完成后再生成预览。")
+    timeline = find_timeline(project, request)
+    output, progress = Path(request['output']), Path(request['progress_file'])
+    if not output.is_absolute() or output.suffix.lower() != '.mp4' or output.exists():
+        raise WorkerError("预览输出位置无效或已有文件，请重新生成。")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    previous = project.GetCurrentTimeline()
+    timecode_before = optional(previous, 'GetCurrentTimecode') if previous else None
+    page, mode = resolve.GetCurrentPage(), project.GetCurrentRenderMode()
+    codec = project.GetCurrentRenderFormatAndCodec() or {}
+    backup = '__WB_PREVIEW_' + uuid4().hex
+    if not project.SaveAsNewRenderPreset(backup):
+        raise WorkerError("无法保存原渲染设置，尚未生成预览。")
+    render_id, warnings, original_target = None, [], None
+    try:
+        # Resolve presets contain the output directory but LoadRenderPreset
+        # deliberately keeps the current directory. Preserve that field explicitly.
+        with tempfile.TemporaryDirectory(prefix='workbench-render-settings-') as directory:
+            if not resolve.ExportRenderPreset(backup, directory):
+                raise WorkerError("无法备份原导出目录，尚未生成预览。")
+            try:
+                tree = ET.parse(Path(directory) / (backup + '.xml'))
+                targets = [node for node in tree.iter() if node.tag.rsplit('}', 1)[-1] == 'RecordTargetDir']
+                if len(targets) != 1:
+                    raise ValueError('unknown preset structure')
+                original_target = targets[0].text or ''
+            except (OSError, ET.ParseError, ValueError) as error:
+                raise WorkerError("无法读取原导出目录，尚未生成预览。") from error
+        if not project.SetCurrentTimeline(timeline):
+            raise WorkerError("无法切换到所选时间线。")
+        width, height = int(timeline.GetSetting('timelineResolutionWidth')), int(timeline.GetSetting('timelineResolutionHeight'))
+        scale = min(1., 1280 / max(width, height))
+        width, height = max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)
+        fps = float(str(timeline.GetSetting('timelineFrameRate')).split()[0])
+        start, end = timeline.GetStartFrame(), timeline.GetEndFrame()
+        if end <= start:
+            raise WorkerError("所选时间线没有可导出的内容。")
+        resolve.OpenPage('deliver')
+        if not project.LoadRenderPreset('H.264 Master') or not project.SetCurrentRenderFormatAndCodec('mp4', 'H264'):
+            raise WorkerError("当前达芬奇没有可用的 H.264 MP4 导出格式。")
+        if not project.SetCurrentRenderMode(1):
+            raise WorkerError("无法设置整条时间线导出。")
+        settings = dict(SelectAllFrames=True, MarkIn=start, MarkOut=end-1, TargetDir=str(output.parent),
+            CustomName=output.stem, UseUniqueFilenames=False,
+            ExportVideo=True, ExportAudio=True, FormatWidth=width, FormatHeight=height, FrameRate=fps,
+            VideoQuality=4000, AudioCodec='aac', AudioSampleRate=48000, NetworkOptimization=True,
+            ExportSubtitle=bool(timeline.GetTrackCount('subtitle')), SubtitleFormat='BurnIn', DataBurnIn='None')
+        if not project.SetRenderSettings(settings):
+            raise WorkerError("达芬奇未接受预览导出设置。")
+        render_id = project.AddRenderJob()
+        if not render_id:
+            raise WorkerError("达芬奇没有创建这次预览导出任务。")
+        durable_json(progress, {'status':'running', 'percent':0, 'message':'达芬奇正在导出预览…'})
+        if not project.StartRendering([render_id], False):
+            raise WorkerError("达芬奇没有启动这次预览导出。")
+        deadline = time.monotonic() + 30*60
+        while True:
+            state = project.GetRenderJobStatus(render_id) or {}
+            label = str(state.get('JobStatus') or '')
+            if label == 'Complete':
+                break
+            if label in {'Failed', 'Cancelled', 'Background Render Cancelled', 'Remote Render Cancelled'}:
+                raise WorkerError(state.get('Error') or '预览导出失败或已取消。')
+            if time.monotonic() >= deadline:
+                raise WorkerError("预览导出超过 30 分钟，请核对达芬奇。")
+            percent = max(0, min(99, int(state.get('CompletionPercentage') or 0)))
+            durable_json(progress, {'status':'running', 'percent':percent, 'message':f'达芬奇正在导出预览：{percent}%'})
+            time.sleep(.5)
+        if not output.is_file() or output.stat().st_size == 0:
+            raise WorkerError("达芬奇报告导出完成，但没有生成可读取的 MP4。")
+    finally:
+        if render_id:
+            state = project.GetRenderJobStatus(render_id) or {}
+            if state.get('JobStatus') == 'Rendering':
+                project.StopRendering()
+            if not project.DeleteRenderJob(render_id):
+                warnings.append('本次预览任务仍留在达芬奇渲染队列中。')
+        # Restore the user's timeline before restoring its render preset/range.
+        current = project.GetCurrentTimeline()
+        if previous and current and current.GetUniqueId() == timeline.GetUniqueId():
+            project.SetCurrentTimeline(previous)
+            if timecode_before:
+                previous.SetCurrentTimecode(timecode_before)
+        restored = project.LoadRenderPreset(backup)
+        project.SetCurrentRenderMode(mode)
+        if codec.get('format') and codec.get('format') != 'unknown' and codec.get('codec'):
+            restored = project.SetCurrentRenderFormatAndCodec(codec['format'], codec['codec']) and restored
+        if original_target is not None:
+            restored = project.SetRenderSettings({'TargetDir':original_target}) and restored
+        if restored:
+            project.DeleteRenderPreset(backup)
+        else:
+            warnings.append(f'原渲染设置未恢复，请在达芬奇加载预设「{backup}」。')
+        if resolve.GetCurrentPage() == 'deliver' and page:
+            resolve.OpenPage(page)
+    durable_json(progress, {'status':'completed', 'percent':100, 'message':'导出完成，正在检查视频。'})
+    return {'file':str(output), 'width':width, 'height':height, 'fps':fps, 'frames':end-start, 'warnings':warnings}
+
+
 COMMANDS = {"ping": lambda resolve, request: {}, "status": status, "build": build, "open": open_timeline, "inspect": inspect, "restore": restore,
             "candidates": candidates, "frames": frames, "reveal": reveal, "mark_usage": mark_usage,
-            "read_subtitles": read_subtitles, "replace_subtitles": replace_subtitles, "add_hook": add_hook}
+            "read_subtitles": read_subtitles, "replace_subtitles": replace_subtitles, "add_hook": add_hook, "render_preview": render_preview}
 
 
 def main():

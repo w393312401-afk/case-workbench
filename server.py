@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(DEFAULT_CONFIG.get("skill_code_root", DEFAULT_CONFIG
 sys.path.insert(0, str(APP_ROOT / "scripts"))
 sys.path.insert(0, str(APP_ROOT))
 from workbench_notion import NotionUploads, NotionUploadStore
+from workbench_previews import PreviewExports
 from case_store import CaseStore, StoreError, add_schema, current_schema, current_sources, encode
 from render_case_library import render_library
 from validate_case_structure import DEFAULT_TEMPLATE, validate_case_structure
@@ -93,6 +94,7 @@ from case_auto_breakdown import AutoBreakdown
 from case_breakdown_runner import CaseBreakdownRunner, transcribe_case
 from case_insights import tag_stats
 from remote_accounts import RemoteAccounts, RemoteAccountError
+from program_assets import ProgramAssets
 
 EXTENSIONS = {
     "video": {".mp4", ".webm", ".mov", ".m4v"},
@@ -130,7 +132,16 @@ HOME_VIDEO_FIELDS = (
 def static_signature():
     """Change marker for every page asset, so the versioned index follows any js/css/svg edit."""
     folder = APP_ROOT / "static"
-    return tuple((path.name, file_key(path)) for path in sorted(folder.iterdir()) if path.suffix in {".js", ".css", ".svg"})
+    values = []
+    for path in sorted(folder.iterdir()):
+        if path.suffix not in {".js", ".css", ".svg", ".html"}:
+            continue
+        try:
+            stat = path.stat()
+            values.append((path.name, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        except OSError:
+            values.append((path.name, None))
+    return tuple(values)
 
 
 def versioned_index(raw):
@@ -452,6 +463,7 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         codex = getattr(self.ai.bridge, "codex", None)
         self.edit_codex = CodexEditBridge(executable=getattr(codex, "executable", None))
         self.notion_uploads = NotionUploads(self, notion_settings, bridge=None)
+        self.preview_exports = PreviewExports(self)
         self.edit_skill_dir = code_root.parent / "davinci-product-video-editing"
         self.ledger_dir = self.runtime / "davinci-ledger"
         self.recover_edit_results()
@@ -481,6 +493,8 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
 
     def ensure_data_idle(self):
         with self.lock:
+            if getattr(self, "preview_exports", None) and self.preview_exports.busy():
+                raise TransferError("视频预览正在导出，请完成后再操作总数据。", 409)
             if getattr(self, "notion_uploads", None) and self.notion_uploads.busy():
                 raise TransferError("Notion 成片仍在上传，请完成后再操作总数据。", 409)
             tasks = self.ai.list_tasks()
@@ -1909,11 +1923,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         super().log_request(code, size)
 
-    def headers_common(self, cache_control="no-store"):
+    def headers_common(self, cache_control="no-store", script_hashes=()):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", cache_control)
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        scripts = "script-src 'self'" + (" " + " ".join(script_hashes) if script_hashes else "")
+        self.send_header("Content-Security-Policy", f"default-src 'self'; {scripts}; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 
     def output(self, status, content, content_type="application/json; charset=utf-8"):
         if not isinstance(content, bytes):
@@ -1986,6 +2001,16 @@ class Handler(BaseHTTPRequestHandler):
             if self.command in {"GET", "HEAD"}:
                 if path == "/api/production/local-edit/client":
                     return self.output(200, edit_transfer.client_package(), "application/zip")
+                if path == "/api/production/local-edit/lookup":
+                    lookup = parse_qs(parsed.query, keep_blank_values=True)
+                    if not lookup:
+                        return self.output(200, {"imports": edit_transfer.imported_packages(self.app), "token": self.app.token})
+                    if (lookup.keys() - {"job_id", "fingerprint", "skill_version"}
+                            or any(len(values) != 1 for values in lookup.values())):
+                        raise ApiError(400, "剪辑包识别参数无效。")
+                    return self.output(200, edit_transfer.find_imported_package(self.app,
+                        lookup.get("job_id", [""])[0], lookup.get("fingerprint", [""])[0],
+                        lookup.get("skill_version", [""])[0]))
                 transfer_download = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/local-edit/(package|result)", path)
                 if transfer_download:
                     identifier, kind = transfer_download.groups()
@@ -2071,6 +2096,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.material_catalog(query.get("product", [None])[0]))
                 if path == "/api/production":
                     return self.output(200, self.app.production_catalog(query.get("product", [None])[0]))
+                preview_file = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/preview/(PVW-[0-9a-f]{12})/video", path)
+                if preview_file:
+                    return self.file(self.app.preview_exports.video(*preview_file.groups()), download="download" in query)
+                preview = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/preview", path)
+                if preview:
+                    values = query.get("timeline", [])
+                    if set(query) != {"timeline"} or len(values) != 1:
+                        raise ApiError(400, "请选择要预览的时间线。")
+                    return self.output(200, self.app.preview_exports.detail(preview[1], values[0]))
                 publication_download = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication/(VPU-[0-9a-f]{12})/download", path)
                 if publication_download:
                     return self.file(self.app.video_publication_file(*publication_download.groups()), download=True)
@@ -2311,11 +2345,23 @@ class Handler(BaseHTTPRequestHandler):
                         return self.file(self.app.thumbnail_path(parts[1], events[0]))
                     file = self.app.asset_path(parts[1], parts[2], query.get("event", [None])[0])
                     return self.file(file, download="download" in query)
-                files = {"/": "index.html", "/app.js": "app.js", "/navigation.js": "navigation.js", "/library.js": "library.js", "/bulk.js": "bulk.js", "/detail.js": "detail.js", "/transcript-sync.js": "transcript-sync.js", "/case-replica.js": "case-replica.js", "/case-replica.css": "case-replica.css", "/delete.js": "delete.js", "/directions.js": "directions.js", "/editor.js": "editor.js", "/native.js": "native.js", "/ai.js": "ai.js", "/performance.js": "performance.js", "/perf-dashboard.js": "perf-dashboard.js", "/perf-date-picker.js": "perf-date-picker.js", "/perf-creators.js": "perf-creators.js", "/reviews.js": "reviews.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
+                if path in {"/", "/index.html"} or re.fullmatch(r"/workbench-(?:program-\d+\.js|styles-\d+\.css)", path):
+                    with self.server.static_lock:
+                        snapshot = self.server.program_assets.load(APP_ROOT / "static", (file_key(APP_ROOT / "static/index.html"), static_signature()))
+                        document = path in {"/", "/index.html"}
+                        versions = query.get("v", [])
+                        if not document and (len(versions) > 1 or versions and not re.fullmatch(r"[0-9a-f]{12}", versions[0])):
+                            raise ApiError(400, "程序资源版本无效。")
+                        resource = snapshot.index if document else self.server.program_assets.find(path[1:], versions[0] if versions else None)
+                    if resource is None:
+                        raise ApiError(404, "程序资源已更新，请刷新页面。")
+                    return self.file(Path(resource.name), cache=True, immutable=not document and bool(versions),
+                                     generated=resource, script_hashes=snapshot.script_hashes if document else ())
+                files = {"/app.js": "app.js", "/navigation.js": "navigation.js", "/library.js": "library.js", "/bulk.js": "bulk.js", "/detail.js": "detail.js", "/transcript-sync.js": "transcript-sync.js", "/case-replica.js": "case-replica.js", "/case-replica.css": "case-replica.css", "/delete.js": "delete.js", "/directions.js": "directions.js", "/editor.js": "editor.js", "/native.js": "native.js", "/ai.js": "ai.js", "/performance.js": "performance.js", "/perf-dashboard.js": "perf-dashboard.js", "/perf-date-picker.js": "perf-date-picker.js", "/perf-creators.js": "perf-creators.js", "/reviews.js": "reviews.js", "/style.css": "style.css", "/favicon.svg": "favicon.svg"}
                 files.update({"/" + name: name for name in ("shell.js", "shell.css", "settings.js", "settings.css", "global-search.js", "global-search.css", "navigation.css", "library.css", "detail.css", "inline-editor.js", "inline-editor.css", "direction-picker.js", "direction-picker.css", "home.js", "home.css", "material-basket.js", "material-basket.css", "scripts.js", "scripts.css", "production.js", "production.css", "writing.css", "reviews-layout.css", "demo.js")})
-                files.update({"/" + name: name for name in ("review-followups.js", "review-opportunities.js", "review-opportunities.css", "video-publication.js", "video-publication.css", "copy-id.js", "drawer-resize.js", "campaigns.js", "campaigns.css", "auto-breakdown.js", "auto-breakdown.css", "content-flow.js", "content-flow.css", "workflow-links.js", "workflow-links.css", "production-needs.js", "production-needs.css", "feedback-chain.js", "feedback-chain.css", "delivery-provenance.js", "delivery-provenance.css")})
+                files.update({"/" + name: name for name in ("review-followups.js", "review-opportunities.js", "review-opportunities.css", "video-publication.js", "video-publication.css", "video-preview.js", "copy-id.js", "drawer-resize.js", "campaigns.js", "campaigns.css", "auto-breakdown.js", "auto-breakdown.css", "content-flow.js", "content-flow.css", "workflow-links.js", "workflow-links.css", "production-needs.js", "production-needs.css", "feedback-chain.js", "feedback-chain.css", "delivery-provenance.js", "delivery-provenance.css")})
                 files.update({"/review-experiences.js": "review-experiences.js", "/review-experiences.css": "review-experiences.css"})
-                files.update({"/index.html": "index.html", "/remote-session.js": "remote-session.js", "/remote-session.css": "remote-session.css",
+                files.update({"/notion-upload.js": "notion-upload.js", "/remote-session.js": "remote-session.js", "/remote-session.css": "remote-session.css",
                               "/tk-candidates.js": "tk-candidates.js", "/tk-candidates.css": "tk-candidates.css",
                               "/buttons.css": "buttons.css"})
                 if path in files:
@@ -2327,14 +2373,16 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(404, "页面不存在。")
             if self.command == "POST":
                 if path == "/api/production/local-edit/import":
-                    if (self.client_address[0] not in {"127.0.0.1", "::1"}
-                            or any(self.headers.get(name) for name in ("Forwarded", "X-Forwarded-For", "CF-Connecting-IP"))):
-                        raise ApiError(403, "请在这台电脑的本机工作台导入剪辑包。")
+                    started = time.perf_counter()
                     length = self.content_length(edit_transfer.MAX_PACKAGE)
                     self.connection.settimeout(120)
                     raw = self.rfile.read(length)
                     post_body_unread = False
-                    return self.output(200, edit_transfer.import_package(self.app, raw))
+                    received = time.perf_counter()
+                    imported = edit_transfer.import_package(self.app, raw)
+                    self.log_message("剪辑包导入 bytes=%d receive_ms=%.0f process_ms=%.0f reused=%s", length,
+                        (received - started) * 1000, (time.perf_counter() - received) * 1000, imported['reused'])
+                    return self.output(200, imported)
                 if path == "/api/upload":
                     post_body_unread = False  # upload handles its own bounded rejection drain.
                     return self.upload(query)
@@ -2508,6 +2556,9 @@ class Handler(BaseHTTPRequestHandler):
                     handler = {"approval": self.app.approve_edit, "baseline": self.app.adopt_edit_baseline}[action]
                     return self.output(200, handler(identifier, edit_id, body))
                 video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication(/verify|/calendar|/undo-auto|/dismiss|/title-zh)?", path)
+                preview = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/preview", path)
+                if preview:
+                    return self.output(202, self.app.preview_exports.start(preview[1], body))
                 notion_upload = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/notion", path)
                 if notion_upload:
                     return self.output(202, self.app.notion_uploads.start(notion_upload[1], body))
@@ -2776,28 +2827,31 @@ class Handler(BaseHTTPRequestHandler):
         return self.output(200, {"path": str(target), "name": raw_name, "bytes": length,
                                  "managed": True, "temporary": True})
 
-    def file(self, path, download=False, cache=False, immutable=False):
+    def file(self, path, download=False, cache=False, immutable=False, generated=None, script_hashes=()):
         content = None
         compressed = False
         if cache:
-            with self.server.static_lock:
-                index = path.name == "index.html"
-                key = (file_key(path), static_signature()) if index else file_key(path)
-                cached = self.server.static_cache.get(path)
-                if cached is None or cached[0] != key:
-                    raw = versioned_index(path.read_bytes()) if index else path.read_bytes()
-                    packed = gzip.compress(raw, compresslevel=5, mtime=0) if len(raw) >= 1024 and path.suffix in {".js", ".css", ".html", ".svg"} else None
-                    if packed is not None and len(packed) >= len(raw):
-                        packed = None
-                    cached = (key, raw, packed)
-                    self.server.static_cache[path] = cached
+            if generated is not None:
+                cached = (generated.version, generated.raw, generated.packed)
+            else:
+                with self.server.static_lock:
+                    index = path.name == "index.html"
+                    key = (file_key(path), static_signature()) if index else file_key(path)
+                    cached = self.server.static_cache.get(path)
+                    if cached is None or cached[0] != key:
+                        raw = versioned_index(path.read_bytes()) if index else path.read_bytes()
+                        packed = gzip.compress(raw, compresslevel=5, mtime=0) if len(raw) >= 1024 and path.suffix in {".js", ".css", ".html", ".svg"} else None
+                        if packed is not None and len(packed) >= len(raw):
+                            packed = None
+                        cached = (key, raw, packed)
+                        self.server.static_cache[path] = cached
             compressed = cached[2] is not None and accepts_gzip(self.headers.get("Accept-Encoding", "")) and not self.headers.get("Range")
             content = cached[2] if compressed else cached[1]
             etag = '"' + hashlib.sha256(content).hexdigest() + '"'
             supplied = self.headers.get("If-None-Match", "")
             if any(tag.strip().removeprefix("W/") in {etag, "*"} for tag in supplied.split(",")):
                 self.send_response(304)
-                self.headers_common("private, max-age=31536000, immutable" if immutable else "private, no-cache")
+                self.headers_common("private, max-age=31536000, immutable" if immutable else "private, no-cache", script_hashes)
                 self.send_header("ETag", etag)
                 self.send_header("Vary", "Accept-Encoding")
                 self.end_headers()
@@ -2830,7 +2884,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             status = 206
         self.send_response(status)
-        self.headers_common("private, max-age=31536000, immutable" if cache and immutable else "private, no-cache" if cache or image_tag else "no-store")
+        self.headers_common("private, max-age=31536000, immutable" if cache and immutable else "private, no-cache" if cache or image_tag else "no-store", script_hashes)
         if image_tag:
             self.send_header("ETag", image_tag)
         if cache:
@@ -2878,6 +2932,7 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
         self._write_gate = threading.Condition()
         self.static_lock = threading.Lock()
         self.static_cache = {}
+        self.program_assets = ProgramAssets()
         self._active_writes = 0
         self._shutting_down = False
         self.data_maintenance = False
@@ -2947,6 +3002,8 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
 
     def _activity_blocker(self):
         """Why the service must not stop right now, or None. Never interrupts: running work is only reported."""
+        if getattr(self.app, "preview_exports", None) and self.app.preview_exports.busy():
+            return "视频预览正在导出，请完成后再重新启动。"
         if getattr(self.app, "notion_uploads", None) and self.app.notion_uploads.busy():
             return "Notion 成片仍在上传，请完成后再重新启动。"
         tasks = self.app.ai.list_tasks()

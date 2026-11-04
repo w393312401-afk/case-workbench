@@ -40,7 +40,8 @@ class ProductionValidationBrowserTests(unittest.TestCase):
 
     def take(self, identifier, groups, duration=2):
         return {"id": identifier, "voice_id": "VOICE123456789", "model_id": "test-model", "settings": {},
-                "duration": duration, "created_at": "2026-10-11", "groups": groups, "alignment_source": "tts"}
+                "duration": duration, "created_at": "2026-10-11", "groups": groups, "alignment_source": "tts",
+                "mp3": "voiceover.mp3", "wav": "voiceover.wav"}
 
     def open_page(self, width=1080, post=None):
         context = self.browser.new_context(viewport={"width": width, "height": 740})

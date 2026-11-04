@@ -79,7 +79,7 @@ class NotionUploadTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         self.app = Bench(self.root)
         self.app.calendar = {}
         self.app.content_calendar = lambda query: self.app.calendar.get(query["id"][0], {})

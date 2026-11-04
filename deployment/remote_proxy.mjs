@@ -31,7 +31,7 @@ class RequestError extends Error {
 
 export function validateConfig(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Config must be an object.');
-  const allowed = new Set(['hostname', 'teamDomain', 'audience', 'allowedEmails', 'nodePath', 'cloudflaredPath', 'httpsProxy', 'authMode', 'guestEnabled']);
+  const allowed = new Set(['hostname', 'teamDomain', 'audience', 'allowedEmails', 'nodePath', 'cloudflaredPath', 'httpsProxy', 'authMode', 'guestEnabled', 'upstream', 'listenPort']);
   if (Object.keys(value).some(key => !allowed.has(key))) throw new Error('Config contains an unsupported field.');
   const dns = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
   if (typeof value.hostname !== 'string' || !dns.test(value.hostname)) throw new Error('hostname must be a lowercase DNS hostname.');
@@ -39,7 +39,16 @@ export function validateConfig(value) {
   if (!['cloudflare', 'password'].includes(authMode)) throw new Error('Unsupported authentication mode.');
   const guestEnabled = value.guestEnabled ?? false;
   if (typeof guestEnabled !== 'boolean' || (guestEnabled && authMode !== 'password')) throw new Error('Guest browsing requires password mode.');
-  if (authMode === 'password') return Object.freeze({ hostname: value.hostname, authMode, guestEnabled });
+  const upstream = value.upstream ?? UPSTREAM;
+  const target = new URL(upstream);
+  if (typeof upstream !== 'string' || target.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(target.hostname)
+      || target.pathname !== '/' || target.search || target.hash || target.username || target.password) {
+    throw new Error('Upstream must be a loopback HTTP origin.');
+  }
+  const listenPort = value.listenPort ?? LISTEN_PORT;
+  if (!Number.isInteger(listenPort) || listenPort < 1 || listenPort > 65535) throw new Error('listenPort must be an integer between 1 and 65535.');
+  const connection = { upstream: target.origin, listenPort };
+  if (authMode === 'password') return Object.freeze({ hostname: value.hostname, authMode, guestEnabled, ...connection });
   if (typeof value.teamDomain !== 'string') throw new Error('teamDomain is required.');
   const teamDomain = value.teamDomain.replace(/^https:\/\//, '').replace(/\/$/, '');
   if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$/.test(teamDomain)) {
@@ -51,7 +60,7 @@ export function validateConfig(value) {
         || /[\x00-\x20\x7f*]/.test(email)
         || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) throw new Error('allowedEmails must contain explicit email addresses.');
   return Object.freeze({
-    hostname: value.hostname, authMode, teamDomain, audience: value.audience,
+    hostname: value.hostname, authMode, teamDomain, audience: value.audience, ...connection,
     allowedEmails: Object.freeze([...new Set(value.allowedEmails)]),
   });
 }
@@ -195,7 +204,7 @@ function guardRequest(request, config) {
     throw new RequestError(403, 'A same-origin browser request is required.');
   }
   // Restart is allowed remotely (fly, 2026-10-15); the workbench still refuses it while work is running.
-  if (/^\/api\/(?:service\/shutdown|remote-account|production\/local-edit\/import)(\/|$)/.test(pathname)
+  if (/^\/api\/(?:service\/shutdown|remote-account)(\/|$)/.test(pathname)
       || (!SAFE_METHODS.has(request.method) && /^\/api\/ai\/claude\/(login|callback|key|install)(\/|$)/.test(pathname))) {
     throw new RequestError(403, 'This action is available only on the local workbench.');
   }
@@ -301,10 +310,10 @@ function staticCachePolicy(request, incoming) {
   return 'private, no-store';
 }
 
-/** Test injection is explicit here. The CLI accepts no upstream or authentication overrides. */
-export function createRemoteProxy(config, { resolveKey, upstream = UPSTREAM, now = Date.now, accountFile, passwordAuth, guestSite } = {}) {
+/** Verifier injection is explicit here; the CLI reads its origin and port only from private config. */
+export function createRemoteProxy(config, { resolveKey, upstream, now = Date.now, accountFile, passwordAuth, guestSite } = {}) {
   config = validateConfig(config);
-  const target = new URL(upstream);
+  const target = new URL(upstream ?? config.upstream);
   if (target.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(target.hostname) || target.pathname !== '/' || target.search || target.username || target.password) throw new Error('Upstream must be a loopback HTTP origin.');
   const passwordMode = config.authMode === 'password';
   if (passwordMode) passwordAuth ??= createPasswordAuth({ file: accountFile, hostname: config.hostname, now });
@@ -441,9 +450,9 @@ async function main() {
     guestSite: join(dirname(process.argv[3]), 'guest', 'site') });
   await new Promise((accept, reject) => {
     server.once('error', reject);
-    server.listen(LISTEN_PORT, LISTEN_HOST, accept);
+    server.listen(config.listenPort, LISTEN_HOST, accept);
   });
-  console.log(`Protected workbench proxy listening on ${LISTEN_HOST}:${LISTEN_PORT} for ${config.hostname}`);
+  console.log(`Protected workbench proxy listening on ${LISTEN_HOST}:${config.listenPort} for ${config.hostname}`);
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {
     server.close(() => process.exit(0));
     setTimeout(() => { server.closeAllConnections(); process.exit(0); }, 5000).unref();

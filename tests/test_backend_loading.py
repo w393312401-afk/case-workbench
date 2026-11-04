@@ -129,10 +129,10 @@ class BackendLoadingTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Cache-Control"], "private, no-cache")
         page = body.decode("utf-8")
-        self.assertRegex(page, r'src="/app\.js\?v=[0-9a-f]{12}"')
+        self.assertRegex(page, r'src="/workbench-program-0\.js\?v=[0-9a-f]{12}"')
         self.assertNotRegex(page, r'(?:src|href)="/[A-Za-z0-9_.-]+\.(?:js|css)"')
-        version = re.search(r'src="/app\.js\?v=([0-9a-f]{12})"', page)[1]
-        status, asset, _ = self.request("GET", f"/app.js?v={version}")
+        version = re.search(r'src="/workbench-program-0\.js\?v=([0-9a-f]{12})"', page)[1]
+        status, asset, _ = self.request("GET", f"/workbench-program-0.js?v={version}")
         self.assertEqual(status, 200)
         self.assertEqual(asset["Cache-Control"], "private, max-age=31536000, immutable")
         status, plain, _ = self.request("GET", "/app.js")

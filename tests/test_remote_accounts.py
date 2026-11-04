@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -12,7 +13,7 @@ from remote_accounts import RemoteAccounts, RemoteAccountError
 import test_server as fixture
 
 
-PASSWORD = "fixture-only-password-123"
+PASSWORD = "fixture9!"
 
 
 class RemoteAccountsTests(unittest.TestCase):
@@ -99,10 +100,28 @@ class RemoteAccountsTests(unittest.TestCase):
         self.assertFalse(unavailable["guest_enabled"])
         self.assertFalse(unavailable["public_ready"])
 
+    def test_password_only_readiness_requires_account_and_matching_deployment(self):
+        deployment = self.accounts.directory / "deployment.json"
+        deployment.write_text('{"auth_method":"password"}')
+        self.accounts.config.write_text(json.dumps({**self.config, "authMode": "password", "guestEnabled": False}))
+        self.assertFalse(self.accounts.metadata()["public_ready"])
+        result = self.save()
+        self.assertTrue(result["public_ready"])
+        self.assertFalse(result["guest_enabled"])
+        self.assertEqual(result["notice"], "公网账号已更新，已登录的设备需要重新登录。")
+        for mode, guest, method in (("cloudflare", False, "password"),
+                                    ("password", True, "password"),
+                                    ("password", False, "password_with_guest")):
+            with self.subTest(mode=mode, guest=guest, method=method):
+                self.accounts.config.write_text(json.dumps({**self.config, "authMode": mode, "guestEnabled": guest}))
+                deployment.write_text(json.dumps({"auth_method": method}))
+                self.assertFalse(self.accounts.metadata()["public_ready"])
+
     def test_invalid_inputs_do_not_write_account_or_enable_password_mode(self):
         for changes in ({"username": "ab"}, {"username": "x"*65}, {"username": "a\nadmin"},
                         {"username": "a\u200bb"}, {"username": 42}, {"password": "short"},
                         {"password": "密码"*65}, {"password": "a"*257}, {"password": "a"*12+"\ud800"},
+                        {"password": ""}, {"password": "a" * 7},
                         {"password": None}, {"confirm_password": "does-not-match"}):
             with self.subTest(changes=changes), self.assertRaises(RemoteAccountError):
                 self.save(**changes)
@@ -214,7 +233,11 @@ class RemoteAccountHTTPTests(unittest.TestCase):
                     self.assertEqual(status, 200)
                     self.assertIn("text/html", headers["Content-Type"])
                     if method == "GET":
-                        self.assertIn(b"settings.js", body)
+                        program = re.search(rb'src="(/workbench-program-0\.js\?v=[0-9a-f]{12})"', body)
+                        self.assertIsNotNone(program)
+                        asset_status, _, source = self.request("GET", program[1].decode())
+                        self.assertEqual(asset_status, 200)
+                        self.assertIn(b"settings-group-remote", source)
                     else:
                         self.assertEqual(body, b"")
 

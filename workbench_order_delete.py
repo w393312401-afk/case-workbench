@@ -57,6 +57,9 @@ class OrderDeleteMixin:
         rules = root / "edit-skill" / job["id"]
         if _safe_folder(rules, root / "edit-skill"):
             folders.append(rules)
+        previews = root / "previews" / job["id"]
+        if _safe_folder(previews, root / "previews"):
+            folders.append(previews)
         files = [path for path in (root / "handoffs").glob(f"{job['id']}-*.md") if path.is_file() and not path.is_symlink()]
         for path in (root / "operations").glob("*.json"):
             try:
@@ -92,6 +95,9 @@ class OrderDeleteMixin:
                 not self._production_operations().recovery_file(record).exists())
 
     def _job_blockers(self, job):
+        previews = getattr(self, "preview_exports", None)
+        if previews and previews.busy(job["id"]):
+            return "这张制作单正在导出视频预览，请完成后再删除。"
         notion = getattr(self, "notion_uploads", None)
         if notion and notion.busy(job["id"]):
             return "这张制作单正在上传到 Notion，请等它结束。"
@@ -203,6 +209,13 @@ class OrderDeleteMixin:
     def _timeline_footprint(self, job, timeline):
         root = self.production.root
         folders, files = [], []
+        previews = getattr(self, "preview_exports", None)
+        if previews:
+            for row in previews._records(job['id']):
+                if row['timeline_uid'] == timeline['unique_id']:
+                    folder = previews._folder(job['id'], row['id'])
+                    if _safe_folder(folder, previews.root / job['id']):
+                        folders.append(folder)
         for edit in timeline_edits(job, timeline):
             if EDIT_ID.fullmatch(str(edit.get("id"))):
                 folder = root / "edits" / edit["id"]
@@ -231,6 +244,9 @@ class OrderDeleteMixin:
         return folders, files
 
     def _timeline_blockers(self, job, timeline):
+        previews = getattr(self, "preview_exports", None)
+        if previews and previews.busy(job["id"]):
+            return "这张制作单正在导出视频预览，请完成后再删除时间线。"
         with self.lock:
             self._edits()
             for edit in timeline_edits(job, timeline):

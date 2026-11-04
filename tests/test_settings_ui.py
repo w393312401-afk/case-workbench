@@ -112,14 +112,14 @@ class SettingsBrowserTests(unittest.TestCase):
         self.assertEqual(password.get_attribute("autocomplete"), "new-password")
         self.assertEqual(confirm.get_attribute("autocomplete"), "new-password")
         username.fill("  fixture-admin  ")
-        password.fill("fixture-password-123")
-        confirm.fill("fixture-password-123")
+        password.fill("fixture9!")
+        confirm.fill("fixture9!")
         page.evaluate("() => { const form = document.querySelector('#settings-remote-form'); form.dispatchEvent(new Event('submit', {cancelable:true})); form.dispatchEvent(new Event('submit', {cancelable:true})); }")
         page.wait_for_function("window.deferredRequests.length === 1")
         self.assertTrue(password.is_disabled())
         posts = page.evaluate("window.requests.filter(call => call.path === '/api/remote-account' && call.method === 'POST')")
         self.assertEqual(len(posts), 1)
-        self.assertEqual(posts[0]["body"], {"username": "fixture-admin", "password": "fixture-password-123", "confirm_password": "fixture-password-123"})
+        self.assertEqual(posts[0]["body"], {"username": "fixture-admin", "password": "fixture9!", "confirm_password": "fixture9!"})
         page.evaluate("result => window.deferredRequests[0].resolve(result)",
                       {**metadata, "username": "fixture-admin", "configured": True, "saved": True, "auth_mode": "password"})
         page.get_by_text("本机账号密码已就绪；Cloudflare 公网入口仍需切换。", exact=True).wait_for()
@@ -138,7 +138,7 @@ class SettingsBrowserTests(unittest.TestCase):
         password.fill("密码" * 65)
         confirm.fill("密码" * 65)
         page.get_by_role("button", name="保存账号密码", exact=True).click()
-        page.get_by_text("密码至少 12 个字符，最多 256 个 UTF-8 字节。", exact=True).wait_for()
+        page.get_by_text("密码至少 8 个字符，最多 256 个 UTF-8 字节。", exact=True).wait_for()
         self.assertEqual(page.evaluate("window.requests.filter(call => call.path === '/api/remote-account' && call.method === 'POST')"), [])
 
     def test_public_guest_readiness_explains_password_unlock_and_save_keeps_guest_access(self):
