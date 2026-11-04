@@ -618,6 +618,20 @@ window.ContentFlow = (() => {
     bar.innerHTML = `<span>${esc(queue.label)} <b>${index + 1} / ${queue.entries.length}</b></span><a class="secondary" ${go(previous)}>上一条</a><a class="${next ? 'primary' : 'secondary'}" ${go(next)}>${next ? '下一条' : '已是最后一条'}</a><button type="button" class="icon-button" data-queue-end aria-label="结束依次处理">${icon('close')}</button>`;
     $('[data-queue-end]',bar).onclick = () => {try {sessionStorage.removeItem(queueKey);} catch { /* The bar still goes away. */ }bar.remove();};
   }
+  // The order pages walk the list as it is on screen: this view, its filters, sort and page.
+  const orderKey = 'case-content-order-v1';
+  function rememberOrder(data) {
+    const entries = data.items.filter(item => item.kind === 'video' && item.production_ids?.[0]).map(item => {
+      const path = `#production/${encodeURIComponent(item.production_ids[0])}`;
+      return {path,hash:routePath(item.next_hash) === path ? item.next_hash : path,product:item.product,title:item.title || ''};
+    });
+    const named = page.filters.saved ? savedViews().find(row => row.id === page.filters.saved)?.name : '';
+    const label = named || (page.filters.filter ? '筛选结果' : views[page.filters.view] || '内容列表');
+    try {
+      if (entries.length > 1) sessionStorage.setItem(orderKey,JSON.stringify({label:page.filters.page > 1 ? `${label} · 第 ${page.filters.page} 页` : label,entries}));
+      else sessionStorage.removeItem(orderKey);
+    } catch { /* The order pages then show no 上一单 / 下一单. */ }
+  }
   window.addEventListener('hashchange',paintQueue);
   document.addEventListener('DOMContentLoaded',paintQueue);
   function paint() {
@@ -627,6 +641,7 @@ window.ContentFlow = (() => {
     node.dataset.view = page.filters.view;
     node.classList.toggle('is-selecting',page.selecting);
     paintGroups(data);
+    rememberOrder(data);
     node.innerHTML = data.items.length ? grouped(data) ? groupedMarkup(data) : data.items.map(row).join('') : `<div class="empty"><h3>${data.counts.all ? '当前视图没有内容' : '还没有创作记录'}</h3><p>${data.counts.all ? '切换视图或调整搜索，查看其他内容。' : '开始写稿后，候选、脚本和制作记录会出现在这里。'}</p>${data.counts.all ? '<button type="button" class="secondary" data-flow-all>查看全部</button>' : '<button type="button" class="primary" data-flow-start>开始写稿</button>'}</div>`;
     $$('.flow-menu',node).forEach(menu => {if (opened.has(menu.closest('[data-content-id]')?.dataset.contentId)) menu.open = true;});
     $$('.flow-group-toggle',node).forEach(button => button.onclick = () => {

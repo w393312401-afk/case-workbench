@@ -468,6 +468,7 @@ class ProductionWorkbenchMixin:
                     "script": script, "variant": variant, "voices": catalog["voices"], "defaults": catalog["defaults"],
                     "models": copy.deepcopy(MODELS), "default_model": DEFAULT_MODEL, "creators": catalog["settings"]["creators"],
                     "product_settings": self.production.product_settings(catalog, job["product"]),
+                    "material_combos": self.production.material_combos(catalog, job["product"]),
                     "today": datetime.now().strftime("%y%m%d")}
 
     def production_variants(self, task_id, round_id):

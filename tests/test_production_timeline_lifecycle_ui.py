@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
 
 from playwright.sync_api import expect
@@ -111,10 +112,13 @@ class ProductionTimelineLifecycleBrowserTests(unittest.TestCase):
         form = page.locator('#edit-panel #edit-form')
         page.locator('.production-steps [data-step="edit"]').click()
         form.locator('[name="instruction"]').fill('保留这段尚未提交的剪辑要求')
-        form.locator('[name="timeline"]').select_option('uid-own')
+        page.locator('.production-focus [data-timeline-focus="uid-own"]').click()
         page.evaluate('window.__editForm=document.querySelector("#edit-panel #edit-form")')
         page.locator('.production-steps [data-step="timeline"]').click()
         expect(page.locator('[data-archive-timeline]')).to_have_count(0)
+        # The strip still shows the timeline chosen in the edit step; pick the one to delete.
+        expect(page.locator('#timeline-cards > [data-timeline-id="uid-old"]')).to_be_hidden()
+        page.locator('.production-focus [data-timeline-focus="uid-old"]').click()
         page.locator('[data-delete-timeline="uid-old"]').click()
         dialog = page.locator('dialog.production-dialog')
         expect(dialog).to_contain_text('Lab261010-202-1')
@@ -128,6 +132,9 @@ class ProductionTimelineLifecycleBrowserTests(unittest.TestCase):
         page.locator('dialog.production-dialog [data-submit]').click()
         expect(page.locator('#toast')).to_contain_text('时间线及本地文件已删除')
         expect(page.locator('#timeline-cards > .timeline-card')).to_have_count(1)
+        # With one timeline left the strip goes away and its card shows.
+        expect(page.locator('.production-focus')).to_be_hidden()
+        expect(page.locator('#timeline-cards > [data-timeline-id="uid-own"]')).to_be_visible()
         expect(page.locator('[data-timeline-count]')).to_have_text('1 条')
         expect(page.locator('.timeline-history')).to_have_count(0)
         expect(form.locator('[name="timeline"]')).to_have_value('uid-own')
@@ -164,6 +171,10 @@ class ProductionTimelineLifecycleBrowserTests(unittest.TestCase):
         expect(card.locator('[data-timeline-task]')).to_have_value('completed')
         # The manual completion of this timeline is its result; the task status stays a separate choice.
         expect(card.locator('[data-timeline-ai-state]')).to_have_text('人工完成')
+        # The timeline still to cut opens first; the completed one is picked in the strip, unfolded.
+        page.locator('.production-steps [data-step="timeline"]').click()
+        page.locator('.production-focus [data-timeline-focus="uid-own"]').click()
+        self.assertEqual(card.locator('[data-timeline-fold]').count(), 0)
         card.locator('[data-timeline-task]').select_option('in_progress')
         expect(page.locator('#toast')).to_contain_text('已更新任务状态。')
         expect(card.locator('[data-timeline-task]')).to_have_value('in_progress')
@@ -177,6 +188,7 @@ class ProductionTimelineLifecycleBrowserTests(unittest.TestCase):
         job['edits'] = [edit]
         page.reload()
         page.locator('.production-steps [data-step="timeline"]').click()
+        page.locator('.production-focus [data-timeline-focus="uid-own"]').click()
         card.locator('[data-timeline-task]').select_option('completed')
         expect(page.locator('#toast')).to_contain_text('已更新任务状态。')
         # A later failed AI run does not reopen a timeline the user completed by hand; the run itself is kept.
@@ -188,31 +200,72 @@ class ProductionTimelineLifecycleBrowserTests(unittest.TestCase):
         expect(page.locator('#timeline-cards > .timeline-card')).to_have_count(2)
         expect(page.locator('#timeline-cards [data-timeline-ai-state]')).to_have_count(0)
 
-    def test_approved_order_folds_unused_timelines_without_an_ai_badge(self):
+    def test_two_timelines_show_one_card_at_a_time_from_the_shared_strip(self):
         self.payload['job'].update(status='approved', manual_completion=self.receipt(name='Lab261011-202-2'))
         page = self.open_page()
-        expect(page.locator('#timeline-cards > .timeline-card')).to_have_count(1)
-        expect(page.locator('#timeline-cards > .timeline-card.current')).to_have_attribute('data-timeline-id', 'uid-own')
-        others = page.locator('#timeline-cards .timeline-others')
-        expect(others.locator('summary')).to_have_text('其他时间线（1 条）')
-        self.assertFalse(others.evaluate('node => node.open'))
-        old = others.locator('[data-timeline-id="uid-old"]')
+        page.locator('.production-steps [data-step="timeline"]').click()
+        strip = page.locator('.production-focus')
+        expect(strip).to_be_visible()
+        expect(page.locator('#timeline-cards .timeline-others')).to_have_count(0)
+        old, own = page.locator('#timeline-cards > [data-timeline-id="uid-old"]'), page.locator('#timeline-cards > [data-timeline-id="uid-own"]')
+        # The timeline still to cut opens first; the completed one is a click away and is not folded.
+        expect(strip.locator('[aria-selected="true"]')).to_have_attribute('data-timeline-focus', 'uid-old')
+        expect(strip.locator('[data-timeline-focus="uid-own"] [data-focus-edit]')).to_have_text('剪完')
+        expect(old).to_be_visible()
+        expect(own).to_be_hidden()
         expect(old.locator('[data-timeline-ai-state]')).to_have_count(0)
         expect(old.locator('[data-timeline-task]')).to_have_value('pending')
-        others.locator('summary').click()
         old.locator('[data-open-timeline]').click()
         expect(page.locator('#toast')).to_contain_text('已在达芬奇打开 Lab261010-202-1')
+        strip.locator('[data-timeline-focus="uid-own"]').click()
+        expect(own).to_be_visible()
+        expect(old).to_be_hidden()
+        expect(own.locator('[data-timeline-fold]')).to_have_count(0)
+        expect(own.locator('.timeline-task-state')).to_be_visible()
+        # The strip belongs to the timeline, edit and publish steps only, and keeps its choice across them.
+        page.locator('.production-steps [data-step="voice"]').click()
+        expect(strip).to_be_hidden()
+        page.locator('.production-steps [data-step="edit"]').click()
+        expect(strip).to_be_visible()
+        expect(strip.locator('[aria-selected="true"]')).to_have_attribute('data-timeline-focus', 'uid-own')
         expect(page.locator('.timeline-history')).to_have_count(0)
+
+    def test_completed_timeline_folds_and_stays_unfolded_across_renders(self):
+        # Folding applies when the order has one timeline; with several, the strip shows one card at a time.
+        job = self.payload['job']
+        job['timelines'] = [item for item in job['timelines'] if item['unique_id'] == 'uid-own']
+        job.update(status='approved', manual_completion=self.receipt(name='Lab261011-202-2'))
+        page = self.open_page()
+        page.locator('.production-steps [data-step="timeline"]').click()
+        card = page.locator('#timeline-cards > [data-timeline-id="uid-own"]')
+        expect(card).to_have_class(re.compile(r'\bis-folded\b'))
+        expect(card.locator('.timeline-done-tag')).to_be_visible()
+        expect(card.locator('.timeline-task-state')).to_be_hidden()
+        expect(card.locator('[data-delete-timeline]')).to_be_hidden()
+        expect(card.locator('[data-open-timeline]')).to_be_visible()
+        toggle = card.locator('[data-timeline-fold]')
+        expect(toggle).to_have_text('展开')
+        toggle.click()
+        expect(card.locator('.timeline-task-state')).to_be_visible()
+        expect(card.locator('.timeline-done-tag')).to_be_hidden()
+        expect(toggle).to_have_text('收起')
+        page.locator('.production-steps [data-step="voice"]').click()
+        page.locator('.production-steps [data-step="timeline"]').click()
+        expect(page.locator('#timeline-cards > [data-timeline-id="uid-own"] .timeline-task-state')).to_be_visible()
 
     def test_timeline_built_after_the_approval_stays_open_beside_its_basis(self):
         job = self.payload['job']
         job.update(status='approved', manual_completion=self.receipt(name='Lab261011-202-2'))
         job['timelines'].append({**self.timeline('uid-new', 'Lab261012-202-3'), 'task_status': 'pending', 'archived': False})
         page = self.open_page()
-        expect(page.locator('#timeline-cards > .timeline-card')).to_have_count(2)
+        page.locator('.production-steps [data-step="timeline"]').click()
+        expect(page.locator('#timeline-cards > .timeline-card')).to_have_count(3)
+        expect(page.locator('#timeline-cards .timeline-others')).to_have_count(0)
+        # The newly built timeline opens first; the approved basis keeps its result and is one click away.
+        expect(page.locator('#timeline-cards > [data-timeline-id="uid-new"]')).to_be_visible()
         expect(page.locator('#timeline-cards > [data-timeline-id="uid-own"] [data-timeline-ai-state]')).to_have_text('人工完成')
-        expect(page.locator('#timeline-cards > [data-timeline-id="uid-new"]')).to_have_count(1)
-        expect(page.locator('#timeline-cards .timeline-others [data-timeline-id="uid-old"]')).to_have_count(1)
+        expect(page.locator('.production-focus [data-timeline-focus="uid-own"] [data-focus-edit]')).to_have_text('剪完')
+        expect(page.locator('.production-focus [data-timeline-focus="uid-new"] [data-focus-edit]')).to_have_text('未剪辑')
 
     def test_conflict_refreshes_revision_and_restores_failed_status_control(self):
         def conflict_once(route):

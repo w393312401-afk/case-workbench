@@ -109,6 +109,60 @@ class PerformanceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.video("7600000000000000002")["window_top_pct"], 100)
         self.assertNotIn("window_top_pct", self.store.video("7600000000000000003"))  # window still open
 
+    def test_analytics_keeps_daily_rows_even_when_a_week_overlaps(self):
+        export(self.folder / "9月" / "日明细.xlsx", "2026-09-02", "2026-09-02", [row(LINKED, 100, 1, 5, 25)])
+        self.store.sync()
+        data = self.store.analytics("local")
+        video = next(i for i, value in enumerate(data["videos"]) if value[0] == LINKED)
+        self.assertIn("2026-09-02", data["daily_dates"])
+        self.assertIn("2026-08-31", data["report_weeks"])
+        self.assertEqual(next(r[7] for r in data["daily"] if r[0] == video and r[1] == "2026-09-02"), 25)
+        self.assertEqual(next(r[7] for r in data["report_weekly"] if r[0] == video and r[1] == "2026-08-31"), 450)
+        # New arrays must also be independent copies of the cached analytics.
+        data["daily_dates"].clear()
+        data["daily"][0][7] = -1
+        self.assertIn("2026-09-02", self.store.analytics("local")["daily_dates"])
+        self.assertNotEqual(self.store.analytics("local")["daily"][0][7], -1)
+
+    def test_quarter_report_is_available_for_an_exact_range_without_becoming_a_month(self):
+        quarter_only = "7600000000000000099"
+        value = row("7600000000000000002", 100, 2, 20, 125.75)
+        value[HEADER.index("Video ID")] = quarter_only
+        source = export(self.folder / "季度.xlsx", "2026-07-01", "2026-09-30", [value, row(LINKED, 300, 3, 30, 500)])
+        self.assertEqual(self.store.sync()["failed"][0]["file"], "other.xlsx")
+        data = self.store.analytics("local")
+        self.assertIn(["2026-07-01", "2026-09-30"], data["report_ranges"])
+        video = next(i for i, attrs in enumerate(data["videos"]) if attrs[0] == quarter_only)
+        self.assertEqual(next(r[-1] for r in data["report_periods"] if r[0] == video), 125.75)
+        self.assertNotIn("2026-07", data["months"])  # A quarter is never presented as July's month report.
+        fallback = next(v for v in self.store.videos(shop="local") if v["video_id"] == quarter_only)
+        self.assertEqual(fallback["account"], "sharpal_us")
+        self.assertIsNone(fallback["gmv"])  # An interval is not a lifetime total.
+        data["report_ranges"][0][0] = "1900-01-01"
+        self.assertIn(["2026-07-01", "2026-09-30"], self.store.analytics("local")["report_ranges"])
+
+        # A shop containing only the quarter export still exposes its accounts and the report's date range.
+        only = PerformanceStore(Path(self.temp.name) / "quarter-only", [source])
+        self.assertEqual(only.sync()["failed"], [])
+        self.assertEqual(only.summary("local")["coverage"], {"first": "2026-07-01", "last": "2026-09-30", "gaps": []})
+        self.assertEqual(only.summary("local")["weeks"], [])
+        self.assertEqual({v["account"] for v in only.videos(shop="local")}, {"sharpal_us", "bushcraftedge"})
+
+    def test_quarter_report_with_missing_gmv_is_not_treated_as_complete(self):
+        values = row(LINKED, 100, 1, 10, 20)
+        values[HEADER.index("Video-attributed GMV ($)")] = "--"
+        source = export(self.folder / "缺销售额.xlsx", "2026-07-01", "2026-09-30", [values])
+        only = PerformanceStore(Path(self.temp.name) / "missing-gmv", [source])
+        self.assertEqual(only.sync()["failed"], [])
+        data = only.analytics("local")
+        self.assertNotIn(["2026-07-01", "2026-09-30"], data["report_ranges"])
+        self.assertIn(["2026-07-01", "2026-09-30"], data["invalid_report_ranges"])
+        values = row(LINKED, 100, 1, 10, 20)
+        values[HEADER.index("Product Clicks")] = "--"
+        another = export(self.folder / "缺点击.xlsx", "2026-10-01", "2026-12-31", [values])
+        self.assertEqual(only.import_paths([another])["failed"], [])
+        self.assertIn(["2026-10-01", "2026-12-31"], only.analytics("local")["invalid_report_ranges"])
+
     def test_videos_readonly_shares_the_cached_rows_that_videos_copies(self):
         self.store.sync()
         shared = self.store.videos_readonly()

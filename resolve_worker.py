@@ -1259,9 +1259,495 @@ def reveal(resolve, request):
     return {"name": timeline.GetName(), "timecode": reached}
 
 
+def edit_audio_baseline(resolve, request):
+    """Remember identities only, so the edit cannot overwrite pre-existing sound."""
+    project = request_project(resolve, request)
+    timeline = find_timeline(project, request)
+    if timeline.GetTrackCount("audio") < 1:
+        raise WorkerError("目标时间线没有原声轨，不能确定已有片段。")
+    video = [item.GetUniqueId() for index in range(1, timeline.GetTrackCount("video") + 1)
+             for item in timeline.GetItemListInTrack("video", index) or []]
+    audio = [item.GetUniqueId() for item in timeline.GetItemListInTrack("audio", 1) or []]
+    if any(not isinstance(uid, str) or not uid for uid in video + audio) or len(set(video)) != len(video) or len(set(audio)) != len(audio):
+        raise WorkerError("目标时间线的片段身份不完整，不能安全保留已有声音。")
+    return {"video_ids": video, "audio_ids": audio}
+
+
+def _audio_effects(item):
+    """Read effects only on the active timeline; None is not an empty effects list."""
+    effects = item.GetEffects("audio")
+    if not isinstance(effects, list):
+        raise ValueError("插件列表无法读取")
+    result = []
+    for effect in effects:
+        info = effect.GetInfo()
+        if not isinstance(info, dict) or not info.get("id"):
+            raise ValueError("插件身份无法读取")
+        enabled, index = effect.GetIsEnabled(), effect.GetIndex()
+        if not isinstance(enabled, bool) or not isinstance(index, int) or index < 1:
+            raise ValueError("插件状态或顺序无法读取")
+        result.append({"id": info["id"], "enabled": enabled, "index": index})
+    return sorted(result, key=lambda value: value["index"])
+
+
+def _edit_audio_item(item):
+    media = item.GetMediaPoolItem()
+    speed = item.GetSpeed()
+    return {"id": item.GetUniqueId(), "media_id": media.GetUniqueId() if media else None,
+            "start": item.GetStart(), "end": item.GetEnd(),
+            "source_start": item.GetSourceStartFrame(), "source_end": item.GetSourceEndFrame(),
+            "speed": speed, "links": [linked.GetUniqueId() for linked in item.GetLinkedItems() or []]}
+
+
+def _audio_candidate_matches(row, item):
+    span = row.get("source") if isinstance(row, dict) else None
+    values = [item.get("source_start"), item.get("source_end")]
+    return (isinstance(row, dict) and row.get("media_id") == item.get("media_id") and
+            isinstance(span, list) and len(span) == 2 and
+            all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in [*span, *values]) and
+            span[0] <= values[0] <= values[1] <= span[1])
+
+
+def inherit_edit_audio(resolve, request):
+    """Finish newly placed original-sound clips before delivery; never touch earlier audio or the voice track."""
+    project = request_project(resolve, request)
+    target = find_timeline(project, request)
+    baseline, candidates = request.get("audio_baseline"), request.get("candidates")
+    if (not isinstance(baseline, dict) or not isinstance(baseline.get("audio_ids"), list) or
+            not isinstance(baseline.get("video_ids"), list) or not isinstance(candidates, list)):
+        raise WorkerError("缺少剪前片段身份或素材清单，没有改动原声设置。")
+    protected = request.get("audio_overrides", [])
+    if not isinstance(protected, list) or any(not isinstance(uid, str) or not uid for uid in protected):
+        raise WorkerError("本次自定义原声片段的身份无效，没有改动原声设置。")
+    retry_audio, retry_video = request.get("retry_audio_ids", []), request.get("retry_video_ids", [])
+    if any(not isinstance(ids, list) or any(not isinstance(uid, str) or not uid for uid in ids)
+           for ids in (retry_audio, retry_video)):
+        raise WorkerError("重试的原声片段身份无效，没有改动声音设置。")
+    protected, retry_audio, retry_video = set(protected), set(retry_audio), set(retry_video)
+    old_audio = set(baseline["audio_ids"]) - retry_audio
+    old_video = set(baseline["video_ids"]) - retry_video
+    if target.GetTrackCount("audio") < 1:
+        raise WorkerError("目标时间线没有原声轨，没有改动声音设置。")
+    if not project.SetCurrentTimeline(target):
+        raise WorkerError("无法打开目标时间线，没有改动声音设置。")
+    target_uid = target.GetUniqueId()
+    result = {"status": "completed", "new_audio": 0, "processed": 0, "plugins_copied": 0,
+              "protected": 0, "issues": [], "parameters_unverified": False, "volume_animation_unverified": False,
+              "timing_unverified": False, "saved": None}
+    attempts, active_uid = 0, target_uid
+
+    def issue(item, message):
+        result["issues"].append({"item_uid": item.get("id", ""), "start": item.get("start"),
+                                 "end": item.get("end"), "linked_ids": item.get("links", []), "message": message})
+
+    def current_is(uid):
+        current = resolve.GetProjectManager().GetCurrentProject()
+        current_id, project_id = optional(current, "GetUniqueId"), optional(project, "GetUniqueId")
+        if not current or not current_id or not project_id or current_id != project_id:
+            return False
+        timeline = current.GetCurrentTimeline()
+        return bool(timeline and timeline.GetUniqueId() == uid)
+
+    try:
+        if target.GetIsTrackLocked("audio", 1):
+            raise WorkerError("目标原声轨已锁定，没有改动声音设置。")
+        videos = {}
+        for track in range(1, target.GetTrackCount("video") + 1):
+            for item in target.GetItemListInTrack("video", track) or []:
+                value = _edit_audio_item(item)
+                videos[value["id"]] = value
+        audio = []
+        for item in target.GetItemListInTrack("audio", 1) or []:
+            value = _edit_audio_item(item)
+            if value["id"] in old_audio:
+                continue
+            result["new_audio"] += 1
+            if value["id"] in protected:
+                result["protected"] += 1
+                continue
+            linked = [videos[uid] for uid in value["links"] if uid in videos]
+            if len(linked) != 1:
+                issue(value, "原声未与唯一画面片段链接，无法安全继承素材设置。")
+                continue
+            video = linked[0]
+            if (not value["media_id"] or value["media_id"] != video["media_id"] or
+                    (value["start"], value["end"], value["source_start"], value["source_end"]) !=
+                    (video["start"], video["end"], video["source_start"], video["source_end"]) or
+                    value["speed"] != video["speed"]):
+                issue(value, "原声与画面的媒体、区间或速度不一致，无法安全继承素材设置。")
+                continue
+            matches = [row for row in candidates if _audio_candidate_matches(row, value)
+                       and row.get("timeline_uid") and row.get("item_uid")]
+            if len(matches) != 1:
+                issue(value, "无法唯一确定对应的素材片段，未猜测或覆盖声音设置。")
+                continue
+            try:
+                properties = item.GetProperties()
+                if (not isinstance(properties, dict) or not isinstance(properties.get("AudioVolume"), (int, float)) or
+                        isinstance(properties.get("AudioVolume"), bool) or not isinstance(properties.get("AudioVolumeEnabled"), bool)):
+                    raise ValueError("原声音量无法读取")
+            except Exception as exc:
+                properties = None
+                issue(value, f"目标原声音量无法读取：{exc}。")
+            try:
+                effects = _audio_effects(item)
+            except Exception as exc:
+                effects = None
+                issue(value, f"目标原声插件无法读取：{exc}。")
+            if properties is None and effects is None:
+                continue
+            audio.append({"item": item, "value": value, "candidate": matches[0], "properties": properties,
+                          "effects": effects, "mapping": item.GetSourceAudioChannelMapping(), "fades": item.GetFades()})
+
+        # New video with known audio must have its own linked audio; do not touch an earlier audio clip.
+        audio_ids = {item.GetUniqueId() for item in target.GetItemListInTrack("audio", 1) or []}
+        for value in videos.values():
+            if value["id"] in old_video or not value["media_id"]:
+                continue
+            linked_audio = [uid for uid in value["links"] if uid in audio_ids]
+            if linked_audio:
+                if any(uid in old_audio for uid in linked_audio):
+                    issue(value, "新画面链接了原有音频，未覆盖已有声音设置，请人工确认。")
+                continue
+            matches = [row for row in candidates if _audio_candidate_matches(row, value)]
+            if any(row.get("has_audio") is True for row in matches):
+                issue(value, "新画面没有链接逐片原声，未自动生成音频。")
+            elif not matches or any(row.get("has_audio") is None for row in matches):
+                issue(value, "无法确认新画面的素材是否含原声，请人工核对。")
+
+        actual_audio_ids = {item.GetUniqueId() for item in target.GetItemListInTrack("audio", 1) or []}
+        for uid in protected - actual_audio_ids:
+            issue({"id": uid}, "声明的自定义原声片段不存在，未应用默认继承。")
+
+        source_timelines = {timeline.GetUniqueId(): timeline for timeline in timelines(project)}
+        for timeline_uid in sorted({row["candidate"]["timeline_uid"] for row in audio}):
+            if not current_is(active_uid):
+                raise WorkerError("操作期间当前时间线发生变化，已停止补齐。")
+            source = source_timelines.get(timeline_uid)
+            group = [row for row in audio if row["candidate"]["timeline_uid"] == timeline_uid]
+            if source is None or not project.SetCurrentTimeline(source):
+                for row in group:
+                    issue(row["value"], "素材时间线不可用，未继承声音设置。")
+                continue
+            active_uid = timeline_uid
+            wanted = {row["candidate"]["item_uid"] for row in group}
+            source_videos = {}
+            for track in range(1, source.GetTrackCount("video") + 1):
+                for item in source.GetItemListInTrack("video", track) or []:
+                    uid = item.GetUniqueId()
+                    if uid in wanted:
+                        source_videos[uid] = item
+            applied = []
+            for row in group:
+                value, candidate = row["value"], row["candidate"]
+                if not current_is(active_uid):
+                    raise WorkerError("操作期间当前时间线发生变化，已停止补齐。")
+                video = source_videos.get(candidate["item_uid"])
+                linked = [item for item in (video.GetLinkedItems() or []) if item.GetType() == "audio"] if video else []
+                if len(linked) != 1:
+                    issue(value, "素材片段没有唯一的链接原声，未继承声音设置。")
+                    continue
+                source_audio = linked[0]
+                source_info, source_video = _edit_audio_item(source_audio), _edit_audio_item(video)
+                valid_source = lambda info: _audio_candidate_matches({"media_id": info["media_id"],
+                    "source": [info["source_start"], info["source_end"]]}, value)
+                if not valid_source(source_info) or not valid_source(source_video):
+                    issue(value, "素材画面或原声的媒体、源区间已变化，未继承声音设置。")
+                    continue
+                if source_info["source_start"] != value["source_start"] or source_info["speed"] != value["speed"]:
+                    result["timing_unverified"] = True
+                try:
+                    source_properties = source_audio.GetProperties()
+                    source_volume = source_properties.get("AudioVolume")
+                    source_enabled = source_properties.get("AudioVolumeEnabled")
+                    if (not isinstance(source_volume, (int, float)) or isinstance(source_volume, bool) or
+                            not isinstance(source_enabled, bool)):
+                        raise ValueError("素材音量无法读取")
+                except Exception as exc:
+                    source_volume, source_enabled = None, None
+                    issue(value, f"素材原声音量无法读取：{exc}。")
+                try:
+                    source_effects = _audio_effects(source_audio)
+                except Exception as exc:
+                    source_effects = None
+                    issue(value, f"素材原声插件无法读取：{exc}。")
+                opts = {}
+                # A non-default differing target value may be a deliberate adjustment: leave it alone.
+                if row["properties"] is not None and source_volume is not None and row["properties"]["AudioVolume"] in (0, source_volume):
+                    already_fixed = (value["id"] in retry_audio and row["properties"]["AudioVolume"] == source_volume and
+                                     row["properties"]["AudioVolumeEnabled"] == source_enabled)
+                    if not already_fixed:
+                        opts["audioVolume"] = True
+                        result["volume_animation_unverified"] = True
+                elif row["properties"] is not None and source_volume is not None:
+                    issue(value, "原声音量已有不同设置，未覆盖，请人工确认。")
+                if source_effects is not None and row["effects"] is not None:
+                    if source_effects and (not row["effects"] or
+                                           (row["effects"] == source_effects and value["id"] not in retry_audio)):
+                        opts["audioPlugins"] = True
+                    elif row["effects"] != source_effects:
+                        issue(value, "原声已有不同插件，未覆盖，请人工确认。")
+                    if source_effects:
+                        result["parameters_unverified"] = True
+                if not opts:
+                    continue
+                if hasattr(resolve, "KEYFRAME_TIMING_MAINTAIN"):
+                    opts["keyframeTiming"] = resolve.KEYFRAME_TIMING_MAINTAIN
+                attempts += 1  # A failed call may still have changed the target.
+                copied = source_audio.CopyAttributes([row["item"]], opts)
+                applied.append((row, opts, source_volume, source_enabled, source_effects, copied))
+            if not current_is(active_uid) or not project.SetCurrentTimeline(target):
+                raise WorkerError("无法切回目标时间线确认本次声音操作。")
+            active_uid = target_uid
+            for row, opts, source_volume, source_enabled, source_effects, copied in applied:
+                value, item = row["value"], row["item"]
+                try:
+                    after, effects = item.GetProperties(), _audio_effects(item)
+                    untouched = _edit_audio_item(item) == value and item.GetSourceAudioChannelMapping() == row["mapping"] and item.GetFades() == row["fades"]
+                    other = {k: v for k, v in after.items() if k not in ("AudioVolume", "AudioVolumeEnabled")}
+                    before = ({k: v for k, v in row["properties"].items() if k not in ("AudioVolume", "AudioVolumeEnabled")}
+                              if row["properties"] is not None else other)
+                    volume_ok = not opts.get("audioVolume") or (after.get("AudioVolume") == source_volume and after.get("AudioVolumeEnabled") == source_enabled)
+                    plugins_ok = not opts.get("audioPlugins") or effects == source_effects
+                    if not copied or not volume_ok or not plugins_ok or not untouched or other != before:
+                        issue(value, "音量或插件复制未确认，或其他声音属性发生变化，请人工核对。")
+                    else:
+                        result["processed"] += 1
+                        result["plugins_copied"] += int(bool(opts.get("audioPlugins")))
+                except Exception as exc:
+                    issue(value, f"声音设置复制后无法读取：{exc}。")
+    except Exception as exc:
+        issue({}, str(exc))
+    finally:
+        # Save only the project this task edited; never switch away from a user's new project.
+        manager = resolve.GetProjectManager()
+        current = manager.GetCurrentProject()
+        current_id, project_id = optional(current, "GetUniqueId"), optional(project, "GetUniqueId")
+        if current and current_id and project_id and current_id == project_id:
+            if active_uid != target_uid and current_is(active_uid):
+                project.SetCurrentTimeline(target)
+            result["saved"] = bool(manager.SaveProject()) if attempts else True
+        elif attempts:
+            result["saved"] = False
+        if result["saved"] is False:
+            issue({}, "原声设置可能已更改，但工程保存未确认。")
+    if result["issues"]:
+        result["status"] = "needs_attention"
+    return result
+
+
+def restore_textless(resolve, request):
+    """Recover the state journaled before a textless render, including after a worker timeout."""
+    path = Path(request["recovery_path"])
+    if not path.is_file():
+        return {"restored": True}
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    if snapshot.get("restored"):
+        return {"restored": True}
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project or project.GetUniqueId() != snapshot["project_id"]:
+        raise WorkerError(f"请打开项目「{snapshot['project']}」后重试，以恢复上次导出的字幕和屏显轨。")
+    job_id = snapshot.get("render_job_id")
+    if project.IsRenderingInProgress():
+        if request.get("stop_render") is False:
+            raise WorkerError("上次导出尚未结束，请等达芬奇导出结束后重试。")
+        status = project.GetRenderJobStatus(job_id) if job_id else {}
+        state = (status or {}).get("JobStatus")
+        if state not in ("Rendering", "Complete"):
+            raise WorkerError("达芬奇正在进行其他渲染，暂时无法恢复上次导出状态，请结束后重试。")
+        if state == "Rendering":
+            project.StopRendering()
+        deadline = time.monotonic() + 15
+        while project.IsRenderingInProgress() and time.monotonic() < deadline:
+            time.sleep(.2)
+        if project.IsRenderingInProgress():
+            raise WorkerError("达芬奇未能停止本次导出，请停止渲染后重试恢复轨道。")
+    timeline = find_timeline(project, {"unique_id": snapshot["timeline_uid"], "name": snapshot["timeline_name"]})
+    errors = []
+    for track in snapshot["tracks"]:
+        try:
+            kind, index = track["kind"], track["index"]
+            if timeline.GetTrackName(kind, index) != track["name"]:
+                raise ValueError("轨道位置发生变化")
+            timeline.SetTrackEnable(kind, index, track["enabled"])
+            if timeline.GetIsTrackEnabled(kind, index) != track["enabled"]:
+                raise ValueError("开关状态未恢复")
+        except Exception:
+            errors.append(f"「{track['name']}」轨未恢复")
+    try:
+        preset = snapshot["preset"]
+        if preset in (project.GetRenderPresetList() or []):
+            if not project.LoadRenderPreset(preset):
+                raise ValueError("导出设置未恢复")
+        elif snapshot.get("preset_saved"):
+            raise ValueError("原导出设置备份已丢失")
+        if not project.SetCurrentRenderMode(snapshot["render_mode"]):
+            raise ValueError("导出模式未恢复")
+        original = snapshot["format"]
+        if not project.SetCurrentRenderFormatAndCodec(original["format"], original["codec"]):
+            raise ValueError("导出格式未恢复")
+    except Exception as exc:
+        errors.append(str(exc))
+    try:
+        current = project.GetCurrentTimeline()
+        # Leave a timeline the user switched to during rendering alone.
+        if current and current.GetUniqueId() == snapshot["timeline_uid"]:
+            previous = next((t for t in timelines(project) if t.GetUniqueId() == snapshot["previous_uid"]), None)
+            if previous:
+                if not project.SetCurrentTimeline(previous):
+                    raise ValueError("原时间线未恢复")
+                if snapshot.get("previous_timecode") and not previous.SetCurrentTimecode(snapshot["previous_timecode"]):
+                    raise ValueError("原播放头未恢复")
+            if snapshot.get("page"):
+                resolve.OpenPage(snapshot["page"])
+    except Exception as exc:
+        errors.append(str(exc))
+    if not resolve.GetProjectManager().SaveProject():
+        errors.append("恢复后的工程未确认保存")
+    # Only this operation's queue entry and preset may be removed; keep the journal on failure.
+    if not errors:
+        jobs = project.GetRenderJobList() or []
+        if job_id and any(job.get("JobId") == job_id for job in jobs) and not project.DeleteRenderJob(job_id):
+            errors.append("本次导出任务未能从渲染队列移除")
+        if not errors and snapshot["preset"] in (project.GetRenderPresetList() or []):
+            if not project.DeleteRenderPreset(snapshot["preset"]):
+                errors.append("临时导出预设未能清理")
+    snapshot["restored"] = not errors
+    durable_json(path, snapshot)
+    if errors:
+        raise WorkerError("；".join(errors) + "。请核对达芬奇后重试。")
+    return {"restored": True}
+
+
+def export_textless(resolve, request):
+    """Render just the bound timeline, with all subtitle tracks and the dedicated screen-text tracks off.
+
+    All state is journaled before mutation. The render has its own deadline inside the bridge's process timeout,
+    so normal failures run the finally block; the journal also permits recovery after an unresponsive worker.
+    """
+    manager = resolve.GetProjectManager()
+    active = manager.GetCurrentProject()
+    if active and active.IsRenderingInProgress():
+        raise WorkerError("达芬奇正在渲染，请完成后再导入无字版。")
+    project = request_project(resolve, request)
+    timeline = find_timeline(project, request)
+    if project.IsRenderingInProgress():
+        raise WorkerError("达芬奇正在渲染，请完成后再导入无字版。")
+    if timeline.GetEndFrame() <= timeline.GetStartFrame():
+        raise WorkerError("这条时间线是空的，无法导出无字版。")
+    tracks = []
+    has_picture = False
+    for kind in ("subtitle", "video"):
+        for index in range(1, timeline.GetTrackCount(kind) + 1):
+            name = timeline.GetTrackName(kind, index)
+            enabled = timeline.GetIsTrackEnabled(kind, index)
+            if type(enabled) is not bool:
+                raise WorkerError("无法读取轨道开关状态，没有开始导出。")
+            if kind == "subtitle" or name in (HOOK_TRACK, "字幕"):
+                tracks.append({"kind": kind, "index": index, "name": name, "enabled": enabled})
+            elif enabled and timeline.GetItemListInTrack(kind, index):
+                has_picture = True
+    if not has_picture:
+        raise WorkerError("这条时间线没有启用的画面轨，无法导出无字版。")
+    # Fail before changing tracks when the source footage or audio is offline.
+    muted = {(track["kind"], track["index"]) for track in tracks}
+    for kind in ("video", "audio"):
+        for index in range(1, timeline.GetTrackCount(kind) + 1):
+            if (kind, index) in muted or not timeline.GetIsTrackEnabled(kind, index):
+                continue
+            for item in timeline.GetItemListInTrack(kind, index) or []:
+                media = optional(item, "GetMediaPoolItem")
+                props = optional(media, "GetClipProperty") or {}
+                source = props.get("File Path")
+                if str(props.get("Online Status") or "").casefold() == "offline" or (source and not Path(source).is_file()):
+                    raise WorkerError(f"素材「{item.GetName()}」离线，请在达芬奇重新链接后再导出。")
+    codecs = project.GetRenderCodecs("mp4") or {}
+    codec = next((c for c in ("H264_NVIDIA", "H264", "H264_AMD", "H264_INTEL") if c in codecs.values()), None)
+    if not codec:
+        raise WorkerError("当前达芬奇没有可用的 MP4 / H.264 导出编码器。")
+    output = Path(request["output_dir"])
+    output.mkdir(parents=True, exist_ok=True)
+    path = Path(request["recovery_path"])
+    previous = project.GetCurrentTimeline()
+    snapshot = {"project": project.GetName(), "project_id": project.GetUniqueId(), "timeline_uid": timeline.GetUniqueId(),
+                "timeline_name": timeline.GetName(), "tracks": tracks, "previous_uid": previous.GetUniqueId() if previous else "",
+                "previous_timecode": previous.GetCurrentTimecode() if previous else "", "page": optional(resolve, "GetCurrentPage"),
+                "preset": "__WB_textless_" + uuid4().hex, "format": project.GetCurrentRenderFormatAndCodec(),
+                "render_mode": project.GetCurrentRenderMode(), "restored": False}
+    durable_json(path, snapshot)
+    def progress(message, percent=None):
+        durable_json(request["progress_path"], {"message": message, "percent": percent})
+    error, result = None, None
+    try:
+        if not project.SaveAsNewRenderPreset(snapshot["preset"]):
+            raise WorkerError("无法保存原导出设置，没有开始导出。")
+        snapshot["preset_saved"] = True
+        durable_json(path, snapshot)
+        if not project.SetCurrentTimeline(timeline):
+            raise WorkerError("达芬奇没能打开对应成片时间线。")
+        progress("正在准备无字版…")
+        for track in tracks:
+            timeline.SetTrackEnable(track["kind"], track["index"], False)
+            if timeline.GetIsTrackEnabled(track["kind"], track["index"]) is not False:
+                raise WorkerError(f"没能关闭「{track['name']}」轨，没有开始导出。")
+        if not project.LoadRenderPreset("H.264 Master"):
+            raise WorkerError("达芬奇没能加载 H.264 导出设置。")
+        if not project.SetCurrentRenderFormatAndCodec("mp4", codec) or not project.SetCurrentRenderMode(1):
+            raise WorkerError("达芬奇没能设置整条成片的导出格式。")
+        settings = {"TargetDir": str(output), "CustomName": "textless", "SelectAllFrames": True,
+                    "ExportVideo": True, "ExportAudio": True, "ExportSubtitle": False, "DataBurnIn": "None",
+                    "FormatWidth": int(timeline.GetSetting("timelineResolutionWidth")),
+                    "FormatHeight": int(timeline.GetSetting("timelineResolutionHeight")),
+                    "FrameRate": float(timeline.GetSetting("timelineFrameRate")), "VideoQuality": "Best",
+                    "AudioCodec": "aac", "AudioSampleRate": 48000, "UseUniqueFilenames": False}
+        if not project.SetRenderSettings(settings):
+            raise WorkerError("达芬奇没有接受无字版导出设置。")
+        job_id = project.AddRenderJob()
+        if not job_id:
+            raise WorkerError("达芬奇没能建立本次导出任务。")
+        snapshot["render_job_id"] = job_id
+        durable_json(path, snapshot)
+        if not project.StartRendering([job_id]):
+            raise WorkerError("达芬奇没能开始导出无字版。")
+        deadline = time.monotonic() + request.get("render_timeout", 1200)
+        while True:
+            status = project.GetRenderJobStatus(job_id) or {}
+            state = status.get("JobStatus")
+            progress("正在从达芬奇导出无字版…", status.get("CompletionPercentage", 0))
+            if state == "Complete":
+                break
+            if state in ("Failed", "Cancelled", "Background Render Cancelled", "Remote Render Cancelled"):
+                raise WorkerError("达芬奇导出失败或已取消：" + str(status.get("Error") or state))
+            if not project.IsRenderingInProgress():
+                raise WorkerError("达芬奇导出已停止，未得到完整的无字版。")
+            if time.monotonic() >= deadline:
+                raise WorkerError("无字版导出超时，已停止本次导出。")
+            time.sleep(1)
+        video = output / "textless.mp4"
+        if not video.is_file() or video.stat().st_size == 0:
+            raise WorkerError("达芬奇未生成可用的无字版视频。")
+        result = {"video_path": str(video), "name": timeline.GetName(), "unique_id": timeline.GetUniqueId()}
+    except Exception as exc:
+        error = exc
+    finally:
+        try:
+            progress("正在恢复字幕和屏显轨…")
+        except OSError:
+            pass
+        try:
+            restore_textless(resolve, request)
+        except Exception as exc:
+            raise WorkerError(f"{str(error) + '；' if error else ''}导出后恢复未完成：{exc}") from exc
+    if error:
+        raise error
+    return {**result, "restored": True}
+
+
 COMMANDS = {"ping": lambda resolve, request: {}, "status": status, "build": build, "open": open_timeline, "inspect": inspect, "restore": restore,
             "candidates": candidates, "frames": frames, "reveal": reveal, "mark_usage": mark_usage,
-            "read_subtitles": read_subtitles, "replace_subtitles": replace_subtitles, "add_hook": add_hook}
+            "read_subtitles": read_subtitles, "replace_subtitles": replace_subtitles, "add_hook": add_hook,
+            "edit_audio_baseline": edit_audio_baseline, "inherit_edit_audio": inherit_edit_audio,
+            "export_textless": export_textless, "restore_textless": restore_textless}
 
 
 def main():

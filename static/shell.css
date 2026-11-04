@@ -191,9 +191,6 @@ label>.workbench-select,.field>.workbench-select{width:100%}
 .product-manager-add button{flex-shrink:0;padding:8px 15px;font-size:13px}
 .product-manager-filter{padding:16px 24px 10px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-shrink:0}
 .product-manager-filter>input{max-width:245px;height:36px}
-.product-manager-tabs{display:flex;gap:4px;flex-shrink:0;padding:3px;background:var(--surface-alt);border-radius:8px}
-.product-manager-tabs button{padding:7px 11px;border-radius:6px;background:transparent;color:var(--muted);font-size:12px;white-space:nowrap}
-.product-manager-tabs button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 4px #0002;font-weight:600}
 #product-manager-error,#product-manager-status{margin:0 24px 8px;padding:9px 12px;border-radius:8px;font-size:12px;line-height:1.6;overflow-wrap:anywhere;flex-shrink:0}
 #product-manager-error{background:var(--surface-danger);color:var(--danger-ink)}
 #product-manager-status{background:var(--surface-tint);color:var(--accent-text)}

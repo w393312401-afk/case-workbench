@@ -389,7 +389,8 @@ class CaseBreakdownRunner:
     def __call__(self, app, case_id, video_path, job, update=None):
         case = app.store.read_case(case_id)
         root = Path(app.store.root)
-        runtime = SkillRuntime(root)
+        # Skill code and case data may live in different roots after migration.
+        runtime = SkillRuntime(getattr(app.ai, "skill_code_root", root), case_data_root=root)
         bundle = runtime.prepare("retrospective", "auto")
         if not bundle.get("ready") or not bundle.get("skills"):
             reasons = "；".join(item.get("reason", "") for item in bundle.get("unavailable", []))

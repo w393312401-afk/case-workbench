@@ -363,6 +363,7 @@ export function createRemoteProxy(config, { resolveKey, upstream = UPSTREAM, now
           if (guestDocument && error.status === 401) { await sendGuest(request, response, guestView, config.hostname); return; }
           throw error;
         }
+        if (user.cookie) response.setHeader('set-cookie', user.cookie);
         if (pathname === '/auth/session' && request.method === 'GET') {
           jsonResponse(response, { authenticated: true, username: user.username }); return;
         }
@@ -392,6 +393,11 @@ export function createRemoteProxy(config, { resolveKey, upstream = UPSTREAM, now
       forwarded.once('response', incoming => {
         const outgoingHeaders = filterHeaders(incoming.headers);
         outgoingHeaders['cache-control'] = staticCachePolicy(request, incoming);
+        const renewedCookie = response.getHeader('set-cookie');
+        if (renewedCookie) {
+          outgoingHeaders['set-cookie'] = [].concat(outgoingHeaders['set-cookie'] || [], renewedCookie);
+          outgoingHeaders['cache-control'] = 'private, no-store';
+        }
         outgoingHeaders.vary = [...new Set(String(outgoingHeaders.vary || '').split(',').map(value => value.trim()).filter(Boolean).concat('Cookie'))].join(', ');
         if (typeof outgoingHeaders.location === 'string' && outgoingHeaders.location.startsWith(`${target.origin}/`)) {
           outgoingHeaders.location = `https://${config.hostname}${outgoingHeaders.location.slice(target.origin.length)}`;

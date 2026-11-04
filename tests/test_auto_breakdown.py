@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -38,6 +39,54 @@ def fake_download(url, folder, video_id):
     target = folder / f"{video_id}.mp4"
     target.write_bytes(b"\x00\x00\x00\x18ftypmp42" + bytes(range(256)) * 8)
     return target
+
+
+class DownloaderTests(unittest.TestCase):
+    def test_project_downloader_receives_proxy_and_isolated_package_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            package = root / "tool"
+            (package / "yt_dlp").mkdir(parents=True)
+            (package / "yt_dlp" / "__init__.py").touch()
+            output = root / "output"
+            output.mkdir()
+            captured = {}
+
+            def run(command, **kwargs):
+                captured.update(command=command, **kwargs)
+                (output / f"{VIDEO_ID}.mp4").write_bytes(b"video")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.object(AUTO, "LOCAL_YT_DLP", package), patch.object(AUTO.subprocess, "run", side_effect=run):
+                path, reason = AUTO._with_local_yt_dlp("https://example.test/video", output, VIDEO_ID,
+                                                       proxy="http://127.0.0.1:7900")
+            self.assertEqual(path, output / f"{VIDEO_ID}.mp4")
+            self.assertEqual(reason, "")
+            self.assertIn("--proxy", captured["command"])
+            self.assertIn("http://127.0.0.1:7900", captured["command"])
+            self.assertIn("--max-filesize", captured["command"])
+            self.assertEqual(captured["env"]["PYTHONPATH"].split(AUTO.os.pathsep)[0], str(package))
+
+    def test_download_passes_proxy_to_fallback_and_cleans_partial_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            seen = []
+
+            def failed(url, directory, video_id, *, proxy):
+                seen.append(proxy)
+                (directory / "partial.mp4").write_bytes(b"incomplete")
+                return None, "下载失败"
+
+            def succeeds(url, directory, video_id, *, proxy):
+                seen.append(proxy)
+                self.assertFalse((directory / "partial.mp4").exists())
+                return fake_download(url, directory, video_id), ""
+
+            with patch.object(AUTO, "_with_local_yt_dlp", failed), patch.object(AUTO, "_with_yt_dlp_module", succeeds):
+                path = AUTO.download_tiktok("https://example.test/video", folder, VIDEO_ID,
+                                            proxy="http://127.0.0.1:7900")
+            self.assertTrue(path.is_file())
+            self.assertEqual(seen, ["http://127.0.0.1:7900"] * 2)
 
 
 class WorkbenchCase(unittest.TestCase):
@@ -258,10 +307,13 @@ class BatchCollectTests(AutoBreakdownTests):
         import threading as th
         state = {"now": 0, "peak": 0}
         guard = th.Lock()
+        all_started = th.Event()
         def slow(url, folder, video_id):
             with guard:
                 state["now"] += 1; state["peak"] = max(state["peak"], state["now"])
-            time.sleep(0.3)
+                if state["now"] == AUTO.PARALLEL_DOWNLOADS:
+                    all_started.set()
+            all_started.wait(5)
             with guard:
                 state["now"] -= 1
             return fake_download(url, folder, video_id)
@@ -312,8 +364,10 @@ class FakeBridge:
 
 
 class FakeRuntime:
-    def __init__(self, root):
-        pass
+    calls = []
+
+    def __init__(self, root, case_data_root=None):
+        self.calls.append((root, case_data_root))
 
     def prepare(self, action, selection):
         return {"ready": True, "skills": [{"name": "product-video-case-analysis", "path": "skill"}],
@@ -324,6 +378,7 @@ class FakeRuntime:
 class RunnerTests(WorkbenchCase):
     def setUp(self):
         super().setUp()
+        FakeRuntime.calls = []
         template = self.skill / "sources" / "video-cases" / "case_template.md"
         template.parent.mkdir(parents=True, exist_ok=True)
         template.write_text("---\nlibrary_id: VSL-T3-000\n---\n# 模板\n", encoding="utf-8")
@@ -377,6 +432,13 @@ class RunnerTests(WorkbenchCase):
         self.identifier = other["case_id"]
         status, body = self.request("POST", f"/api/cases/{self.identifier}/auto-breakdown", {})
         self.assertEqual(self.wait()["analysis"]["library_id"], "VSL-T2-002")
+
+    def test_breakdown_uses_skill_code_root_separately_from_case_data(self):
+        code_root = self.skill.parent / "skill-code" / "product-video-script-review"
+        self.app.ai.skill_code_root = code_root
+        self.use(DOC)
+        self.assertEqual(self.run_job()["status"], "completed")
+        self.assertEqual(FakeRuntime.calls[-1], (code_root, self.skill))
 
     def test_structure_errors_get_one_repair_round(self):
         bridge = self.use("```markdown\n" + DOC.replace("STRUCTURE-OK", "缺东西") + "\n```", DOC)

@@ -28,6 +28,9 @@ class BoardCampaignFilterTests(unittest.TestCase):
         folder = self.root / "exports"
         for day, gmv in (("2026-09-08", 20), ("2026-09-09", 30), ("2026-09-10", 40), ("2026-09-11", 50)):
             shops.totals(folder / "本土店" / "销售" / f"{day}.xlsx", day, gmv)
+        for day, gmv in (("2026-09-01", 0), ("2026-09-02", 450), ("2026-09-08", 0), ("2026-09-09", 0), ("2026-09-10", 150)):
+            performance.export(folder / "本土店" / "视频" / f"{day}.xlsx", day, day,
+                [performance.row(performance.LINKED, 100, 1, 10, gmv)])
         photo = deepcopy(shops.ITEM_ROWS[:1])
         photo[0][5] = "SHARPAL 202H Precision Kit(1732157836537861037)"
         shops.item_export(folder / "本土店" / "图文" / "九月.xlsx", "2026-09-01", "2026-09-30", photo)
@@ -75,7 +78,7 @@ class BoardCampaignFilterTests(unittest.TestCase):
         page.locator("#perf-campaign").select_option(selected)
 
     def wait_gmv(self, page, value):
-        page.wait_for_function("value => document.querySelector('#perf-board [data-perf-metric=gmv] strong')?.textContent === value", arg=value)
+        page.wait_for_function("value => [value, value + '.00'].includes(document.querySelector('#perf-board [data-perf-metric=gmv] strong')?.textContent)", arg=value)
 
     def filters(self, page):
         return page.evaluate("CasePerformance.captureListState().filters")
@@ -94,11 +97,11 @@ class BoardCampaignFilterTests(unittest.TestCase):
         self.assertIn("2026-09-08", trigger)
         self.assertIn("2026-09-10", trigger)
         hint = page.locator("#perf-campaign-hint").inner_text()
-        self.assertIn("周", hint)
-        self.assertIn("月", hint)
+        self.assertIn("自制视频按活动日期统计", hint)
+        self.assertIn("整份导出", hint)
         page.wait_for_function("() => [...document.querySelectorAll('.perf-source')].every(card => !card.textContent.includes('正在读取'))")
         source_values = page.locator(".perf-sources .perf-source > strong").all_inner_texts()
-        self.assertEqual(source_values, ["$150", "$121", "$100"])
+        self.assertEqual(source_values, ["$150.00", "$121", "$100"])
         weeks = self.fold(page, "每周数据表")
         weeks.locator("summary").click()
         self.assertEqual(weeks.locator("tbody tr td:first-child").all_inner_texts(), ["2026-09-07 周"])

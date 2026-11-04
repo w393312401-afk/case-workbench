@@ -373,6 +373,24 @@ class ProductionStore:
         return {"project": key, "code": re.sub(r"\D", "", key) or key, "fps": "29.97", "width": 1080, "height": 1920,
                 "audio_bin": "音频字幕", "timeline_bin": "时间线", **saved}
 
+    @staticmethod
+    def material_combos(data, product, limit=3):
+        """Material timeline sets this product's AI edits used, most used first, ties broken by the latest use."""
+        key = product_key(product)
+        combos = {}
+        for job in data.get("jobs", []):
+            if job.get("product") != key:
+                continue
+            for edit in job.get("edits", []):
+                names = [str(name).strip() for name in edit.get("materials") or [] if str(name).strip()]
+                if not names:
+                    continue
+                entry = combos.setdefault(frozenset(names), {"materials": list(dict.fromkeys(names)), "count": 0, "last": ""})
+                entry["count"] += 1
+                entry["last"] = max(entry["last"], str(edit.get("started_at") or ""))
+        ranked = sorted(combos.values(), key=lambda item: (item["count"], item["last"]), reverse=True)
+        return [{"materials": item["materials"], "count": item["count"]} for item in ranked[:limit]]
+
     def read(self):
         with self.lock:
             data = copy.deepcopy(self._read_catalog())

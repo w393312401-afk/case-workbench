@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import copy
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -231,6 +232,20 @@ class NotionUploadHTTPTests(unittest.TestCase):
 
     def stop_server(self):
         return self.fixture.WorkbenchHTTPTests.stop_server(self)
+
+    def test_index_serves_notion_upload_and_all_its_script_sources(self):
+        status, _, index = self.request("GET", "/")
+        self.assertEqual(200, status)
+        sources = re.findall(r'<script\b[^>]*\bsrc="([^"]+)"', index.decode("utf-8"))
+        paths = [source.split("?", 1)[0] for source in sources]
+        self.assertIn("/notion-upload.js", paths)
+        self.assertLess(paths.index("/notion-upload.js"), paths.index("/video-publication.js"))
+        for source in sources:
+            with self.subTest(source=source):
+                status, headers, content = self.request("GET", source)
+                self.assertEqual(200, status)
+                self.assertIn("javascript", headers["Content-Type"])
+                self.assertTrue(content)
 
     def test_routes_pass_the_chosen_timeline_and_do_not_register_a_post(self):
         manager = self.server.app.notion_uploads

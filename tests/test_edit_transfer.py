@@ -271,3 +271,15 @@ def test_receipt_records_the_version_that_made_it(stations):
     imported = import_package(local, export_package(host, identifier))['job_id']
     import_receipt(host, identifier, export_receipt(local, imported))
     assert host.production.job(identifier)['local_edit_results'][0]['source_version'] == source_version()
+
+
+def test_running_tasks_do_not_block_taking_the_package_but_an_unfinished_cut_blocks_the_result(stations):
+    host, local, identifier = stations
+    host._timeline_live()[identifier] = dict(request_id='build-1', cancel=None)
+    imported = import_package(local, export_package(host, identifier))['job_id']
+    local._timeline_live()[imported] = dict(request_id='build-2', cancel=None)
+    with pytest.raises(VoiceError) as caught:
+        export_receipt(local, imported)
+    assert caught.value.status == 409
+    del local._timeline_live()[imported]
+    assert export_receipt(local, imported)['local_job_id'] == imported

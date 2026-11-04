@@ -422,6 +422,7 @@ class DataBackupTests(unittest.TestCase):
     def test_remote_access_secrets_are_not_exported_and_survive_restore(self):
         token = self.write(self.runtime / "remote-access" / "tunnel-token.txt", b"live tunnel token")
         account = self.write(self.runtime / "remote-access" / "account.json", b'{"password_hash": "live"}')
+        sessions = self.write(self.runtime / "remote-access" / "sessions.json", b'{"sessions": ["isolated fixture hash"]}')
         self.write(self.runtime / "remote-access" / "guest" / "site" / "index.html", b"<p>guest</p>")
         archive = self.export()
         with zipfile.ZipFile(archive) as packed:
@@ -433,6 +434,7 @@ class DataBackupTests(unittest.TestCase):
         result = self.manager.restore_archive(archive, self.root / "recoveries")
         self.assertEqual(token.read_bytes(), b"rotated tunnel token")
         self.assertEqual(account.read_bytes(), b'{"password_hash": "live"}')
+        self.assertEqual(sessions.read_bytes(), b'{"sessions": ["isolated fixture hash"]}')
         self.assertTrue((self.runtime / "remote-access" / "guest" / "site" / "index.html").is_file())
         with zipfile.ZipFile(result["recovery_path"]) as recovery:
             self.assertFalse(any("remote-access" in name.casefold() for name in recovery.namelist()))

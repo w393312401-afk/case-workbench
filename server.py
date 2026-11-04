@@ -45,6 +45,8 @@ sys.path.insert(0, str(Path(DEFAULT_CONFIG.get("skill_code_root", DEFAULT_CONFIG
 sys.path.insert(0, str(APP_ROOT / "scripts"))
 sys.path.insert(0, str(APP_ROOT))
 from workbench_notion import NotionUploads, NotionUploadStore
+from photo_carousel import PhotoCarousels, PhotoSetError
+from carousel_render import RenderError
 from case_store import CaseStore, StoreError, add_schema, current_schema, current_sources, encode
 from render_case_library import render_library
 from validate_case_structure import DEFAULT_TEMPLATE, validate_case_structure
@@ -398,7 +400,7 @@ def job_fill_result(job, task):
 
 
 class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, FeedbackWorkbenchMixin, ContentWorkbenchMixin, CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, OrderDeleteMixin, VideoPublishMixin, PublicationMatchMixin, RetroDraftWorkbenchMixin, ReplicaWorkbenchMixin):
-    def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=(), skill_code_root=None, legacy_runtime_roots=(), notion_settings=None):
+    def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=(), skill_code_root=None, legacy_runtime_roots=(), notion_settings=None, tiktok_download_proxy=None):
         self.store = CachedCaseStore(skill_root)
         self.runtime = Path(runtime_root).resolve()
         self.store.product_labels = ProductLabels(self.runtime / "evidence" / "case-products.json")
@@ -435,7 +437,7 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         self.reconcile_tk_candidates()
         self.activity = ActivityStore(self.runtime)
         # 收为案例后自动取原视频并拆解；拆解步骤可替换（见 case_auto_breakdown.py）。
-        self.auto_breakdown = AutoBreakdown(self, analyzer=CaseBreakdownRunner())
+        self.auto_breakdown = AutoBreakdown(self, analyzer=CaseBreakdownRunner(), download_proxy=tiktok_download_proxy)
         # Cases left at 「视频已关联，拆解待接入」 (or cut off by the restart) are broken down without a click.
         resume = threading.Timer(8, self.auto_breakdown.resume_pending)
         resume.daemon = True
@@ -452,6 +454,7 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         codex = getattr(self.ai.bridge, "codex", None)
         self.edit_codex = CodexEditBridge(executable=getattr(codex, "executable", None))
         self.notion_uploads = NotionUploads(self, notion_settings, bridge=None)
+        self.photo_sets = PhotoCarousels(self)
         self.edit_skill_dir = code_root.parent / "davinci-product-video-editing"
         self.ledger_dir = self.runtime / "davinci-ledger"
         self.recover_edit_results()
@@ -481,6 +484,8 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
 
     def ensure_data_idle(self):
         with self.lock:
+            if getattr(self, "photo_sets", None) and self.photo_sets.busy():
+                raise TransferError("图文导入、抽帧或文案正在处理，请完成后再操作总数据。", 409)
             if getattr(self, "notion_uploads", None) and self.notion_uploads.busy():
                 raise TransferError("Notion 成片仍在上传，请完成后再操作总数据。", 409)
             tasks = self.ai.list_tasks()
@@ -2081,6 +2086,27 @@ class Handler(BaseHTTPRequestHandler):
                     if set(query) != {"timeline"} or len(values) != 1:
                         raise ApiError(400, "请选择要上传的时间线。")
                     return self.output(200, self.app.notion_uploads.detail(notion_upload[1], values[0]))
+                photo_set = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/photo-set", path)
+                if photo_set:
+                    values = query.get("timeline", [])
+                    if len(values) != 1:
+                        raise ApiError(400, "请选择时间线。")
+                    return self.output(200, self.app.photo_sets.detail(photo_set[1], values[0]))
+                photo_frames = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/frames", path)
+                if photo_frames:
+                    return self.output(200, self.app.photo_sets.frames(photo_frames[1]))
+                photo_frame = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/frame/([0-9]{1,5})\.jpg", path)
+                if photo_frame:
+                    return self.file(self.app.photo_sets.frame_path(photo_frame[1], int(photo_frame[2]), full=query.get("full") == ["1"]))
+                photo_base = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/base/([A-Z])/([0-9]{1,2})", path)
+                if photo_base:
+                    return self.file(self.app.photo_sets.base_path(photo_base[1], photo_base[2], int(photo_base[3])))
+                photo_render = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/render/([A-Z])/(label|flower|bar)/([0-9]{1,2})\.jpg", path)
+                if photo_render:
+                    width = query.get("w", [None])[0]
+                    if width is not None and not width.isdigit():
+                        raise ApiError(400, "宽度无效。")
+                    return self.file(self.app.photo_sets.rendered(photo_render[1], photo_render[2], photo_render[3], int(photo_render[4]), width))
                 if path == "/api/notion/connection":
                     return self.output(200, self.app.notion_uploads.bridge.status())
                 if video_publication:
@@ -2317,7 +2343,7 @@ class Handler(BaseHTTPRequestHandler):
                 files.update({"/review-experiences.js": "review-experiences.js", "/review-experiences.css": "review-experiences.css"})
                 files.update({"/index.html": "index.html", "/remote-session.js": "remote-session.js", "/remote-session.css": "remote-session.css",
                               "/tk-candidates.js": "tk-candidates.js", "/tk-candidates.css": "tk-candidates.css",
-                              "/buttons.css": "buttons.css"})
+                              "/buttons.css": "buttons.css", "/notion-upload.js": "notion-upload.js", "/photo-carousel.js": "photo-carousel.js", "/photo-carousel.css": "photo-carousel.css"})
                 if path in files:
                     return self.file(APP_ROOT / "static" / files[path], cache=True, immutable=path != "/" and "v" in query)
                 if path in {"/activity.js", "/activity.css"}:
@@ -2508,6 +2534,30 @@ class Handler(BaseHTTPRequestHandler):
                     handler = {"approval": self.app.approve_edit, "baseline": self.app.adopt_edit_baseline}[action]
                     return self.output(200, handler(identifier, edit_id, body))
                 video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication(/verify|/calendar|/undo-auto|/dismiss|/title-zh)?", path)
+                photo_import = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/photo-set/from-resolve", path)
+                if photo_import:
+                    return self.output(202, self.app.photo_sets.import_resolve(photo_import[1], body))
+                photo_create = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/photo-set", path)
+                if photo_create:
+                    return self.output(200, self.app.photo_sets.create(photo_create[1], body))
+                photo_action = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/(plan|cancel|choose|work|remove|style|undo|copy|export|open)", path)
+                if photo_action:
+                    set_id, action = photo_action.groups()
+                    sets = self.app.photo_sets
+                    if action == "open":
+                        if not self.app.allow_open or os.name != "nt":
+                            raise ApiError(403, "当前模式无法打开本地文件夹。")
+                        subprocess.Popen(["explorer.exe", str(sets.export_folder(set_id, str(body.get("name") or "")))])
+                        return self.output(200, {"ok": True})
+                    handlers = {"plan": lambda: sets.plan(set_id, body), "cancel": lambda: sets.cancel(set_id),
+                                "choose": lambda: sets.choose(set_id, body), "style": lambda: sets.set_style(set_id, body),
+                                "work": lambda: sets.open_work(set_id, body), "remove": lambda: sets.remove_work(set_id, body),
+                                "undo": lambda: sets.undo(set_id), "copy": lambda: sets.edit_set(set_id, body),
+                                "export": lambda: sets.export(set_id)}
+                    return self.output(200, handlers[action]())
+                photo_slide = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/slides/([0-9]{1,2})", path)
+                if photo_slide:
+                    return self.output(200, self.app.photo_sets.edit_slide(photo_slide[1], int(photo_slide[2]), body))
                 notion_upload = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/notion", path)
                 if notion_upload:
                     return self.output(202, self.app.notion_uploads.start(notion_upload[1], body))
@@ -2679,6 +2729,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.output(exc.status, {"error": str(exc)})
         except AITaskError as exc:
             return self.output(exc.status, {"error": str(exc)})
+        except PhotoSetError as exc:
+            return self.output(exc.status, {"error": str(exc)})
+        except RenderError as exc:
+            return self.output(400, {"error": str(exc)})
         except VideoFileError as exc:
             self.close_connection = True
             self.output(400, {"error": str(exc)})
@@ -2947,6 +3001,8 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
 
     def _activity_blocker(self):
         """Why the service must not stop right now, or None. Never interrupts: running work is only reported."""
+        if getattr(self.app, "photo_sets", None) and self.app.photo_sets.busy():
+            return "图文导入、抽帧或文案正在处理，请完成后再重新启动。"
         if getattr(self.app, "notion_uploads", None) and self.app.notion_uploads.busy():
             return "Notion 成片仍在上传，请完成后再重新启动。"
         tasks = self.app.ai.list_tasks()
@@ -3029,7 +3085,9 @@ def make_server(skill_root, runtime_root, port=8767, allow_open=True, ai_bridge=
         server.app = Workbench(skill_root, runtime_root, allow_open, ai_bridge=ai_bridge,
                                performance_sources=performance_sources, skill_code_root=code_root,
                                legacy_runtime_roots=legacy_roots,
-                               notion_settings=DEFAULT_CONFIG.get("notion_upload") if code_root else None)
+                               notion_settings=DEFAULT_CONFIG.get("notion_upload") if code_root else None,
+                               tiktok_download_proxy=(DEFAULT_CONFIG.get("tiktok_download_proxy")
+                                                      if Path(runtime_root).resolve() == Path(DEFAULT_CONFIG["runtime_root"]).resolve() else None))
         server.app.data_transfer.maintenance = server.data_operation
         server.app.data_transfer.start(server.server_port)
     except Exception:

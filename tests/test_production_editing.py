@@ -54,6 +54,9 @@ def inspect_reply(gaps=(), voice_end=400, shots=((0, 25), (25, 50), (50, 200))):
 class Runner:
     def __init__(self):
         self.calls, self.inspect, self.final_inspect = [], inspect_reply(), None
+        self.audio_baseline = {"ok": True, "video_ids": [], "audio_ids": []}
+        self.audio_result = {"ok": True, "status": "completed", "new_audio": 0, "processed": 0, "plugins_copied": 0,
+                             "protected": 0, "issues": [], "parameters_unverified": False, "saved": True}
 
     def __call__(self, args, input, **options):
         request = json.loads(input.decode("utf-8"))
@@ -63,6 +66,10 @@ class Runner:
             if isinstance(reply, Exception):
                 raise reply
             body = json.loads(json.dumps(reply).replace("{job}", self.job))
+        elif request["command"] == "edit_audio_baseline":
+            body = self.audio_baseline
+        elif request["command"] == "inherit_edit_audio":
+            body = self.audio_result
         elif request["command"] == "build":
             body = {"ok": True, "name": request["prefix"] + "1", "unique_id": "uid-1", "start_frame": 0, "end_frame": 400,
                     "audio_items": [{"start": 0, "end": 400}], "markers": [{"frame": m["frame"]} for m in request["markers"]]}
@@ -189,6 +196,94 @@ class EditingTests(unittest.TestCase):
         self.assertIsNone(edit["baseline"])
         self.assertEqual(judging_inspects(self.bench.runner.calls), [])
         self.assertEqual(self.bench.production.public("202H")["product_settings"]["material_timelines"], ["蓝点折刀成品素材"])
+
+    def test_source_audio_is_applied_after_edit_and_recorded_before_delivery(self):
+        job = self.timeline_job()
+        self.bench.runner.audio_baseline = {"ok": True, "video_ids": ["old-video"], "audio_ids": ["old-audio"]}
+        self.bench.runner.audio_result.update(new_audio=2, processed=2, plugins_copied=2, parameters_unverified=True)
+        self.start(job)
+        edit = self.wait(job["id"])
+        calls = self.bench.runner.calls
+        before = next(index for index, call in enumerate(calls) if call["command"] == "edit_audio_baseline")
+        inherit = next(index for index, call in enumerate(calls) if call["command"] == "inherit_edit_audio")
+        snapshot = next(index for index, call in enumerate(calls) if call["command"] == "inspect")
+        self.assertLess(before, inherit)
+        self.assertLess(inherit, snapshot)
+        self.assertEqual(calls[inherit]["audio_baseline"], {"video_ids": ["old-video"], "audio_ids": ["old-audio"]})
+        self.assertEqual(edit["audio_inheritance"]["plugins_copied"], 2)
+        self.assertEqual(edit["status"], "completed")
+        self.assertTrue(any("插件参数和动画" in question for question in edit["report"]["questions"]))
+        self.assertIn("audio_overrides", self.editor.calls[0]["prompt"])
+
+    def test_audio_failure_is_visible_and_cannot_be_reported_as_complete(self):
+        job = self.timeline_job()
+        self.bench.runner.audio_result.update(status="needs_attention", saved=True,
+            issues=[{"start": 30, "end": 50, "message": "素材原声插件无法读取。"}])
+        self.start(job)
+        edit = self.wait(job["id"])
+        self.assertEqual(edit["status"], "needs_repair")
+        self.assertIn("原声音量或插件", edit["error"])
+        self.assertTrue(any("[30, 50)" in question and "插件无法读取" in question for question in edit["report"]["questions"]))
+        self.assertIsNone(edit["validation"])
+
+    def test_picture_recheck_does_not_clear_an_unresolved_audio_failure(self):
+        job = self.timeline_job()
+        self.bench.runner.audio_result.update(status="needs_attention", saved=True,
+            issues=[{"item_uid": "bad-audio", "start": 30, "end": 50, "message": "素材原声插件无法读取。"}])
+        self.start(job)
+        edit = self.wait(job["id"])
+        self.current_readback(job, shots=((0, 200), (200, 400)))
+        checked = self.bench.recheck_edit(job["id"], edit["id"], {"request_id": uuid4().hex})["edit"]
+        self.assertEqual(checked["status"], "needs_repair")
+        self.assertEqual(checked["audio_inheritance"]["status"], "needs_attention")
+
+    def test_unavailable_audio_baseline_never_overwrites_existing_clips(self):
+        job = self.timeline_job()
+        self.bench.runner.audio_baseline = {"ok": True, "video_ids": ["existing"]}  # Missing audio identities.
+        self.start(job)
+        edit = self.wait(job["id"])
+        self.assertEqual(edit["status"], "needs_repair")
+        self.assertTrue(any("剪前已有片段" in item["message"] for item in edit["audio_inheritance"]["issues"]))
+        self.assertFalse(any(call["command"] == "inherit_edit_audio" for call in self.bench.runner.calls))
+
+    def test_retry_carries_failed_audio_ids_forward_without_rewriting_other_clips(self):
+        job = self.timeline_job()
+        self.bench.runner.audio_result.update(status="needs_attention", issues=[{
+            "item_uid": "bad-audio", "linked_ids": ["bad-video"], "start": 0, "end": 20, "message": "插件未复制。"}])
+        first = self.start(job)["edit"]
+        self.assertEqual(self.wait(job["id"])["status"], "needs_repair")
+        self.bench.runner.audio_baseline = {"ok": True, "video_ids": ["bad-video", "other-video"],
+                                            "audio_ids": ["bad-audio", "other-audio"]}
+        self.bench.runner.audio_result.update(status="completed", issues=[])
+        self.start(job, retry_of=first["id"])
+        self.assertEqual(self.wait(job["id"])["status"], "completed")
+        call = [call for call in self.bench.runner.calls if call["command"] == "inherit_edit_audio"][-1]
+        self.assertEqual(call["retry_audio_ids"], ["bad-audio"])
+        self.assertEqual(call["retry_video_ids"], ["bad-video"])
+
+    def test_retry_does_not_hide_an_unidentified_previous_audio_failure(self):
+        job = self.timeline_job()
+        self.bench.runner.audio_baseline = {"ok": True, "video_ids": ["existing"]}
+        first = self.start(job)["edit"]
+        self.assertEqual(self.wait(job["id"])["status"], "needs_repair")
+        self.bench.runner.audio_baseline = {"ok": True, "video_ids": [], "audio_ids": []}
+        self.start(job, retry_of=first["id"])
+        edit = self.wait(job["id"])
+        self.assertEqual(edit["status"], "needs_repair")
+        self.assertTrue(any("上次未能确定" in issue["message"] for issue in edit["audio_inheritance"]["issues"]))
+
+    def test_sound_override_requires_identified_audio_and_protects_it(self):
+        job = self.timeline_job()
+        self.start(job, instruction="把原声音量调低 10 dB")
+        edit = self.wait(job["id"])
+        self.assertEqual(edit["status"], "needs_repair")
+        self.assertTrue(any("未标明受影响" in item["message"] for item in edit["audio_inheritance"]["issues"]))
+        self.assertFalse(any(call["command"] == "inherit_edit_audio" for call in self.bench.runner.calls))
+        self.editor.output = REPORT.replace('"saved": true', '"audio_overrides": ["audio-custom"], "saved": true')
+        self.start(job, instruction="把原声音量调低 10 dB")
+        edit = self.wait(job["id"])
+        self.assertEqual(edit["status"], "completed")
+        self.assertEqual([call for call in self.bench.runner.calls if call["command"] == "inherit_edit_audio"][-1]["audio_overrides"], ["audio-custom"])
 
     def test_unsaved_edit_retries_in_place_on_the_same_timeline(self):
         job = self.timeline_job()
@@ -992,6 +1087,19 @@ class SummaryTests(unittest.TestCase):
                                 instruction="", materials=[], ledger="L", notes={}, voice_label="Zack")
         self.assertIn("| 1 | A ／ B | 甲 乙 | 无推荐 |", text)
         self.assertIn("未指定", text)
+
+
+class MaterialCombosTests(unittest.TestCase):
+    def test_combos_rank_by_use_then_latest_and_ignore_order_and_other_products(self):
+        def job(product, *edits):
+            return {"product": product, "edits": [{"materials": names, "started_at": at} for names, at in edits]}
+        data = {"jobs": [
+            job("202H", (["A", "B"], "2026-10-01"), (["B", "A"], "2026-10-03"), (["C"], "2026-10-05")),
+            job("202H", (["D"], "2026-10-02"), (["D"], "2026-10-04"), ([], "2026-10-06")),
+            job("110", (["A", "B"], "2026-10-07"), (["A", "B"], "2026-10-08"), (["A", "B"], "2026-10-09"))]}
+        self.assertEqual(ProductionStore.material_combos(data, "202H"),
+                         [{"materials": ["D"], "count": 2}, {"materials": ["A", "B"], "count": 2}, {"materials": ["C"], "count": 1}])
+        self.assertEqual(len(ProductionStore.material_combos(data, "202H", limit=1)), 1)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 Each case has at most one job, kept as JSON under runtime/evidence/auto-breakdown/<case_id>.json.
 The video source is, in order: a finished file already bound to a video publication with the same
-video ID, the yt-dlp Python module, a yt-dlp executable on PATH, then reading TikTok's public page.
+video ID, the project-local yt-dlp, the Python module, an executable on PATH, then TikTok's public page.
 The breakdown step is a replaceable callable (`analyzer`); until the case-analysis skill is wired in,
 the default analyzer only reports that the step is waiting, so nothing is guessed or written.
 """
@@ -13,10 +13,12 @@ from datetime import datetime, timezone
 import hashlib
 import http.cookiejar
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import urllib.request
 from uuid import uuid4
@@ -34,6 +36,7 @@ STEP_LABELS = {"queued": "排队中", "downloading": "正在取得原视频", "a
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/126.0 Safari/537.36")
 DOWNLOAD_TIMEOUT = 600
+LOCAL_YT_DLP = Path(__file__).resolve().parent / ".local" / "yt-dlp"
 # Downloads are network-bound and run wider than analyses, which each start a model run on the PC.
 PARALLEL_DOWNLOADS = 4
 PARALLEL_ANALYSES = 3
@@ -75,7 +78,7 @@ def _finish_file(folder, video_id):
     return target
 
 
-def _with_yt_dlp_module(url, folder, video_id):
+def _with_yt_dlp_module(url, folder, video_id, *, proxy=None):
     try:
         import yt_dlp  # type: ignore
     except ImportError:
@@ -83,6 +86,8 @@ def _with_yt_dlp_module(url, folder, video_id):
     options = {"outtmpl": str(folder / f"{video_id}.%(ext)s"), "format": "best[ext=mp4]/best",
                "quiet": True, "no_warnings": True, "noprogress": True, "noplaylist": True,
                "max_filesize": MAX_VIDEO_BYTES, "socket_timeout": 30}
+    if proxy:
+        options["proxy"] = proxy
     try:
         with yt_dlp.YoutubeDL(options) as client:
             client.download([url])
@@ -91,19 +96,36 @@ def _with_yt_dlp_module(url, folder, video_id):
     return _finish_file(folder, video_id), ""
 
 
-def _with_yt_dlp_exe(url, folder, video_id):
-    exe = shutil.which("yt-dlp")
-    if not exe:
-        return None, "本机 PATH 中没有 yt-dlp"
+def _run_yt_dlp(command, url, folder, video_id, *, proxy=None, env=None):
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    args = [*command, "--no-playlist", "--no-progress", "--max-filesize", str(MAX_VIDEO_BYTES),
+            "--socket-timeout", "30", "-f", "best[ext=mp4]/best", "-o", str(folder / f"{video_id}.%(ext)s")]
+    if proxy:
+        args.extend(["--proxy", proxy])
     try:
-        done = subprocess.run([exe, "--no-playlist", "-f", "best[ext=mp4]/best", "-o", str(folder / f"{video_id}.%(ext)s"), url],
-                              capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT, creationflags=flags)
+        done = subprocess.run([*args, url], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=DOWNLOAD_TIMEOUT, creationflags=flags, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"yt-dlp 运行失败：{str(exc)[:200]}"
     if done.returncode != 0:
         return None, f"yt-dlp 下载失败：{(done.stderr or done.stdout or '').strip()[-200:]}"
     return _finish_file(folder, video_id), ""
+
+
+def _with_local_yt_dlp(url, folder, video_id, *, proxy=None):
+    if not (LOCAL_YT_DLP / "yt_dlp" / "__init__.py").is_file():
+        return None, "工作台未安装专用 yt-dlp"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(LOCAL_YT_DLP), env.get("PYTHONPATH"))))
+    return _run_yt_dlp([sys.executable, "-m", "yt_dlp", "--ignore-config"], url, folder, video_id,
+                       proxy=proxy, env=env)
+
+
+def _with_yt_dlp_exe(url, folder, video_id, *, proxy=None):
+    exe = shutil.which("yt-dlp")
+    if not exe:
+        return None, "本机 PATH 中没有 yt-dlp"
+    return _run_yt_dlp([exe], url, folder, video_id, proxy=proxy)
 
 
 def _find_play_url(page):
@@ -128,9 +150,12 @@ def _find_play_url(page):
     return None
 
 
-def _with_page(url, folder, video_id):
+def _with_page(url, folder, video_id, *, proxy=None):
     jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    handlers = [urllib.request.HTTPCookieProcessor(jar)]
+    if proxy:
+        handlers.append(urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+    opener = urllib.request.build_opener(*handlers)
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
     try:
         with opener.open(urllib.request.Request(url, headers=headers), timeout=30) as response:
@@ -157,18 +182,18 @@ def _with_page(url, folder, video_id):
     return _finish_file(folder, video_id), ""
 
 
-def download_tiktok(url, folder, video_id):
+def download_tiktok(url, folder, video_id, *, proxy=None):
     """Return the downloaded file inside `folder`; raise DownloadError with every attempt's reason."""
     reasons = []
-    for attempt in (_with_yt_dlp_module, _with_yt_dlp_exe, _with_page):
+    for attempt in (_with_local_yt_dlp, _with_yt_dlp_module, _with_yt_dlp_exe, _with_page):
         for leftover in folder.iterdir():
             if leftover.is_file():
                 leftover.unlink()
-        path, reason = attempt(url, folder, video_id)
+        path, reason = attempt(url, folder, video_id, proxy=proxy)
         if path:
             return path
         reasons.append(reason or "未取得视频文件")
-    raise DownloadError("原视频没有下载成功。" + "；".join(reasons) + "。可以在案例详情手动导入视频，或在电脑上安装 yt-dlp（py -m pip install yt-dlp）后点「重试」。")
+    raise DownloadError("原视频没有下载成功。" + "；".join(reasons) + "。可以在案例详情手动导入视频；也可检查工作台的下载工具和网络连接后点「重试」。")
 
 
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-\[\]]{0,79}")
@@ -176,11 +201,11 @@ EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
 class AutoBreakdown:
-    def __init__(self, app, analyzer=None, downloader=None):
+    def __init__(self, app, analyzer=None, downloader=None, download_proxy=None):
         self.app = app
         self.root = Path(app.runtime) / "evidence" / "auto-breakdown"
         self.analyzer = analyzer or pending_analyzer
-        self.downloader = downloader or download_tiktok
+        self.downloader = downloader or (lambda url, folder, video_id: download_tiktok(url, folder, video_id, proxy=download_proxy))
         self.lock = threading.Lock()
         self.threads = {}
         self.download_slots = threading.Semaphore(PARALLEL_DOWNLOADS)

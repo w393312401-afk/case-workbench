@@ -96,6 +96,15 @@ class HandoffTest(unittest.TestCase):
     def test_other_modes_of_the_same_job_stay_as_they_were(self):
         self.assertNotIn("原片镜头表", self.handoff("explain"))
 
+    def test_other_modes_do_not_inherit_the_lines_copy_the_original_hint(self):
+        self.job["lines"][0]["proof"] = "照原片 镜头 1（0.00–2.00 秒）"
+        self.job["lines"][1]["proof"] = "Show the edge"
+        for mode in ("explain", "sync", "montage"):
+            text = self.handoff(mode)
+            self.assertNotIn("照原片 镜头", text)
+            self.assertIn("Show the edge", text)
+        self.assertIn("照原片 镜头 1", self.handoff("replica"))
+
     def test_the_mode_has_selection_rules(self):
         self.assertIn("replica", MODES)
         self.assertIn("1:1 复刻原片", mode_selection_rules("replica"))

@@ -37,7 +37,8 @@ class NotionUploadBrowserTests(unittest.TestCase):
           window.api = async (path,options) => {
             if (path === '/api/notion/connection') return {status:window.connectorState || 'connected',authorization_url:window.connectorState === 'waiting' ? 'https://mcp.notion.com/authorize-fixture' : ''};
             if (path === '/api/notion/connect') {window.connectorState = 'waiting';return {status:'waiting'};}
-            if (path.startsWith('/api/content/calendar')) return {};
+            // The planned day on the page, kept apart from the server's own date and from today.
+            if (path.startsWith('/api/content/calendar')) return {calendar_date:'2026-11-05'};
             if (path.startsWith('/api/performance/videos')) return {videos:[]};
             if (path.includes('/notion')) {
               if (options) {
@@ -70,7 +71,8 @@ class NotionUploadBrowserTests(unittest.TestCase):
         self.assertTrue(self.page.evaluate("document.querySelector('[data-notion-upload]').compareDocumentPosition(document.querySelector('[name=post_id]')) & Node.DOCUMENT_POSITION_FOLLOWING"))
         self.page.locator('[name="post_id"]').fill('7999999999999999901')
         dialog = self.open()
-        self.assertEqual('2026-11-03', dialog.locator('[name="published_on"]').input_value())
+        # The dialog takes the day planned on the page, not the server's default.
+        self.assertEqual('2026-11-05', dialog.locator('[name="published_on"]').input_value())
         self.assertIn('中文文案。', dialog.text_content())
         dialog.locator('[data-notion-title-choice]').select_option('1')
         dialog.locator('[data-notion-submit]').click()
@@ -78,7 +80,7 @@ class NotionUploadBrowserTests(unittest.TestCase):
         call = self.page.evaluate('window.calls[0]')
         self.assertEqual('two', call['timeline_uid'])
         self.assertEqual('🔴Second title#tag', call['title'])
-        self.assertEqual('2026-11-03', call['published_on'])
+        self.assertEqual('2026-11-05', call['published_on'])
         self.assertTrue(call['request_id'])
         self.assertEqual('7999999999999999901', self.page.locator('#publication [name="post_id"]').input_value())
         self.assertTrue(dialog.locator('[data-notion-result]').is_visible())

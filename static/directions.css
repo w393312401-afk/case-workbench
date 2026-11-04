@@ -51,7 +51,7 @@
 .direction-card-link{min-height:32px;white-space:nowrap}.direction-card-link>svg{width:16px;height:16px;flex:0 0 16px}
 
 #direction-plan-dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 40px);padding:0;overflow:auto}#direction-plan-dialog .dialog-heading{padding:22px 24px 14px}
-.tier-segment{display:flex;gap:6px;flex-wrap:wrap}.tier-segment button{white-space:nowrap;min-width:40px;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--muted);font-weight:700;cursor:pointer}.tier-segment button:hover{color:var(--accent);border-color:var(--accent)}.tier-segment button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+.tier-segment{display:flex;gap:6px;flex-wrap:wrap}
 .tier-segment button small{margin-left:6px;font-size:.85em;font-weight:600;opacity:.7}
 
 /* 卖点与方向：界面细化 */
@@ -107,14 +107,6 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 .dir-status.is-good{background:var(--surface-success);color:var(--success-ink)}
 .dir-status.is-warn{background:var(--surface-warm);color:var(--warm-ink)}
 .dir-build{font-size:13px}
-.dir-menu{position:relative}
-.dir-menu>summary{list-style:none;cursor:pointer;width:30px;height:30px}
-.dir-menu>summary::-webkit-details-marker{display:none}
-.dir-menu>summary svg{width:18px;height:18px}
-.dir-menu[open]>summary{background:var(--fill)}
-.dir-menu>div{position:absolute;right:0;top:calc(100% + 4px);z-index:6;min-width:150px;padding:5px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow-menu)}
-.dir-menu>div>button{display:block;width:100%;text-align:left;background:transparent;color:var(--ink);font-size:13px;padding:7px 10px;border-radius:6px}
-.dir-menu>div>button:hover{background:var(--accent);color:var(--on-accent)}
 
 /* ---- detail: chain and variants on the left, facts and next round on the right ---- */
 .dir-detail-heading{align-items:flex-end;margin-bottom:24px}
@@ -201,9 +193,6 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 .dir-variant-head .subtle{margin-left:auto}
 .dir-change{font-size:12px;color:var(--muted);margin-top:8px}
 .dir-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:-6px -22px 12px;padding:0 14px;overflow-x:auto;scrollbar-width:none}
-.dir-tabs button{display:inline-flex;align-items:center;gap:6px;padding:10px 10px 11px;background:transparent;color:var(--muted-soft);font-size:13px;font-weight:500;white-space:nowrap;border-bottom:2px solid transparent;margin-bottom:-1px}
-.dir-tabs button small{font-size:12px;padding:0 6px;border-radius:9px;background:var(--fill);color:var(--muted-soft)}
-.dir-tabs button[aria-selected=true]{color:var(--ink);border-bottom-color:var(--accent)}
 .dir-empty{font-size:13px;color:var(--muted-soft);padding:8px 0}
 .dir-related .direction-related-list{display:flex;flex-direction:column;gap:0}
 .dir-related .direction-related-item{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);background:none;border-radius:0}
@@ -297,7 +286,6 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 .dir-notes-more>summary{cursor:pointer}
 .dir-notes-more p{margin:4px 0}
 .dir-aside-status{display:flex;align-items:center;gap:8px}
-.dir-menu [role=menu] [data-use-point]{white-space:nowrap}
 .dir-point-rationale{font-size:13px;margin-top:12px}
 .dir-point-rationale summary{cursor:pointer;color:var(--accent-text);width:fit-content}
 .dir-point-rationale p{color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7;margin-top:8px}

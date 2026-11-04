@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
+import http.client
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -23,6 +25,9 @@ sys.path.insert(0, str(ROOT))
 from app_config import load_config
 DEFAULT_NODE = Path("C:/Program Files/nodejs/node.exe")
 DEFAULT_CLOUDFLARED = Path.home() / ".antigravity_tools" / "bin" / "cloudflared.exe"
+TUNNEL_CHECK_INTERVAL = 15
+TUNNEL_STARTUP_GRACE = 60
+TUNNEL_FAILED_CHECKS = 3
 
 
 class ConfigurationError(ValueError):
@@ -35,6 +40,33 @@ class AlreadyRunning(RuntimeError):
 
 def timestamp():
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def available_metrics_port():
+    # Pick a new loopback-only endpoint for each owned connector generation.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return listener.getsockname()[1]
+
+
+def probe_tunnel(port):
+    # HTTPConnection bypasses system proxies and never follows redirects.
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    try:
+        connection.request("GET", "/ready")
+        response = connection.getresponse()
+        if response.status != 200:
+            return False
+        raw = response.read(4097)
+        if len(raw) > 4096:
+            return False
+        data = json.loads(raw)
+        return (isinstance(data, dict) and type(data.get("readyConnections")) is int
+                and data["readyConnections"] > 0)
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
 
 
 def atomic_json(path, value):
@@ -142,11 +174,12 @@ class Settings:
         # Start the snapshot independently; always stop the connector before the proxy.
         return ("guest_snapshot", "proxy", "tunnel") if self.guest_enabled else ("proxy", "tunnel")
 
-    def commands(self):
+    def commands(self, *, tunnel_metrics="127.0.0.1:0"):
         commands = {
             "proxy": [str(self.node), str(self.proxy), "--config", str(self.config)],
             "tunnel": [str(self.cloudflared), "tunnel", "--config", str(self.runtime / "cloudflared.yml"),
-                       "--no-autoupdate", "--metrics", "127.0.0.1:0", "--loglevel", "error",
+                       "--no-autoupdate", "--metrics", tunnel_metrics, "--loglevel", "warn",
+                       "--transport-loglevel", "warn", "--log-directory", str(self.runtime / "cloudflared-logs"),
                        "run", "--protocol", "http2", "--token-file", str(self.token)],
         }
         if self.guest_enabled:
@@ -255,8 +288,9 @@ def load_settings(root=ROOT, config_path=None):
 
 
 class Supervisor:
-    def __init__(self, settings, *, clock=time.monotonic, spawn=subprocess.Popen, job=None, logger=None):
+    def __init__(self, settings, *, clock=time.monotonic, spawn=subprocess.Popen, job=None, logger=None, probe=None):
         self.settings, self.clock, self.spawn, self.job = settings, clock, spawn, job
+        self.probe = probe if probe is not None else probe_tunnel
         self.logger = logger or logging.getLogger("remote-supervisor")
         self.instance = uuid4().hex
         self.stop_event = threading.Event()
@@ -269,11 +303,17 @@ class Supervisor:
         self.stop_reason = "requested"
         self.reload_requests = set()
         self.last_reload_request_id = None
+        self.tunnel_metrics_port = None
+        self.tunnel_connected = None
+        self.tunnel_failed_checks = 0
+        self.next_tunnel_check = 0
 
     def status(self):
         return {"schema": 1, "pid": os.getpid(), "instance_id": self.instance, "state": self.state,
                 "auth_mode": self.settings.auth_mode, "last_reload_request_id": self.last_reload_request_id,
                 "guest_enabled": self.settings.guest_enabled,
+                "tunnel_connected": self.tunnel_connected,
+                "tunnel_failed_checks": self.tunnel_failed_checks,
                 "updated_at": timestamp(), "children": {
                     kind: {"pid": child["process"].pid if child["process"] is not None else None,
                            "failures": child["failures"], "last_exit_code": child["exit_code"]}
@@ -381,6 +421,10 @@ class Supervisor:
         return readiness
 
     def _stop_child(self, kind):
+        if kind == "tunnel":
+            self.tunnel_metrics_port = None
+            self.tunnel_connected = None
+            self.tunnel_failed_checks = 0
         child = self.children[kind]
         process = child["process"]
         if process is None:
@@ -412,6 +456,24 @@ class Supervisor:
                     # handle must not abort cleanup/restart of the other child.
                     self.logger.warning("%s_output_close_failed exception=%s", kind, type(error).__name__)
 
+    def _tunnel_unhealthy(self, child, now):
+        if now < self.next_tunnel_check:
+            return False
+        self.next_tunnel_check = now + TUNNEL_CHECK_INTERVAL
+        connected = self.probe(self.tunnel_metrics_port)
+        if connected:
+            if self.tunnel_connected is not True:
+                self.logger.info("tunnel_connected")
+            self.tunnel_connected = True
+            self.tunnel_failed_checks = 0
+            return False
+        if self.tunnel_connected is not False:
+            self.logger.warning("tunnel_not_ready")
+        self.tunnel_connected = False
+        self.tunnel_failed_checks += 1
+        return (now - child["started"] >= TUNNEL_STARTUP_GRACE
+                and self.tunnel_failed_checks >= TUNNEL_FAILED_CHECKS)
+
     def tick(self):
         with self.lifecycle_lock:
             self._tick_locked()
@@ -420,16 +482,23 @@ class Supervisor:
         now = self.clock()
         for kind, child in self.children.items():
             process = child["process"]
-            unhealthy = (kind == "proxy" and process is not None and
-                         not child["readiness"]["ready"].is_set())
+            unhealthy = False
+            if process is not None and process.poll() is None:
+                if kind == "proxy":
+                    unhealthy = not child["readiness"]["ready"].is_set()
+                elif kind == "tunnel":
+                    unhealthy = self._tunnel_unhealthy(child, now)
             if process is not None and (process.poll() is not None or unhealthy):
                 if kind == "proxy":
                     self._stop_child("tunnel")
+                elif unhealthy:
+                    self.logger.warning("tunnel_unhealthy checks=%s", self.tunnel_failed_checks)
                 child.update(exit_code=process.returncode, failures=child["failures"] + 1)
                 self._stop_child(kind)
                 child["retry_at"] = now + min(60, 2 ** min(child["failures"] - 1, 6))
                 self.logger.warning("%s_exited code=%s", kind, process.returncode)
-            elif process is not None and now - child["started"] >= 60:
+            elif (process is not None and now - child["started"] >= 60
+                  and (kind != "tunnel" or self.tunnel_connected is True)):
                 child["failures"] = 0
             if child["process"] is None and now >= child["retry_at"]:
                 if self.stop_event.is_set():
@@ -440,7 +509,13 @@ class Supervisor:
                             not proxy["readiness"]["ready"].is_set()):
                         continue
                 try:
-                    process = self.spawn(self.settings.commands()[kind], cwd=self.settings.root,
+                    if kind == "tunnel":
+                        self.tunnel_metrics_port = available_metrics_port()
+                        self.next_tunnel_check = now
+                        command = self.settings.commands(tunnel_metrics=f"127.0.0.1:{self.tunnel_metrics_port}")[kind]
+                    else:
+                        command = self.settings.commands()[kind]
+                    process = self.spawn(command, cwd=self.settings.root,
                                          env=self.settings.environment(kind), stdin=subprocess.DEVNULL,
                                          stdout=subprocess.PIPE if kind == "proxy" else subprocess.DEVNULL,
                                          stderr=subprocess.DEVNULL, bufsize=0,
@@ -464,6 +539,8 @@ class Supervisor:
                     child["retry_at"] = now + min(60, 2 ** min(child["failures"] - 1, 6))
                     self.logger.error("%s_start_failed exception=%s", kind, type(error).__name__)
         self.state = "children_running" if all(child["process"] is not None for child in self.children.values()) else "retry_wait"
+        if self.state == "children_running" and self.tunnel_connected is False:
+            self.state = "tunnel_disconnected"
         self.write_status()
 
     def stop_children(self):

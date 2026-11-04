@@ -109,6 +109,32 @@ class UnifiedDropdownPagesBrowserTests(unittest.TestCase):
     def assert_no_overflow(self, page):
         self.assertTrue(page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1"))
 
+    def test_more_actions_fit_pages_and_escape_keeps_the_current_route(self):
+        for width in (320, 1280):
+            for theme in ("light", "dark"):
+                with self.subTest(width=width, theme=theme):
+                    page = self.open_page(width=width, theme=theme)
+                    for route, selector in ((f"#case/{self.identifier}", ".detail-menu"),
+                                            ("#/202H/reviews", ".rev-menu"),
+                                            ("#/202H/content", ".flow-main-menu")):
+                        page.evaluate("route => location.hash = route", route)
+                        menu = page.locator(selector).first
+                        trigger = menu.locator(":scope > summary")
+                        trigger.click()
+                        panel = menu.locator(":scope > div")
+                        expect(panel).to_be_visible()
+                        page.wait_for_function("selector => document.querySelector(selector + ' > div').style.getPropertyValue('--menu-shift-x') !== ''", arg=selector)
+                        self.assert_in_viewport(page, panel)
+                        self.assertTrue(panel.evaluate("panel => {const r=panel.getBoundingClientRect();return panel.contains(document.elementFromPoint(r.x+r.width/2,r.y+16));}"))
+                        item = panel.locator("button, a").first
+                        expect(item).to_have_css("justify-content", "flex-start")
+                        before = page.url
+                        page.keyboard.press("Escape")
+                        expect(panel).to_be_hidden()
+                        expect(trigger).to_be_focused()
+                        self.assertEqual(page.url, before)
+                    page.close()
+
     def test_library_filters_sort_and_saved_view_use_dropdowns_and_keep_their_effect(self):
         page = self.open_page()
         page.locator("#case-search").wait_for()
@@ -156,7 +182,11 @@ class UnifiedDropdownPagesBrowserTests(unittest.TestCase):
         page.locator("#perf-tab-list").click()
         self.assert_enhanced(page)
         previous_count = page.locator("[data-video-row]").count()
-        self.choose(page, "#perf-account", "bushcraftedge", query="bush")
+        _, _, _, panel = self.open_picker(page, "#perf-account")
+        panel.locator("input[type=search]").fill("bush")
+        panel.locator('[data-picker-value="bushcraftedge"]').click()
+        expect(panel).to_be_visible()  # account selections stay open for another choice
+        page.keyboard.press("Escape")
         expect(page.locator("#perf-reset")).to_be_visible()
         self.assertGreater(previous_count, page.locator("[data-video-row]").count())
         self.assertTrue(all("bushcraftedge" in text for text in page.locator("[data-video-row]").all_text_contents()))

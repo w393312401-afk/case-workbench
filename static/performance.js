@@ -23,7 +23,7 @@
     status: ["参考价值", (v) => statusOrder.indexOf(reviewStatus(v).key), "asc"],
     views: ["累计播放", (v) => v.views, "desc"],
     items: ["售出", (v) => salesOf(v).items, "desc"],
-    gmv: ["GMV", (v) => weekSales() ? salesOf(v).gmv : v.gmv || 0, "desc"],
+    gmv: ["GMV", (v) => listSalesRange() ? salesOf(v).gmv : v.gmv || 0, "desc"],
     ctor: ["CTOR", (v) => salesOf(v).ctor_pct, "desc"],
     week: ["本周 GMV", (v) => v.this_week_gmv || 0, "desc"],
     likes: ["点赞", (v) => v.likes, "desc"],
@@ -97,6 +97,7 @@
   }
 
   const money = (v) => (v == null ? "—" : "$" + Math.round(v).toLocaleString("en-US"));
+  const money2 = (v) => (v == null ? "—" : "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
   const count = (v) => (v == null ? "—" : Math.round(v).toLocaleString("en-US"));
   const pct = (v) => (v == null ? "—" : v.toFixed(2) + "%");
   const badge = (v) => {const status = reviewStatus(v);return `<span class="perf-status perf-review-${status.key}" title="${esc(statusHints[status.key])}">${esc(status.label)}</span>`;};
@@ -162,21 +163,15 @@
     const campaign = window.Campaigns?.current()?.campaigns.find(row => row.id === f.campaign);
     return campaign ? [campaign.start, campaign.end] : null;
   };
-  // Whole Monday-start weeks a range touches, the same weeks the board counts; exports can't be split into days.
-  const salesWeeks = ([start, end]) => {
-    const monday = (day) => addCalendarDays(day, -((new Date(`${day}T00:00:00Z`).getUTCDay() + 6) % 7));
-    return [monday(start), addCalendarDays(monday(end), 6)];
-  };
-  // With a date or activity picked, one video's sold, GMV and CTOR over those weeks; null means the list shows its totals.
+  // With a date or activity picked, use the same exact-date rows as the board; null means the list shows its totals.
   let weekSalesCache = {};
   function weekSales() {
     const range = listSalesRange(), analytics = perf.analytics;
     if (!range || !analytics) return null;
-    const cache = weekSalesCache, [first, last] = salesWeeks(range);
+    const cache = weekSalesCache, [first, last] = range;
     if (cache.analytics === analytics && cache.first === first && cache.last === last) return cache.videos;
     const videos = new Map();
-    for (const [index, week, , , clicks, orders, items, gmv] of analytics.weekly) {
-      if (week < first || week > last) continue;
+    for (const [index, , , , clicks, orders, items, gmv] of PerfDashboard.rangeRows(analytics, range).totalRows) {
       const id = analytics.videos[index][0], row = videos.get(id) || { clicks: 0, orders: 0, items: 0, gmv: 0 };
       row.clicks += clicks;
       row.orders += orders;
@@ -189,18 +184,21 @@
     return videos;
   }
   const noWeekSales = { items: null, gmv: null, ctor_pct: null };
-  const salesOf = (v) => { const videos = weekSales(); return videos ? videos.get(v.video_id) || noWeekSales : v; };
+  const salesOf = (v) => listSalesRange() ? weekSales()?.get(v.video_id) || noWeekSales : v;
   const weekSalesLabels = { items: "售出", gmv: " GMV", ctor: " CTOR" };
-  const weekSalesLabel = (key) => weekSales() && weekSalesLabels[key] ? `${perf.filters.campaign ? "活动周" : "所选周"}${weekSalesLabels[key]}` : sortColumns[key][0];
+  const weekSalesLabel = (key) => listSalesRange() && weekSalesLabels[key] ? `${perf.filters.campaign ? "活动期" : "所选日期"}${weekSalesLabels[key]}` : sortColumns[key][0];
   function weekSalesNote() {
     const range = listSalesRange();
     if (!range) return "";
-    if (perf.analytics) return `售出、GMV、CTOR 按${perf.filters.campaign ? "活动" : "所选日期"}涉及的整周（${salesWeeks(range).join(" 至 ")}）统计，可能包含${perf.filters.campaign ? "活动外" : "所选范围外的"}日期，鼠标悬停看累计值。`;
-    return perf.analyticsLoading ? "整周数字读取中，售出、GMV、CTOR 暂为累计值。" : "整周数字暂时读不到，售出、GMV、CTOR 显示为累计值。";
+    if (perf.analytics) {
+      const selected = PerfDashboard.rangeRows(perf.analytics, range), missing = selected.missing;
+      return `售出、GMV、CTOR 按 ${range.join(" 至 ")} 统计，不包含范围外日期；${selected.exact ? "使用完整区间报表，不与日报或周报相加。" : missing.length ? `数据不全，缺少 ${PerfDashboard.missingDates(missing)} 的逐日报表，仅显示已覆盖日期。` : "鼠标悬停可看累计值。"}${selected.invalidReport && !selected.exact ? "匹配的区间报表缺少必要指标，未用于汇总。" : ""}`;
+    }
+    return perf.analyticsLoading ? "所选日期数字读取中，售出、GMV、CTOR 暂不显示。" : "所选日期数字暂时读不到，售出、GMV、CTOR 暂不显示。";
   }
   function salesCells(v) {
     const sales = salesOf(v), title = (text) => sales === v ? "" : ` title="${esc(text)}"`;
-    return `<td class="num"${title(`累计售出 ${count(v.items)}`)}>${count(sales.items)}</td><td class="num"${title(`累计 GMV ${money(v.gmv)}`)}>${money(sales.gmv)}</td><td class="num"${title(`累计 CTOR ${pct(v.ctor_pct)}`)}>${pct(sales.ctor_pct)}</td>`;
+    return `<td class="num"${title(`累计售出 ${count(v.items)}`)}>${count(sales.items)}</td><td class="num"${title(`累计 GMV ${money(v.gmv)}`)}>${(listSalesRange() ? money2 : money)(sales.gmv)}</td><td class="num"${title(`累计 CTOR ${pct(v.ctor_pct)}`)}>${pct(sales.ctor_pct)}</td>`;
   }
   const resultCount = (rows) => {
     if (campaignPending()) return perf.campaignsError ? "活动读取失败" : "正在读取活动…";
@@ -218,7 +216,7 @@
     const rows = perf.videos.filter((v) =>
       (!range || ((v.posted_on || "") >= range[0] && (v.posted_on || "") <= range[1])) &&
       (!campaignId || (campaign && v.posted_on && v.window_end && v.posted_on <= campaign.end && v.window_end >= campaign.start)) &&
-      (!f.account || v.account === f.account) &&
+      PerfDashboard.accountMatches(f.account, v.account) &&
       (ignoreProduct || productMatches(v.product)) &&
       (ignoreStatus || !f.status || reviewStatus(v).key === f.status) &&
       (!q || `${v.title} ${v.video_id}`.toLowerCase().includes(q)) &&
@@ -234,7 +232,8 @@
   }
 
   function options(values, selected, all) {
-    return `<option value="">${all}</option>` + values.map((v) => `<option value="${esc(v)}" ${v === selected ? "selected" : ""}>${esc(v)}</option>`).join("");
+    const selectedAccounts = new Set(String(selected || "").split(",").filter(Boolean));
+    return `<option value=""${selectedAccounts.size ? "" : " selected"}>${all}</option>` + values.map((v) => `<option value="${esc(v)}" ${selectedAccounts.has(v) ? "selected" : ""}>${esc(v)}</option>`).join("");
   }
 
   // Human review classification across the videos matching every other filter.
@@ -800,7 +799,7 @@
     const shop = shopNames[f.shop], info = (s.shops || []).find((item) => item.id === f.shop);
     // A shop whose folder has no exports yet shows how to fill it, instead of empty charts.
     const bare = info && !info.files;
-    const accounts = [...new Set(perf.videos.map((v) => v.account).filter(Boolean))].sort();
+    const accounts = [...new Set([...perf.videos.map((v) => v.account).filter(Boolean), ...f.account.split(",").filter(Boolean)])].sort();
     const gaps = s.coverage.gaps.map(([a, b]) => (a === b ? a : `${a} 至 ${b}`)).join("、");
     $("#breadcrumb").innerHTML = "带货数据";
     $("#content").innerHTML = `<div class="page-heading perf-heading"><div><h1>带货数据</h1><p>${esc(shop)}：${s.coverage.first ? `视频导出覆盖 ${s.coverage.first} 至 ${s.coverage.last}${gaps ? `，缺 ${gaps}` : ""}。` : "还没有导入后台数据。"}参考价值以人工复盘分类为准。</p></div>
@@ -811,7 +810,7 @@
       <div class="perf-tabs" role="tablist" aria-label="带货数据视图">${tabs.map(([k, label]) => `<button type="button" role="tab" id="perf-tab-${k}" data-perf-tab="${k}" aria-selected="${k === f.tab}" class="${k === f.tab ? "is-active" : ""}">${label}</button>`).join("")}</div>
       <div class="toolbar perf-toolbar"${bare ? " hidden" : ""}>${PerfDatePicker.trigger(f.period, perf.summary)}${creators ? PerfCreators.toolbar(perf.creators, f) : board || photos ? ""
         : `<label class="search">${icon("search")}<input id="perf-q" aria-label="搜索视频标题或 ID" placeholder="搜索标题或视频 ID…" value="${esc(f.q)}"></label>`}
-        ${creators || photos ? "" : `<select id="perf-account" aria-label="账号">${options(accounts, f.account, "全部账号")}</select>`}
+        ${creators || photos ? "" : `<select id="perf-account" aria-label="账号" multiple size="1" data-multi-filter>${options(accounts, f.account, "全部账号")}</select>`}
         <button type="button" class="subtle perf-reset" id="perf-reset" hidden>清除筛选</button>
         ${board || creators || photos ? "" : `<span class="result-count">${resultCount(rows)}</span><button type="button" class="secondary compact" id="perf-export" title="把当前筛选的视频导出为 Excel：后台累计播放与公开页播放并排，售出和 GMV 是累计值，原导出表不改">导出 Excel</button>`}</div>
       ${!bare && window.Campaigns ? '<div class="perf-campaign-filter" id="perf-campaign-filter"></div>' : ""}
@@ -961,7 +960,7 @@
     const rows = [...(data?.campaigns || [])].sort((a,b) => (window.Campaigns.phase(a) === "next") - (window.Campaigns.phase(b) === "next") || b.start.localeCompare(a.start));
     const campaign = rows.find(row => row.id === selected);
     const basis = {
-      board: "已切换到活动日期。店铺日度数据按活动起止日统计；视频按活动涉及的整周、图文与达人按重叠的整份导出统计，可能包含活动外日期，无法精确拆分到活动日。",
+      board: "已切换到活动日期。自制视频按活动日期统计；图文与达人按重叠的整份导出统计，可能包含活动外日期。",
       photos: "已切换到活动日期。逐条图文按与活动重叠的整份导出统计，周汇总按整周统计；可能包含活动外日期，无法精确拆分到活动日。",
       creators: "已切换到活动日期。达人排行与明细按与活动重叠的整份导出统计，通常为月报；可能包含活动外日期，无法精确拆分到活动日。",
       list: `观察窗与活动期有重叠的视频会计入，含起止日期。${weekSalesNote()}`,
@@ -1186,8 +1185,10 @@
     drawer.addEventListener("click", (event) => { if (event.target === drawer || event.target.closest("[data-drawer-close]")) drawer.close(); });
     drawer.addEventListener("close", () => { perf.openVideo = ""; syncFilterURL(); $$("[data-video-row].is-open, [data-creator-row].is-open").forEach((row) => row.classList.remove("is-open")); });
     $(".perf-menu")?.addEventListener("click", (event) => { if (event.target.closest("[role=menuitem]")) event.currentTarget.open = false; });
-    [["#perf-account", "account"]].forEach(([selector, key]) =>
-      $(selector)?.addEventListener("change", (event) => { perf.filters[key] = event.target.value; perf.shown = 200; saveFilters(); refresh(); }));
+    $("#perf-account")?.addEventListener("change", (event) => {
+      perf.filters.account = [...event.target.selectedOptions].map(option => option.value).filter(Boolean).join(",");
+      perf.shown = 200; saveFilters(); refresh();
+    });
     $$(".perf-tabs [data-perf-tab]").forEach((button) => (button.onclick = () => setTab(button.dataset.perfTab)));
     $$("[data-perf-shop]").forEach((button) => (button.onclick = () => void switchShop(button.dataset.perfShop)));
     $("#perf-reset").onclick = () => {
@@ -1265,13 +1266,13 @@
 
   function reviewMaterial() {
     const s = perf.summary, weeks = s.weeks.filter((w) => w.complete), latest = weeks.at(-1);
-    const scopedVideos = perf.videos.filter(v => productMatches(v.product) && (!perf.filters.account || v.account === perf.filters.account));
+    const scopedVideos = perf.videos.filter(v => productMatches(v.product) && PerfDashboard.accountMatches(perf.filters.account, v.account));
     const judged = scopedVideos.filter((v) => v.window_end && latest && v.window_end >= addCalendarDays(latest.week, -7) && v.window_end <= addCalendarDays(latest.week, 6));
     const line = (v) => `- ${v.posted_on} ${v.account}｜${v.headline}｜${v.product}｜首两周播放 ${count(v.window_views)}｜累计 GMV ${money(v.gmv)}｜CTOR ${pct(v.ctor_pct)}｜${reviewStatus(v).label}${v.case_id ? `｜案例 ${v.case_id}` : ""}`;
     const top = [...scopedVideos].filter((v) => v.this_week_gmv > 0).sort((a, b) => b.this_week_gmv - a.this_week_gmv).slice(0, 10);
     return [
       `# ${shopNames[perf.filters.shop]}带货数据复盘材料（${latest ? `${latest.week} 这一周` : "暂无完整周"}）`,
-      ...(currentProduct() || perf.filters.account ? ["", `范围：${[currentProduct(), perf.filters.account].filter(Boolean).join(" · ")}（全店每周汇总未混入本范围）`] : ["", "## 每周走势（最近 6 个完整周）", ...weeks.slice(-6).map((w) => `- ${w.week} 起：GMV ${money(w.gmv)}，播放 ${count(w.views)}，售出 ${count(w.items)}，新发 ${w.posted} 条`)]),
+      ...(currentProduct() || perf.filters.account ? ["", `范围：${[currentProduct(), perf.filters.account.split(",").join("、")].filter(Boolean).join(" · ")}（全店每周汇总未混入本范围）`] : ["", "## 每周走势（最近 6 个完整周）", ...weeks.slice(-6).map((w) => `- ${w.week} 起：GMV ${money(w.gmv)}，播放 ${count(w.views)}，售出 ${count(w.items)}，新发 ${w.posted} 条`)]),
       "", "## 本周 GMV 前 10 的视频", ...top.map((v) => `${line(v)}｜本周 GMV ${money(v.this_week_gmv)}`),
       "", "## 本周刚满两周观察期的新视频", ...(judged.length ? statusOrder.flatMap((k) => judged.filter((v) => reviewStatus(v).key === k).map(line)) : ["- 无"]),
       "", "参考价值采用人工复盘分类；未复盘显示待复盘，已复盘但未分类显示待分类。",

@@ -341,8 +341,13 @@ window.VideoPublication = (() => {
       await repaint(result.timeline);
     });
   }
-  async function mount(host,{job,api,onSaved,onLoaded,onTimelineChanged} = {}) {
+  async function mount(host,{job,api,onSaved,onLoaded,onTimelineChanged,picker,onLines,onRegistered} = {}) {
     if (!host || !job || !api) return;
+    // A page with its own timeline selector hides this panel's switch and drives it through select().
+    if (picker !== undefined) host._videoPublicationPicker = picker;
+    if (onLines) host._videoPublicationOnLines = onLines;
+    if (onRegistered) host._videoPublicationOnRegistered = onRegistered;
+    host._videoPublicationArgs = {job,api,onSaved,onLoaded,onTimelineChanged};
     const token = Symbol('video-publication');host._videoPublicationToken = token;
     host.classList.add('video-publication');
     host.innerHTML = '<h2>成片与发布</h2><p class="context-note">正在读取发布记录…</p>';
@@ -354,6 +359,7 @@ window.VideoPublication = (() => {
     // One registration stands for each timeline. With several, a saved-but-unconfirmed request is kept per timeline, and the
     // order's header follows the current timeline only, never the one just being looked at.
     const lines = data.timelines || [], multi = lines.length > 1, key = multi ? `${job.id}:${data.timeline_uid}` : job.id;
+    host._videoPublicationShown = data.timeline_uid;host._videoPublicationOnLines?.(lines,data.timeline_uid);
     if (!multi || !host._videoPublicationTimeline || host._videoPublicationTimeline === lines[0].unique_id) onLoaded?.(item || null);
     let savedRequest;
     try {savedRequest = requests.get(key) || JSON.parse(sessionStorage.getItem(storageKey(key)) || 'null');} catch {}
@@ -370,11 +376,11 @@ window.VideoPublication = (() => {
       <label class="field"><span>绑定成片文件：本地完整路径</span><input name="file_path" maxlength="2000" placeholder="C:\Videos\最终成片.mp4" value="${esc(draft.file_path || item?.file?.original_path || '')}"></label>
       <label class="video-publication-confirm"><input name="file_confirmed" type="checkbox">我已核对：该文件就是以上审查版本实际发布的成片。</label></details></form>`;
     host.innerHTML = `<h2>成片与发布<details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">登记发布后的视频 ID，并保存对应脚本、配音和人工审查版本。导入或同步销售视频表时，能唯一匹配的帖子会自动登记；匹配结果不唯一的帖子会列在这里，点一下登记。自动登记可以撤销。发布后在浏览器打开自己账号的主页，TK 看板也会把新帖推给工作台。成片文件可选绑定，绑定后会复制到工作台，随完整备份保存。</div></details></h2>
-      ${timelinePicker(lines,data.timeline_uid)}
+      ${host._videoPublicationPicker === false ? '' : timelinePicker(lines,data.timeline_uid)}
       ${lines.some(line => line.unique_id === data.timeline_uid) ? timelineTools(job,data.timeline_uid,data.copy) : ''}
       ${data.timeline_uid && window.NotionUpload ? window.NotionUpload.markup(data.timeline_uid) : ''}
-      ${item ? receipt(job,item,true) : canEdit ? candidateRows(data.candidates) + formMarkup(calendarPlanMarkup()) : `<div class="video-publication-bar">${calendarPlanMarkup()}<span class="context-note">${esc(data.blocked_reason)}</span></div>`}
-      ${copyRow(data.copy)}
+      ${data.timeline_uid && window.PhotoCarousel ? window.PhotoCarousel.markup(data.timeline_uid) : ''}
+      ${item ? receipt(job,item,true) + copyRow(data.copy) : canEdit ? candidateRows(data.candidates) + copyRow(data.copy) + formMarkup(calendarPlanMarkup()) : `<div class="video-publication-bar">${calendarPlanMarkup()}<span class="context-note">${esc(data.blocked_reason)}</span></div>${copyRow(data.copy)}`}
       <div class="video-publication-folds">
       ${item && canEdit ? `<details class="video-publication-editor" ${savedRequest ? 'open' : ''}><summary>绑定另一个视频 / 修正当前登记</summary><p class="context-note">填新的视频 ID 会再绑定一个，原登记保留；填原 ID 是修正当前登记。</p>${formMarkup('')}</details>` : ''}
       ${item && !canEdit ? `<p class="context-note">${esc(data.blocked_reason)}</p>` : ''}
@@ -383,6 +389,7 @@ window.VideoPublication = (() => {
     bindCopy(host,data.copy);
     bindTimelineTools(host,job,api,onTimelineChanged,data.copy);
     if (window.NotionUpload && data.timeline_uid) void window.NotionUpload.bind(host,{job,api,uid:data.timeline_uid});
+    if (window.PhotoCarousel && data.timeline_uid) void window.PhotoCarousel.bind(host,{job,api,uid:data.timeline_uid});
     void fillTitleChinese(host,job,api,data.copy);
     host.querySelectorAll('[data-publication-timeline]').forEach(button => button.addEventListener('click',() => {
       if (button.classList.contains('is-current')) return;
@@ -468,7 +475,7 @@ window.VideoPublication = (() => {
       form.dataset.busy = '1';error.hidden = true;
       form.querySelectorAll('button').forEach(button => button.disabled = true);
       form.querySelector('[data-save-status]').textContent = '正在保存发布登记…';
-      try {await api(base(job.id),{method:'POST',body:request});clearPending(key);if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});}
+      try {await api(base(job.id),{method:'POST',body:request});clearPending(key);if (multi) host._videoPublicationOnRegistered?.(data.timeline_uid,lines);if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});}
       catch (problem) {
         const definitive = Number.isInteger(problem.status) && problem.status >= 400 && problem.status < 500;
         savedRequest.uncertain = !definitive;remember(key,savedRequest);
@@ -478,5 +485,11 @@ window.VideoPublication = (() => {
       finally {delete form.dataset.busy;form.querySelectorAll('button').forEach(button => button.disabled = false);lockUncertain();}
     });
   }
-  return {mount,normalize,localDate,postedOn,followPostDate,copyBlock,bindCopy,calendarLine,calendarChoice,calendarPlanMarkup,bindCalendarPlan,registrationTag,registrationHint,tiktokUrl};
+  // Shows another timeline's registration; a no-op when it is already shown or being read.
+  function select(host,uid) {
+    if (!host?._videoPublicationArgs || !uid || (host._videoPublicationTimeline || host._videoPublicationShown) === uid) return;
+    host._videoPublicationTimeline = uid;
+    return mount(host,host._videoPublicationArgs);
+  }
+  return {mount,normalize,localDate,postedOn,followPostDate,copyBlock,bindCopy,calendarLine,calendarChoice,calendarPlanMarkup,bindCalendarPlan,registrationTag,registrationHint,tiktokUrl,select};
 })();

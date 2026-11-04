@@ -670,5 +670,203 @@ class BuildTests(unittest.TestCase):
         self.assertIn("没有写意群标记", str(caught.exception))
 
 
+class SoundEffect:
+    def __init__(self, name, enabled=True, index=1, parameter="source setting"):
+        self.name, self.enabled, self.index, self.parameter = name, enabled, index, parameter
+
+    def GetInfo(self):
+        return {"id": self.name}
+
+    def GetIsEnabled(self):
+        return self.enabled
+
+    def GetIndex(self):
+        return self.index
+
+
+class SoundItem(FakeItem):
+    def __init__(self, project, timeline, kind, media, start, end, source_start, source_end, volume=0, effects=()):
+        super().__init__(start, end, media)
+        self.project, self.timeline, self.kind = project, timeline, kind
+        self.source_start, self.source_end = source_start, source_end
+        self.properties = {"AudioVolume": volume, "AudioVolumeEnabled": True, "AudioPan": 0.25}
+        self.effects, self.linked = list(effects), []
+        self.copy_calls, self.copy_return, self.unreadable_effects = [], True, False
+        self.copy_plugins = True
+
+    def GetType(self):
+        return self.kind
+
+    def GetSourceStartFrame(self):
+        return self.source_start
+
+    def GetSourceEndFrame(self):
+        return self.source_end
+
+    def GetSpeed(self):
+        return {"Percentage": 100.0}
+
+    def GetLinkedItems(self):
+        return self.linked
+
+    def GetProperties(self):
+        return dict(self.properties)
+
+    def GetEffects(self, category):
+        if self.project.current is not self.timeline:
+            return []  # Resolve can report an empty list for a non-active timeline.
+        if self.unreadable_effects:
+            return None
+        return list(self.effects)
+
+    def GetSourceAudioChannelMapping(self):
+        return "stereo"
+
+    def GetFades(self):
+        return {"FadeIn": 0, "FadeOut": 0}
+
+    def CopyAttributes(self, targets, options):
+        assert self.project.current is self.timeline
+        self.copy_calls.append(dict(options))
+        for target in targets:
+            if options.get("audioVolume"):
+                for key in ("AudioVolume", "AudioVolumeEnabled"):
+                    target.properties[key] = self.properties[key]
+            if options.get("audioPlugins") and self.copy_plugins:
+                target.effects = [SoundEffect(x.name, x.enabled, x.index, x.parameter) for x in self.effects]
+        return self.copy_return
+
+
+class SoundTimeline(FakeTimeline):
+    def __init__(self, name):
+        super().__init__(name)
+        self.video, self.audio = [], {1: [], 2: []}
+
+    def GetTrackCount(self, kind):
+        return 1 if kind == "video" else 2
+
+    def GetItemListInTrack(self, kind, index):
+        return self.video if kind == "video" else self.audio.get(index, [])
+
+
+class SoundProject(FakeProject):
+    def GetUniqueId(self):
+        return "project-id"
+
+
+class AudioInheritanceTests(unittest.TestCase):
+    def setUp(self):
+        self.project = SoundProject()
+        self.source, self.target = SoundTimeline("素材"), SoundTimeline("成片")
+        self.project.items = [self.source, self.target]
+        self.project.current = self.target
+        self.resolve = FakeResolve(self.project)
+        self.media = FakeClip("source.mov")
+        self.src_v = SoundItem(self.project, self.source, "video", self.media, 200, 260, 100, 160)
+        self.src_a = SoundItem(self.project, self.source, "audio", self.media, 200, 260, 100, 160, -10,
+                               [SoundEffect("noise", True, 1, "custom threshold")])
+        self.src_v.linked, self.src_a.linked = [self.src_a], [self.src_v]
+        self.source.video.append(self.src_v)
+        self.source.audio[1].append(self.src_a)
+        self.old = SoundItem(self.project, self.target, "audio", self.media, 50, 60, 10, 20, -17,
+                             [SoundEffect("manual")])
+        self.voice = SoundItem(self.project, self.target, "audio", FakeClip("voice.wav"), 0, 80, 0, 80, -4)
+        self.target.audio[1].append(self.old)
+        self.target.audio[2].append(self.voice)
+        self.request = {"project": "202H", "unique_id": self.target.uid, "current_only": True}
+        self.baseline = worker.edit_audio_baseline(self.resolve, self.request)
+        self.dst_v = SoundItem(self.project, self.target, "video", self.media, 0, 20, 110, 130)
+        self.dst_a = SoundItem(self.project, self.target, "audio", self.media, 0, 20, 110, 130)
+        self.dst_v.linked, self.dst_a.linked = [self.dst_a], [self.dst_v]
+        self.target.video.append(self.dst_v)
+        self.target.audio[1].append(self.dst_a)
+        self.candidate = {"media_id": self.media.uid, "timeline_uid": self.source.uid, "item_uid": self.src_v.uid,
+                          "source": [100, 160], "has_audio": True}
+
+    def inherit(self, **extra):
+        return worker.inherit_edit_audio(self.resolve, {**self.request, "audio_baseline": self.baseline,
+                                                       "candidates": [self.candidate], **extra})
+
+    def test_inherits_each_new_clip_on_active_source_without_touching_existing_sound(self):
+        result = self.inherit()
+        self.assertEqual((result["status"], result["new_audio"], result["processed"], result["plugins_copied"]),
+                         ("completed", 1, 1, 1))
+        self.assertTrue(result["saved"])
+        self.assertEqual(self.resolve.saved, 1)
+        self.assertIs(self.project.current, self.target)
+        self.assertEqual(self.dst_a.properties["AudioVolume"], -10)
+        self.assertEqual([(e.name, e.enabled, e.parameter) for e in self.dst_a.effects], [("noise", True, "custom threshold")])
+        self.assertEqual((self.old.properties["AudioVolume"], self.old.effects[0].name, self.voice.properties["AudioVolume"]), (-17, "manual", -4))
+        self.assertEqual(self.dst_a.GetLinkedItems(), [self.dst_v])
+        self.assertTrue(result["parameters_unverified"])
+        self.assertTrue(result["volume_animation_unverified"])
+        self.assertTrue(result["timing_unverified"])
+
+    def test_ambiguous_source_and_missing_audio_are_reported_without_guessing(self):
+        ambiguous = {**self.candidate, "item_uid": "different-source"}
+        result = self.inherit(candidates=[self.candidate, ambiguous])
+        self.assertEqual(result["status"], "needs_attention")
+        self.assertIn("唯一", result["issues"][0]["message"])
+        self.assertEqual((self.dst_a.properties["AudioVolume"], self.dst_a.effects, self.resolve.saved), (0, [], 0))
+        self.target.audio[1].remove(self.dst_a)
+        self.dst_v.linked = []
+        result = self.inherit()
+        self.assertTrue(any("没有链接逐片原声" in issue["message"] for issue in result["issues"]))
+
+    def test_effect_read_failure_does_not_prevent_volume_inheritance(self):
+        self.src_a.unreadable_effects = True
+        result = self.inherit()
+        self.assertEqual(result["status"], "needs_attention")
+        self.assertEqual(self.dst_a.properties["AudioVolume"], -10)
+        self.assertEqual(self.dst_a.effects, [])
+        self.assertTrue(any("素材原声插件无法读取" in issue["message"] for issue in result["issues"]))
+
+    def test_failed_copy_is_reported_and_any_partial_change_is_saved(self):
+        self.src_a.copy_return = False
+        result = self.inherit()
+        self.assertEqual(result["status"], "needs_attention")
+        self.assertTrue(result["saved"])
+        self.assertEqual(self.resolve.saved, 1)
+        self.assertTrue(any("复制未确认" in issue["message"] for issue in result["issues"]))
+
+    def test_success_return_without_plugin_is_not_accepted_as_inheritance(self):
+        self.src_a.copy_plugins = False
+        result = self.inherit()
+        self.assertEqual(result["status"], "needs_attention")
+        self.assertEqual(self.dst_a.properties["AudioVolume"], -10)
+        self.assertEqual(self.dst_a.effects, [])
+        self.assertTrue(any("复制未确认" in issue["message"] for issue in result["issues"]))
+
+    def test_same_plugin_name_on_a_new_clip_still_receives_source_parameters(self):
+        self.dst_a.effects = [SoundEffect("noise", True, 1, "default threshold")]
+        result = self.inherit()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.dst_a.effects[0].parameter, "custom threshold")
+        self.assertTrue(self.src_a.copy_calls[0]["audioPlugins"])
+
+    def test_retry_only_repairs_the_failed_audio_and_leaves_its_correct_volume_alone(self):
+        self.src_a.unreadable_effects = True
+        first = self.inherit()
+        self.assertEqual(first["status"], "needs_attention")
+        self.assertEqual(self.dst_a.properties["AudioVolume"], -10)
+        self.src_a.unreadable_effects = False
+        current = worker.edit_audio_baseline(self.resolve, self.request)
+        result = self.inherit(audio_baseline=current, retry_audio_ids=[self.dst_a.uid], retry_video_ids=[self.dst_v.uid])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.dst_a.effects[0].parameter, "custom threshold")
+        self.assertTrue(self.src_a.copy_calls[-1]["audioPlugins"])
+        self.assertNotIn("audioVolume", self.src_a.copy_calls[-1])
+
+    def test_existing_nondefault_settings_and_explicit_overrides_are_not_overwritten(self):
+        self.dst_a.properties["AudioVolume"] = -3
+        self.dst_a.effects = [SoundEffect("manual")]
+        result = self.inherit()
+        self.assertEqual(result["status"], "needs_attention")
+        self.assertEqual((self.dst_a.properties["AudioVolume"], self.dst_a.effects[0].name, self.resolve.saved), (-3, "manual", 0))
+        result = self.inherit(audio_overrides=[self.dst_a.uid])
+        self.assertEqual((result["status"], result["protected"]), ("completed", 1))
+        self.assertEqual((self.dst_a.properties["AudioVolume"], self.dst_a.effects[0].name), (-3, "manual"))
+
+
 if __name__ == "__main__":
     unittest.main()

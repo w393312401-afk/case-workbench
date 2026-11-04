@@ -37,6 +37,8 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.payload["job"]["timelines"] = [{"unique_id": "uid-own", "name": "Lab261011-202-1",
             "creator": "Lab", "markers": 1, "frames": 60, "fps": "29.97", "take_id": "", "built_at": "2026-10-11"}]
         self.timelines = ["蓝点折刀成品素材", "Lab261011-202-1"]
+        # Nothing is ticked by default any more; the last edit's material is.
+        self.payload["product_settings"]["material_timelines"] = ["蓝点折刀成品素材"]
         self.catalog = {"default_settings": {"model": "claude-opus", "reasoning_effort": "high"}, "models": [
             {"id": "claude-default", "name": "Claude 客户端默认", "available": True, "reasoning_efforts": ["high", "max"]},
             {"id": "claude-opus", "name": "Claude Opus", "available": True, "reasoning_efforts": ["high", "max"]},
