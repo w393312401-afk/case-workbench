@@ -90,7 +90,7 @@ class ProductionValidationBrowserTests(unittest.TestCase):
             card.locator(".script-status").get_by_text(label, exact=True).wait_for()
             self.assertTrue(card.get_by_role("button", name="重新核验", exact=True).is_enabled())
         page.locator(".edit-validation-issues").get_by_text("配音轨内容和建线时不一致。", exact=True).wait_for()
-        page.get_by_text("字幕、声音和导出由你处理。", exact=False).wait_for()
+        page.locator('[data-edit-id="EDT-000000000000"]').get_by_text("确认完成后自动导出成片。", exact=False).wait_for()
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 
     def test_recheck_reads_existing_edit_without_starting_another_edit_or_voice(self):
@@ -419,7 +419,7 @@ class ProductionValidationBrowserTests(unittest.TestCase):
         page = self.open_page(post=approve)
         form = page.locator('[data-edit-review="EDT-0123456789ab"]')
         form.wait_for()
-        self.assertIn("只登记你的人工审查，不会读回工程核验", form.locator(".production-hint-body").text_content())
+        self.assertIn("自动导出当前时间线的成片", form.locator(".production-hint-body").text_content())
         submit = form.get_by_role("button", name="确认完成", exact=True)
         self.assertTrue(submit.is_disabled())
         for box in form.locator('input[name="reviewed"]').all():
