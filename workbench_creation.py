@@ -12,6 +12,7 @@ from creation_store import CreationError, PLAN_VARIANT_SNAPSHOT_KEYS, text
 from direction_store import product_key, fingerprint, now
 from review_store import NOTE_LIMIT
 from ai_tasks import MAX_PROMPT_CHARS
+from case_replica import parse_transcript
 from variant_parse import parse_variants
 from review_policy import review_context
 
@@ -900,17 +901,24 @@ class CreationWorkbenchMixin:
 
     @staticmethod
     def _writing_mode(body, case, direction):
-        """Freeze 「原稿发散」: new scripts grown from the case's own script, each on a progression of its own."""
+        """Freeze 「原稿发散」 (new scripts grown from the case's own script, each on a progression of its own) or
+        「照原片优化」 (the 照原片做视频 entry: the case's script rewritten line for line, so its shots still fit)."""
         value = body.get("writing_mode")
         if value is None:
             return None
-        if not isinstance(value, dict) or value.get("mode") != "diverge" or set(value) - {"mode", "count"}:
+        if not isinstance(value, dict) or value.get("mode") not in {"diverge", "replica"} or set(value) - {"mode", "count"}:
             raise CreationError(400, "写法参数无效。")
+        name = "原稿发散" if value["mode"] == "diverge" else "照原片优化"
         if body.get("action") != "variants" or not case:
-            raise CreationError(400, "原稿发散只用于从案例写稿。")
+            raise CreationError(400, f"{name}只用于从案例写稿。")
         count = value.get("count", 3)
         if type(count) is not int or not 1 <= count <= 5:
-            raise CreationError(400, "发散条数须为 1–5。")
+            raise CreationError(400, f"{name}条数须为 1–5。")
+        if value["mode"] == "replica":
+            lines, _ = parse_transcript(((case.get("current") or {}).get("transcript") or {}).get("text"))
+            if not lines:
+                raise CreationError(409, "这条案例还没有口播文案，请先转写。")
+            return {"mode": "replica", "count": count, "lines": len(lines)}
         recorded = (case.get("current") or {}).get("test_direction") or {}
         used = sorted({variant["progression"] for variant in (direction or {}).get("variants") or []
                        if variant.get("progression") and not variant.get("conflict")})

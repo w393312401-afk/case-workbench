@@ -1,4 +1,4 @@
-.flow-views{display:flex;flex-wrap:wrap;gap:4px;margin:18px 0 14px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.flow-views{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin:18px 0 14px;padding-bottom:12px;border-bottom:1px solid var(--line)}
 .flow-filters{display:flex;gap:14px;align-items:center;margin-bottom:14px}.flow-filters .search{flex:1;min-width:0}.flow-filters>label:last-of-type{display:flex;gap:8px;align-items:center;white-space:nowrap}.flow-filters select{padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink)}
 .flow-delete-archived{color:var(--danger-ink)}.flow-delete-confirm{display:flex;align-items:center;gap:8px;margin:14px 0 0;font-weight:550}.flow-delete-confirm input{width:16px;height:16px;margin:0;flex:none}.flow-delete-list{margin:12px 0;font-size:13px}.flow-delete-list summary{cursor:pointer;color:var(--muted)}.flow-delete-list ul{max-height:220px;overflow:auto;margin:6px 0 0;padding:0;list-style:none}.flow-delete-list li{display:flex;gap:8px;align-items:center;min-width:0;padding:3px 0}.flow-delete-list li>span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .flow-batch{display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:6px 10px;border-radius:8px;background:var(--surface-tint);font-size:13px}.flow-batch>span{margin-right:auto}
@@ -48,21 +48,21 @@ a.flow-chain-step:hover i{border-color:var(--accent)}
 .flow-filters>.search{flex:1 1 220px;max-width:360px;margin-right:auto}
 .flow-filters>.search input{height:36px;padding:7px 12px 7px 34px;background:var(--surface);font-size:13px;border-radius:8px}
 .flow-filters>.search svg{top:10px;left:11px;width:16px;height:16px}
-.flow-filters>button{flex:none;min-height:34px;padding:6px 10px;border-color:transparent;background:transparent;font-size:13px;font-weight:450}
+.flow-filters>button{flex:none;min-height:var(--btn-h);padding:6px 10px;border-color:transparent;background:transparent;font-size:13px;font-weight:450}
 .flow-filters>button:hover{background:var(--fill-hover)}
 #content-flow-filter-toggle[aria-expanded=true]{background:var(--surface-tint);color:var(--blue-ink)}
 #content-flow-save-view:not(:disabled){color:var(--accent-text)}
 .flow-filter-summary{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:0 0 10px;min-width:0;min-height:30px;color:var(--muted);font-size:12px}
 .flow-filter-summary>span{flex:none}
 .flow-filter-summary .flow-filter-meta{flex:0 1 auto;min-width:0;max-width:100%;margin-left:auto;color:var(--muted-soft);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.flow-filter-chip-wrap{display:inline-flex;align-items:stretch;min-width:0;max-width:100%;border:1px solid color-mix(in srgb,var(--accent) 22%,var(--line));border-radius:var(--radius);background:var(--surface-tint);color:var(--blue-ink)}
-.flow-filter-chip{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:100%;min-height:28px;padding:4px 10px;border:0;border-radius:var(--radius);background:transparent;color:inherit;font-size:12px;line-height:1.5;cursor:pointer;text-align:left;overflow-wrap:anywhere}
+.flow-filter-chip-wrap{display:inline-flex;align-items:stretch;min-width:0;max-width:100%;border:1px solid color-mix(in srgb,var(--accent) 22%,var(--line));border-radius:999px;background:var(--surface-tint);color:var(--blue-ink)}
+.flow-filter-chip{display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:100%;min-height:28px;padding:4px 10px;border:0;border-radius:999px;background:transparent;color:inherit;font-size:12px;line-height:1.5;cursor:pointer;text-align:left;overflow-wrap:anywhere}
 .flow-filter-chip-wrap .flow-filter-chip{border-top-right-radius:0;border-bottom-right-radius:0}
 .flow-filter-chip svg{flex:none;width:13px;height:13px}
 .flow-filter-chip:hover,.flow-filter-chip-remove:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
 .flow-filter-chip-remove{display:grid;place-items:center;flex:none;width:27px;min-height:28px;padding:0 5px 0 3px;border:0;border-top-right-radius:var(--radius);border-bottom-right-radius:var(--radius);background:transparent;color:var(--blue-ink);cursor:pointer;font-size:15px}
 .flow-filter-chip-remove svg{width:12px;height:12px}
-.flow-filter-add-quick,.flow-filter-match,.flow-filter-summary>[data-filter-clear]{display:inline-flex;align-items:center;gap:5px;min-height:30px;padding:4px 9px;border:1px solid transparent;border-radius:var(--radius);background:transparent;color:var(--muted-soft);font-size:12px;line-height:1.5;font-weight:400;white-space:nowrap}
+.flow-filter-add-quick,.flow-filter-match,.flow-filter-summary>[data-filter-clear]{display:inline-flex;align-items:center;gap:5px;min-height:var(--btn-h);padding:4px 10px;border:1px solid transparent;border-radius:var(--btn-radius);background:transparent;color:var(--muted-soft);font-size:12px;line-height:1.5;font-weight:400;white-space:nowrap}
 .flow-filter-add-quick{background:var(--fill);color:var(--muted)}
 .flow-filter-add-quick:hover,.flow-filter-match:hover,.flow-filter-summary>[data-filter-clear]:hover{background:var(--fill-hover);color:var(--ink)}
 .flow-filter-add-quick[aria-expanded=true],.flow-filter-match[aria-pressed=true]{background:var(--surface-tint);color:var(--blue-ink)}
@@ -85,7 +85,7 @@ a.flow-chain-step:hover i{border-color:var(--accent)}
 .flow-filter-options label:hover{background:var(--fill-hover)}.flow-filter-options label:has(input:checked){background:var(--surface-tint);color:var(--blue-ink)}
 .flow-filter-options input{width:16px;height:16px;flex:none;margin:0;accent-color:var(--accent)}
 .flow-filter-footer{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}.flow-filter-footer>[data-filter-hint]{flex:1}
-.flow-filter-footer>button{padding:6px 10px;font-size:12px;min-height:32px}
+.flow-filter-footer>button{padding:4px 10px;font-size:12px;min-height:var(--btn-h)}
 .flow-filter-editor :is(button,summary,input,select):focus-visible,.flow-filter-summary button:focus-visible,.flow-quick-popover :is(button,input):focus-visible{outline:3px solid color-mix(in srgb,var(--accent) 45%,transparent);outline-offset:2px}
 .flow-view-dialog{width:min(540px,calc(100vw - 32px))}.flow-view-dialog .dialog-footer,.flow-view-dialog .dialog-footer>div{flex-wrap:wrap;gap:8px}
 .flow-views button{max-width:100%;overflow-wrap:anywhere}
@@ -94,7 +94,7 @@ a.flow-chain-step:hover i{border-color:var(--accent)}
 .flow-quick-popover{position:fixed;z-index:90;display:flex;flex-direction:column;width:320px;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);padding:7px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow-menu);color:var(--ink);font-size:13px}
 .flow-quick-heading{display:flex;align-items:center;gap:5px;min-height:32px;padding:1px 3px 5px}
 .flow-quick-heading strong{flex:1;min-width:0;overflow-wrap:anywhere;font-size:12px;font-weight:550;color:var(--muted)}
-.flow-quick-heading button{display:grid;place-items:center;flex:none;width:26px;min-height:26px;padding:4px;border-radius:6px;background:transparent;color:var(--muted-soft)}
+.flow-quick-heading button{display:grid;place-items:center;flex:none;width:26px;min-height:26px;padding:4px;border-radius:7px;background:transparent;color:var(--muted-soft)}
 .flow-quick-heading button:hover{background:var(--fill-hover);color:var(--ink)}
 .flow-quick-heading button svg{width:14px;height:14px}
 .flow-quick-search{flex:none;width:calc(100% - 6px);min-width:0;height:34px;margin:1px 3px 8px;padding:6px 10px;border:1px solid var(--line);border-radius:7px;background:var(--surface-alt);color:var(--ink);font-size:13px;line-height:1.5}
@@ -113,16 +113,16 @@ a.flow-chain-step:hover i{border-color:var(--accent)}
 .flow-quick-footer>button{flex:none}
 @media(max-width:700px){
   .flow-views{gap:3px;margin-top:12px;margin-bottom:10px;padding-bottom:9px}
-  .flow-views button{min-height:34px;padding:6px 9px;font-size:12px}
+  .flow-views button{padding:3px 9px}
   .flow-filters{gap:4px;margin-bottom:8px}
   .flow-filters>.search{flex-basis:100%;max-width:none;margin:0 0 2px}
-  .flow-filters>button{min-height:34px;padding:6px 8px;font-size:12px}
+  .flow-filters>button{padding:6px 8px;font-size:12px}
   .flow-filter-summary{gap:6px;margin-bottom:9px}
   .flow-filter-summary .flow-filter-meta{flex-basis:100%;margin:2px 0 0}
   .flow-filter-chip-wrap{max-width:100%}
   .flow-filter-chip{min-height:32px}
   .flow-filter-chip-remove{width:30px;min-height:32px}
-  .flow-filter-add-quick,.flow-filter-match,.flow-filter-summary>[data-filter-clear]{min-height:32px}
+  .flow-filter-add-quick,.flow-filter-match,.flow-filter-summary>[data-filter-clear]{min-height:var(--btn-h)}
   .flow-filter-editor{padding:12px}
   .flow-filter-row{grid-template-columns:minmax(0,1fr) 32px;gap:8px}
   .flow-filter-row>select,.flow-filter-row>.workbench-select{grid-column:1;grid-row:1;max-width:100%}
@@ -145,8 +145,12 @@ a.flow-chain-step:hover i{border-color:var(--accent)}
 .flow-group-toggle{display:inline-flex;align-items:center;gap:8px;min-height:28px;padding:2px 6px 2px 2px;border:0;background:transparent;color:var(--ink);font-size:13px;font-weight:600;cursor:pointer}
 .flow-group-toggle::before{content:'';width:6px;height:6px;margin:0 3px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:rotate(45deg) translate(-2px,-2px);transition:transform .15s}
 .flow-group-toggle[aria-expanded=false]::before{transform:rotate(-45deg)}
+/* 全部 folds 已完结 rows into one quiet line at the end of the list. */
+.flow-finished-fold{display:flex;align-items:baseline;gap:10px;width:100%;min-height:36px;margin-top:6px;padding:8px 12px;border:1px dashed var(--line);border-radius:6px;background:transparent;color:var(--muted);font-size:13px;text-align:left;cursor:pointer}
+.flow-finished-fold:hover{color:var(--ink);border-color:var(--muted)}
+.flow-finished-fold small{font-size:12px}
 .flow-group-toggle small{font-size:12px;font-weight:400;color:var(--muted-soft);font-variant-numeric:tabular-nums}
-.flow-group-queue{display:inline-flex;align-items:center;gap:4px;margin-left:auto;min-height:28px;padding:2px 8px;border:0;border-radius:6px;background:transparent;color:var(--accent-text);font-size:12px;font-weight:550;cursor:pointer}
+.flow-group-queue{display:inline-flex;align-items:center;gap:4px;margin-left:auto;min-height:var(--btn-h-sm);padding:3px 8px;border:0;border-radius:var(--btn-radius);background:transparent;color:var(--accent-text);font-size:12px;font-weight:500;cursor:pointer}
 .flow-group-queue:hover{background:var(--fill-hover)}.flow-group-queue svg{width:13px;height:13px}
 /* The walk through one group floats over whichever page it opened. */
 .flow-queue{position:fixed;z-index:60;left:50%;bottom:20px;transform:translateX(-50%);display:flex;align-items:center;gap:8px;max-width:calc(100vw - 32px);padding:6px 6px 6px 14px;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:var(--shadow-menu);font-size:13px;color:var(--muted)}
@@ -167,7 +171,7 @@ body:has(#content-flow-queue) main{padding-bottom:72px}
 .flow-toolbar .flow-main-menu>summary{height:34px;padding:0 12px;font-size:13px;font-weight:450}
 /* Notion-style view row: search, filter, rules, save, refresh and more are icons beside the view tabs. */
 .flow-toolbar>.flow-filters{gap:2px}
-.flow-toolbar>.flow-filters>.icon-button,.flow-toolbar .flow-main-menu>summary.icon-button{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:3px;width:auto;min-width:32px;height:32px;min-height:32px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--muted)}
+.flow-toolbar>.flow-filters>.icon-button,.flow-toolbar .flow-main-menu>summary.icon-button{position:relative;display:inline-flex;align-items:center;justify-content:center;gap:3px;width:auto;min-width:28px;height:28px;min-height:28px;padding:0 6px;border:0;border-radius:7px;background:transparent;color:var(--muted)}
 .flow-toolbar>.flow-filters>.icon-button:hover,.flow-toolbar .flow-main-menu>summary.icon-button:hover{background:var(--fill-hover);color:var(--ink)}
 .flow-toolbar>.flow-filters>.icon-button svg,.flow-toolbar .flow-main-menu>summary.icon-button svg{width:17px;height:17px}
 .flow-toolbar .flow-main-menu>summary.icon-button svg{fill:currentColor}
@@ -201,7 +205,7 @@ body:has(#content-flow-queue) main{padding-bottom:72px}
 .flow-subbar{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;margin:0 0 10px}
 .flow-subbar>#content-flow-result-count{flex:none;margin:0}
 .flow-subbar>.flow-filter-summary{flex:1 1 auto;margin:0;min-height:0}
-.flow-saved-menu>summary{display:flex;align-items:center;gap:7px;width:auto;height:auto;min-height:34px;padding:6px 11px;border-radius:8px;color:var(--muted);font-size:13px;white-space:nowrap}
+.flow-saved-menu>summary{display:flex;align-items:center;gap:7px;width:auto;height:auto;min-height:var(--btn-h-sm);padding:3px 10px;border-radius:999px;color:var(--muted);font-size:12px;font-weight:500;white-space:nowrap}
 .flow-saved-menu>summary:hover{background:var(--fill-hover);color:var(--ink)}
 .flow-saved-menu>summary[data-active=true]{color:var(--blue-ink);background:var(--surface-tint);font-weight:550}
 .flow-saved-menu>summary small{font-size:11px;font-weight:400}
@@ -241,7 +245,7 @@ body:has(#content-flow-queue) main{padding-bottom:72px}
 .flow-views .flow-pinned-view em{font-style:normal;font-size:11px;font-weight:400;color:var(--muted-soft)}
 .flow-saved-menu .flow-saved-row{display:flex;align-items:center;gap:2px}
 .flow-saved-menu .flow-saved-row>[data-flow-saved-view]{flex:1 1 auto;min-width:0}
-.flow-views .flow-saved-menu .flow-view-pin{flex:none;display:inline-flex;align-items:center;justify-content:center;width:28px;min-height:28px;height:28px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted-soft);opacity:.55}
+.flow-views .flow-saved-menu .flow-view-pin{flex:none;display:inline-flex;align-items:center;justify-content:center;width:28px;min-height:28px;height:28px;padding:0;border:0;border-radius:7px;background:transparent;color:var(--muted-soft);opacity:.55}
 .flow-views .flow-saved-menu .flow-view-pin svg{width:15px;height:15px}
 .flow-views .flow-saved-menu .flow-saved-row:hover .flow-view-pin,.flow-views .flow-saved-menu .flow-view-pin:focus-visible{opacity:1}
 .flow-views .flow-saved-menu .flow-view-pin:hover{background:var(--fill-hover);color:var(--ink)}

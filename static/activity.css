@@ -201,7 +201,7 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 @media (max-width: 700px) { .activity-trigger { gap: 3px; padding: 7px 8px; } .activity-count { font-size: 10px; padding: 2px 4px; } }
 /* On phones the task button joins the single header row as an icon; its counts become corner badges. */
 @media (max-width: 760px) {
-  .topbar-right > .activity-trigger { position: relative; width: 40px; height: 40px; min-height: 40px; padding: 0; justify-content: center; gap: 0; }
+  .topbar-right > .activity-trigger { position: relative; width: var(--btn-h-lg); height: var(--btn-h-lg); min-height: var(--btn-h-lg); padding: 0; justify-content: center; gap: 0; }
   .topbar-right > .activity-trigger > span:not([data-icon]):not(.activity-count) { display: none; }
   .topbar-right > .activity-trigger svg { width: 19px; height: 19px; }
   .activity-trigger .activity-count { position: absolute; right: -5px; min-width: 16px; padding: 0 4px; font-size: 10px; line-height: 16px; text-align: center; }
@@ -219,7 +219,7 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 }
 
 /* Keep cross-product filtering while leaving more room for results and logs. */
-.activity-controls{padding:8px;gap:6px}.activity-refine{gap:6px}.activity-field-label{line-height:1.2}.activity-refine select,.activity-refine input,.activity-product-trigger,.activity-kind-trigger{height:32px}.activity-search-field>svg{top:8px}
+.activity-controls{padding:8px;gap:6px}.activity-refine{gap:6px}.activity-field-label{line-height:1.2}.activity-refine select,.activity-refine input,.activity-product-trigger,.activity-kind-trigger{height:var(--btn-h-lg)}.activity-search-field>svg{top:10px}
 
 .activity-log-single{display:flex;align-items:baseline;gap:6px}.activity-log-single .activity-log-lines{flex:1;min-width:0}.activity-single-phase{font-size:11px;color:var(--muted-soft);padding-left:8px;flex-shrink:0}
 

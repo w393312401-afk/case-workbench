@@ -95,6 +95,33 @@ def client_environment():
     return env
 
 
+USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def run_usage(event):
+    """What one Claude Code run used, read from its final result event; missing numbers count as 0."""
+    usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+    number = lambda value: value if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else 0
+    models = event.get("modelUsage") if isinstance(event.get("modelUsage"), dict) else {}
+    return {**{key: int(number(usage.get(key))) for key in USAGE_KEYS},
+            "turns": int(number(event.get("num_turns"))), "cost_usd": round(float(number(event.get("total_cost_usd"))), 4),
+            "seconds": round(number(event.get("duration_ms")) / 1000),
+            "models": sorted(name for name in models if isinstance(name, str))[:5]}
+
+
+def add_usage(total, part):
+    """Sum usage records (one run's, or an earlier sum); None stays None until a record arrives."""
+    if not isinstance(part, dict):
+        return total
+    total = dict(total or {})
+    for key in (*USAGE_KEYS, "turns", "seconds"):
+        total[key] = int(total.get(key) or 0) + int(part.get(key) or 0)
+    total["cost_usd"] = round(float(total.get("cost_usd") or 0) + float(part.get("cost_usd") or 0), 4)
+    total["models"] = sorted(set(total.get("models") or []) | set(part.get("models") or []))[:5]
+    total["runs"] = int(total.get("runs") or 0) + int(part.get("runs") or 1)
+    return total
+
+
 def _friendly(error):
     """Never display raw CLI diagnostics, paths, tokens or user account details."""
     text = str(error).lower()
@@ -884,6 +911,10 @@ class ClaudeBridge:
                         flush(True)
                     elif event_type == "result":
                         final = event
+                        try:
+                            emit({"type": "usage", **run_usage(event)})
+                        except Exception:
+                            pass  # Usage is bookkeeping; it never fails the run.
                 check()
                 if final.get("is_error") or final.get("subtype") != "success":
                     raise BridgeError(_friendly(str(final.get("errors") or final.get("result") or final.get("subtype"))))

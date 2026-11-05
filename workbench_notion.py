@@ -23,6 +23,9 @@ from production_store import active_timelines, timeline_running
 from workbench_video_publish import VideoPublicationStore
 
 
+ACCOUNT_FIELDS = ("账号", "发布账号")
+
+
 def body_markdown(source):
     def block(value):
         fence = "`" * max(3, max((len(x) + 1 for x in re.findall(r"`+", value)), default=3))
@@ -102,7 +105,7 @@ class NotionUploads:
         self.app = workbench
         self.settings = copy.deepcopy(settings or {})
         self.store = NotionUploadStore(workbench.production.root)
-        self.bridge = bridge or NotionBridge()
+        self.bridge = bridge or NotionBridge(cache_path=self.store.root / "connection.json")
         self.lock = threading.RLock()
         self.running = set()
         # A restart never silently retries a cloud write. The next click searches
@@ -144,17 +147,33 @@ class NotionUploads:
         source = self.app._video_publish_copy(job) or {}
         source.update(en="\n".join(line["spoken"] for line in job["lines"]),
                       zh="\n".join(line.get("zh", "") for line in job["lines"]).strip() or source.get("zh", ""))
+        if source.get("titles") and hasattr(self.app, "_title_translations"):
+            from workbench_video_publish import title_headline
+            known = self.app._title_translations()
+            source["titles_zh"] = [known.get(title_headline(line), "") for line in source["titles"]]
         saved = (previous.get("source") or {})
         screen = (timeline.get("hook_overlay") or {}).get("text") or source.get("screen_en") or saved.get("screen_en", "")
         options = source.get("screen_options") or saved.get("screen_options") or []
         source["screen_options"] = options
         source.update(screen_en=screen, screen_zh=next((row.get("zh", "") for row in options if row.get("en") == screen),
             source.get("screen_zh") or saved.get("screen_zh", "")))
-        file = (previous.get("file") or {}).get("original_path", "")
-        if not file or not Path(file).is_file():
-            safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", timeline.get("name", ""))
-            path = self.app.production.root / "exports" / (safe + ".mp4")
-            file = str(path) if path.is_file() else ""
+        # The newest export wins: the timeline's latest preview capture, a manual export, or the last uploaded file.
+        safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", timeline.get("name", ""))
+        candidates = [(previous.get("file") or {}).get("original_path", ""), self.app.production.root / "exports" / (safe + ".mp4")]
+        previews = getattr(self.app, "video_previews", None)
+        if previews:
+            try:
+                candidates.append(previews.export_file(job_id, uid))
+            except (VoiceError, OSError, ValueError):
+                pass
+        found = []
+        for item in candidates:
+            try:
+                if item and Path(item).is_file():
+                    found.append((Path(item).stat().st_mtime, str(Path(item))))
+            except OSError:
+                pass
+        file = max(found)[1] if found else ""
         primary = (list(reversed(active_timelines(job))) or [{}])[0].get("unique_id")
         content_id = "video:" + job_id + ("_tl_" + re.sub(r"[^A-Za-z0-9-]", "", uid)[:120] if uid != primary else "")
         calendar = self.app.content_calendar({"id": [content_id]})
@@ -251,7 +270,55 @@ class NotionUploads:
             with self.lock:
                 self.running.discard((row["job_id"], row["timeline_uid"]))
 
+    # Account pages rarely change, so a confirmed match is kept locally and reused without a SQL query.
+    def _accounts_path(self):
+        return self.store.root / "accounts.json"
+
+    def _accounts(self):
+        try:
+            data = json.loads(self._accounts_path().read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _known_account(self, source, name):
+        url = self._accounts().get(source, {}).get(name)
+        return url if isinstance(url, str) and url.startswith("https://") else None
+
+    def _write_accounts(self, data):
+        path = self._accounts_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(path.name + ".tmp")
+            temporary.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+            temporary.replace(path)
+        except OSError:
+            pass
+
+    def _remember_account(self, source, name, url):
+        with self.lock:
+            data = self._accounts()
+            data.setdefault(source, {})[name] = url
+            self._write_accounts(data)
+
+    def _forget_account(self, source, name):
+        with self.lock:
+            data = self._accounts()
+            if data.get(source, {}).pop(name, None) is not None:
+                self._write_accounts(data)
+
     def _publish(self, client, row, path, progress):
+        used = {}
+        try:
+            self._write_page(client, row, path, progress, used)
+        except Exception as exc:
+            # A remembered account may have been removed or renamed in Notion; the next try looks it up again.
+            # An exhausted quota or a dropped connection says nothing about the account, so it stays.
+            if used.get("key") and getattr(exc, "status", None) not in {429, 503}:
+                self._forget_account(*used["key"])
+            raise
+
+    def _write_page(self, client, row, path, progress, used):
         destination = client.call("fetch", {"id": "collection://" + row["destination_id"]})
         # Fetch and use the actual schemas before querying any properties.
         state = re.search(r"<data-source-state>\s*(.*?)\s*</data-source-state>", destination.get("text", ""), re.S)
@@ -259,26 +326,44 @@ class NotionUploads:
         schema, table = state.get("schema", {}), state.get("url", "")
         if not table or notion_id(table) != row["destination_id"]:
             raise VoiceError(409, "Notion 发布日历地址与配置不一致。")
-        required = {"名称", "文件和媒体", "日期", "标题＋tags", "发布账号"}
-        if not required.issubset(schema):
+        # 「账号」 links to the full account list (账号列表（总制作）); older calendars only have 「发布账号」.
+        field = next((name for name in ACCOUNT_FIELDS if (schema.get(name) or {}).get("dataSourceUrl")),
+                     next((name for name in ACCOUNT_FIELDS if name in schema), ""))
+        required = {"名称", "文件和媒体", "日期", "标题＋tags"}
+        if not field or not required.issubset(schema):
             raise VoiceError(409, "Notion 发布日历缺少名称、日期、账号或文件字段，请核对目标数据库。")
-        account_source = schema["发布账号"].get("dataSourceUrl")
+        account_source = schema[field].get("dataSourceUrl")
         if not account_source:
             raise VoiceError(409, "Notion 发布账号关联没有配置账号列表。")
-        account_schema = client.call("fetch", {"id": account_source})
-        account_state = re.search(r"<data-source-state>\s*(.*?)\s*</data-source-state>", account_schema.get("text", ""), re.S)
-        account_state = json.loads(account_state[1]) if account_state else {}
-        if not {"名称", "Username", "Nick Name"}.issubset(account_state.get("schema", {})):
-            raise VoiceError(409, "Notion 账号列表缺少用户名字段，请核对发布账号关联。")
-        access = client.call("get_tool_access", {"tool_names": ["query_data_sources"]})
-        if access.get("current_tool_access", {}).get("query_data_sources", {}).get("status") not in {"available", "available_with_limit"}:
-            raise VoiceError(409, "Notion 连接暂不能查询账号，请检查连接权限。")
-        account = client.call("query_data_sources", {"data": {"mode": "sql", "data_source_urls": [account_source],
-            "query": f'SELECT url, "名称", "Username", "Nick Name" FROM "{account_source}" WHERE lower("Username") = ? OR lower("名称") = ? OR lower("Nick Name") = ? LIMIT 3',
-            "params": [row["account"].lstrip("@").casefold()] * 3}}).get("results", [])
-        if len(account) != 1:
-            raise VoiceError(409, "Notion 中未找到唯一的发布账号，请填写账号列表里的用户名后重试。")
+        checked = []
+        def can_query():
+            # SQL queries draw on a small hourly Notion allowance, so they run only when needed.
+            if not checked:
+                access = client.call("get_tool_access", {"tool_names": ["query_data_sources"]})
+                if access.get("current_tool_access", {}).get("query_data_sources", {}).get("status") not in {"available", "available_with_limit"}:
+                    raise VoiceError(409, "Notion 连接暂不能查询账号，请检查连接权限。")
+                checked.append(True)
+        account_key = (notion_id(account_source), row["account"].strip().lstrip("@").casefold())
+        remembered = self._known_account(*account_key)
+        if remembered:
+            account = [{"url": remembered}]
+            used["key"] = account_key
+        else:
+            account_schema = client.call("fetch", {"id": account_source})
+            account_state = re.search(r"<data-source-state>\s*(.*?)\s*</data-source-state>", account_schema.get("text", ""), re.S)
+            account_state = json.loads(account_state[1]) if account_state else {}
+            if not {"名称", "Username", "Nick Name"}.issubset(account_state.get("schema", {})):
+                raise VoiceError(409, f"Notion 账号列表缺少用户名字段，请核对「{field}」关联。")
+            can_query()
+            account = client.call("query_data_sources", {"data": {"mode": "sql", "data_source_urls": [account_source],
+                # Usernames are stored with or without a leading @, so both spellings match.
+                "query": f'SELECT url, "名称", "Username", "Nick Name" FROM "{account_source}" WHERE lower("Username") IN (?, ?) OR lower("名称") = ? OR lower("Nick Name") IN (?, ?) LIMIT 3',
+                "params": (lambda bare: [bare, "@" + bare, row["account"].strip().casefold(), bare, "@" + bare])(account_key[1])}}).get("results", [])
+            if len(account) != 1:
+                raise VoiceError(409, "Notion 中未找到唯一的发布账号，请填写账号列表里的用户名后重试。")
+            self._remember_account(*account_key, account[0]["url"])
         if not row.get("page_id"):
+            can_query()
             found = client.call("query_data_sources", {"data": {"mode": "sql", "data_source_urls": [table],
                 "query": f'SELECT url, "名称" FROM "{table}" WHERE "名称" = ? LIMIT 3', "params": [row["name"]]}}).get("results", [])
             if len(found) > 1:
@@ -287,7 +372,7 @@ class NotionUploads:
                 row.update(page_id=notion_id(found[0]["url"]), page_url=found[0]["url"])
                 self._save(row["id"], page_id=row["page_id"], page_url=row["page_url"])
         properties = {"名称": row["name"], "标题＋tags": row["title"], "date:日期:start": row["published_on"],
-            "date:日期:is_datetime": 0, "发布账号": json.dumps([account[0]["url"]])}
+            "date:日期:is_datetime": 0, field: json.dumps([account[0]["url"]])}
         markdown = body_markdown(row["source"])
         if row.get("page_id"):
             existing = client.call("fetch", {"id": row["page_id"]})
@@ -318,6 +403,6 @@ class NotionUploads:
                            for key in ("en", "zh", "screen_en") if row["source"].get(key))
         if (actual.get("date:日期:start") != row["published_on"] or actual.get("标题＋tags") != row["title"]
                 or not actual.get("文件和媒体") or not copy_matches
-                or not any(notion_id(url) == notion_id(account[0]["url"]) for url in actual.get("发布账号", []))):
+                or not any(notion_id(url) == notion_id(account[0]["url"]) for url in actual.get(field, []))):
             raise VoiceError(502, "Notion 页面已保留，但日期、账号、成片或文案尚未核对一致，请重试。")
         self._save(row["id"], page_id=row["page_id"], page_url=saved.get("url") or row["page_url"])

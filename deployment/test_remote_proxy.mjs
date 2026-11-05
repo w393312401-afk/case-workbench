@@ -549,6 +549,37 @@ test('preserves browser caching only for authenticated program assets', async t 
   assert.equal(reached, before, 'cached static responses never bypass authentication');
 });
 
+test('versioned preview videos keep private browser caching through authenticated range requests', async t => {
+  let reached = 0;
+  const upstream = http.createServer((req, res) => {
+    reached++;
+    const path = new URL(req.url, 'http://localhost');
+    const status = path.searchParams.has('error') ? 404 : req.headers['if-none-match'] ? 304 : req.headers.range ? 206 : 200;
+    res.writeHead(status, { 'content-type': path.searchParams.has('json') ? 'application/json' : 'video/mp4',
+      'cache-control': 'private, max-age=31536000, immutable', etag:'"preview-1"',
+      ...(status === 206 ? {'content-range':'bytes 0-3/8','accept-ranges':'bytes'} : {}) });
+    res.end(status === 304 ? undefined : 'data');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createRemoteProxy(config, {...options,upstream:`http://127.0.0.1:${upstreamPort}`});
+  const port = await listen(proxy);
+  t.after(async () => {await close(proxy);await close(upstream);});
+  const path = '/api/production/jobs/PRD-0123456789ab/preview/video?timeline=uid-1&version=123456abcdef-web1';
+  for (const extra of [{}, {range:'bytes=0-3'}, {'if-none-match':'"preview-1"'}]) {
+    const result = await request(port,{path,headers:headers(extra)});
+    assert.equal(result.headers['cache-control'],'private, max-age=31536000, immutable');
+    assert.equal(result.headers.vary,'Cookie');
+    assert.equal(result.headers.etag,'"preview-1"');
+  }
+  for (const unsafe of [path.replace('&version=123456abcdef-web1',''),path+'&version=123456abcdef-web1',
+      path+'&json=1',path+'&error=1','/api/state?timeline=uid-1&version=123456abcdef-web1']) {
+    assert.equal((await request(port,{path:unsafe})).headers['cache-control'],'private, no-store');
+  }
+  const before = reached;
+  assert.equal((await request(port,{path,headers:{host:config.hostname}})).status,401);
+  assert.equal(reached,before);
+});
+
 test('streams SSE before completion, cancels on disconnect, and preserves media Range/status/headers', async t => {
   let finishEvents, signalClosed;
   const streamClosed = new Promise(resolve => { signalClosed = resolve; });

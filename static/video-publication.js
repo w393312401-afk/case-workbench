@@ -93,9 +93,17 @@ window.VideoPublication = (() => {
       ${current && !item.source_current ? '<p class="video-publication-warning">当前制作版本或审查状态已变化；这条发布记录仍保留当时的成片、配音和审查依据。</p>' : ''}
       ${current && item.file && !item.file_available ? '<p class="video-publication-warning">托管成片缺失或大小有变化，请从完整备份恢复。</p>' : ''}
       ${item.note ? `<p class="video-publication-sub">${esc(item.note)}</p>` : ''}
+      ${current ? campaignReminder(item) : ''}
       ${window.DeliveryProvenance?.render({kind:'video',record:item,owner:job,copyTake:true,
         rows:`<dt>登记时间</dt><dd>${esc(localTime(item.registered_at))}</dd>${item.file ? `<dt>原成片路径</dt><dd>${esc(item.file.original_path)}</dd>` : ''}<dt>审查依据</dt><dd>${esc(localTime((source.manual_completion || source.edit?.approval)?.at) || '未保留')}</dd>`}) || ''}
       ${current && item.file ? '<button type="button" class="secondary" data-verify-video>核对保存的成片</button><p class="context-note" data-verification role="status"></p>' : ''}</article>`;
+  }
+  // A post that went up during a campaign: once the campaign is over its pinned comment and end card say something untrue.
+  const shortDay = value => String(value || '').slice(5).replace('-','/');
+  function campaignReminder(item) {
+    const campaign = item.campaign;
+    if (!campaign?.ended || item.pin_cleared) return '';
+    return `<p class="video-publication-warning video-publication-campaign">这条在「${esc(campaign.name)}」期间发布，活动已于 ${esc(shortDay(campaign.end))} 结束：置顶评论如果写了活动请改掉，时间线上的活动屏显可在下方去掉。<button type="button" class="subtle compact" data-pin-cleared="${esc(item.id)}">已处理</button></p>`;
   }
   // Registered by the post matcher (TK 看板 push or a Shop export): the standing one can be taken back in one click.
   const autoTag = (item,current) => item.auto ? `<small class="video-publication-aside" title="${esc(`按发布文案标题自动对上（来源：${{tk_lens:'TK 看板',shop_export:'Shop 导出'}[item.auto.source] || '自动匹配'}）${item.auto.title ? `：${item.auto.title}` : ''}`)}">自动登记</small>${current ? '<button type="button" class="subtle compact" data-undo-auto title="不是这条视频：撤销登记，这个帖子以后不再自动登记到这条时间线">撤销</button>' : ''}` : '';
@@ -128,7 +136,15 @@ window.VideoPublication = (() => {
     const hasText = copy.zh || copy.en;
     const text = hasText ? `${item('data-copy-publish="text"',flat(copy.en || copy.zh),copy.en ? reading(flat(copy.zh)) : '','复制中文和外文文案')}<details class="video-publish-copy-fold"><summary>查看全文${copy.version ? ` · 脚本第 ${esc(copy.version)} 版` : ''}</summary><div class="video-publish-copy">${copy.zh ? `<p>${esc(copy.zh)}</p>` : ''}${copy.en ? `<p>${esc(copy.en)}</p>` : ''}</div></details>` : '';
     const line = (label,body) => body ? `<span class="video-publish-copy-label">${label}</span><div class="video-publish-copy-lines">${body}</div>` : '';
-    return `<div class="video-publish-copy-row">${line('钩子屏显',screen)}${line('标题',titles)}${line('文案',text)}</div>`;
+    return `<div class="video-publish-copy-row">${line('钩子屏显',screen)}${line('标题',titles)}${line('文案',text)}${line('置顶评论',pinLine(copy,item))}</div>`;
+  }
+  // The pinned comment carries the campaign, so the video itself never states a deadline that later runs out.
+  function pinLine(copy,item) {
+    const campaign = copy.campaign;
+    if (!copy.pin || !campaign) return '';
+    const when = campaign.status === 'running' ? `${campaign.name} 进行中，${shortDay(campaign.end)} 结束（太平洋时间）。先确认本品已报名，活动结束后改掉。`
+      : `${campaign.name} ${shortDay(campaign.start)} 开始，活动期内发布再置顶。`;
+    return item('data-copy-pin',copy.pin.en,`<small>${esc(copy.pin.zh ? `${copy.pin.zh} · ${when}` : when)}</small>`,'复制置顶评论');
   }
   // Titles are written without Chinese, so their reading is made on first opening and saved; copying never waits for it.
   const titleRuns = new Map();
@@ -158,6 +174,9 @@ window.VideoPublication = (() => {
     }));
     host.querySelectorAll('[data-copy-screen]').forEach(button => button.addEventListener('click',() => {
       write(button,copy.screen_en,'屏显外文已复制');
+    }));
+    host.querySelectorAll('[data-copy-pin]').forEach(button => button.addEventListener('click',() => {
+      write(button,copy.pin?.en || '','置顶评论已复制');
     }));
   }
   // Only the video ID needs typing: a pasted link also gives the account, the account defaults to the last one used,
@@ -276,6 +295,17 @@ window.VideoPublication = (() => {
   }
   const hookWords = value => String(value || '').trim().replace(/\s+\/\s*/g,' / ').replace(/ \/ $/,'');
   const hookTitle = (lock,text) => lock || (text ? `在开头 3 秒加上：${text}` : '这张制作单还没有开头屏显，可以选“自己写”。');
+  // The campaign's end card: only while a trusted campaign runs, on a track of its own so it comes off again afterwards.
+  function campaignTools(timeline,copy,lock) {
+    const card = timeline.campaign_overlay, onTimeline = card && card.status !== 'removed', campaign = copy?.campaign;
+    if (!onTimeline && !campaign) return '';
+    const running = campaign?.status === 'running';
+    const why = lock || (running ? `在结尾 3 秒加上活动屏显，口播不动；${shortDay(campaign.end)} 活动结束后记得去掉。` : campaign ? `${campaign.name} ${shortDay(campaign.start)} 开始后才能加。` : '');
+    const field = onTimeline ? `<span>${esc(card.text)}</span>` : `<input type="text" maxlength="300" data-campaign-text aria-label="活动屏显文字" value="${esc(copy.card_text || '')}" ${running && !lock ? '' : 'disabled'}>`;
+    const button = onTimeline ? `<button type="button" class="secondary compact" data-campaign-card="remove" ${lock ? 'disabled' : ''}>去掉活动屏显</button>`
+      : `<button type="button" class="secondary compact" data-campaign-card="add" ${running && !lock ? '' : 'disabled'} title="${esc(why)}">加活动屏显</button>`;
+    return `<div class="video-publication-campaign-card"><span class="context-note">活动屏显</span>${field}${button}${card?.message ? `<small>${esc(card.message)}</small>` : ''}</div>`;
+  }
   function timelineTools(job,uid,copy) {
     const timeline = (job.timelines || []).find(row => row.unique_id === uid);
     if (!timeline) return '';
@@ -285,7 +315,7 @@ window.VideoPublication = (() => {
     const options = hookOptions(copy), onTimeline = timeline.hook_overlay?.text || '';
     const picked = onTimeline ? options.findIndex(option => hookWords(option.en) === hookWords(onTimeline)) : options.length ? 0 : -1;
     const hookText = picked < 0 ? onTimeline : options[picked].en;
-    return `<div class="video-publication-timeline" data-timeline-tools="${esc(uid)}"><div class="video-publication-timeline-bar"><span class="id-row"><strong>${esc(timeline.name)}</strong>${typeof copyIdButton === 'function' ? copyIdButton(timeline.name,'时间线名称',{icon:true}) : ''}</span><button type="button" class="secondary compact" data-open-timeline>在达芬奇打开</button><button type="button" class="secondary compact" data-check-subtitles ${lock ? 'disabled' : ''} title="${esc(lock || '和配音稿对比，用词错误直接改好，拿不准的列出来。')}">核对字幕</button><button type="button" class="secondary compact" data-add-hook data-hook-lock="${esc(hookLock)}" ${hookLock || !hookText ? 'disabled' : ''} title="${esc(hookTitle(hookLock,hookText))}">${timeline.hook_overlay ? '更新屏显' : '加屏显'}</button></div><div class="video-publication-hook-choice"><select data-hook-choice aria-label="选屏显文字" ${hookLock ? 'disabled' : ''}>${options.map((option,index) => `<option value="${index}" ${index === picked ? 'selected' : ''}>${esc(option.label ? `${option.label}：` : '')}${esc(option.en)}</option>`).join('')}<option value="custom" ${picked < 0 ? 'selected' : ''}>自己写…</option></select><input type="text" maxlength="300" data-hook-custom aria-label="自己写的屏显文字" placeholder="第一行 / 第二行" value="${esc(picked < 0 ? onTimeline : '')}" ${picked < 0 ? '' : 'hidden'} ${hookLock ? 'disabled' : ''}><small data-hook-reading>${esc(options[picked]?.zh || '')}</small></div>${subtitleResult(timeline)}${hookResult(timeline)}<p class="ai-error" data-timeline-tools-error role="alert" hidden></p></div>`;
+    return `<div class="video-publication-timeline" data-timeline-tools="${esc(uid)}"><div class="video-publication-timeline-bar"><span class="id-row"><strong>${esc(timeline.name)}</strong>${typeof copyIdButton === 'function' ? copyIdButton(timeline.name,'时间线名称',{icon:true}) : ''}</span><button type="button" class="secondary compact" data-open-timeline>在达芬奇打开</button><button type="button" class="secondary compact" data-check-subtitles ${lock ? 'disabled' : ''} title="${esc(lock || '和配音稿对比，用词错误直接改好，拿不准的列出来。')}">核对字幕</button><button type="button" class="secondary compact" data-add-hook data-hook-lock="${esc(hookLock)}" ${hookLock || !hookText ? 'disabled' : ''} title="${esc(hookTitle(hookLock,hookText))}">${timeline.hook_overlay ? '更新屏显' : '加屏显'}</button></div><div class="video-publication-hook-choice"><select data-hook-choice aria-label="选屏显文字" ${hookLock ? 'disabled' : ''}>${options.map((option,index) => `<option value="${index}" ${index === picked ? 'selected' : ''}>${esc(option.label ? `${option.label}：` : '')}${esc(option.en)}</option>`).join('')}<option value="custom" ${picked < 0 ? 'selected' : ''}>自己写…</option></select><input type="text" maxlength="300" data-hook-custom aria-label="自己写的屏显文字" placeholder="第一行 / 第二行" value="${esc(picked < 0 ? onTimeline : '')}" ${picked < 0 ? '' : 'hidden'} ${hookLock ? 'disabled' : ''}><small data-hook-reading>${esc(options[picked]?.zh || '')}</small></div>${campaignTools(timeline,copy,hookLock)}${subtitleResult(timeline)}${hookResult(timeline)}<p class="ai-error" data-timeline-tools-error role="alert" hidden></p></div>`;
   }
   function bindTimelineTools(host,job,api,onTimelineChanged,copy) {
     const tools = host.querySelector('[data-timeline-tools]');
@@ -328,6 +358,16 @@ window.VideoPublication = (() => {
       hook.disabled = Boolean(hook.dataset.hookLock) || !chosenText();
       hook.title = hookTitle(hook.dataset.hookLock,chosenText());
     };
+    tools.querySelector('[data-campaign-card]')?.addEventListener('click',async event => {
+      const button = event.currentTarget, action = button.dataset.campaignCard, label = button.textContent;
+      button.disabled = true;button.textContent = '处理中…';error.hidden = true;
+      let result;
+      try {result = await api(`${url}/campaign`,{method:'POST',body:{timeline_uid:uid,request_id:crypto.randomUUID(),action,text:tools.querySelector('[data-campaign-text]')?.value.trim() || ''}});}
+      catch (failure) {problem(failure);button.disabled = false;button.textContent = label;return;}
+      const outcome = result.timeline.campaign_overlay;
+      toast(outcome.message,!['saved','removed'].includes(outcome.status));
+      await repaint(result.timeline);
+    });
     choice.addEventListener('change',() => {chosen();if (!custom.hidden) custom.focus();});
     custom.addEventListener('input',chosen);
     hook.addEventListener('click',async () => {
@@ -340,6 +380,63 @@ window.VideoPublication = (() => {
       toast(outcome.message,outcome.status !== 'saved');
       await repaint(result.timeline);
     });
+  }
+  const previewMarkup = uid => `<section class="timeline-preview" data-timeline-preview="${esc(uid)}"><div class="timeline-preview-heading"><h3>视频预览</h3><button type="button" class="secondary compact" data-preview-import>从达芬奇更新预览</button><span class="context-note" data-preview-progress role="status"></span></div><p class="timeline-preview-hint" data-preview-empty>人工确认完成后自动导出成片，也可手动更新半成品预览；保留字幕、屏显和声音。</p><div data-preview-video hidden><p class="timeline-preview-caption"><strong data-preview-kind></strong><span data-preview-name></span><time data-preview-time></time><a data-preview-download download>下载高清视频</a></p><video controls playsinline preload="auto" aria-label="半成品或成片视频预览"></video></div><p class="ai-error" data-preview-error role="alert" hidden></p></section>`;
+  async function bindPreview(host,job,api,uid) {
+    const root = host.querySelector('[data-timeline-preview]');if (!root) return;
+    const button = root.querySelector('[data-preview-import]'), progress = root.querySelector('[data-preview-progress]');
+    const error = root.querySelector('[data-preview-error]'), box = root.querySelector('[data-preview-video]'), player = box.querySelector('video');
+    const url = `/api/production/jobs/${encodeURIComponent(job.id)}/preview`;
+    let timer, version = 0, posting = false;
+    const fail = problem => {error.textContent = problem.message || '预览暂时无法读取，请重试。';error.hidden = false;};
+    const show = data => {
+      if (!root.isConnected) return;
+      clearTimeout(timer);
+      const busy = data.status === 'running' || data.status === 'optimizing';
+      button.disabled = busy || Boolean(data.blocked_reason);button.setAttribute('aria-busy',String(busy));
+      button.textContent = data.status === 'optimizing' ? '正在准备播放…' : busy ? data.automatic ? '正在自动导出成片…' : '正在导出预览…' : '从达芬奇更新预览';button.title = data.blocked_reason || '';
+      progress.textContent = (busy ? data.message || '正在导出…' : data.blocked_reason || data.message || '') +
+        (busy && Number.isFinite(data.percent) ? ` ${Math.max(0,Math.min(100,data.percent))}%` : '');
+      error.hidden = data.status !== 'failed';if (data.status === 'failed') error.textContent = data.error;
+      const video = data.video;box.hidden = !video;root.querySelector('[data-preview-empty]').hidden = Boolean(video);
+      if (video) {
+        if (player.getAttribute('src') !== video.url) {
+          const generation = video.source_version || video.version;
+          const resume = player.dataset.generation === generation && player.currentTime > 0;
+          const position = player.currentTime, playing = !player.paused;
+          player.pause();player.dataset.generation = generation;
+          if (resume) player.addEventListener('loadedmetadata',() => {
+            if (player.getAttribute('src') !== video.url) return;
+            player.currentTime = Math.min(position,Number.isFinite(player.duration) ? player.duration : position);
+            if (playing) void player.play().catch(() => {});
+          },{once:true});
+          player.src = video.url;
+        }
+        root.querySelector('[data-preview-kind]').textContent = video.kind || '视频预览';
+        root.querySelector('[data-preview-name]').textContent = video.name || '';
+        root.querySelector('[data-preview-time]').textContent = video.generated_at ? `更新于 ${localTime(video.generated_at)}` : '';
+        const download = root.querySelector('[data-preview-download]');
+        download.href = video.download_url || video.url;download.download = video.name || '成片.mp4';
+        download.textContent = video.kind === '成片预览' ? '下载高清成片' : '下载高清视频';
+      }
+      if (busy) timer = setTimeout(load,2000);
+    };
+    const load = async () => {
+      if (!root.isConnected) return;
+      const current = ++version;
+      try {const data = await api(`${url}?timeline=${encodeURIComponent(uid)}`);if (current === version) show(data);}
+      catch (problem) {if (current === version && root.isConnected) {fail(problem);timer = setTimeout(load,3000);}}
+    };
+    player.onerror = () => fail(new Error('这份预览暂时无法播放，可以从达芬奇重新更新。'));
+    button.onclick = async () => {
+      if (posting || button.disabled) return;
+      posting = true;button.disabled = true;error.hidden = true;clearTimeout(timer);
+      const current = ++version;
+      try {const data = await api(url,{method:'POST',body:{timeline_uid:uid}});if (current === version) show(data);}
+      catch (problem) {if (root.isConnected) {button.disabled = false;fail(problem);}}
+      finally {posting = false;}
+    };
+    await load();
   }
   async function mount(host,{job,api,onSaved,onLoaded,onTimelineChanged,picker,onLines,onRegistered} = {}) {
     if (!host || !job || !api) return;
@@ -378,6 +475,7 @@ window.VideoPublication = (() => {
     host.innerHTML = `<h2>成片与发布<details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">登记发布后的视频 ID，并保存对应脚本、配音和人工审查版本。导入或同步销售视频表时，能唯一匹配的帖子会自动登记；匹配结果不唯一的帖子会列在这里，点一下登记。自动登记可以撤销。发布后在浏览器打开自己账号的主页，TK 看板也会把新帖推给工作台。成片文件可选绑定，绑定后会复制到工作台，随完整备份保存。</div></details></h2>
       ${host._videoPublicationPicker === false ? '' : timelinePicker(lines,data.timeline_uid)}
       ${lines.some(line => line.unique_id === data.timeline_uid) ? timelineTools(job,data.timeline_uid,data.copy) : ''}
+      ${data.timeline_uid ? previewMarkup(data.timeline_uid) : ''}
       ${data.timeline_uid && window.NotionUpload ? window.NotionUpload.markup(data.timeline_uid) : ''}
       ${data.timeline_uid && window.PhotoCarousel ? window.PhotoCarousel.markup(data.timeline_uid) : ''}
       ${item ? receipt(job,item,true) + copyRow(data.copy) : canEdit ? candidateRows(data.candidates) + copyRow(data.copy) + formMarkup(calendarPlanMarkup()) : `<div class="video-publication-bar">${calendarPlanMarkup()}<span class="context-note">${esc(data.blocked_reason)}</span></div>${copyRow(data.copy)}`}
@@ -388,6 +486,7 @@ window.VideoPublication = (() => {
       </div>`;
     bindCopy(host,data.copy);
     bindTimelineTools(host,job,api,onTimelineChanged,data.copy);
+    if (data.timeline_uid) void bindPreview(host,job,api,data.timeline_uid);
     if (window.NotionUpload && data.timeline_uid) void window.NotionUpload.bind(host,{job,api,uid:data.timeline_uid});
     if (window.PhotoCarousel && data.timeline_uid) void window.PhotoCarousel.bind(host,{job,api,uid:data.timeline_uid});
     void fillTitleChinese(host,job,api,data.copy);
@@ -406,6 +505,13 @@ window.VideoPublication = (() => {
         await api(`${base(job.id)}/calendar`,{method:'POST',body:{publication_id:button.dataset.publicationId,calendar_uploaded:button.dataset.calendarToggle === '1'}});
         if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});
       } catch (problem) {button.disabled = false;toast(problem.message || '没能更新发布日历状态。',true);}
+    });
+    host.querySelector('[data-pin-cleared]')?.addEventListener('click',async event => {
+      const button = event.currentTarget;button.disabled = true;
+      try {
+        await api(`${base(job.id)}/pin`,{method:'POST',body:{publication_id:button.dataset.pinCleared,pin_cleared:true}});
+        if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});
+      } catch (problem) {button.disabled = false;toast(problem.message || '没能标记。',true);}
     });
     host.querySelector('[data-undo-auto]')?.addEventListener('click',async event => {
       const button = event.currentTarget;button.disabled = true;

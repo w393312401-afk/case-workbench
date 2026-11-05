@@ -1,6 +1,7 @@
 """Engineering review and recovery routes over real HTTP, with only temporary business data."""
 import copy
 import json
+import time
 from uuid import uuid4
 import unittest
 
@@ -20,6 +21,13 @@ class VerificationHTTPTests(unittest.TestCase):
         app = self.server.app
         self.runner = editing.Runner()
         app.resolve = ResolveBridge(runner=self.runner)
+        app.video_previews.optimizer = lambda source, output, progress: source
+        def finish_previews():
+            deadline = time.monotonic() + 5
+            while app.video_previews.busy() and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertFalse(app.video_previews.busy())
+        self.addCleanup(finish_previews)
         identifier, edit_id, take_id = "PRD-0123456789ab", "EDT-0123456789ab", "TAK-0123456789ab"
         self.runner.job = identifier
         self.runner.inspect = editing.inspect_reply(shots=((0, 200), (200, 400)))

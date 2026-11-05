@@ -210,6 +210,25 @@ class FlowTests(unittest.TestCase):
         state = self.sets.remove_work(set_id, {"key": "B"})
         self.assertEqual([w["key"] for w in state["works"]], ["A"])
 
+    def test_prompt_follows_three_part_chain_and_carries_video_hook_and_direction(self):
+        direction = {"product": "202H", "direction_id": "202H-S1", "audience": "徒手磨石守不住角度的人",
+                     "main_difference": "S1 夹持控角", "concern": "S1 → 夹得住吗", "closing": "下方看整套 202H"}
+        self.app.directions = type("Directions", (), {"read": lambda self: {"directions": [direction]},
+                                                      "find_direction": staticmethod(lambda data, product, identifier: next(
+                                                          (d for d in data["directions"] if d["direction_id"] == identifier), None))})()
+        job = {**self.app.production.job("PRD-0123456789ab"), "direction_id": "202H-S1",
+               "timelines": [{"unique_id": "uid-1", "hook_overlay": {"text": "Less angle guesswork"}}],
+               "lines": [{"number": 1, "spoken": "I hate whetstones.", "zh": "讨厌磨石", "proof": "手在磨石上来回"}]}
+        prompt = self.sets.prompt({"id": "PHS-x", "timeline_uid": "uid-1", "product": "202H"}, job, [])
+        for expected in ("开头屏显：Less angle guesswork", "目标人群：徒手磨石守不住角度的人", "收口：下方看整套 202H",
+                         "画面：手在磨石上来回", "首张说到心里", "只讲 1–2 个卖点", "末张给下单理由", "不默认做送礼版"):
+            self.assertIn(expected, prompt)
+        self.assertNotIn("送礼、打消顾虑", prompt)
+        # No direction store and no hook: still a valid prompt that says where to read the audience from.
+        del self.app.directions
+        bare = self.sets.prompt({"id": "PHS-x", "timeline_uid": "uid-1", "product": "202H"}, self.app.production.job("PRD-0123456789ab"), [])
+        self.assertIn("这条视频没有登记方向", bare)
+
     def test_legacy_single_choice_becomes_a_queue(self):
         snapshot = [{"title_lines": ["B ONE"], "body_lines": ["fact", "GET IT *NOW*."], "image": {"kind": "frame", "t": 0.2}}]
         legacy = {"versions": [{"key": "A", "name_zh": "甲", "cta": "GET IT *NOW*.", "slides": [{"title_lines": ["A ONE"], "frame_time": 0.0}]},

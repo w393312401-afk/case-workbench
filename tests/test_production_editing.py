@@ -73,6 +73,10 @@ class Runner:
         elif request["command"] == "build":
             body = {"ok": True, "name": request["prefix"] + "1", "unique_id": "uid-1", "start_frame": 0, "end_frame": 400,
                     "audio_items": [{"start": 0, "end": 400}], "markers": [{"frame": m["frame"]} for m in request["markers"]]}
+        elif request["command"] == "export_preview":
+            path = Path(request["output_dir"]) / "preview.mp4"
+            path.write_bytes(b"isolated-preview-video")
+            body = {"ok": True, "unique_id": request["unique_id"], "restored": True, "video_path": str(path)}
         else:
             body = {"ok": True, "project": "202H", "timelines": ["蓝点折刀成品素材", "Lab261010-202-1"]}
         return subprocess.CompletedProcess(args, 0, json.dumps(body, ensure_ascii=False).encode("utf-8"), b"")
@@ -212,7 +216,8 @@ class EditingTests(unittest.TestCase):
         self.assertEqual(calls[inherit]["audio_baseline"], {"video_ids": ["old-video"], "audio_ids": ["old-audio"]})
         self.assertEqual(edit["audio_inheritance"]["plugins_copied"], 2)
         self.assertEqual(edit["status"], "completed")
-        self.assertTrue(any("插件参数和动画" in question for question in edit["report"]["questions"]))
+        self.assertTrue(edit["audio_inheritance"]["parameters_unverified"])
+        self.assertFalse(any("插件参数和动画" in question for question in edit["report"]["questions"]))
         self.assertIn("audio_overrides", self.editor.calls[0]["prompt"])
 
     def test_audio_failure_is_visible_and_cannot_be_reported_as_complete(self):
@@ -284,6 +289,72 @@ class EditingTests(unittest.TestCase):
         edit = self.wait(job["id"])
         self.assertEqual(edit["status"], "completed")
         self.assertEqual([call for call in self.bench.runner.calls if call["command"] == "inherit_edit_audio"][-1]["audio_overrides"], ["audio-custom"])
+
+    def failed_audio_edit(self, job):
+        self.bench.runner.audio_result.update(status="needs_attention", issues=[{
+            "item_uid": "bad-audio", "linked_ids": ["bad-video"], "start": 30, "end": 50, "message": "没有匹配到素材片段。"}])
+        self.start(job)
+        return self.wait(job["id"])
+
+    def test_sound_only_retry_preserves_edit_and_replaces_only_its_old_questions(self):
+        job = self.timeline_job()
+        edit = self.failed_audio_edit(job)
+        self.bench.runner.audio_baseline = {"ok": True, "video_ids": ["bad-video", "other-video"],
+                                            "audio_ids": ["bad-audio", "other-audio"]}
+        self.bench.runner.audio_result.update(status="completed", issues=[], already_matched=1)
+        calls, editor_calls = len(self.bench.runner.calls), len(self.editor.calls)
+        body = {"request_id": uuid4().hex, "repair_audio": True}
+        saved = self.bench.recheck_edit(job["id"], edit["id"], body)["edit"]
+        self.assertEqual((saved["id"], saved["status"], saved["error"]), (edit["id"], "completed", ""))
+        self.assertEqual(saved["report"]["questions"], ["开头要不要换切纸？"])
+        self.assertEqual(saved["output"], edit["output"])
+        self.assertEqual(saved["finished_at"], edit["finished_at"])
+        self.assertEqual(len(saved["audio_repair_history"]), 1)
+        self.assertEqual(len(self.editor.calls), editor_calls)
+        new_calls = self.bench.runner.calls[calls:]
+        self.assertEqual([call["command"] for call in new_calls], ["edit_audio_baseline", "inherit_edit_audio"])
+        self.assertEqual(new_calls[-1]["retry_audio_ids"], ["bad-audio"])
+        self.assertEqual(new_calls[-1]["retry_video_ids"], ["bad-video"])
+        self.assertEqual(len(self.bench.production.job(job["id"])["edits"]), 1)
+        # A duplicate click replays the receipt, without calling Resolve or appending history.
+        again = self.bench.recheck_edit(job["id"], edit["id"], body)["edit"]
+        self.assertEqual(again["audio_repaired_at"], saved["audio_repaired_at"])
+        self.assertEqual(len(self.bench.runner.calls), calls + 2)
+
+    def test_sound_only_retry_cannot_clear_material_gaps_or_other_failures(self):
+        job = self.timeline_job()
+        self.editor.output = REPORT.replace('"gaps": []', '"gaps": [{"start":0,"end":30,"need":"切纸","status":"missing"}]')
+        edit = self.failed_audio_edit(job)
+        self.bench.runner.audio_baseline = {"ok": True, "video_ids": ["bad-video"], "audio_ids": ["bad-audio"]}
+        self.bench.runner.audio_result.update(status="completed", issues=[])
+        saved = self.bench.repair_edit_audio(job["id"], edit["id"], {"request_id": uuid4().hex})["edit"]
+        self.assertEqual(saved["status"], "needs_material")
+        self.assertEqual(len(saved["report"]["gaps"]), 1)
+
+    def test_sound_only_retry_refuses_a_superseded_delivery(self):
+        job = self.timeline_job()
+        edit = self.failed_audio_edit(job)
+        self.start(job)
+        self.wait(job["id"])
+        calls = len(self.bench.runner.calls)
+        with self.assertRaises(VoiceError) as caught:
+            self.bench.repair_edit_audio(job["id"], edit["id"], {"request_id": uuid4().hex})
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(len(self.bench.runner.calls), calls)
+
+    def test_explicit_sound_source_is_forwarded_and_retained_on_retry(self):
+        job = self.timeline_job()
+        source = {"item_uid": "bad-audio", "timeline_uid": "material-timeline", "source_item_uid": "material-video"}
+        self.editor.output = REPORT.replace('"saved": true', '"audio_sources": ' + json.dumps([source]) + ', "saved": true')
+        self.bench.runner.audio_result["sources"] = [source]
+        edit = self.failed_audio_edit(job)
+        self.assertEqual([call for call in self.bench.runner.calls if call["command"] == "inherit_edit_audio"][-1]["audio_sources"], [source])
+        self.bench.runner.audio_baseline = {"ok": True, "video_ids": ["bad-video"], "audio_ids": ["bad-audio"]}
+        self.editor.output = REPORT  # Older clients may omit the map on retry; keep the known source receipt.
+        self.bench.runner.audio_result.update(status="completed", issues=[])
+        self.start(job, retry_of=edit["id"])
+        self.wait(job["id"])
+        self.assertEqual([call for call in self.bench.runner.calls if call["command"] == "inherit_edit_audio"][-1]["audio_sources"], [source])
 
     def test_unsaved_edit_retries_in_place_on_the_same_timeline(self):
         job = self.timeline_job()
@@ -472,6 +543,23 @@ class EditingTests(unittest.TestCase):
             started = self.start(job)["edit"]
             edit = self.wait(job["id"])
         return edit, self.bench.production.root / "edits" / started["id"], calls
+
+    def test_edit_stops_before_any_ai_round_when_no_picked_material_is_in_the_project(self):
+        absent = {**self.listing(), "materials": [], "missing": ["蓝点折刀成品素材"],
+                  "library": ["龙猎素材"]}
+        edit, folder, calls = self.run_with_listings(absent)
+        self.assertEqual(edit["status"], "failed")
+        self.assertIn("里没有所选的素材时间线（蓝点折刀成品素材），本次没有开始剪辑", edit["error"])
+        self.assertIn("龙猎素材", edit["error"])
+        self.assertEqual(self.editor.calls, [])
+        self.assertEqual(self.commands, ["candidates"])
+
+    def test_partly_missing_materials_still_go_to_the_editor(self):
+        from workbench_editing import absent_materials
+        absent_materials(["A", "B"], {"missing": ["B"]})
+        absent_materials([], {"missing": ["B"]})
+        with self.assertRaises(ValueError):
+            absent_materials(["A", "B"], {"missing": ["A", "B"]})
 
     def test_use_counts_are_read_again_right_before_the_ai_places_shots(self):
         placed = {"timeline_name": "Lab261010-202-9", "timeline_uid": "other", "uid": "shot-1", "media_id": "m1",

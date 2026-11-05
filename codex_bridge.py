@@ -22,6 +22,10 @@ import time
 class BridgeError(RuntimeError):
     """A safe, user-facing failure without raw subprocess output."""
 
+    def __init__(self, message, *, code="CODEX_ERROR"):
+        super().__init__(message)
+        self.code = code
+
 
 class BridgeCancelled(BridgeError):
     pass
@@ -52,7 +56,7 @@ def locate_codex(configured=None):
     return str(candidates[0].resolve()) if candidates else None
 
 
-def _friendly_error(error, stage="本次分析"):
+def _service_error(error, stage="本次分析"):
     """Classify errors locally; never return server messages or stderr verbatim."""
     error = error if isinstance(error, dict) else {}
     info = error.get("codexErrorInfo")
@@ -60,18 +64,21 @@ def _friendly_error(error, stage="本次分析"):
     message = str(error.get("message", "")).lower()
     code = error.get("code")
     if category == "unauthorized" or code in (401, 403) or any(word in message for word in ("unauthorized", "authentication", "not logged", "login required", "invalid api key")):
-        return "本机 Codex 登录暂不可用，请在 Codex 中检查登录状态后重试。"
+        return BridgeError("本机 Codex 登录暂不可用，请在 Codex 中检查登录状态后重试。", code="CODEX_AUTH")
     if category in {"usageLimitExceeded", "rateLimitExceeded", "sessionBudgetExceeded"} or code == 429 or any(word in message for word in ("usage limit", "rate limit", "quota exceeded")):
-        return "Codex 当前可用额度不足或请求过于频繁，请稍后重试。"
+        limited = category in {"usageLimitExceeded", "sessionBudgetExceeded"} or any(word in message for word in ("usage limit", "quota exceeded"))
+        return BridgeError("Codex 当前可用额度不足或请求过于频繁，请稍后重试。",
+                           code="CODEX_QUOTA" if limited else "CODEX_BUSY")
     if category == "contextWindowExceeded":
-        return "本次资料过长，请减少选中的案例或缩短问题后重试。"
+        return BridgeError("本次资料过长，请减少选中的案例或缩短问题后重试。", code="CODEX_CONTEXT")
     if category == "sandboxError" or "sandbox" in message:
-        return "本机 Codex 的只读运行环境不可用；本次操作未扩大权限，请检查 Codex 设置。"
-    if category in {"serverOverloaded", "httpConnectionFailed", "responseStreamConnectionFailed", "responseStreamDisconnected", "responseTooManyFailedAttempts"}:
-        return "Codex 服务连接暂时中断，请稍后重试。"
+        return BridgeError("本机 Codex 的只读运行环境不可用；本次操作未扩大权限，请检查 Codex 设置。", code="CODEX_SETUP")
+    if (category in {"serverOverloaded", "httpConnectionFailed", "responseStreamConnectionFailed", "responseStreamDisconnected", "responseTooManyFailedAttempts"}
+            or code in (500, 502, 503, 504)):
+        return BridgeError("Codex 服务连接暂时中断，请稍后重试。", code="CODEX_CONNECTION")
     if "model" in message and any(word in message for word in ("not found", "unsupported", "unknown", "unavailable")):
-        return "当前 Codex 模型暂不可用，请检查 Codex 的模型设置后重试。"
-    return f"Codex 未能完成{stage}，请检查本机 Codex 状态后重试。"
+        return BridgeError("当前 Codex 模型暂不可用，请检查 Codex 的模型设置后重试。", code="CODEX_MODEL")
+    return BridgeError(f"Codex 未能完成{stage}，请检查本机 Codex 状态后重试。")
 
 
 class _Session:
@@ -184,13 +191,13 @@ class _Session:
                 pending = pending[count:]
             self.process.stdin.flush()
         except (OSError, ValueError):
-            raise BridgeError("与本机 Codex 的连接已断开，请重试。") from None
+            raise BridgeError("与本机 Codex 的连接已断开，请重试。", code="CODEX_CONNECTION") from None
 
     def _check(self, deadline):
         if self.cancel_event.is_set():
             raise BridgeCancelled("本次 AI 分析已取消。")
         if time.monotonic() >= deadline:
-            raise BridgeError("Codex 响应超时，本次分析已停止，请稍后重试。")
+            raise BridgeError("Codex 响应超时，本次分析已停止，请稍后重试。", code="CODEX_TIMEOUT")
 
     def pump(self, deadline=None):
         deadline = min(deadline or self.deadline, self.deadline)
@@ -204,12 +211,12 @@ class _Session:
                     for reader in self.readers[:1]:
                         reader.join(timeout=0.05)
                     if self.messages.empty():
-                        raise BridgeError("本机 Codex 提前退出，未得到完整结果，请重试。")
+                        raise BridgeError("本机 Codex 提前退出，未得到完整结果，请重试。", code="CODEX_CONNECTION")
                 continue
             if kind != "message":
                 if kind == "protocol_error":
                     raise BridgeError("本机 Codex 返回了无法识别的数据，请更新 Codex 后重试。")
-                raise BridgeError("本机 Codex 提前断开，未得到完整结果，请重试。")
+                raise BridgeError("本机 Codex 提前断开，未得到完整结果，请重试。", code="CODEX_CONNECTION")
             if "method" in value:
                 if "id" in value:
                     self.reject_request(value)
@@ -230,7 +237,7 @@ class _Session:
         response = self.responses.pop(identifier)
         if response.get("error") is not None:
             stages = {"initialize": "连接初始化", "thread/start": "临时会话准备", "turn/start": "分析启动", "model/list": "模型列表读取"}
-            raise BridgeError(_friendly_error(response["error"], stages.get(method, "请求")))
+            raise _service_error(response["error"], stages.get(method, "请求"))
         result = response.get("result")
         if not isinstance(result, dict):
             raise BridgeError("Codex 返回的连接信息不完整，请更新 Codex 后重试。")
@@ -309,7 +316,7 @@ class _Session:
                 if self.started:
                     self.progress("连接短暂中断，Codex 正在重试。")
             else:
-                raise BridgeError(_friendly_error(params.get("error")))
+                raise _service_error(params.get("error"))
         elif method == "turn/completed":
             for item in turn.get("items", []):
                 if item.get("type") == "imageView":
@@ -322,7 +329,7 @@ class _Session:
         if turn.get("status") == "interrupted":
             raise BridgeCancelled("本次 AI 分析已停止，未返回完整结果。")
         if turn.get("status") != "completed":
-            raise BridgeError(_friendly_error(turn.get("error")))
+            raise _service_error(turn.get("error"))
         finals, unknown = [], []
         for identifier, item in self.items.items():
             if identifier not in self.completed_items:

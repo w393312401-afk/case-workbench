@@ -32,7 +32,7 @@ JOB_STATUSES = {"draft", "voiced", "timeline", "editing", "awaiting_review", "ap
                 "needs_verification", "verification_failed", "unverified", "failed", "cancelled", "interrupted"}
 TIMELINE_TASK_STATUSES = {"pending", "in_progress", "completed"}
 # Finished voiceovers and timelines are appended whatever else changed while they were being made.
-REVISION_FREE = {"take", "job_fill_start", "job_fill_finish", "timeline", "timeline_location", "timeline_subtitles", "timeline_hook", "job_completion", "edit_start", "edit_bind_timeline", "edit_finish", "edit_recheck", "edit_approve", "edit_baseline", "edit_delete", "timeline_delete", "job_delete"}
+REVISION_FREE = {"take", "job_fill_start", "job_fill_finish", "timeline", "timeline_location", "timeline_subtitles", "timeline_hook", "timeline_campaign", "job_completion", "edit_start", "edit_bind_timeline", "edit_finish", "edit_recheck", "edit_audio_repair", "edit_approve", "edit_baseline", "edit_delete", "timeline_delete", "job_delete"}
 EDIT_ID = re.compile(r"EDT-[0-9a-f]{12}")
 PUBLICATION_ID = re.compile(r"PUB-[0-9a-f]{12}")
 # Timeline frame rates as exact ratios; names are what DaVinci Resolve shows.
@@ -727,11 +727,12 @@ class ProductionStore:
             handlers = {"voice": self._voice, "reading": self._reading, "job": self._job, "job_lines": self._job_lines, "job_fill_start": self._job_fill_start, "job_fill_finish": self._job_fill_finish,
                         "job_archive": self._job_archive, "take": self._take, "select_take": self._select_take,
                         "settings": self._settings, "timeline": self._timeline, "timeline_location": self._timeline_location,
-                        "timeline_subtitles": self._timeline_subtitles, "timeline_hook": self._timeline_hook, "job_completion": self._job_completion,
+                        "timeline_subtitles": self._timeline_subtitles, "timeline_hook": self._timeline_hook, "timeline_campaign": self._timeline_campaign, "job_completion": self._job_completion,
                         "timeline_archive": self._timeline_archive, "timeline_delete": self._timeline_delete,
                         "timeline_task_status": self._timeline_task_status,
                         "edit_start": self._edit_start, "edit_bind_timeline": self._edit_bind_timeline,
                         "edit_finish": self._edit_finish, "edit_recheck": self._edit_recheck,
+                        "edit_audio_repair": self._edit_audio_repair,
                         "edit_approve": self._edit_approve, "edit_baseline": self._edit_baseline,
                         "edit_delete": self._edit_delete,
                         "job_delete": self._job_delete}
@@ -1031,6 +1032,19 @@ class ProductionStore:
         job["history"].append({"at": hook["at"], "event": "timeline_hook", "note": f"给时间线 {timeline.get('name', '')} {'加' if hook['created'] else '更新'}屏显：{hook['text']}"})
         return self._timeline_management_result(job, timeline)
 
+    def _timeline_campaign(self, data, body, card):
+        """Remember the campaign end card a timeline carries (or that it was taken off); the order's history keeps each change."""
+        job = self._find_job(data, body.get("job_id"))
+        uid = text(body.get("timeline_uid"), "时间线标识", limit=500)
+        timeline = next((row for row in job.get("timelines", []) if row.get("unique_id") == uid), None)
+        if not timeline:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        timeline["campaign_overlay"] = copy.deepcopy(card)
+        job["updated_at"] = card["at"]
+        note = f"给时间线 {timeline.get('name', '')} 加活动屏显：{card['text']}" if card["status"] != "removed" else f"去掉时间线 {timeline.get('name', '')} 的活动屏显"
+        job["history"].append({"at": card["at"], "event": "timeline_campaign", "note": note})
+        return self._timeline_management_result(job, timeline)
+
     @staticmethod
     def _managed_timeline(data, body):
         job = ProductionStore._find_job(data, body.get("job_id"))
@@ -1295,6 +1309,20 @@ class ProductionStore:
         self._apply_readback(job, edit, result)
         job["status"] = job_status(job)
         job["history"].append({"at": job["updated_at"], "event": "edit_recheck", "note": f"重新核验 {edit['id']}：{edit['status']}"})
+        return {"job": copy.deepcopy(job), "edit": copy.deepcopy(edit)}
+
+    def _edit_audio_repair(self, data, body, result):
+        job, edit = self._finished_edit(data, body)
+        if not isinstance(result, dict) or not isinstance(result.get("audio_inheritance"), dict):
+            raise VoiceError(500, "原声处理结果无效，未覆盖原记录。")
+        edit.setdefault("audio_repair_history", []).append({"at": now(), "status": edit.get("status"),
+            "error": edit.get("error", ""), "audio_inheritance": copy.deepcopy(edit.get("audio_inheritance"))})
+        for key in ("status", "error", "report", "audio_inheritance", "audio_repaired_at"):
+            if key in result:
+                edit[key] = copy.deepcopy(result[key])
+        job["status"], job["updated_at"] = job_status(job), now()
+        job["history"].append({"at": job["updated_at"], "event": "edit_audio_repair",
+            "note": f"原声继承已补齐 {edit['id']}" if edit["audio_inheritance"].get("status") == "completed" else f"原声继承仍有待处理项 {edit['id']}"})
         return {"job": copy.deepcopy(job), "edit": copy.deepcopy(edit)}
 
     def _edit_delete(self, data, body, extra):

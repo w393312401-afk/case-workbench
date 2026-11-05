@@ -211,14 +211,20 @@ class ManualCompletionHTTPTests(unittest.TestCase):
         self.server.app.production.write(data)
         return identifier
 
-    def test_route_marks_replays_lists_delivery_and_revokes_without_resolve(self):
+    def test_route_marks_exports_once_lists_delivery_and_revokes_without_engineering_readback(self):
+        from test_timeline_preview import wait
         identifier = self.seed_job()
         path = f"/api/production/jobs/{identifier}/completion"
         body = {"request_id": uuid4().hex, "completed": True, "timeline_uid": "uid-1", "note": "人工完成"}
         status, _, first = self.request("POST", path, body)
         self.assertEqual(status, 200, first)
         self.assertEqual((first["completed"], first["job"]["status"], first["job"]["edits"]), (True, "approved", []))
-        self.assertEqual(self.request("POST", path, body)[2], first)
+        self.assertEqual(first["video_preview"]["status"], "running")
+        wait(lambda: not self.server.app.video_previews.busy())
+        again = self.request("POST", path, body)[2]
+        self.assertEqual(again["manual_completion"], first["manual_completion"])
+        self.assertEqual(again["video_preview"]["status"], "done")
+        self.assertEqual(again["video_preview"]["video"]["kind"], "成片预览")
         row = self.request("GET", "/api/production/deliveries")[2]["items"][0]
         self.assertEqual((row["id"], row["status"], row["edit_id"], row["timeline_uid"]), (identifier, "approved", None, "uid-1"))
         self.assertEqual(row["approved_at"], first["manual_completion"]["at"])
@@ -228,7 +234,7 @@ class ManualCompletionHTTPTests(unittest.TestCase):
                                                         "timeline_uid": "uid-1", "completion_at": first["manual_completion"]["at"]})
         self.assertEqual((status, revoked["job"]["status"]), (200, "timeline"))
         self.assertEqual(self.request("GET", "/api/production/deliveries")[2]["items"], [])
-        self.assertEqual(self.runner.calls, [])
+        self.assertEqual([call["command"] for call in self.runner.calls], ["export_preview"])
 
     def test_route_rejects_unauthorized_invalid_stale_or_missing_job(self):
         identifier = self.seed_job()

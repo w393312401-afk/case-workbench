@@ -806,7 +806,7 @@ class AudioInheritanceTests(unittest.TestCase):
         ambiguous = {**self.candidate, "item_uid": "different-source"}
         result = self.inherit(candidates=[self.candidate, ambiguous])
         self.assertEqual(result["status"], "needs_attention")
-        self.assertIn("唯一", result["issues"][0]["message"])
+        self.assertIn("多个", result["issues"][0]["message"])
         self.assertEqual((self.dst_a.properties["AudioVolume"], self.dst_a.effects, self.resolve.saved), (0, [], 0))
         self.target.audio[1].remove(self.dst_a)
         self.dst_v.linked = []
@@ -820,6 +820,67 @@ class AudioInheritanceTests(unittest.TestCase):
         self.assertEqual(self.dst_a.properties["AudioVolume"], -10)
         self.assertEqual(self.dst_a.effects, [])
         self.assertTrue(any("素材原声插件无法读取" in issue["message"] for issue in result["issues"]))
+
+    def test_unique_one_frame_source_boundary_is_resolved_and_recorded(self):
+        # The production failure: the material starts at 14194, but placement reads back 14193.
+        self.src_v.source_start = self.src_a.source_start = 14194
+        self.src_v.source_end = self.src_a.source_end = 14370
+        self.dst_v.source_start = self.dst_a.source_start = 14193
+        self.dst_v.source_end = self.dst_a.source_end = 14314
+        self.candidate["source"] = [14194, 14370]
+        result = self.inherit()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.dst_a.properties["AudioVolume"], -10)
+        self.assertEqual(self.dst_a.effects[0].parameter, "custom threshold")
+        self.assertEqual(result["sources"][0]["match"], "frame_boundary")
+        self.assertEqual(result["sources"][0]["source_item_uid"], self.src_v.uid)
+
+    def test_two_frame_overrun_is_not_treated_as_rounding(self):
+        self.src_v.source_start = self.src_a.source_start = 112
+        self.candidate["source"] = [112, 160]
+        result = self.inherit()
+        self.assertEqual(result["status"], "needs_attention")
+        self.assertIn("没有匹配到", result["issues"][0]["message"])
+        self.assertEqual(self.src_a.copy_calls, [])
+
+    def test_repeated_listing_of_one_source_is_not_ambiguous(self):
+        self.assertEqual(self.inherit(candidates=[self.candidate, dict(self.candidate)])["status"], "completed")
+
+    def test_explicit_item_identity_resolves_overlapping_sources(self):
+        other_v = SoundItem(self.project, self.source, "video", self.media, 300, 360, 100, 160)
+        other_a = SoundItem(self.project, self.source, "audio", self.media, 300, 360, 100, 160, -18, [SoundEffect("other")])
+        other_v.linked, other_a.linked = [other_a], [other_v]
+        self.source.video.append(other_v)
+        self.source.audio[1].append(other_a)
+        other = {**self.candidate, "item_uid": other_v.uid}
+        result = self.inherit(candidates=[self.candidate, other], audio_sources=[{
+            "item_uid": self.dst_a.uid, "timeline_uid": self.source.uid, "source_item_uid": other_v.uid}])
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.dst_a.properties["AudioVolume"], -18)
+        self.assertEqual(self.dst_a.effects[0].name, "other")
+        self.assertEqual(self.src_a.copy_calls, [])
+
+    def test_invalid_explicit_source_never_falls_back_to_another_clip(self):
+        result = self.inherit(audio_sources=[{"item_uid": self.dst_a.uid, "timeline_uid": self.source.uid,
+                                              "source_item_uid": "gone-source"}])
+        self.assertEqual(result["status"], "needs_attention")
+        self.assertIn("声明的素材来源", result["issues"][0]["message"])
+        self.assertEqual((self.dst_a.properties["AudioVolume"], self.resolve.saved), (0, 0))
+
+    def test_conflicting_source_declarations_fail_before_mutations(self):
+        source = {"item_uid": self.dst_a.uid, "timeline_uid": self.source.uid, "source_item_uid": self.src_v.uid}
+        with self.assertRaises(worker.WorkerError):
+            self.inherit(audio_sources=[source, {**source, "source_item_uid": "another-source"}])
+        self.assertEqual(self.src_a.copy_calls, [])
+
+    def test_retry_of_matching_sound_does_not_copy_or_duplicate_plugins(self):
+        self.inherit()
+        calls = len(self.src_a.copy_calls)
+        baseline = worker.edit_audio_baseline(self.resolve, self.request)
+        result = self.inherit(audio_baseline=baseline, retry_audio_ids=[self.dst_a.uid], retry_video_ids=[self.dst_v.uid])
+        self.assertEqual((result["status"], result["already_matched"], result["processed"]), ("completed", 1, 0))
+        self.assertEqual(len(self.src_a.copy_calls), calls)
+        self.assertEqual(len(self.dst_a.effects), 1)
 
     def test_failed_copy_is_reported_and_any_partial_change_is_saved(self):
         self.src_a.copy_return = False

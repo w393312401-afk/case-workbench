@@ -175,6 +175,57 @@ class CreationHTTPTests(unittest.TestCase):
         self.assertIn("原稿形式是写稿底线", prompt)
         self.assertEqual(self.request("POST", "/api/ai/tasks", body)[2]["task"]["task_id"], task["task_id"])
 
+    def test_case_replica_mode_freezes_the_original_line_count(self):
+        bridge = FakeBridge(output="**优化 #1**")
+        self.server.app.ai.bridge = bridge
+        base = {"case_id": self.identifier, "revision": self.detail()["revision"], "action": "variants", "skill_selection": "none"}
+        for extra in ({"writing_mode": {"mode": "replica", "count": 0}}, {"writing_mode": {"mode": "replica", "count": 6}},
+                      {"writing_mode": {"mode": "replica", "lines": 9}}):
+            self.assertEqual(self.request("POST", "/api/ai/tasks", {**base, "request_id": uuid4().hex, **extra})[0], 400, extra)
+        status, _, data = self.request("POST", "/api/ai/tasks", {**base, "request_id": uuid4().hex, "instruction": "",
+                                                                  "writing_mode": {"mode": "replica", "count": 2}})
+        self.assertEqual(status, 200, data)
+        task = data["task"]
+        deadline = time.monotonic() + 4
+        while task["busy"] and time.monotonic() < deadline:
+            time.sleep(.02)
+            task = self.server.app.ai.get(task["task_id"])
+        self.assertEqual({"mode": "replica", "count": 2, "lines": 2}, task["context"]["writing_mode"])
+        self.assertIn("逐句对应原稿 2 句", task["rounds"][0]["instruction"])
+        prompt = bridge.calls[0]["prompt"]
+        self.assertIn("照原片优化", prompt)
+        self.assertIn("口播行数等于 writing_mode.lines", prompt)
+        self.assertIn("带货力验收", prompt)
+        self.assertIn("收口句子各条不同", prompt)
+        self.assertIn("原稿开头的情绪或身份", prompt)
+        self.assertIn("<untrusted_case_breakdown>", prompt)
+        self.assertNotIn("推进结构两两不同", prompt)
+
+    def test_replica_entry_makes_the_original_job_and_starts_the_optimized_scripts(self):
+        self.server.app.ai.bridge = FakeBridge(output="**优化 #1**")
+        path = f"/api/cases/{self.identifier}/replica"
+        # The fixture's video bytes are not decodable; the shot table itself is covered in test_replica.
+        shots = {"case_id": self.identifier, "case_title": "t", "duration": 2.0, "width": 720, "height": 1280, "timed": True,
+                 "spans": [{"start": 0, "end": 1}, {"start": 1, "end": 2}], "notes": [], "wording": "original",
+                 "shots": [{"number": 1, "start": 0, "end": 1, "lines": [1]}, {"number": 2, "start": 1, "end": 2, "lines": [2]}]}
+        tasks = []
+        with patch("workbench_replica.snapshot", lambda *args, **options: copy.deepcopy(shots)):
+            self.assertEqual(self.request("POST", path, {"new": True, "optimize": 9})[0], 400)
+            status, _, result = self.request("POST", path, {"new": True, "optimize": 2})
+            self.assertEqual(status, 200, result)
+            tasks.append(result["task"]["task_id"])
+            self.assertEqual("1:1 复刻", result["job"]["variant_label"])
+            self.assertEqual({"mode": "replica", "count": 2, "lines": 2}, result["task"]["context"]["writing_mode"])
+            # Continuing the open job only starts another task; no second original job.
+            status, _, again = self.request("POST", path, {"optimize": 1})
+            tasks.append(again["task"]["task_id"])
+            self.assertEqual((status, again["job"]["id"], again["reused"]), (200, result["job"]["id"], True))
+            self.assertEqual(1, again["task"]["context"]["writing_mode"]["count"])
+            self.assertNotIn("task", self.request("POST", path, {})[2])
+        deadline = time.monotonic() + 4
+        while any(self.server.app.ai.get(task)["busy"] for task in tasks) and time.monotonic() < deadline:
+            time.sleep(.02)
+
     def test_plans_and_source_material_expressions_are_checked(self):
         direction = self.direction()
         body = {"revision": self.catalog()["revision"], "request_id": uuid4().hex,

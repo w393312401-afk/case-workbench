@@ -22,9 +22,8 @@
 #content .lib-toolbar{padding:0;margin:0 0 16px;border:0;background:none;box-shadow:none;display:flex;flex-direction:column;gap:12px}
 .lib-search-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .lib-search-row .search{flex:1 1 280px;max-width:none}
-.lib-search-row .search input{background:var(--fill);border-color:transparent;border-radius:10px}
-.lib-filter-open{gap:7px;padding:10px 14px;border-radius:10px}
-.lib-filter-open svg{width:17px;height:17px}
+.lib-search-row .search input{background:var(--fill);border-color:transparent}
+.lib-filter-open{gap:6px}
 #content .lib-views{display:flex;align-items:center;gap:4px;margin:0;padding:0;border:0}
 #content .lib-views label{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted-soft)}
 #content .lib-views select{border:1px solid transparent;border-radius:8px;background:var(--fill);color:var(--ink);font-size:13px;font-weight:500;padding:6px 8px;min-width:112px;max-width:200px;text-overflow:ellipsis;cursor:pointer}
@@ -41,7 +40,7 @@
 
 .lib-category-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;flex-wrap:wrap}
 #content .lib-category-tabs{min-width:0;flex:0 1 auto}
-#content .lib-category-tabs button{display:inline-flex;align-items:center;gap:7px;min-height:34px;max-width:100%;overflow-wrap:anywhere;white-space:normal;text-align:left}
+#content .lib-category-tabs button{display:inline-flex;align-items:center;gap:7px;min-height:var(--btn-h-sm);max-width:100%;overflow-wrap:anywhere;white-space:normal;text-align:left}
 .lib-category-tabs small{font-size:11px;color:var(--muted-soft);font-variant-numeric:tabular-nums}
 .lib-product-classify{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:100%;margin-left:auto}
 .lib-product-classify>span:first-child{font-size:12px;color:var(--muted-soft);white-space:nowrap}

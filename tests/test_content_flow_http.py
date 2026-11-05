@@ -333,8 +333,13 @@ class ContentFlowHTTPTests(unittest.TestCase):
             "source_signature": detail["source_signature"], "post_id": "7999999999999999912",
             "published_on": "2026-10-01", "account": "fixture", "file_path": str(path), "file_confirmed": True})
         self.assertEqual(self.content(view="publish")["items"], [])
-        self.assertEqual(self.content(view="all")["items"][0]["stage"], "published")
-        self.assertTrue(self.content(view="all")["items"][0]["workflow_complete"])
+        listed = self.content(view="all")
+        self.assertEqual((listed["items"], listed["finished_hidden"], listed["counts"]["all"]), ([], 1, 0))
+        finished = self.content(view="all", status="finished")["items"]
+        self.assertEqual(finished[0]["stage"], "published")
+        self.assertTrue(finished[0]["finished"])
+        self.assertTrue(finished[0]["workflow_complete"])
+        self.assertEqual([row["id"] for row in self.content(view="all", status="published")["items"]], [identifier])
         self.assertEqual(self.content(view="all", status="workflow_incomplete")["items"], [])
         data = self.server.app.production.read()
         row = next(row for row in data["jobs"] if row["id"] == job["id"])
@@ -351,6 +356,22 @@ class ContentFlowHTTPTests(unittest.TestCase):
         self.assertFalse(any(row["history"] for row in self.content(view="all")["items"]))
         self.assertEqual(self.server.app.creation.get_script(script["id"])["status"], "published")
         self.assertEqual(self.ok("GET", endpoint)["publication"]["post_id"], "7999999999999999912")
+        # 不发了 moves the waiting video to 已完结 with its reason; 恢复待发布 brings it back.
+        self.manage(identifier, skip_publish=True, skip_reason="开头不行")
+        self.assertEqual(self.content(view="publish")["items"], [])
+        self.assertEqual(self.content(view="all")["finished_hidden"], 1)
+        skipped = self.content(view="all", status="finished")["items"]
+        self.assertEqual([(row["id"], row["stage"], row["skip_reason"]) for row in skipped], [(identifier, "skipped", "开头不行")])
+        self.assertEqual(self.content(view="all", status="published")["items"], [])
+        self.assertEqual(self.content(view="all", q="视频")["finished_hidden"], 0)
+        self.manage(identifier, skip_publish=False, skip_reason="")
+        self.assertEqual([row["id"] for row in self.content(view="publish")["items"]], [identifier])
+
+    def test_only_a_waiting_video_can_be_marked_not_to_post(self):
+        job = self.job(self.script())
+        status, _, response = self.request("POST", "/api/content/manage",
+                                           self.management_body("video:" + job["id"], skip_publish=True))
+        self.assertEqual(status, 409, response)
 
     def test_each_timeline_of_an_order_keeps_its_own_calendar_day(self):
         job = self.job(self.script())

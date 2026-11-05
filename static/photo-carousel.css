@@ -68,7 +68,7 @@
 .photo-frames{display:flex;gap:6px;overflow-x:auto;padding:2px 0 6px;min-width:0}
 .photo-frame{flex:0 0 auto;position:relative;padding:0;border-radius:6px;overflow:hidden;background:var(--media-bg);outline:2px solid transparent;outline-offset:1px}
 .photo-frame img{display:block;width:58px;height:103px;object-fit:cover}
-.photo-frame span{position:absolute;left:0;bottom:0;right:0;font-size:11px;line-height:1.5;background:#0000008c;color:#fff}
+.photo-frame span{position:absolute;left:0;bottom:0;right:0;font-size:11px;line-height:1.5;background:#0000008c;color:var(--media-ink)}
 .photo-frame.is-current{outline-color:var(--accent)}
 .photo-exports{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:4px;font-size:var(--font-meta)}
 .photo-exports li{display:flex;align-items:center;gap:10px;justify-content:space-between}

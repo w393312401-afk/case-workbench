@@ -19,6 +19,7 @@ class Timeline:
         self.timecode = "01:00:03:00"
         self.offline = False
         self.fail_switch = None
+        self.project = None
 
     def GetUniqueId(self):
         return self.uid
@@ -46,11 +47,17 @@ class Timeline:
         return self.names.get((kind, index), kind + str(index))
 
     def GetIsTrackEnabled(self, kind, index):
+        # Native Resolve 21.1.2 reports all tracks disabled when this timeline is not active.
+        if self.project and self.project.current is not self:
+            return False
         return self.enabled[kind, index]
 
     def SetTrackEnable(self, kind, index, value):
         if (kind, index, value) == self.fail_switch:
             return False
+        # Native 21.1.2 returns True but changes nothing while the Deliver page is open.
+        if self.project and self.project.page == "deliver":
+            return True
         self.enabled[kind, index] = value
         return True
 
@@ -69,6 +76,7 @@ class Project:
     def __init__(self):
         self.target, self.previous = Timeline("target"), Timeline("previous")
         self.current = self.previous
+        self.target.project = self.previous.project = self
         self.mode = 0
         self.format = {"format": "mov", "codec": "DNxHR"}
         self.settings = {"ExportSubtitle": True, "DataBurnIn": "existing", "MarkIn": 90020, "MarkOut": 90030}
@@ -79,6 +87,7 @@ class Project:
         self.outcome = "Complete"
         self.stops = 0
         self.render_snapshot = None
+        self.page = "edit"
 
     def GetName(self):
         return "Project"
@@ -100,7 +109,7 @@ class Project:
         return True
 
     def GetRenderCodecs(self, extension):
-        return {"H.264": "H264"}
+        return {"H.264 NVIDIA": "H264_NVIDIA"}
 
     def GetCurrentRenderMode(self):
         return self.mode
@@ -117,6 +126,7 @@ class Project:
         return True
 
     def SaveAsNewRenderPreset(self, name):
+        self.page = "deliver"  # native Resolve jumps to Deliver here
         self.presets[name] = copy.deepcopy(self.settings)
         return True
 
@@ -128,10 +138,14 @@ class Project:
         return True
 
     def DeleteRenderPreset(self, name):
+        self.page = "deliver"
         del self.presets[name]
         return True
 
     def SetRenderSettings(self, settings):
+        # Native 21.1.2 returns False for the whole dict when NVIDIA receives VideoQuality.
+        if "VideoQuality" in settings and self.format["codec"] == "H264_NVIDIA":
+            return False
         self.settings.update(settings)
         return True
 
@@ -145,7 +159,7 @@ class Project:
         self.render_snapshot = {"tracks": self.target.enabled.copy(), "settings": self.settings.copy(),
                                 "mode": self.mode, "uid": self.current.GetUniqueId()}
         if self.outcome == "Complete":
-            (Path(self.settings["TargetDir"]) / "textless.mp4").write_bytes(b"fixture-video")
+            (Path(self.settings["TargetDir"]) / (self.settings["CustomName"] + ".mp4")).write_bytes(b"fixture-video")
         return True
 
     def GetRenderJobStatus(self, job_id):
@@ -177,7 +191,8 @@ class TextlessTests(unittest.TestCase):
         self.project = Project()
         self.resolve = Mock()
         self.resolve.GetProjectManager.return_value.GetCurrentProject.return_value = self.project
-        self.resolve.GetCurrentPage.return_value = "edit"
+        self.resolve.GetCurrentPage.side_effect = lambda: self.project.page
+        self.resolve.OpenPage.side_effect = lambda page: setattr(self.project, "page", page) or True
         self.resolve.GetProjectManager.return_value.SaveProject.return_value = True
         self.request = {"project": "Project", "unique_id": "target", "name": "target", "output_dir": str(folder),
                         "recovery_path": str(folder / "recovery.json"), "progress_path": str(folder / "progress.json")}
@@ -189,6 +204,7 @@ class TextlessTests(unittest.TestCase):
     def assert_restored(self):
         self.assertEqual(self.project.target.enabled, self.before_tracks)
         self.assertIs(self.project.current, self.project.previous)
+        self.assertEqual(self.project.page, "edit")
         self.assertEqual(self.project.settings, self.before_settings)
         self.assertEqual(self.project.mode, 0)
         self.assertEqual(self.project.format, {"format": "mov", "codec": "DNxHR"})
@@ -213,6 +229,14 @@ class TextlessTests(unittest.TestCase):
         worker.restore_textless(self.resolve, self.request)  # repeated recovery is harmless
         self.assert_restored()
 
+    def test_tracks_are_switched_on_edit_page_after_preset_save_jumps_to_deliver(self):
+        # Seen live: SaveAsNewRenderPreset opened Deliver and the subtitle switch was ignored there.
+        result = worker.export_textless(self.resolve, self.request)
+        self.assertTrue(result["restored"])
+        self.assertFalse(self.project.render_snapshot["tracks"][("subtitle", 1)])
+        self.assertFalse(self.project.render_snapshot["tracks"][("video", 2)])
+        self.assert_restored()
+
     def test_failed_or_cancelled_render_restores_without_deleting_existing_queue(self):
         for outcome in ("Failed", "Cancelled"):
             with self.subTest(outcome=outcome):
@@ -220,6 +244,35 @@ class TextlessTests(unittest.TestCase):
                 with self.assertRaises(worker.WorkerError):
                     worker.export_textless(self.resolve, self.request)
                 self.assert_restored()
+
+    def test_normal_preview_preserves_subtitles_screen_text_and_audio(self):
+        with patch.object(self.project.target, "SetTrackEnable", wraps=self.project.target.SetTrackEnable) as switch:
+            result = worker.export_preview(self.resolve, self.request)
+            switch.assert_not_called()
+        self.assertEqual(Path(result["video_path"]).name, "preview.mp4")
+        snapshot = self.project.render_snapshot
+        self.assertEqual(snapshot["tracks"], self.before_tracks)
+        self.assertTrue(snapshot["settings"]["ExportSubtitle"])
+        self.assertEqual(snapshot["settings"]["SubtitleFormat"], "BurnIn")
+        self.assertTrue(snapshot["settings"]["ExportAudio"])
+        self.assert_restored()
+
+    def test_inactive_timeline_is_opened_before_preflight_and_original_playhead_is_restored(self):
+        self.project.previous.timecode = "01:00:12:08"
+        self.assertFalse(self.project.target.GetIsTrackEnabled("video", 1))
+        result = worker.export_preview(self.resolve, self.request)
+        self.assertTrue(result["restored"])
+        self.assertEqual(self.project.render_snapshot["uid"], "target")
+        self.assertTrue(self.project.render_snapshot["tracks"]["video", 1])
+        self.assertEqual(self.project.previous.timecode, "01:00:12:08")
+        self.assert_restored()
+
+    def test_normal_preview_does_not_turn_on_a_disabled_subtitle_track(self):
+        self.project.target.enabled["subtitle", 1] = False
+        self.before_tracks = self.project.target.enabled.copy()
+        worker.export_preview(self.resolve, self.request)
+        self.assertFalse(self.project.render_snapshot["settings"]["ExportSubtitle"])
+        self.assert_restored()
 
     def test_timeout_stops_only_its_render_then_restores(self):
         self.project.outcome = "Rendering"

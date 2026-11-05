@@ -71,7 +71,7 @@
 .dir-heading p{max-width:640px}
 .dir-filters{display:flex;flex-wrap:wrap;align-items:center;gap:10px 12px;margin-bottom:22px}
 .dir-filters .search{flex:1 1 260px;max-width:none}
-.dir-filters .search input{background:var(--fill);border-color:transparent;border-radius:10px}
+.dir-filters .search input{background:var(--fill);border-color:transparent}
 .dir-filters .search input:focus{background:var(--surface);border-color:var(--accent);outline:3px solid color-mix(in srgb,var(--accent) 22%,transparent);outline-offset:0}
 
 
@@ -211,7 +211,7 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 .dir-facts dt{color:var(--muted-soft)}
 .dir-facts dd{margin:0;color:var(--ink);overflow-wrap:anywhere}
 .dir-plan-buttons{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
-.dir-plan-buttons .compact{padding:8px 0}
+.dir-plan-buttons .compact{width:100%}
 .dir-plans{list-style:none;margin:12px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
 .dir-plans li{display:flex;flex-wrap:wrap;gap:4px 8px;font-size:13px}
 .dir-plans span{color:var(--muted-soft)}
@@ -315,3 +315,6 @@ a.dir-title::after{content:"";position:absolute;inset:0;border-radius:10px}
 @media(max-width:900px){.dir-variant-num:is([data-variant-videos],[data-variant-ctor]),.dir-variant-columns :is(.col-videos,.col-ctor){display:none}}
 @media(max-width:620px){#content .dir-variant-row{grid-template-columns:minmax(0,1fr) auto}.direction-variant-list :is(.dir-variant-columns,.dir-variant-num){display:none}}
 #content .dir-variant-columns+.dir-variant-row{border-top:0}
+/* 变体行是紧凑行：手机上按钮和状态下拉降一档，不撑高整行 */
+@media(max-width:760px){.dir-variant-row{--btn-h-sm:32px;--btn-h:34px}}
+.dir-variant-row .workbench-select>.product-picker-trigger{height:var(--btn-h)}

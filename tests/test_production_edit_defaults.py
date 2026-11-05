@@ -51,18 +51,28 @@ class EditingGlobalDefaultsTests(unittest.TestCase):
         self.assertEqual((edit["model"], edit["effort"]), ("claude-opus", "max"))
         self.assertEqual((self.editor.calls[0]["model"], self.editor.calls[0]["reasoning_effort"]), ("claude-opus", "max"))
 
-    def test_incompatible_global_defaults_fail_before_touching_resolve_or_starting_editor(self):
+    def test_any_saved_claude_model_and_effort_is_used_as_saved(self):
+        for model, effort in (("claude-sonnet", "medium"), ("claude-haiku", "medium")):
+            with self.subTest(model=model):
+                self.editor.calls.clear()
+                self.save(model, effort)
+                job = self.timeline_job()
+                self.start(job)
+                edit = self.wait(job["id"])
+                self.assertEqual((edit["model"], edit["effort"]), (model, effort))
+                self.assertEqual((self.editor.calls[0]["model"], self.editor.calls[0]["reasoning_effort"]), (model, effort))
+
+    def test_unavailable_global_model_fails_before_touching_resolve_or_starting_editor(self):
         job = self.timeline_job()
         before = len(self.bench.runner.calls)
-        for model, effort in (("claude-haiku", None), ("claude-opus", "low")):
-            with self.subTest(model=model, effort=effort):
-                self.save(model, effort)
-                with self.assertRaisesRegex(VoiceError, "不支持 AI 剪辑"):
-                    self.start(job)
-                self.assertEqual(len(self.bench.runner.calls), before)
-                self.assertFalse(self.bench.edit_running())
-                self.assertEqual(self.editor.calls, [])
-                self.assertEqual(self.codex.calls, [])
+        self.save("claude-haiku", "low")
+        self.catalog.entries[3]["available"] = False
+        with self.assertRaises((AITaskError, VoiceError)):
+            self.start(job)
+        self.assertEqual(len(self.bench.runner.calls), before)
+        self.assertFalse(self.bench.edit_running())
+        self.assertEqual(self.editor.calls, [])
+        self.assertEqual(self.codex.calls, [])
 
     def test_saved_codex_model_and_effort_reach_the_native_editor(self):
         expected = self.save("test-codex", "low")

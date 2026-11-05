@@ -507,23 +507,49 @@ class PhotoCarousels:
         path = root.parent / SKILL / "SKILL.md"
         return [{"name": SKILL, "path": str(path)}] if path.is_file() else []
 
+    def _video_brief(self, data, job):
+        """What the video already settled for this timeline: its on-screen hook and the direction it tests (audience,
+        main selling point, concern chain, closing). The carousel opens on the same viewer and closes the same way."""
+        rows = []
+        timeline = next((row for row in job.get("timelines") or [] if row.get("unique_id") == data.get("timeline_uid")), {})
+        hook = (timeline.get("hook_overlay") or {}).get("text") or (job.get("supplement") or {}).get("hook_text")
+        if hook:
+            rows.append(f"开头屏显：{hook}")
+        direction = None
+        if job.get("direction_id") and getattr(self.app, "directions", None):
+            try:
+                direction = self.app.directions.find_direction(self.app.directions.read(), job.get("product"), job["direction_id"])
+            except Exception:
+                direction = None
+        for key, label in (("audience", "目标人群"), ("main_difference", "主打卖点"), ("concern", "顾虑链"), ("closing", "收口")):
+            if (direction or {}).get(key):
+                rows.append(f"{label}：{direction[key]}")
+        return "\n".join(rows)
+
     def prompt(self, data, job, refs, note=""):
-        lines = "\n".join(f"{line.get('number')}. {line.get('spoken')}｜{line.get('zh') or ''}" for line in job.get("lines") or [])
+        lines = "\n".join(f"{line.get('number')}. {line.get('spoken')}｜{line.get('zh') or ''}"
+                          + (f"｜画面：{line['proof']}" if line.get("proof") else "") for line in job.get("lines") or [])
         duration = (data.get("video") or {}).get("duration") or 0
         sheets = sorted((self.root / data["id"] / "sheets").glob("*.jpg"))
+        brief = self._video_brief(data, job)
         return f"""按 tiktok-photo-commerce 技能，把这条带货视频做成 TikTok 挂车图文，先出 3 版逐张表。
 
 附图是这条视频的无字幕版抽帧总览（共 {len(sheets)} 张，每格左上角黄字是秒数，全片约 {duration} 秒）。
 产品型号：{data.get('product') or '未登记'}。产品资料（只读，事实以它为准）：{'、'.join(refs) or '没有找到，请只写画面里看得见、脚本里说过的事实'}。
 
-视频脚本（英文｜中文）：
+视频脚本（英文｜中文｜画面要证明什么）：
 {lines}
+{('这条视频已定的开头和方向（图文沿用同一群人、同一个收口）：' + chr(10) + brief) if brief else '这条视频没有登记方向，人群和卖点从脚本里读。'}
 
-要求：
-- 3 版用同一条视频、同一份事实，各从一个不同的购买动机切入（如痛点、一套配齐、送礼、打消顾虑），每版 5 张左右；按技能的「卖货理由链」写，末张收口。
+每版都按三段写（技能「卖货理由链」；开头和收口的句位规则以写稿技能「开头、中段与收口」为准）：
+1. 首张说到心里：用观众自己的处境或烦恼开场（如角度一直靠猜、磨刀配件一直在买），不懂这个品类的人也认得出；首张标题不介绍产品、不报配置，型号最多放在事实行。至少 1 版首张沿用视频的开头（上面的开头屏显或脚本第一句）。
+2. 中段只讲 1–2 个卖点：每个卖点都回答首张那个烦恼，标题说观众得到的好处，事实行给证明，画面里看得见效果；一个卖点可以占一到两张。不把配件、磨板、箱子逐件列成清单，和首张烦恼无关的卖点不写。
+3. 末张给下单理由：一个已核实的理由加购买入口。理由按写稿技能的优先顺序：质保（按产品资料原样说年限和“有限”）或价格（没给今天挂车价就不写数字，可以写去看今天的价格）；脚本收口里已经说过的理由可以直接用；只有这些都没有时才用整套，并说出观众因此避开什么（不用一件件凑、不会买错配件）。收纳、硬壳这类不算下单理由。
+- 3 版用同一条视频、同一份事实，区别在首张说到的烦恼或开头写法（让步反差、结果先给、身份圈人、戳破以为正常），不是换一种买家；不默认做送礼版，除非补充说明要求。每版 3–5 张，不为凑张数加页。
+- motive_zh 写这一版的三段：「烦恼：…｜卖点：…｜下单理由：…」。
 - 每张三层：大标题 1–2 短行（不懂这个品类的人 2 秒能懂，重点词用 *星号* 包起来），事实行 1–2 行（具体、可核实：数字、规格、件数、目数、范围），页码由排版自动加。
 - 每张选一个帧时间 frame_time（秒，必须是总览里看得到、画面能证明标题和事实行的那一格，优先清楚不糊的）；没有能证明的画面就收窄文案，不编。
-- 价格、优惠、退货这类有时效或因店而异的信息不写，除非下面的补充说明给了。不写资料里列为无依据的说法。
+- 价格数字、优惠、活动期限只用下面补充说明给的；不写资料里列为无依据的说法。
 - 字尽量不挡主体（刀身、刃口、刀柄、磨刀架、夹具、磨板、箱子），缩成缩略图也要一眼认出拍的是什么；字放在桌面、墙、背景这类空处，其次手臂和杂物。
 - crop_y：成图是 3:4，竖屏视频要上下裁掉一截，0 保留顶部、1 保留底部、0.5 居中；按主体位置给，尽量把主体推到一侧，空出另一侧放字。
 - text_position：split（标题在上、事实在下，默认）、top（全部在上）、bottom（全部在下），选画面空的那一侧。
@@ -531,9 +557,9 @@ class PhotoCarousels:
 {('补充说明：' + note) if note else ''}
 
 只输出一个 JSON 对象，不要别的文字：
-{{"versions":[{{"name_zh":"一套配齐","buyer_zh":"卖给谁","motive_zh":"购买动机一句话","recommended":true,
+{{"versions":[{{"name_zh":"不用再猜角度","buyer_zh":"卖给谁","motive_zh":"烦恼：…｜卖点：…｜下单理由：…","recommended":true,
 "cta":"GET YOUR *202H* BELOW.","caption_en":"发布文案英文 1–3 句 + 4–6 个标签","caption_zh":"中文对照",
-"slides":[{{"title_lines":["STOP BUYING STONES","*ONE BY ONE.*"],"body_lines":["7 plates in one hard case"],
+"slides":[{{"title_lines":["STILL *GUESSING*","YOUR ANGLE?"],"body_lines":["202H holds the knife for you"],
 "title_zh":"中文标题","body_zh":"中文事实行","frame_time":34.0,"picture_zh":"这张画面里看得到什么","crop_y":0.5,"text_position":"split","text_size":"l"}}]}}],
 "gaps_zh":["缺什么画面、哪些说法因为没证据没写"]}}
 recommended 只给 1 版设 true。"""

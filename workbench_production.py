@@ -28,6 +28,7 @@ from production_operations import ProductionOperations, durable_json
 from production_store import (FRAME_RATES, JOB_ID, TAKE_ID, apply_readings, current_manual_receipt, skill_delivery_reviewable,
                               supplement_markdown, take_quality, job_status)
 from subtitle_check import compare, summary
+from workbench_video_publish import campaign_card_text
 from task_activity import activity_label, record_activity, safe_error, settle_resolved_activity
 from variant_parse import parse_variants, same_lines, spoken_lines, variant_directions, variant_script
 
@@ -610,7 +611,9 @@ class ProductionWorkbenchMixin:
         """Record manual step-four success without launching or fabricating an AI edit."""
         if not isinstance(body, dict):
             raise VoiceError(400, "成功标记参数格式无效。")
-        return self.production.mutate("job_completion", {**body, "job_id": identifier})
+        result = self.production.mutate("job_completion", {**body, "job_id": identifier})
+        previews = getattr(self, "video_previews", None)
+        return previews.after_confirmation(identifier, result) if previews else result
 
     def _forced_alignment(self, lines, audio_path):
         """Cache the external alignment response; an unknown attempt is never billed again."""
@@ -1040,6 +1043,39 @@ class ProductionWorkbenchMixin:
             self.resolve.lock.release()
         check["message"] = summary(check)
         return self.production.mutate("timeline_subtitles", request, check)
+
+    def set_timeline_campaign(self, identifier, body):
+        """Put the campaign's end card on a timeline (its own 活动屏显 track, last seconds), or take it off when the campaign is over.
+        The voice-over never changes: the script's swappable line stays the timeless one."""
+        if not isinstance(body, dict) or body.get("action") not in {"add", "remove"}:
+            raise VoiceError(400, "活动屏显参数无效。")
+        request = {"request_id": body.get("request_id"), "job_id": identifier, "timeline_uid": body.get("timeline_uid"),
+                   "action": body["action"], "text": str(body.get("text") or "").strip()[:300]}
+        prior = self.production.replay("timeline_campaign", request)
+        if prior:
+            return prior
+        job = self.production.job(identifier)
+        record = next((item for item in job.get("timelines", []) if item["unique_id"] == body.get("timeline_uid")), None)
+        if not record:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        if job.get("archived") or record.get("archived"):
+            raise VoiceError(409, "已归档的时间线不能改活动屏显，请先恢复。")
+        where = {"project": record["project"], "unique_id": record["unique_id"], "name": record["name"], **timeline_location(record)}
+        if request["action"] == "remove":
+            done = self.resolve.run("remove_campaign_card", where, timeout=90)
+            message = ("活动屏显已去掉" if done["removed"] else "这条时间线没有活动屏显") + ("" if done["saved"] else "，但工程没有保存，请到达芬奇保存")
+            return self.production.mutate("timeline_campaign", request, {"at": now(), "status": "removed", "text": "", "campaign": None, "message": message})
+        campaign = (self._campaign_now() if hasattr(self, "_campaign_now") else {}).get("running")
+        if not campaign:
+            raise VoiceError(409, "现在没有进行中的活动，不能加活动屏显。活动开始后再加。")
+        lines = hook_lines(request["text"] or campaign_card_text(campaign))
+        if not lines or len(lines) > 2:
+            raise VoiceError(409, "活动屏显最多两行，请先改短。")
+        done = self.resolve.run("add_campaign_card", {**where, "text": "\n".join(lines), "style": ""}, timeout=90)
+        message = ("活动屏显已加" if done["created"] else "活动屏显已更新") if done["saved"] else "活动屏显已写入，但工程没有保存，请到达芬奇保存"
+        return self.production.mutate("timeline_campaign", request, {"at": now(), "status": "saved" if done["saved"] else "unsaved", "text": " / ".join(lines),
+                                                                     "campaign": {key: campaign[key] for key in ("name", "start", "end")},
+                                                                     "start": done["start"], "end": done["end"], "message": message})
 
     def add_timeline_hook(self, identifier, body):
         """Put the order's opening hook on a timeline as Text+; clicking again rewrites it with the order's current wording."""

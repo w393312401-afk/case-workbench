@@ -65,8 +65,8 @@
 
   /* Settings, brand and product leave the tab bar for the top bar (fixed, so they escape the aside). */
   body .sidebar #files-nav {
-    position: fixed; top: 8px; right: 10px; flex: none; width: 40px; height: 40px; padding: 0; font-size: 0; gap: 0;
-    border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); z-index: 31;
+    position: fixed; top: 8px; right: 10px; flex: none; width: var(--btn-h-lg); height: var(--btn-h-lg); padding: 0; font-size: 0; gap: 0;
+    border: 0; border-radius: var(--btn-radius); background: var(--fill); color: var(--ink); z-index: 31;
   }
   body .sidebar #files-nav.active { border-color: var(--accent); color: var(--accent-text); }
   body .sidebar #files-nav.active span[data-icon] { background: none; color: inherit; padding: 0; }
@@ -78,7 +78,7 @@
   }
   body .sidebar .global-product > span { display: none; }
   body .sidebar .global-product select {
-    height: 40px; padding: 0 22px 0 8px; font-size: 16px; font-weight: 600; letter-spacing: 0; border-color: var(--line); background-color: var(--surface); color: var(--ink);
+    height: var(--btn-h-lg); padding: 0 22px 0 8px; font-size: 16px; font-weight: 600; letter-spacing: 0; border-color: var(--line); background-color: var(--surface); color: var(--ink);
   }
 
   /* The local workbench also shows 收录案例 in the top bar; video import stays a desktop task. */
@@ -92,9 +92,9 @@
   }
   #breadcrumb { display: none; }
   .topbar-right { gap: 6px; flex-wrap: nowrap; }
-  .global-search-trigger { width: 40px; height: 40px; padding: 0; justify-content: center; }
+  .global-search-trigger { width: var(--btn-h-lg); height: var(--btn-h-lg); padding: 0; justify-content: center; }
   .global-search-trigger .search-label, .global-search-trigger kbd { display: none; }
-  #add-top { height: 40px; padding: 0 10px; font-size: 0; gap: 0; }
+  #add-top { height: var(--btn-h-lg); padding: 0 10px; font-size: 0; gap: 0; }
   #add-top svg { width: 19px; height: 19px; }
   .content { padding: 18px 14px 24px; }
   .banner { margin: 10px 14px 0; }
@@ -119,8 +119,7 @@
 
   /* Comfortable taps and no iOS zoom on focus. */
   input:not([type=checkbox]):not([type=radio]):not([type=range]), select, textarea { font-size: 16px; }
-  .content button:not(.nav-item):not(.ai-title-line), .content .button, dialog button { min-height: 38px; }
-  .content select, .content input[type=text], .content input[type=search], .content input:not([type]) { min-height: 42px; }
+  .content button:not([class]):not(.nav-item), dialog button:not([class]) { min-height: var(--btn-h); }
 
   /* Cards breathe less so text gets the width. */
   .section-card, .home-section { padding: 16px 14px; border-radius: 12px; }
@@ -297,7 +296,7 @@
 /* script versions: one row per version, same rhythm as the task list */
 #content .script-list-filters{display:flex;align-items:center;gap:12px;margin:0 0 20px}
 #content .script-list-filters .search{flex:1;max-width:none}
-#content .script-list-filters .search input{background:var(--fill);border-color:transparent;border-radius:10px}
+#content .script-list-filters .search input{background:var(--fill);border-color:transparent}
 .script-status-choice{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted-soft)}
 .script-status-choice select{border:0;background:transparent;color:var(--ink);font-size:13px;font-weight:500;padding:4px 2px}
 #content .script-list-group>h2{display:flex;align-items:baseline;gap:10px;font-size:15px;font-weight:600;margin:0 0 10px 4px}

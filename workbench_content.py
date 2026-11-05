@@ -22,7 +22,7 @@ from task_activity import settle_resolved_activity
 # Running work stays visible separately from rows waiting for the reader.
 VIEWS = ("attention", "running", "publish", "all")
 KINDS = {"all", "task", "script", "video"}
-STATUSES = {"all", "workflow_incomplete", "in_progress", "needs_attention", "awaiting_review", "approved", "published", "archived"}
+STATUSES = {"all", "workflow_incomplete", "in_progress", "needs_attention", "awaiting_review", "approved", "published", "finished", "archived"}
 # List order: field + direction. updated_desc keeps the default reading (open rows first in 全部).
 SORT_FIELDS = {"updated": "updated_at", "created": "created_at", "published": "published_on", "title": "title"}
 SORTS = {f"{field}_{direction}" for field in SORT_FIELDS for direction in ("asc", "desc")}
@@ -133,6 +133,8 @@ def _status_matches(item, status):
         return True
     if status == "archived":
         return bool(item.get("archived"))
+    if status == "finished":
+        return bool(item.get("finished"))
     if status == "workflow_incomplete":
         return (item["kind"] == "video" and not item.get("archived") and
                 item.get("workflow_complete") is False)
@@ -286,13 +288,18 @@ class ContentWorkbenchMixin:
             raise CreationError(400, "内容筛选条件无效。")
         (items, management), stale = self._reusable_content_snapshot(product, reuse == "1")
 
+        # 全部 folds 已完结 rows away unless the reader asks for them: a status, a rule or a search shows them again.
+        fold = view == "all" and status == "all" and content_filter is None and not search
+        finished = sum(bool(item.get("finished")) for item in items)
         counts = {mode: sum(_view_matches(item, mode) for item in items) for mode in VIEWS}
+        counts["all"] -= finished
         # Saved views list in a menu with their counts, read the way the list reads them: filter and search over 全部.
         saved = self.content_views.public(product)["views"]
         view_counts = {row["id"]: sum(_matches(item, "all", row["q"].strip().casefold()) and _filter_matches(item, row["filter"])
                                       for item in items) for row in saved}
         selected = [item for item in items if _view_matches(item, view) and _matches(item, kind, search)
-                    and _status_matches(item, status) and _filter_matches(item, content_filter)]
+                    and _status_matches(item, status) and _filter_matches(item, content_filter)
+                    and not (fold and item.get("finished"))]
         if sort == "updated_desc":
             # Newest first; in 全部, finished and archived rows follow the open ones.
             selected.sort(key=lambda item: (item.get("updated_at", ""), item["id"]), reverse=True)
@@ -322,7 +329,7 @@ class ContentWorkbenchMixin:
         calendar = sorted((item for item in items if item.get("calendar_pending")),
                           key=lambda item: (item.get("published_on", ""), item["id"]))
         return {"items": selected[(page - 1) * size:page * size], "total": total, "page": page,
-                "pages": pages, "page_size": size, "counts": counts, "view_counts": view_counts, "groups": groups, "revision": management["revision"],
+                "pages": pages, "page_size": size, "counts": counts, "finished_hidden": finished if fold else 0, "view_counts": view_counts, "groups": groups, "revision": management["revision"],
                 "calendar_pending": {"total": len(calendar), "items": calendar[:8]},
                 # Archived rows in view that 删除已归档 can remove.
                 "archived_deletable": len(self._archived_deletable([item for item in selected if item.get("archived")])[0]),
@@ -512,6 +519,9 @@ class ContentWorkbenchMixin:
             allowed.update(f"video:{row['id']}_tl_{re.sub(r'[^A-Za-z0-9-]', '', line['unique_id'])[:120]}"
                            for row in production["jobs"] for line in active_timelines(row) if line.get("unique_id"))
             item = next((row for row in items if row["id"] == body.get("id")), None)
+            if ("skip_publish" in body["management"] or "skip_reason" in body["management"]) and (
+                    not item or item["kind"] != "video" or item["stage"] not in {"awaiting_publication", "skipped"}):
+                raise CreationError(409, "只有已完成、还没登记发布的视频可以标记不发。")
             if (body.get("management") or {}).get("archived") is True and item and item.get("busy"):
                 raise CreationError(409, "这条内容仍有任务在运行，结束后可归档。")
             restore = body["management"].get("archived") is False

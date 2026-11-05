@@ -321,6 +321,33 @@ class VideoPublicationTests(unittest.TestCase):
         self.assertEqual(detail["publication"]["source_signature"], record["source_signature"])
         self.bench._video_publications().validate()
 
+    def test_a_post_during_a_campaign_says_so_and_its_pinned_comment_can_be_marked_changed(self):
+        record = self.save(self.body(file_path="", file_confirmed=False))["publication"]
+        self.bench._campaign_on = lambda day: {"name": "Black Friday", "start": "2000-01-01", "end": "2000-01-02"}
+        shown = self.bench.video_publication_detail(JOB)["publication"]
+        self.assertEqual((shown["campaign"]["name"], shown["campaign"]["ended"]), ("Black Friday", True))
+        result = self.bench.set_video_pin_status(JOB, {"publication_id": record["id"], "pin_cleared": True})
+        self.assertIs(result["pin_cleared"], True)
+        self.assertIs(self.bench.video_publication_detail(JOB)["publication"]["pin_cleared"], True)
+        self.bench._video_publications().validate()
+        self.error(400, self.bench.set_video_pin_status, JOB, {"publication_id": record["id"], "pin_cleared": "yes"})
+        self.error(409, self.bench.set_video_pin_status, JOB, {"publication_id": "VPU-000000000000", "pin_cleared": True})
+        self.bench._campaign_on = lambda day: None
+        self.assertNotIn("campaign", self.bench.video_publication_detail(JOB)["publication"])
+
+    def test_campaign_copy_prefers_the_scripts_own_wording(self):
+        running = {"name": "Black Friday / Cyber Monday（黑五网一）", "start": "2026-11-11", "end": "2026-11-30", "status": "running"}
+        self.bench._campaign_now = lambda: {"running": running, "upcoming": None}
+        swap = {"line": 9, "options": [{"kind": "活动版", "en": "It's in the Black Friday sale.", "zh": "黑五活动中", "note": ""}],
+                "pin": {"en": "Black Friday sale—tap the cart.", "zh": "黑五，点购物车"}}
+        copy = self.bench._campaign_copy(swap)
+        self.assertEqual((copy["pin"]["en"], copy["written"]["en"]), ("Black Friday sale—tap the cart.", "It's in the Black Friday sale."))
+        self.assertEqual((copy["campaign"]["status"], copy["card_text"]), ("running", "Black Friday & Cyber Monday sale / Ends Nov 30"))
+        made = self.bench._campaign_copy(None)
+        self.assertIn("ends Nov 30 (Pacific)", made["pin"]["en"])
+        self.bench._campaign_now = lambda: {"running": None, "upcoming": None}
+        self.assertEqual(self.bench._campaign_copy(None), {"campaign": None, "card_text": "", "pin": None, "written": None})
+
     def test_calendar_mark_refuses_a_stale_registration_and_bad_input(self):
         record = self.save(self.body(file_path="", file_confirmed=False))["publication"]
         self.error(409, self.bench.set_video_calendar_status, JOB, {"publication_id": "VPU-000000000000", "calendar_uploaded": True})

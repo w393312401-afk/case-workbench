@@ -116,7 +116,7 @@ window.PhotoCarousel = (() => {
       if (!ui.pick) ui.pick = new Set(Object.keys(queued).length ? [] : set.versions.filter(version => version.recommended).map(version => version.key));
       const cards = set.versions.map(version => `<article class="photo-version ${queued[version.key] || ui.pick.has(version.key) ? 'is-chosen' : ''}">
         <header><strong>${esc(version.key)} · ${esc(version.name_zh)}</strong>${version.recommended ? '<span class="photo-chip">推荐</span>' : ''}${queued[version.key] ? `<span class="photo-chip is-${esc(queued[version.key].status)}">${STATUS[queued[version.key].status]}</span>` : `<label class="photo-pick"><input type="checkbox" data-photo-pick="${esc(version.key)}" ${ui.pick.has(version.key) ? 'checked' : ''}>做这版</label>`}</header>
-        <p class="photo-meta">卖给：${esc(version.buyer_zh)}</p>
+        <p class="photo-meta">卖给：${esc(version.buyer_zh)}</p>${version.motive_zh ? `<p class="photo-meta">${esc(version.motive_zh)}</p>` : ''}
         <ol>${version.slides.map((slide,index) => `<li><img loading="lazy" src="${thumb(set,slide.frame_time)}" alt=""><div><p class="photo-title">${slide.title_lines.map(hot).join(' / ')}</p><p class="photo-fact">${esc((slide.body_lines || []).map(line => line.replaceAll('*','')).filter(line => line !== (version.cta || '').replaceAll('*','')).join(' / '))}</p><p class="photo-zh">${esc(slide.title_zh)}｜${esc(slide.body_zh)}</p><small>${esc(slide.frame_time)} 秒 · ${esc(slide.picture_zh)}</small></div></li>`).join('')}</ol>
         ${version.cta ? `<p class="photo-fact">收口：${hot(version.cta)}</p>` : ''}
       </article>`).join('');

@@ -290,6 +290,20 @@ def _describe_free(candidate, count_usage=False):
     return f"可用源帧 {spans}（其余已被 {'、'.join(candidate['used_by']) or '其他成片'} 用过）"
 
 
+def candidates_text(data):
+    """candidates.json with each clip on one line, so one Grep by its key returns the whole clip.
+
+    Lists of clips (candidates, before, after) get one row per clip; everything else stays compact on its own line."""
+    rows = []
+    for key, value in data.items():
+        if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            items = ",\n".join("  " + json.dumps(item, ensure_ascii=False) for item in value)
+            rows.append(f" {json.dumps(key, ensure_ascii=False)}: [\n{items}\n ]")
+        else:
+            rows.append(f" {json.dumps(key, ensure_ascii=False)}: {json.dumps(value, ensure_ascii=False)}")
+    return "{\n" + ",\n".join(rows) + "\n}\n"
+
+
 def write_task_files(folder, found, index, entries, listing, *, deduplicate_source_ranges=False, count_usage=False):
     """candidates.json/.md in the task folder; contact images are linked in, not copied, when the volume allows."""
     target = Path(folder) / "candidates"
@@ -312,7 +326,7 @@ def write_task_files(folder, found, index, entries, listing, *, deduplicate_sour
             "missing": listing.get("missing") or [], "dedup_enabled": deduplicate_source_ranges,
             "used_complete": bool(listing.get("used_complete")) if deduplicate_source_ranges or count_usage else False,
             "usage_counted": count_usage, "candidates": listed}
-    (Path(folder) / "candidates.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    (Path(folder) / "candidates.json").write_text(candidates_text(data), encoding="utf-8")
     lines = ["# 候选画面", "",
              f"每行一个素材片段：候选编号｜标签｜标签状态｜素材时间线位置（帧，半开）｜时长｜{'使用次数' if count_usage else '可用范围'}｜对照图｜画面描述。",
              "「已核标签」是片段名称（带 BK024 这类编号、不含“待核”）或打标签技能写的逐片标记，看过画面后写的，可直接按标签选片段；"

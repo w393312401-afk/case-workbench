@@ -11,13 +11,26 @@ import re
 import shutil
 
 from codex_bridge import BridgeCancelled
-from edit_candidates import pick_keys
+from claude_bridge import add_usage
+from edit_candidates import candidates_text, pick_keys
 
 ANALYSIS_WORKERS = 3
 ANALYSIS_TIMEOUT = 20 * 60
 # Clips shown on each side of a worker's run so a sequence cut by the boundary is still seen whole.
 NEIGHBOR_CLIPS = 3
 READ_TOOLS = ["Read", "Glob", "Grep"]
+# Skill files a read-only planner never uses: DaVinci scripting integrity rules, the change log and old ledgers.
+PLANNER_SKIPPED_REFERENCES = ("resolve-integrity.md", "CHANGELOG.md", "archive")
+# Planners pick from labels and descriptions for the editor to check; a stronger model or deeper thinking there
+# multiplies cost by the worker count without changing what the editor finally places.
+PLANNER_EFFORT_CAP = "medium"
+
+
+def planner_settings(model, effort, provider):
+    """The planners' model and effort for one edit: Claude planners run Sonnet at most medium effort."""
+    if provider != "claude":
+        return model, effort
+    return "claude-sonnet", effort if effort in {"low", PLANNER_EFFORT_CAP} else PLANNER_EFFORT_CAP
 # One fenced block, any language tag (json, JSON, jsonc or none); its body stops at its own closing fence.
 FENCED_BLOCK = re.compile(r"```[A-Za-z0-9_+-]*(.*?)```", re.S)
 DECODER = json.JSONDecoder()
@@ -135,15 +148,17 @@ def prepare_workers(folder, handoff):
                 copied.append(candidate)
             return copied
 
-        (directory / "candidates.json").write_text(json.dumps({
+        (directory / "candidates.json").write_text(candidates_text({
             "worker": number, "workers": count, "candidates": copy_rows(batch),
             "before": copy_rows(before), "after": copy_rows(after),
-        }, ensure_ascii=False, indent=1), encoding="utf-8")
+        }), encoding="utf-8")
         (directory / "handoff.md").write_text(handoff, encoding="utf-8")
         # Keep applicable product and continuity rules identical to the editor's
         # current task snapshot, without granting access outside this worker.
         if (folder / "skill").is_dir():
-            shutil.copytree(folder / "skill", directory / "skill", dirs_exist_ok=True)
+            # Selection needs the skill and product references, not its DaVinci integrity rules or history.
+            shutil.copytree(folder / "skill", directory / "skill", dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns(*PLANNER_SKIPPED_REFERENCES))
         if (folder / "reference").is_dir():  # A 1:1 edit's planners compare against the original's shots too.
             shutil.copytree(folder / "reference", directory / "reference", dirs_exist_ok=True)
         workers.append(directory)
@@ -200,6 +215,8 @@ def analyze_candidates(folder, handoff, bridge, *, cancel, model, effort, slots,
                "denied": ["Write", "Edit", "Bash", "Agent", "Task"], "mcp": {}, "dirs": [],
                "timeout": ANALYSIS_TIMEOUT}
 
+    used = []  # Usage events of every planner run, failed ones included: they used the quota too.
+
     def research(number, directory):
         acquired = False
         try:
@@ -221,10 +238,14 @@ def analyze_candidates(folder, handoff, bridge, *, cancel, model, effort, slots,
                       "首选是你会从本组直接放进该意群的镜头，一个意群需要几个镜头就按顺序列几项、每项一个 key；"
                       "选项 A/B/C 只取你最推荐的那套，不列其余备选、被否定的片段或 before/after；本组没有首选就给空数组。"
                       "工作台只按这份清单登记本次剪辑将用的素材。")
+            def on_event(event):
+                if isinstance(event, dict) and event.get("type") == "usage":
+                    used.append(event)
+
             output = bridge.run(prompt, cwd=str(directory), cancel_event=cancel,
                                 on_progress=lambda message: progress(f"选材分工 {number}/{len(workers)}：{message}"),
                                 model=None if model == "codex-default" else model, reasoning_effort=effort,
-                                skills=[], on_event=None, profile=profile)
+                                skills=[], on_event=on_event, profile=profile)
             if cancel.is_set():
                 raise BridgeCancelled("选材已取消。")
             text = str(output or "").strip()
@@ -256,5 +277,8 @@ def analyze_candidates(folder, handoff, bridge, *, cancel, model, effort, slots,
         lines.extend([f"## 第 {result['worker']} 组", "", result.get("output") or f"未完成：{result['error']}。需由主剪辑自行查找本组候选。", ""])
     path.write_text("\n".join(lines), encoding="utf-8")
     (Path(folder) / "planning-results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
+    usage = None
+    for event in list(used):
+        usage = add_usage(usage, event)
     return {"workers": len(workers), "completed": sum(row["status"] == "completed" for row in results),
-            "failed": sum(row["status"] == "failed" for row in results)}
+            "failed": sum(row["status"] == "failed" for row in results), **({"usage": usage} if usage else {})}

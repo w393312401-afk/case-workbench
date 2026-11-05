@@ -127,7 +127,7 @@ main:has(.production-steps) .topbar{position:sticky;top:0;z-index:20}
 .production-completion-details summary{cursor:pointer}
 .production-completion-details .field{margin:10px 0 0}
 .production-completion-details textarea{width:100%;box-sizing:border-box}
-@media(max-width:720px){.production-completion-heading{flex-direction:column;align-items:stretch}.production-completion-heading button{width:100%;min-height:40px}}
+@media(max-width:720px){.production-completion-heading{flex-direction:column;align-items:stretch}.production-completion-heading button{width:100%;min-height:var(--btn-h-lg)}}
 .edit-older>summary{cursor:pointer;color:var(--muted-soft);font-size:13px;padding:6px 0}
 .edit-older-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px}
 .edit-older-bar small{color:var(--muted-soft)}
@@ -147,6 +147,7 @@ main:has(.production-steps) .topbar{position:sticky;top:0;z-index:20}
 .image-redo-controls>div{padding-top:8px}
 
 .edit-delivery-questions{margin:12px 0}
+.edit-delivery-questions h4{margin:10px 0 4px;font-size:var(--font-meta);color:var(--muted)}
 
 /* compact pick tiles */
 .pick-slides{gap:10px}

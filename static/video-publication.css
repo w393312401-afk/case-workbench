@@ -96,6 +96,14 @@
 .video-publication-folds>p {margin:0;}
 
 .video-publication-unmarked {color:var(--muted-soft);font-size:var(--font-micro);}
+.timeline-preview{margin:12px 0;padding:12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+.timeline-preview-heading{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap}
+.timeline-preview-heading h3{margin:0;font-size:var(--font-body)}
+.timeline-preview-hint,.timeline-preview-caption{margin:8px 0 0;color:var(--muted);font-size:var(--font-meta)}
+.timeline-preview-caption{display:flex;gap:6px 10px;align-items:baseline;flex-wrap:wrap;overflow-wrap:anywhere}
+.timeline-preview-caption strong{color:var(--ink)}
+.timeline-preview video{display:block;width:min(270px,100%);max-height:480px;aspect-ratio:9/16;object-fit:contain;background:var(--media-bg);border-radius:var(--radius);margin-top:8px}
+.timeline-preview [data-preview-error]{margin:8px 0 0}
 .video-publication-history {display:grid;gap:6px;}
 .notion-upload {display:flex;align-items:center;gap:6px 10px;flex-wrap:wrap;margin:6px 0 10px;font-size:var(--font-meta);}
 .notion-upload [data-notion-status]:empty {display:none;}
@@ -106,3 +114,9 @@
 .notion-upload-dialog [data-notion-progress]:empty {display:none;}
 .video-publication-superseded>summary {cursor:pointer;color:var(--muted);font-size:var(--font-micro);padding:2px 0;}
 .video-publication-superseded>.video-publication-receipt {margin:6px 0 4px;}
+
+/* Campaign end card on a timeline, and the reminder once its campaign is over. */
+.video-publication-campaign-card{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin-top:6px}
+.video-publication-campaign-card input{flex:1 1 220px;min-width:0}
+.video-publication-campaign-card small{color:var(--muted-soft)}
+.video-publication-campaign button{margin-left:8px}

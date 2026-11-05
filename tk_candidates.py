@@ -309,6 +309,19 @@ class CandidateStore:
         items = [item for item in items if (not key or item["product_key"] == key) and (status in (None, "", "all") or item["status"] == status)]
         return sorted(items, key=lambda item: item["saved_at"], reverse=True)
 
+    def prune_missing_jobs(self, job_ids):
+        """Remove saved cards only when their linked order no longer exists."""
+        existing = set(job_ids)
+        with self.lock:
+            data = self.read()
+            kept = [item for item in data["candidates"]
+                    if not item.get("job_id") or item["job_id"] in existing]
+            removed = len(data["candidates"]) - len(kept)
+            if removed:
+                data["candidates"] = kept
+                self.write(data)
+            return removed
+
     def counts(self, product=None):
         key = product_key(product) if product else None
         with self.lock:

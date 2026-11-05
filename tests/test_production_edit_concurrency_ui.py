@@ -106,6 +106,34 @@ class ProductionEditConcurrencyBrowserTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0]["body"]["materials"], ["蓝点折刀成品素材"])
 
+    def test_finished_edit_shows_what_it_took_from_the_quota(self):
+        edit = fixture.ProductionValidationBrowserTests.edit(self, "awaiting_review")
+        part = {"runs": 1, "turns": 40, "input_tokens": 1000, "cache_read_input_tokens": 2500000,
+                "cache_creation_input_tokens": 99000, "output_tokens": 30000, "cost_usd": 3.2}
+        planning = {**part, "runs": 3, "turns": 30, "cache_read_input_tokens": 600000, "cost_usd": 1}
+        edit["ai_usage"] = {"editor": part, "planning": planning, "total": {**part, "cost_usd": 4.2}}
+        self.payload["job"]["edits"] = [edit]
+        page = self.open_page()
+        note = page.locator(f'[data-edit-id="{edit["id"]}"] .edit-usage')
+        expect(note).to_contain_text("主剪辑 40 轮，读入 260 万（缓存 250 万），输出 3.0 万")
+        expect(note).to_contain_text("选材 3 次 30 轮")
+        expect(note).to_contain_text("$4.20")
+
+    def test_busy_resolve_never_offers_another_creators_materials_for_a_project_without_any(self):
+        # Built in a project with no material timelines: the product's last list belongs to another creator's project.
+        self.payload["job"]["timelines"][0].update(project="Zack-202H", materials=[])
+        page = self.open_page()
+        page.route("**/api/production/resolve", lambda route: route.fulfill(status=200,
+            content_type="application/json", body=json.dumps({"ok": False, "busy": True,
+                "error": "达芬奇正在执行另一项工作台操作"})))
+        page.reload()
+        page.locator('.production-steps [data-step="edit"]').click()
+        form = page.locator("#edit-panel #edit-form")
+        expect(form.locator('[name="material_text"]')).to_have_value("")
+        expect(form.locator("[data-materials]")).to_contain_text("「Zack-202H」")
+        form.get_by_role("button", name="开始 AI 剪辑", exact=True).click()
+        self.assertEqual(self.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

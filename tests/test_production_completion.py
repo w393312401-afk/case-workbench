@@ -411,6 +411,7 @@ class CompletionHTTPTests(unittest.TestCase):
 
     def test_routes_confirm_replay_and_revoke(self):
         from test_production_verification_http import VerificationHTTPTests
+        from test_timeline_preview import wait
         job, edit = VerificationHTTPTests.seed_job(self)
         path = f"/api/production/jobs/{job}/edits/{edit}/approval"
         self.assertEqual(self.request("POST", path, {"request_id": uuid4().hex, "approved": True, "reviewed": []})[0], 400)
@@ -421,8 +422,12 @@ class CompletionHTTPTests(unittest.TestCase):
         status, _, first = self.request("POST", path, body)
         self.assertEqual(status, 200, first)
         self.assertEqual((first["approved"], first["job"]["status"]), (True, "approved"))
-        self.assertEqual(self.request("POST", path, body)[2], first)
-        self.assertEqual(len(self.runner.calls), 1)
+        self.assertEqual(first["video_preview"]["status"], "running")
+        wait(lambda: not self.server.app.video_previews.busy())
+        again = self.request("POST", path, body)[2]
+        self.assertEqual(again["edit"]["approval"], first["edit"]["approval"])
+        self.assertEqual(again["video_preview"]["video"]["kind"], "成片预览")
+        self.assertEqual([call["command"] for call in self.runner.calls], ["inspect", "export_preview"])
         ready = self.request("GET", "/api/production/deliveries")[2]["items"]
         self.assertEqual(ready[0]["approved_at"], first["edit"]["approval"]["at"])
         status, _, revoked = self.request("POST", path, {"request_id": uuid4().hex, "approved": False})

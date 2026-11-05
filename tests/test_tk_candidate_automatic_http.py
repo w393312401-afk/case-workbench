@@ -91,6 +91,69 @@ class AutomaticCandidateHTTPTests(unittest.TestCase):
         self.assertEqual(app.reconcile_tk_candidates(), {"associated": 1, "errors": []})
         self.assertEqual(before, [path.read_bytes() for path in paths])
 
+    def test_listing_removes_deleted_order_cards_and_keeps_archived_and_unproduced_cards(self):
+        made = self.produce()
+        app = self.server.app
+        status, _, archived = self.extension("/api/public-stats/direction-produce",
+            {"product": "202H", "reference": REFERENCE, "direction": {**CARD, "name": "归档制作单"}})
+        self.assertEqual(status, 200, archived)
+        app.archive_job(archived["job"]["id"], {"request_id": "archive-kept-candidate",
+            "revision": app.production.current_revision(), "archived": True})
+        pending = app.tk_candidates.add("202H", REFERENCE,
+            [{**CARD, "name": name} for name in ("尚未制作", "正在写稿", "已忽略")])["candidates"]
+        app.tk_candidates.link(pending[1]["candidate_id"], writing_task_id="AIT-pending")
+        app.tk_candidates.set_status(pending[2]["candidate_id"], "dismissed")
+        app.tk_candidates.remember_direction(made["candidate"]["candidate_id"], error="这张制作单不存在。")
+        app.delete_job_order(made["job"]["id"], {"request_id": "delete-candidate-order"})
+        paths = [app.directions.path, app.creation.path, app.production.path]
+        before = [path.read_bytes() for path in paths]
+
+        status, _, listed = self.request("GET", "/api/tk-candidates?product=202H&status=new")
+        self.assertEqual(status, 200, listed)
+        self.assertEqual([item["candidate_id"] for item in listed["candidates"]], [pending[0]["candidate_id"]])
+        self.assertEqual(listed["counts"], {"new": 1, "adopted": 0, "dismissed": 1, "writing": 1, "produced": 1})
+        expected = {archived["candidate"]["candidate_id"], *(item["candidate_id"] for item in pending)}
+        self.assertEqual({item["candidate_id"] for item in app.tk_candidates.list()}, expected)
+        self.assertEqual(before, [path.read_bytes() for path in paths])
+        saved = app.tk_candidates.path.read_bytes()
+        with patch.object(app.tk_candidates, "write", wraps=app.tk_candidates.write) as write:
+            status, _, listed = self.request("GET", "/api/tk-candidates?product=202H")
+            self.assertEqual(status, 200, listed)
+            self.assertEqual({item["candidate_id"] for item in listed["candidates"]}, expected)
+            write.assert_not_called()
+        self.assertEqual(saved, app.tk_candidates.path.read_bytes())
+
+    def test_startup_removes_missing_orders_before_reassociating_candidates(self):
+        made = self.produce()
+        app = self.server.app
+        app.delete_job_order(made["job"]["id"], {"request_id": "delete-before-startup"})
+        paths = [app.directions.path, app.creation.path, app.production.path]
+        before = [path.read_bytes() for path in paths]
+        recovered = fixture.SERVER.Workbench(self.skill, self.runtime, allow_open=False)
+        self.assertEqual(recovered.tk_candidates.list(), [])
+        self.assertEqual(before, [path.read_bytes() for path in paths])
+
+    def test_plugin_reference_status_also_cleans_missing_orders_for_all_candidate_states(self):
+        app = self.server.app
+        for state in ("produced", "adopted", "dismissed"):
+            item = app.tk_candidates.add("202H", REFERENCE, [{**CARD, "name": state}])["candidates"][0]
+            app.tk_candidates.link(item["candidate_id"], job_id="PRD-000000000000")
+            app.tk_candidates.set_status(item["candidate_id"], state, "202H-S8" if state == "adopted" else "")
+        status, _, reference = self.extension("/api/public-stats/reference-status", {"video_id": REFERENCE["id"]})
+        self.assertEqual(status, 200, reference)
+        self.assertEqual(reference, {"candidates": [], "directions": []})
+        self.assertEqual(app.tk_candidates.list(), [])
+
+    def test_unreadable_order_catalog_does_not_delete_candidates(self):
+        self.produce()
+        app = self.server.app
+        before = app.tk_candidates.path.read_bytes()
+        app.production.path.write_text("{broken", encoding="utf-8")
+        status, _, error = self.request("GET", "/api/tk-candidates?product=202H")
+        self.assertEqual(status, 500, error)
+        self.assertIn("制作资料无法读取", error["error"])
+        self.assertEqual(app.tk_candidates.path.read_bytes(), before)
+
     def test_new_batch_keeps_a_missing_voiceover_pending_and_still_processes_the_next_card(self):
         self.install_points()
         silent = {**CARD, "name": "只有中文口播", "lines": [{"zh": "只有中文"}], "cta": {"zh": "现在入手"}}

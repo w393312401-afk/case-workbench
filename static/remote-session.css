@@ -13,6 +13,6 @@
 /* On phones the product picker is fixed at the top left and sized to leave room for the top-bar buttons
    (writing.css reserves four); the account button is a fifth, 40px plus its 6px gap. */
 @media(max-width:760px){
-  .remote-account>summary{width:40px;height:40px;justify-content:center;padding:0}
+  .remote-account>summary{width:var(--btn-h-lg);height:var(--btn-h-lg);justify-content:center;padding:0}
   body:not(.public-text-mode):has(.topbar .remote-account) .sidebar .global-product{width:min(calc(100vw - 251px),220px)}
 }
