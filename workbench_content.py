@@ -144,7 +144,7 @@ def _status_matches(item, status):
     if status == "needs_attention":
         return bool(item.get("needs_attention"))
     return item["stage"] in {"awaiting_review": {"awaiting_review", "reviewing"},
-                             "approved": {"awaiting_publication"},
+                             "approved": {"awaiting_publication", "uploaded"},
                              "published": {"published", "reviewed"}}[status]
 
 

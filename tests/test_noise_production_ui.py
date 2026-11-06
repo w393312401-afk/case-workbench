@@ -137,8 +137,9 @@ class NoisePublicationTests(unittest.TestCase):
         self.assertEqual(receipt.locator('.delivery-provenance dt', has_text='登记时间').count(), 1)
         receipt.locator('[data-copy-take]').click()
         self.assertEqual(page.evaluate('window.copiedText'), 'TAK-frozen')
-        page.locator('.video-publication-editor > summary').click()
-        self.assertIn('绑定另一个视频', page.locator('.video-publication-editor > summary').inner_text())
+        # A registration is corrected with its own 修改 button; no second registration form sits under it.
+        self.assertEqual(page.locator('.video-publication-editor').count(), 0)
+        self.assertTrue(receipt.locator('[data-edit-post]').is_visible())
 
 if __name__ == '__main__':
     unittest.main()

@@ -32,7 +32,7 @@ JOB_STATUSES = {"draft", "voiced", "timeline", "editing", "awaiting_review", "ap
                 "needs_verification", "verification_failed", "unverified", "failed", "cancelled", "interrupted"}
 TIMELINE_TASK_STATUSES = {"pending", "in_progress", "completed"}
 # Finished voiceovers and timelines are appended whatever else changed while they were being made.
-REVISION_FREE = {"take", "job_fill_start", "job_fill_finish", "timeline", "timeline_location", "timeline_subtitles", "timeline_hook", "timeline_campaign", "job_completion", "edit_start", "edit_bind_timeline", "edit_finish", "edit_recheck", "edit_audio_repair", "edit_approve", "edit_baseline", "edit_delete", "timeline_delete", "job_delete"}
+REVISION_FREE = {"take", "job_fill_start", "job_fill_finish", "timeline", "timeline_location", "timeline_subtitles", "timeline_hook", "timeline_campaign", "timeline_import", "job_completion", "edit_start", "edit_bind_timeline", "edit_finish", "edit_recheck", "edit_audio_repair", "edit_approve", "edit_baseline", "edit_delete", "timeline_delete", "job_delete"}
 EDIT_ID = re.compile(r"EDT-[0-9a-f]{12}")
 PUBLICATION_ID = re.compile(r"PUB-[0-9a-f]{12}")
 # Timeline frame rates as exact ratios; names are what DaVinci Resolve shows.
@@ -727,7 +727,7 @@ class ProductionStore:
             handlers = {"voice": self._voice, "reading": self._reading, "job": self._job, "job_lines": self._job_lines, "job_fill_start": self._job_fill_start, "job_fill_finish": self._job_fill_finish,
                         "job_archive": self._job_archive, "take": self._take, "select_take": self._select_take,
                         "settings": self._settings, "timeline": self._timeline, "timeline_location": self._timeline_location,
-                        "timeline_subtitles": self._timeline_subtitles, "timeline_hook": self._timeline_hook, "timeline_campaign": self._timeline_campaign, "job_completion": self._job_completion,
+                        "timeline_subtitles": self._timeline_subtitles, "timeline_hook": self._timeline_hook, "timeline_campaign": self._timeline_campaign, "timeline_import": self._timeline_import, "job_completion": self._job_completion,
                         "timeline_archive": self._timeline_archive, "timeline_delete": self._timeline_delete,
                         "timeline_task_status": self._timeline_task_status,
                         "edit_start": self._edit_start, "edit_bind_timeline": self._edit_bind_timeline,
@@ -988,6 +988,27 @@ class ProductionStore:
         job["status"] = job_status(job)
         job["history"].append({"at": record["built_at"], "event": "timeline", "note": f"在达芬奇建时间线 {record['name']}"})
         return {"job": copy.deepcopy(job), "timeline": copy.deepcopy(record)}
+
+    def _timeline_import(self, data, body, record):
+        """Record a timeline cut on another computer as the order's new timeline; the one it replaces is archived, not deleted."""
+        job = self._find_job(data, body.get("job_id"))
+        if not isinstance(record, dict) or not record.get("unique_id"):
+            raise VoiceError(500, "导入的时间线未完成核对，未保存。")
+        old = next((row for row in job.get("timelines", []) if row.get("unique_id") == body.get("timeline_uid")), None)
+        if not old:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        job["timelines"].append(copy.deepcopy(record))
+        if not old.get("archived") and not any(edit.get("status") == "running" and edit.get("timeline_uid") == old["unique_id"]
+                                               for edit in job.get("edits", [])):
+            old["task_status"] = timeline_task_status(job, old)
+            old["archived"] = True
+            old["replaced_by"] = record["unique_id"]
+        job["updated_at"] = record["built_at"]
+        job["status"] = job_status(job)
+        job["history"].append({"at": record["built_at"], "event": "timeline_import",
+                               "note": f"导入另一台电脑剪的时间线 {record['name']}，替换 {old.get('name', '')}"
+                                       + ("（原时间线已归档）" if old.get("archived") else "")})
+        return self._timeline_management_result(job, job["timelines"][-1])
 
     def _timeline_location(self, data, body, location):
         """Pin a timeline built before its project was recorded to the project DaVinci actually opened it in.

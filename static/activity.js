@@ -345,15 +345,24 @@ window.TaskActivity = (() => {
       return { key, runs, lead, label: naming(runs[0]).label, at: runs[0].updated_at, open: runs.some(waiting), unread: runs.some(unread) };
     }).sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
   }
+  // An order with nothing left waiting reads as what it needs now; its settled failures become one line of history.
+  const ownerStates = new Map(), stateTones = { success: "done", warning: "warning", running: "active", neutral: "muted", muted: "muted" };
+  function orderNow(group) {
+    const state = ownerStates.get(group.key);
+    if (!state || !state.label || group.runs.some(waiting)) return null;
+    const failed = group.runs.filter(run => run.status === "failed" || run.status === "interrupted");
+    const latest = group.runs[0], note = failed.length ? `历史：${failed.length} 次失败已处理` : `${naming(latest).head}：${latest.message || phaseLabel(latest.phase)}`;
+    return { label: state.label, level: stateTones[state.tone] || "muted", note };
+  }
   function goMarkup(run, name) {
     const label = `查看结果：${name}`;
     return safeUrl(run.url) ? `<button type="button" class="activity-row-go" data-activity-result="${escape(run.run_id)}" aria-label="${escape(label)}" title="查看结果">${icons.go}</button>` : "";
   }
   // A failure something later settled says why, once, instead of repeating the original error.
   const settledNote = run => run.attention_resolved && !run.owner_archived ? String(run.attention_note || "") : "";
-  function rowMarkup(run, title = run.title || "工作台任务") {
-    const fresh = unread(run), selected = viewer?.runId === run.run_id, level = tone(run), spent = brief(seconds(run)), { head } = naming(run);
-    return `<article class="activity-row${fresh ? " is-unread" : ""}${selected ? " is-selected" : ""}" data-run-id="${escape(run.run_id)}"><button type="button" class="activity-row-main" data-activity-log="${escape(run.run_id)}"${selected ? ' aria-current="true"' : ""}><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-row-text"><span class="activity-row-title">${escape(title)}</span><span class="activity-row-meta"><span class="activity-status is-${level}">${escape(status(run))}</span><span>${escape(settledNote(run) || `${head}：${run.message || phaseLabel(run.phase)}`)}</span></span></span><span class="activity-row-side"><time datetime="${escape(run.updated_at || "")}">${escape(when(run.updated_at))}</time>${spent ? `<small>${escape(spent)}</small>` : ""}</span>${fresh ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, title)}</article>`;
+  function rowMarkup(run, title = run.title || "工作台任务", now = null) {
+    const fresh = unread(run), selected = viewer?.runId === run.run_id, level = now ? now.level : tone(run), spent = brief(seconds(run)), { head } = naming(run);
+    return `<article class="activity-row${fresh ? " is-unread" : ""}${selected ? " is-selected" : ""}" data-run-id="${escape(run.run_id)}"><button type="button" class="activity-row-main" data-activity-log="${escape(run.run_id)}"${selected ? ' aria-current="true"' : ""}><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-row-text"><span class="activity-row-title">${escape(title)}</span><span class="activity-row-meta"><span class="activity-status is-${level}">${escape(now ? now.label : status(run))}</span><span>${escape(now ? now.note : settledNote(run) || `${head}：${run.message || phaseLabel(run.phase)}`)}</span></span></span><span class="activity-row-side"><time datetime="${escape(run.updated_at || "")}">${escape(when(run.updated_at))}</time>${spent ? `<small>${escape(spent)}</small>` : ""}</span>${fresh ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, title)}</article>`;
   }
   // One line per run inside an order: the step, its status and its last message. Identical runs in a row share one line.
   function runMarkup(run, repeat = null) {
@@ -373,12 +382,13 @@ window.TaskActivity = (() => {
     return out.join("");
   }
   function groupMarkup(group) {
-    if (group.runs.length === 1) return rowMarkup(group.runs[0], group.label);
+    const now = orderNow(group);
+    if (group.runs.length === 1) return rowMarkup(group.runs[0], group.label, now);
     const run = group.lead;
     const summary = group.runs.find(item => activeStates.has(item.status)) || group.runs.find(waiting) || group.runs[0] || run;
-    const level = tone(summary), expanded = panel.open.has(group.key), { head } = naming(summary);
+    const level = now ? now.level : tone(summary), expanded = panel.open.has(group.key), { head } = naming(summary);
     const selected = !expanded && group.runs.some(item => item.run_id === viewer?.runId);
-    return `<article class="activity-row activity-group-row${group.unread ? " is-unread" : ""}${selected ? " is-selected" : ""}"><button type="button" class="activity-row-main" data-activity-group="${escape(group.key)}" aria-expanded="${expanded}"><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-row-text"><span class="activity-row-title">${escape(group.label)}</span><span class="activity-row-meta"><span class="activity-status is-${level}">${escape(status(summary))}</span><span>${escape(`${head}：${summary.message || phaseLabel(summary.phase)}`)}</span></span></span><span class="activity-row-side"><time datetime="${escape(group.at || "")}">${escape(when(group.at))}</time><small class="activity-group-count">${group.runs.length} 次${icons.chevron}</small></span>${group.unread ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, group.label)}</article>${expanded ? `<div class="activity-group-runs" role="group" aria-label="${escape(group.label)}">${runsMarkup(group)}</div>` : ""}`;
+    return `<article class="activity-row activity-group-row${group.unread ? " is-unread" : ""}${selected ? " is-selected" : ""}"><button type="button" class="activity-row-main" data-activity-group="${escape(group.key)}" aria-expanded="${expanded}"><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-row-text"><span class="activity-row-title">${escape(group.label)}</span><span class="activity-row-meta"><span class="activity-status is-${level}">${escape(now ? now.label : status(summary))}</span><span>${escape(now ? now.note : `${head}：${summary.message || phaseLabel(summary.phase)}`)}</span></span></span><span class="activity-row-side"><time datetime="${escape(group.at || "")}">${escape(when(group.at))}</time><small class="activity-group-count">${group.runs.length} 次${icons.chevron}</small></span>${group.unread ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, group.label)}</article>${expanded ? `<div class="activity-group-runs" role="group" aria-label="${escape(group.label)}">${runsMarkup(group)}</div>` : ""}`;
   }
   // Folded days are remembered only within their own tab; a new day always starts open.
   function dayed(entries, at, render) {
@@ -452,6 +462,7 @@ window.TaskActivity = (() => {
       if (data?.available === false) throw new Error("运行日志暂时不可用；已有任务仍可继续执行。");
       const items = (data.items || []).map(normalizeRun);
       remember(items);
+      for (const [owner, state] of Object.entries(data.owner_states || {})) ownerStates.set(owner, state);
       // A background refresh keeps older pages already loaded by the reader.
       const keep = row => known.has(row.run_id) && listed(known.get(row.run_id));
       const old = append ? panel.items : quiet ? panel.items.filter(row => !items.some(next => next.run_id === row.run_id) && keep(row)) : [];

@@ -2011,6 +2011,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.command in {"GET", "HEAD"}:
                 if path == "/api/production/local-edit/client":
                     return self.output(200, edit_transfer.client_package(), "application/zip")
+                timeline_file = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/timeline-file", path)
+                if timeline_file:
+                    uid = (parse_qs(parsed.query).get("uid") or [""])[0]
+                    content, _ = self.app.export_timeline_file(timeline_file[1], uid)
+                    return self.output(200, content, "application/zip")
                 transfer_download = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/local-edit/(package|result)", path)
                 if transfer_download:
                     identifier, kind = transfer_download.groups()
@@ -2031,7 +2036,12 @@ class Handler(BaseHTTPRequestHandler):
                     if activity_query.keys() - accepted or any(len(values) != 1 for values in activity_query.values()):
                         raise ApiError(400, "运行记录筛选参数无效。")
                     refresh_activity_projection_briefly(self.app)
-                    return self.output(200, self.app.activity.feed(**{key: values[0] for key, values in activity_query.items()}))
+                    feed = self.app.activity.feed(**{key: values[0] for key, values in activity_query.items()})
+                    try:  # The orders' current state is a reading aid; the run feed stands without it.
+                        feed["owner_states"] = self.app.order_states({row.get("owner_id") for row in feed.get("items", [])})
+                    except Exception:
+                        feed["owner_states"] = {}
+                    return self.output(200, feed)
                 activity_logs = re.fullmatch(r"/api/activity/([A-Za-z0-9_:.\-]{1,300})/logs", path)
                 if activity_logs:
                     if query.keys() - {"after_seq", "limit", "before_seq", "tail"} or any(len(values) != 1 for values in query.values()):
@@ -2130,7 +2140,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.file(self.app.photo_sets.frame_path(photo_frame[1], int(photo_frame[2]), full=query.get("full") == ["1"]))
                 photo_base = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/base/([A-Z])/([0-9]{1,2})", path)
                 if photo_base:
-                    return self.file(self.app.photo_sets.base_path(photo_base[1], photo_base[2], int(photo_base[3])))
+                    cell = query.get("cell", ["1"])[0]
+                    if not cell.isdigit():
+                        raise ApiError(400, "格子编号无效。")
+                    return self.file(self.app.photo_sets.base_path(photo_base[1], photo_base[2], int(photo_base[3]), int(cell)))
                 photo_render = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/render/([A-Z])/(label|flower|bar)/([0-9]{1,2})\.jpg", path)
                 if photo_render:
                     width = query.get("w", [None])[0]
@@ -2569,7 +2582,7 @@ class Handler(BaseHTTPRequestHandler):
                     identifier, edit_id, action = edit_action.groups()
                     handler = {"approval": self.app.approve_edit, "baseline": self.app.adopt_edit_baseline}[action]
                     return self.output(200, handler(identifier, edit_id, body))
-                video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication(/verify|/calendar|/pin|/undo-auto|/dismiss|/title-zh)?", path)
+                video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication(/verify|/calendar|/pin|/undo-auto|/edit|/dismiss|/title-zh)?", path)
                 timeline_preview = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/preview", path)
                 if timeline_preview:
                     return self.output(202, self.app.video_previews.start(timeline_preview[1], body))
@@ -2579,7 +2592,7 @@ class Handler(BaseHTTPRequestHandler):
                 photo_create = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/photo-set", path)
                 if photo_create:
                     return self.output(200, self.app.photo_sets.create(photo_create[1], body))
-                photo_action = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/(plan|cancel|choose|work|remove|style|undo|copy|export|open)", path)
+                photo_action = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/(plan|cancel|choose|work|remove|style|undo|copy|export|open|rewrite-stop|redo)", path)
                 if photo_action:
                     set_id, action = photo_action.groups()
                     sets = self.app.photo_sets
@@ -2592,8 +2605,17 @@ class Handler(BaseHTTPRequestHandler):
                                 "choose": lambda: sets.choose(set_id, body), "style": lambda: sets.set_style(set_id, body),
                                 "work": lambda: sets.open_work(set_id, body), "remove": lambda: sets.remove_work(set_id, body),
                                 "undo": lambda: sets.undo(set_id), "copy": lambda: sets.edit_set(set_id, body),
-                                "export": lambda: sets.export(set_id)}
+                                "export": lambda: sets.export(set_id), "rewrite-stop": lambda: sets.stop_rewrite(set_id), "redo": lambda: sets.redo(set_id)}
                     return self.output(200, handlers[action]())
+                photo_rewrite = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/slides/([0-9]{1,2})/rewrite", path)
+                if photo_rewrite:
+                    return self.output(202, self.app.photo_sets.rewrite(photo_rewrite[1], int(photo_rewrite[2]), body))
+                photo_pick = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/slides/([0-9]{1,2})/pick", path)
+                if photo_pick:
+                    return self.output(200, self.app.photo_sets.pick_option(photo_pick[1], int(photo_pick[2]), body))
+                photo_arrange = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/slides/([0-9]{1,2})/arrange", path)
+                if photo_arrange:
+                    return self.output(200, self.app.photo_sets.arrange(photo_arrange[1], int(photo_arrange[2]), body))
                 photo_slide = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/slides/([0-9]{1,2})", path)
                 if photo_slide:
                     return self.output(200, self.app.photo_sets.edit_slide(photo_slide[1], int(photo_slide[2]), body))
@@ -2606,7 +2628,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.notion_uploads.bridge.connect())
                 if video_publication:
                     handler = {"/verify": self.app.verify_video_publication, "/calendar": self.app.set_video_calendar_status, "/pin": self.app.set_video_pin_status,
-                               "/undo-auto": self.app.undo_auto_video_publication,
+                               "/undo-auto": self.app.undo_auto_video_publication, "/edit": self.app.edit_video_publication,
                                "/dismiss": self.app.dismiss_publication_candidate,
                                "/title-zh": self.app.translate_video_titles}.get(video_publication[2], self.app.save_video_publication)
                     return self.output(200, handler(video_publication[1], body))
@@ -2621,12 +2643,12 @@ class Handler(BaseHTTPRequestHandler):
                     handler = {"archive": self.app.archive_timeline, "delete": self.app.delete_timeline,
                                "task-status": self.app.set_timeline_task_status}[action]
                     return self.output(200, handler(identifier, body))
-                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|fill|archive|delete|timeline|open|subtitles|hook|campaign|edit|handoff|recover|completion)", path)
+                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|fill|archive|delete|timeline|open|subtitles|hook|campaign|home-timeline|edit|handoff|recover|completion)", path)
                 if job_action:
                     identifier, action = job_action.groups()
                     handler = {"takes": self.app.generate_take, "select": self.app.select_take,
                                "lines": self.app.save_job_lines, "fill": self.app.fill_production_job, "archive": self.app.archive_job, "delete": self.app.delete_job_order,
-                               "timeline": self.app.build_timeline, "open": self.app.open_timeline, "subtitles": self.app.check_timeline_subtitles, "hook": self.app.add_timeline_hook, "campaign": self.app.set_timeline_campaign,
+                               "timeline": self.app.build_timeline, "open": self.app.open_timeline, "subtitles": self.app.check_timeline_subtitles, "hook": self.app.add_timeline_hook, "campaign": self.app.set_timeline_campaign, "home-timeline": self.app.import_home_timeline,
                                "edit": self.app.start_edit, "handoff": self.app.edit_handoff,
                                "recover": self.app.recover_production_operation, "completion": self.app.complete_production_job}[action]
                     return self.output(200, handler(identifier, body))

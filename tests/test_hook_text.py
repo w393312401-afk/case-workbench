@@ -242,7 +242,8 @@ class WorkerTests(unittest.TestCase):
         title = timeline.tracks["video"][1][0]
         self.assertEqual((title.start, title.end), (0, 90))
         self.assertEqual(title.tool.inputs["StyledText"], "Stop guessing\nCheck the bevel")
-        self.assertEqual((title.tool.inputs["Font"], title.tool.inputs["Style"], title.tool.inputs["Size"]), ("CapCut Sans Text", "Medium", 0.0673))
+        self.assertEqual((title.tool.inputs["Font"], title.tool.inputs["Style"], title.tool.inputs["Size"]), ("TikTok Sans", "Medium", 0.1))
+        self.assertEqual((title.tool.inputs["Enabled4"], title.tool.inputs["ElementShape4"], title.tool.inputs["Level4"]), (1, 2, 1))
         self.assertEqual(title.tool.inputs["Center"], {1: 0.5, 2: 0.809})
         self.assertEqual(resolve.manager.saves, 1)
 
@@ -272,12 +273,12 @@ class WorkerTests(unittest.TestCase):
     def test_long_line_shrinks_to_stay_inside_the_frame(self):
         resolve, _, timeline = self.world()
         self.add(resolve, "x" * 76)
-        self.assertAlmostEqual(timeline.tracks["video"][1][0].tool.inputs["Size"], 0.03365)
+        self.assertAlmostEqual(timeline.tracks["video"][1][0].tool.inputs["Size"], 3.0 / 76)
 
     def test_line_that_fits_keeps_the_styles_size(self):
         resolve, _, timeline = self.world()
         self.add(resolve, "x" * 38)
-        self.assertEqual(timeline.tracks["video"][1][0].tool.inputs["Size"], 0.0673)
+        self.assertAlmostEqual(timeline.tracks["video"][1][0].tool.inputs["Size"], 3.0 / 38)
 
     def test_a_named_style_is_used_for_a_new_hook(self):
         resolve, _, timeline = self.world()
@@ -595,8 +596,8 @@ class FlowTests(unittest.TestCase):
         self.set_hook("无开头屏显：第一句够强")
         with self.assertRaisesRegex(VoiceError, "还没有开头屏显"):
             self.click()
-        self.set_hook("one / two / three")
-        with self.assertRaisesRegex(VoiceError, "最多两行"):
+        self.set_hook("one / two / three / four")
+        with self.assertRaisesRegex(VoiceError, "最多三行"):
             self.click()
         self.assertEqual(self.hook_calls(), [])
 
@@ -610,9 +611,9 @@ class FlowTests(unittest.TestCase):
         self.bench.add_timeline_hook(self.job["id"], {"timeline_uid": self.line["unique_id"], "request_id": uuid4().hex, "text": "My own words"})
         self.assertEqual(self.hook_calls()[0]["text"], "My own words")
 
-    def test_own_wording_past_two_lines_is_refused(self):
-        with self.assertRaisesRegex(VoiceError, "最多两行"):
-            self.bench.add_timeline_hook(self.job["id"], {"timeline_uid": self.line["unique_id"], "request_id": uuid4().hex, "text": "a / b / c"})
+    def test_own_wording_past_three_lines_is_refused(self):
+        with self.assertRaisesRegex(VoiceError, "最多三行"):
+            self.bench.add_timeline_hook(self.job["id"], {"timeline_uid": self.line["unique_id"], "request_id": uuid4().hex, "text": "a / b / c / d"})
         self.assertEqual(self.hook_calls(), [])
 
     def test_unknown_timeline_is_refused(self):

@@ -87,6 +87,7 @@ button[aria-busy="true"]{cursor:progress}
 .pick-card:hover{border-color:var(--line-strong)}
 .pick-card:is([aria-selected="true"],[aria-pressed="true"],.is-active){border-color:var(--pick-ring);box-shadow:0 0 0 1px var(--pick-ring)}
 .pick-card-name{overflow:hidden;text-overflow:ellipsis;min-width:0}
+.pick-card-note{flex:none;font-size:11px;color:var(--muted-soft)}
 @media(max-width:720px){.pick-card{max-width:100%}}
 
 /* 状态标签：浅底 + 同色文字，放在名称前 */

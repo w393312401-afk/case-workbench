@@ -24,6 +24,7 @@ from workbench_video_publish import VideoPublicationStore
 
 
 ACCOUNT_FIELDS = ("账号", "发布账号")
+STATUS_FIELD, STATUS_READY = "视频状态", "就绪"  # A freshly uploaded video is ready to post.
 
 
 def body_markdown(source):
@@ -179,7 +180,10 @@ class NotionUploads:
         calendar = self.app.content_calendar({"id": [content_id]})
         return {"timeline_uid": uid, "name": timeline.get("name", ""), "copy": source,
             "published_on": calendar.get("calendar_date") or previous.get("published_on") or date.today().isoformat(),
-            "account": previous.get("account") or self.settings.get("accounts", {}).get(timeline.get("creator"), timeline.get("creator") or job.get("creator", "")),
+            # An account Notion said it could not find is not offered again.
+            "account": ((previous.get("account") if "发布账号" not in str(previous.get("error") or "") else "")
+                        or self.settings.get("accounts", {}).get(timeline.get("creator"))
+                        or self._last_account(timeline.get("creator")) or timeline.get("creator") or job.get("creator", "")),
             "file_path": file, "content_id": content_id, "destination": self.settings.get("name", "TK排期计划"),
             "configured": bool(self.settings.get("data_source_id")), "receipt": self.public(previous) if previous else None,
             "blocked_reason": "AI 正在剪辑，结束后可上传成片。" if timeline_running(job, timeline) else "制作单已归档。" if job.get("archived") else ""}
@@ -271,6 +275,25 @@ class NotionUploads:
                 self.running.discard((row["job_id"], row["timeline_uid"]))
 
     # Account pages rarely change, so a confirmed match is kept locally and reused without a SQL query.
+    def _last_account(self, creator):
+        """The account this creator's most recent successful upload went to: once one upload names it, the next
+        upload of the same creator starts from it instead of the creator's short name."""
+        if not creator:
+            return ""
+        rows = sorted((row for row in self.store.read()["uploads"].values() if row.get("status") == "completed" and row.get("account")),
+                      key=lambda row: row.get("updated_at", ""), reverse=True)
+        jobs = None
+        for row in rows:
+            owner = row.get("creator")
+            if owner is None:
+                if jobs is None:
+                    jobs = {job["id"]: job for job in self.app.production.records()["jobs"]}
+                line = next((item for item in (jobs.get(row["job_id"]) or {}).get("timelines", []) if item.get("unique_id") == row["timeline_uid"]), {})
+                owner = line.get("creator")
+            if owner == creator:
+                return row["account"]
+        return ""
+
     def _accounts_path(self):
         return self.store.root / "accounts.json"
 
@@ -379,7 +402,12 @@ class NotionUploads:
             parent = re.search(r'<parent-data-source url="([^"]+)"', existing.get("text", ""))
             if not parent or notion_id(parent[1]) != row["destination_id"]:
                 raise VoiceError(409, "原 Notion 页面已移动到其他数据库，未覆盖内容。")
+            # Re-uploading never moves a page back: a status someone already set (e.g. 已发布) stays.
+            if STATUS_FIELD in schema and not page_properties(existing).get(STATUS_FIELD):
+                properties[STATUS_FIELD] = STATUS_READY
         else:
+            if STATUS_FIELD in schema:
+                properties[STATUS_FIELD] = STATUS_READY
             created = client.call("create_pages", {"parent": {"data_source_id": row["destination_id"]},
                 "pages": [{"properties": properties, "content": markdown}]})
             pages = created.get("pages") or []

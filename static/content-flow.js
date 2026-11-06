@@ -490,7 +490,7 @@ window.ContentFlow = (() => {
     const skip = production && !item.archived && item.stage === 'awaiting_publication' ? `<button type="button" role="menuitem" data-skip="${esc(item.id)}">不发了…</button>`
       : production && !item.archived && item.stage === 'skipped' ? `<button type="button" role="menuitem" data-unskip="${esc(item.id)}">恢复待发布</button>` : '';
     const menu = `<details class="ai-menu flow-menu"><summary class="icon-button" aria-label="更多操作：${title}">${dots}</summary><div role="menu">${links.map(link => `<a role="menuitem" href="${esc(url(link.hash,item.product))}">${esc(link.label)}</a>`).join('')}${skip}${archive}${remove}</div></details>`;
-    if (production && ['awaiting_publication','published','skipped'].includes(item.stage)) return publishRow(item,{target,title,select,menu,view});
+    if (production && ['awaiting_publication','uploaded','published','skipped'].includes(item.stage)) return publishRow(item,{target,title,select,menu,view});
     if (production) return productionRow(item,{target,title,select,menu,stage,next});
     const same = item.same_title_orders || [];
     const started = item.task_started_label ? `<small class="flow-task-started">${esc(item.task_started_label)}</small>`

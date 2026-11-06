@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from elevenlabs_client import VoiceError
 from production_operations import durable_json
+from resolve_bridge import render_recovery_message
 from workbench_video_publish import reviewed_source
 
 PLAYBACK_PROFILE = "web1"
@@ -198,6 +199,22 @@ class TimelinePreviews:
                     return True
             return False
 
+    @staticmethod
+    def _prune_runs(folder, keep):
+        """A new preview replaces the old ones: once it is saved, earlier runs of this timeline are removed.
+        A run still waiting for its DaVinci state to be restored keeps its journal; a file in use stays for next time."""
+        runs = Path(folder) / "runs"
+        for run in runs.iterdir() if runs.is_dir() else ():
+            if run.name == keep or not run.is_dir():
+                continue
+            try:
+                journal = json.loads((run / "recovery.json").read_text(encoding="utf-8")) if (run / "recovery.json").is_file() else {}
+            except (OSError, ValueError):
+                continue
+            if journal and journal.get("restored") is not True:
+                continue
+            shutil.rmtree(run, ignore_errors=True)
+
     def _playback_video(self, folder, video, source, progress):
         playback = self.optimizer(source, source.with_name(f"playback-{PLAYBACK_PROFILE}.mp4"), progress).resolve()
         if playback != source.resolve():
@@ -322,7 +339,7 @@ class TimelinePreviews:
                     try:
                         self.app.resolve.run("restore_textless", payload, timeout=60, held=True)
                     except Exception as recovery_error:
-                        raise VoiceError(409, f"{exc}；导出设置恢复未确认：{recovery_error}") from exc
+                        raise VoiceError(409, render_recovery_message(exc, recovery_error)) from exc
                     raise
                 source = Path(result["video_path"]).resolve()
                 if source != (scratch / "preview.mp4").resolve() or not source.is_file() or not source.stat().st_size:
@@ -336,11 +353,16 @@ class TimelinePreviews:
                 video = self._playback_video(folder, video, source, lambda text: update(message=text))
             except Exception:
                 message = "预览已更新，暂用高清版；稍后更新预览可重试播放优化。"
+            if result.get("switched_on"):
+                message += f"已打开达芬奇里关着的轨道：{'、'.join(map(str, result['switched_on']))}。"
+            if result.get("subtitles_off"):
+                message += "字幕轨没能打开，这次预览没有字幕。"
             with self.lock:
                 current_job, _ = self._timeline(job_id, uid)
                 if row.get("confirmation") and self._confirmation(reviewed_source(current_job, uid)) != row["confirmation"]:
                     raise VoiceError(409, "人工确认已变化，本次自动导出已取消。")
                 update(status="done", message=message, error="", video=video, pending_recovery=None, finished_at=now())
+            self._prune_runs(folder, row["run_id"])
         except Exception as exc:
             update(status="failed", message="", error=str(exc), finished_at=now())
         finally:

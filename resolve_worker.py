@@ -819,8 +819,16 @@ CAMPAIGN_TRACK = "活动屏显"
 # at this size (21 took 50% of the width, measured 2026-11-01), and longer lines shrink to fit.
 HOOK_STYLES = {"white_outline": {"label": "白字黑边", "seconds": 3, "full_line": 38,
                                  "inputs": {"Font": "CapCut Sans Text", "Style": "Medium", "Size": 0.0673, "Center": {1: 0.5, 2: 0.809},
-                                            "Red1": 1.0, "Green1": 1.0, "Blue1": 1.0, "Enabled2": 1, "Thickness2": 0.1, "Red2": 0.0, "Green2": 0.0, "Blue2": 0.0}}}
-DEFAULT_HOOK_STYLE = "white_outline"
+                                            "Red1": 1.0, "Green1": 1.0, "Blue1": 1.0, "Enabled2": 1, "Thickness2": 0.1, "Red2": 0.0, "Green2": 0.0, "Blue2": 0.0}},
+              # Black TikTok Sans on a white box that follows each line (shading element 4: border fill, per line). Checked in
+              # Resolve 21.2 on 2026-11-06: ElementShape4 2 = border fill, Level4 1 = line. fit_width * 1/characters sizes the
+              # longest line to about 88% of the frame width (emoji count as two characters), never above the Size cap. Only Medium is installed (Semibold/Bold render nothing), so a thin black outline on the text stands in for a bolder weight; padding 0.3/0.08 and Round 0.6 match the reference 1:1 (2026-11-06).
+              "white_box": {"label": "白底黑字", "seconds": 3, "fit_width": 3.0,
+                            "inputs": {"Font": "TikTok Sans", "Style": "Medium", "Size": 0.1, "Center": {1: 0.5, 2: 0.809}, "Red1": 0.0, "Green1": 0.0, "Blue1": 0.0,
+                                       "Enabled2": 1, "Thickness2": 0.012, "Red2": 0.0, "Green2": 0.0, "Blue2": 0.0,
+                                       "Enabled4": 1, "ElementShape4": 2, "Level4": 1, "Red4": 1.0, "Green4": 1.0, "Blue4": 1.0, "Thickness4": 1.0,
+                                       "ExtendHorizontal4": 0.3, "ExtendVertical4": 0.08, "Round4": 0.6}}}
+DEFAULT_HOOK_STYLE = "white_box"
 
 
 def is_title(item):
@@ -849,9 +857,12 @@ def write_hook(item, text):
 
 
 def style_hook(tool, style, text):
-    longest = max(len(line) for line in text.split("\n"))
+    width = lambda line: sum(2 if ord(char) > 0x2000 and not "一" <= char <= "鿿" else 1 for char in line)
+    longest = max(width(line) for line in text.split("\n"))
     for name, value in style["inputs"].items():
-        tool.SetInput(name, value * min(1, style["full_line"] / longest) if name == "Size" else value)
+        if name == "Size":
+            value = min(value, style["fit_width"] / longest) if "fit_width" in style else value * min(1, style["full_line"] / longest)
+        tool.SetInput(name, value)
 
 
 def insert_hook(timeline, track, text, style, start, end, at_end=False):
@@ -1632,6 +1643,38 @@ def inherit_edit_audio(resolve, request):
     return result
 
 
+def _render_format_pair(value):
+    """Resolve can return {"format": "unknown", "codec": ""} before Deliver is initialized."""
+    if isinstance(value, dict):
+        fmt, codec = value.get("format"), value.get("codec")
+        if all(isinstance(part, str) and part.strip().casefold() not in ("", "unknown") for part in (fmt, codec)):
+            return fmt.strip(), codec.strip()
+    return None
+
+
+def _restore_render_settings(resolve, project, snapshot):
+    preset = snapshot["preset"]
+    if preset not in (project.GetRenderPresetList() or []):
+        if snapshot.get("preset_saved") or snapshot.get("render_job_id"):
+            raise ValueError("原导出设置备份已丢失")
+        return  # Export never changed settings before saving its backup.
+    if optional(resolve, "GetCurrentPage") != "deliver":
+        resolve.OpenPage("deliver")
+    if not project.LoadRenderPreset(preset):
+        raise ValueError("达芬奇未能加载原导出设置备份")
+    mode = snapshot["render_mode"]
+    if mode in (0, 1) and project.GetCurrentRenderMode() != mode:
+        project.SetCurrentRenderMode(mode)
+        if project.GetCurrentRenderMode() != mode:
+            raise ValueError("导出模式未恢复")
+    # Old journals can have no usable pair. The saved preset holds the original settings in that case.
+    expected = _render_format_pair(snapshot.get("format"))
+    if expected and _render_format_pair(project.GetCurrentRenderFormatAndCodec()) != expected:
+        project.SetCurrentRenderFormatAndCodec(*expected)
+        if _render_format_pair(project.GetCurrentRenderFormatAndCodec()) != expected:
+            raise ValueError(f"导出格式未恢复（应为 {' / '.join(expected)}）")
+
+
 def restore_textless(resolve, request):
     """Recover the state journaled before a textless render, including after a worker timeout."""
     path = Path(request["recovery_path"])
@@ -1676,17 +1719,7 @@ def restore_textless(resolve, request):
         except Exception:
             errors.append(f"「{track['name']}」轨未恢复")
     try:
-        preset = snapshot["preset"]
-        if preset in (project.GetRenderPresetList() or []):
-            if not project.LoadRenderPreset(preset):
-                raise ValueError("导出设置未恢复")
-        elif snapshot.get("preset_saved"):
-            raise ValueError("原导出设置备份已丢失")
-        if not project.SetCurrentRenderMode(snapshot["render_mode"]):
-            raise ValueError("导出模式未恢复")
-        original = snapshot["format"]
-        if not project.SetCurrentRenderFormatAndCodec(original["format"], original["codec"]):
-            raise ValueError("导出格式未恢复")
+        _restore_render_settings(resolve, project, snapshot)
     except Exception as exc:
         errors.append(str(exc))
     wanted_page = None
@@ -1779,25 +1812,34 @@ def _export_current_timeline(resolve, request, project, timeline, previous, prev
     label, filename = ("无字版", "textless") if textless else ("视频预览", "preview")
     if timeline.GetEndFrame() <= timeline.GetStartFrame():
         raise WorkerError(f"这条时间线是空的，无法导出{label}。")
-    tracks = []
+    tracks, switch_on = [], []
     has_picture = False
-    for kind in ("subtitle", "video"):
+    # A textless export switches the text tracks off and puts them back afterwards. A preview shows the whole cut:
+    # every track that holds something and is switched off in DaVinci is switched on, and stays on.
+    for kind in ("subtitle", "video", "audio"):
         for index in range(1, timeline.GetTrackCount(kind) + 1):
             name = timeline.GetTrackName(kind, index)
             enabled = timeline.GetIsTrackEnabled(kind, index)
             if type(enabled) is not bool:
                 raise WorkerError("无法读取轨道开关状态，没有开始导出。")
-            if textless and (kind == "subtitle" or name in (HOOK_TRACK, CAMPAIGN_TRACK, "字幕")):
-                tracks.append({"kind": kind, "index": index, "name": name, "enabled": enabled})
-            elif kind == "video" and enabled and timeline.GetItemListInTrack(kind, index):
-                has_picture = True
+            filled = bool(timeline.GetItemListInTrack(kind, index))
+            if textless and kind != "audio" and (kind == "subtitle" or name in (HOOK_TRACK, CAMPAIGN_TRACK, "字幕")):
+                tracks.append({"kind": kind, "index": index, "name": name, "enabled": enabled, "switch_to": False})
+            else:
+                if not textless and not enabled and filled:
+                    switch_on.append({"kind": kind, "index": index, "name": name})
+                if kind == "video" and filled and (enabled or not textless):
+                    has_picture = True
     if not has_picture:
-        raise WorkerError(f"这条时间线没有启用的画面轨，无法导出{label}。")
-    # Fail before changing tracks when the source footage or audio is offline.
-    muted = {(track["kind"], track["index"]) for track in tracks}
+        filled = any(timeline.GetItemListInTrack("video", index) for index in range(1, timeline.GetTrackCount("video") + 1))
+        raise WorkerError(f"这条时间线的画面轨在达芬奇里都关着，无法导出{label}。" if filled else
+                          f"这条时间线的画面轨上还没有片段（还没剪），无法导出{label}。")
+    # Fail before changing tracks when the source footage or audio that will be exported is offline.
+    switched = {**{(track["kind"], track["index"]): False for track in tracks},
+                **{(track["kind"], track["index"]): True for track in switch_on}}
     for kind in ("video", "audio"):
         for index in range(1, timeline.GetTrackCount(kind) + 1):
-            if (kind, index) in muted or not timeline.GetIsTrackEnabled(kind, index):
+            if not switched.get((kind, index), timeline.GetIsTrackEnabled(kind, index)):
                 continue
             for item in timeline.GetItemListInTrack(kind, index) or []:
                 media = optional(item, "GetMediaPoolItem")
@@ -1815,7 +1857,7 @@ def _export_current_timeline(resolve, request, project, timeline, previous, prev
     snapshot = {"project": project.GetName(), "project_id": project.GetUniqueId(), "timeline_uid": timeline.GetUniqueId(),
                 "timeline_name": timeline.GetName(), "tracks": tracks, "previous_uid": previous.GetUniqueId() if previous else "",
                 "previous_timecode": previous_timecode, "page": page,
-                "preset": "__WB_textless_" + uuid4().hex, "format": project.GetCurrentRenderFormatAndCodec(),
+                "preset": "__WB_textless_" + uuid4().hex, "format": optional(project, "GetCurrentRenderFormatAndCodec"),
                 "render_mode": project.GetCurrentRenderMode(), "restored": False}
     durable_json(path, snapshot)
     def progress(message, percent=None):
@@ -1825,10 +1867,16 @@ def _export_current_timeline(resolve, request, project, timeline, previous, prev
         if not project.SaveAsNewRenderPreset(snapshot["preset"]):
             raise WorkerError("无法保存原导出设置，没有开始导出。")
         snapshot["preset_saved"] = True
+        if not _render_format_pair(snapshot["format"]):
+            # Saving the preset opens Deliver. Read again before applying any export settings.
+            snapshot["format"] = optional(project, "GetCurrentRenderFormatAndCodec")
         durable_json(path, snapshot)
         if not project.SetCurrentTimeline(timeline):
             raise WorkerError("达芬奇没能打开对应成片时间线。")
         progress(f"正在准备{label}…")
+        for track in switch_on:
+            if not switch_track(resolve, timeline, track["kind"], track["index"], True):
+                raise WorkerError(f"没能打开「{track['name']}」轨，没有开始导出。")
         for track in tracks:
             if not switch_track(resolve, timeline, track["kind"], track["index"], False):
                 raise WorkerError(f"没能关闭「{track['name']}」轨，没有开始导出。")
@@ -1838,6 +1886,9 @@ def _export_current_timeline(resolve, request, project, timeline, previous, prev
             raise WorkerError("达芬奇没能设置整条成片的导出格式。")
         subtitles = not textless and any(timeline.GetIsTrackEnabled("subtitle", index) and timeline.GetItemListInTrack("subtitle", index)
                                         for index in range(1, timeline.GetTrackCount("subtitle") + 1))
+        # Subtitles switched off in DaVinci stay off in the export; say so instead of handing back a silent surprise.
+        subtitles_off = not textless and not subtitles and any(timeline.GetItemListInTrack("subtitle", index)
+                                                               for index in range(1, timeline.GetTrackCount("subtitle") + 1))
         settings = {"TargetDir": str(output), "CustomName": filename, "SelectAllFrames": True,
                     "ExportVideo": True, "ExportAudio": True, "ExportSubtitle": bool(subtitles), "SubtitleFormat": "BurnIn", "DataBurnIn": "None",
                     "FormatWidth": int(timeline.GetSetting("timelineResolutionWidth")),
@@ -1872,7 +1923,8 @@ def _export_current_timeline(resolve, request, project, timeline, previous, prev
         video = output / (filename + ".mp4")
         if not video.is_file() or video.stat().st_size == 0:
             raise WorkerError(f"达芬奇未生成可用的{label}视频。")
-        result = {"video_path": str(video), "name": timeline.GetName(), "unique_id": timeline.GetUniqueId()}
+        result = {"video_path": str(video), "name": timeline.GetName(), "unique_id": timeline.GetUniqueId(), "subtitles_off": subtitles_off,
+                  "switched_on": [track["name"] for track in switch_on]}
     except Exception as exc:
         error = exc
     finally:
@@ -1897,7 +1949,150 @@ def export_preview(resolve, request):
     return export_timeline(resolve, {**request, "textless": False})
 
 
+def _timeline_parts(timeline):
+    """Clips that point at media, the tracks' item counts and the Text+ fonts, for checking an imported timeline."""
+    clips, counts, fonts = [], {}, set()
+    for kind in ("video", "audio", "subtitle"):
+        for index in range(1, timeline.GetTrackCount(kind) + 1):
+            items = timeline.GetItemListInTrack(kind, index) or []
+            counts[f"{kind}{index}"] = len(items)
+            for item in items:
+                media = optional(item, "GetMediaPoolItem") if kind != "subtitle" else None
+                if media is not None:
+                    clips.append((optional(item, "GetName") or "", optional(media, "GetClipProperty", "Online Status") or ""))
+                if kind == "video" and optional(item, "GetFusionCompCount"):
+                    comp = optional(item, "GetFusionCompByIndex", 1)
+                    for tool in (optional(comp, "GetToolList", False, "TextPlus") or {}).values():
+                        font = optional(tool, "GetInput", "Font")
+                        if isinstance(font, str) and font.strip():
+                            fonts.add(font.strip())
+    return clips, counts, sorted(fonts)
+
+
+def check_voice(project, media_pool, source, imported, request, fps):
+    """The imported voice track must play the order's own voiceover. Resolve links an imported clip to any clip in the
+    project with the same file name, and voiceovers carried to another computer are all called voiceover.*, so a
+    different order's voiceover can be picked up without any clip showing offline. When the other computer's voice
+    file is as long as this order's voiceover, it was that voiceover: the clips are put back on it where they were.
+    Returns how many clips were relinked."""
+    track = int(request.get("voice_track") or 2)
+
+    def rows(timeline):
+        return [(item, optional(item, "GetMediaPoolItem")) for item in timeline.GetItemListInTrack("audio", track) or []]
+    own = [media for _, media in rows(source) if media is not None]
+    wanted = {optional(media, "GetUniqueId") for media in own}
+    wrong = [(item, media) for item, media in rows(imported) if media is not None and optional(media, "GetUniqueId") not in wanted]
+    if not own or not wrong:
+        return 0
+    take = float(request.get("take_seconds") or 0)
+    lengths = [float(value) for value in request.get("home_voice_seconds") or []]
+    if len(wanted) == 1 and take and lengths and all(abs(value - take) <= 0.1 for value in lengths):
+        if not project.SetCurrentTimeline(imported):
+            raise WorkerError("达芬奇没能切到导入的时间线去换回配音，已撤掉，原时间线没动。")
+        places = [(item.GetStart(), optional(item, "GetLeftOffset") or 0, item.GetEnd() - item.GetStart()) for item, _ in wrong]
+        if not imported.DeleteClips([item for item, _ in wrong], False):
+            raise WorkerError("达芬奇没能拿掉接错的配音，已撤掉导入的时间线，原时间线没动。")
+        for start, offset, length in places:
+            placed = media_pool.AppendToTimeline([{"mediaPoolItem": own[0], "mediaType": 2, "trackIndex": track, "recordFrame": start,
+                                                   "startFrame": offset, "endFrame": offset + length}]) or []
+            if len(placed) != 1 or placed[0].GetStart() != start or placed[0].GetEnd() != start + length:
+                raise WorkerError("换回这张单的配音时位置没对上，已撤掉导入的时间线，原时间线没动。")
+        return len(places)
+    length = lambda items: sum(item.GetEnd() - item.GetStart() for item, _ in items) / (fps or 30)
+    names = "、".join(dict.fromkeys(str(optional(media, "GetName") or "") for _, media in wrong))
+    raise WorkerError(f"导入的配音轨没有接上这张单的配音：主机接到的是「{names}」（时间线上 {length(wrong):.1f} 秒），"
+                      f"家里用的配音文件{'长 ' + '、'.join(f'{value:.1f}' for value in lengths) + ' 秒' if lengths else '长度读不出来'}，"
+                      f"这张单的配音是 {take:.1f} 秒，对不上，可能不是同一版。已撤掉这条导入的时间线，原时间线没动。"
+                      "请在家里换上这张单的配音（制作单「配音」步骤里下载）重新剪。")
+
+
+def import_timeline(resolve, request):
+    """Bring in a timeline cut on another computer (a .drt) next to the one it replaces, linked to this project's media.
+
+    The source timeline is never changed. A timeline with clips that stay offline here is removed again, so only a
+    usable cut is ever handed back to the workbench."""
+    path = Path(request["file"])
+    if not path.is_file():
+        raise WorkerError("上传的时间线文件不见了，请重新上传。")
+    project = request_project(resolve, request)
+    source = find_timeline(project, request)
+    media_pool = project.GetMediaPool()
+    previous, page = project.GetCurrentTimeline(), optional(resolve, "GetCurrentPage")
+    timecode_before = previous.GetCurrentTimecode() if previous else None
+    before = {item.GetUniqueId() for item in timelines(project)}
+    imported = None
+    try:
+        imported = media_pool.ImportTimelineFromFile(str(path), {"importSourceClips": False})
+        if not imported or imported.GetUniqueId() in before:
+            raise WorkerError("达芬奇没能导入这个时间线文件。请确认它是在达芬奇里用「文件 → 导出 → 时间线」导出的 .drt。")
+        clips, counts, fonts = _timeline_parts(imported)
+        offline = [name for name, state in clips if state and state != "Online"]
+        if offline:
+            shown = "、".join(dict.fromkeys(offline[:5]))
+            raise WorkerError(f"导入后有 {len(offline)} 个片段在这台电脑上找不到素材（{shown}{' 等' if len(offline) > 5 else ''}），"
+                              "已撤掉这条导入的时间线，原时间线没动。请确认这台电脑的工程里有这些素材后再上传。")
+        if not any(counts.get(f"video{index}") for index in range(1, imported.GetTrackCount("video") + 1)):
+            raise WorkerError("导入的时间线里没有视频片段，已撤掉，原时间线没动。")
+        relinked = check_voice(project, media_pool, source, imported, request, float(optional(source, "GetSetting", "timelineFrameRate") or 30))
+        names = {item.GetName() for item in timelines(project)}
+        wanted, number = request["name"], 2
+        while wanted in names:
+            wanted, number = f"{request['name']}-{number}", number + 1
+        if not imported.SetName(wanted):
+            raise WorkerError("达芬奇没能给导入的时间线改名，已撤掉，原时间线没动。")
+        warnings = []
+        for key, label in (("timelineFrameRate", "帧率"), ("timelineResolutionWidth", "宽度"), ("timelineResolutionHeight", "高度")):
+            mine, theirs = optional(imported, "GetSetting", key), optional(source, "GetSetting", key)
+            if mine and theirs and not same_setting(mine, theirs):
+                warnings.append(f"{label}和原时间线不同：{mine}（原来 {theirs}）。")
+        try:  # The fonts Fusion can draw Text+ with on this computer.
+            known = optional(getattr(optional(resolve, "Fusion"), "FontManager", None), "GetFontList")
+        except Exception:
+            known = None
+        known = {str(name).casefold() for name in known} if isinstance(known, dict) and known else None
+        missing = [font for font in fonts if known is not None and font.casefold() not in known]
+        result = {"name": imported.GetName(), "unique_id": imported.GetUniqueId(), "start_frame": imported.GetStartFrame(),
+                  "end_frame": imported.GetEndFrame(), "fps": optional(imported, "GetSetting", "timelineFrameRate") or "",
+                  "tracks": counts, "clips": len(clips), "fonts": fonts, "missing_fonts": missing, "warnings": warnings,
+                  "voice_relinked": relinked,
+                  **located(project)}
+    except Exception:
+        if imported is not None and imported.GetUniqueId() not in before:
+            if previous and project.GetCurrentTimeline() is not None and project.GetCurrentTimeline().GetUniqueId() == imported.GetUniqueId():
+                project.SetCurrentTimeline(previous)
+            media_pool.DeleteTimelines([imported])
+        raise
+    finally:
+        if previous:
+            project.SetCurrentTimeline(previous)
+            if timecode_before:
+                previous.SetCurrentTimecode(timecode_before)
+        if page and optional(resolve, "GetCurrentPage") != page:
+            resolve.OpenPage(page)
+    result["saved"] = bool(resolve.GetProjectManager().SaveProject())
+    return result
+
+
+def export_drt(resolve, request):
+    """Write one timeline as a .drt (edit decisions only, no media) for cutting it further on another computer."""
+    project = request_project(resolve, request)
+    timeline = find_timeline(project, request)
+    path = Path(request["file"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not timeline.Export(str(path), resolve.EXPORT_DRT) or not path.is_file():
+        raise WorkerError("达芬奇没能导出这条时间线。")
+    track = int(request.get("voice_track") or 2)
+    voices = []
+    for item in timeline.GetItemListInTrack("audio", track) or []:
+        media = optional(item, "GetMediaPoolItem")
+        file = optional(media, "GetClipProperty", "File Path") if media is not None else None
+        if isinstance(file, str) and file and file not in voices:
+            voices.append(file)
+    return {"name": timeline.GetName(), "size": path.stat().st_size, "voice_files": voices}
+
+
 COMMANDS = {"ping": lambda resolve, request: {}, "status": status, "build": build, "open": open_timeline, "inspect": inspect, "restore": restore,
+            "import_timeline": import_timeline, "export_drt": export_drt,
             "candidates": candidates, "frames": frames, "reveal": reveal, "mark_usage": mark_usage,
             "read_subtitles": read_subtitles, "replace_subtitles": replace_subtitles, "add_hook": add_hook, "add_campaign_card": add_campaign_card, "remove_campaign_card": remove_campaign_card,
             "edit_audio_baseline": edit_audio_baseline, "inherit_edit_audio": inherit_edit_audio,

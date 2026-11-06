@@ -45,7 +45,7 @@ class FakeNotion:
                 if notion_id(args["id"]) == notion_id(ACCOUNTS):
                     state = {"schema": {name: {} for name in ("名称", "Username", "Nick Name")}}
                 else:
-                    state = {"url": "collection://" + DEST, "schema": {name: {} for name in ("名称", "文件和媒体", "日期", "标题＋tags", "发布账号")}}
+                    state = {"url": "collection://" + DEST, "schema": {name: {} for name in ("名称", "文件和媒体", "日期", "标题＋tags", "发布账号", "视频状态")}}
                     state["schema"][self.account_field] = {"dataSourceUrl": "collection://" + ACCOUNTS}
                 return {"text": "<data-source-state>" + json.dumps(state) + "</data-source-state>"}
             page = self.pages[notion_id(args["id"])]
@@ -58,7 +58,7 @@ class FakeNotion:
         if action == "query_data_sources":
             data = args["data"]
             if "Username" in data["query"]:
-                return {"results": [{"url": "https://app.notion.com/p/" + ACCOUNT, "Username": "fixture"}]}
+                return {"results": [{"url": "https://app.notion.com/p/" + ACCOUNT, "Username": "fixture"}] if "fixture" in data["params"] else []}
             # Queries must use the canonical table from the fetched schema, including its hyphens.
             assert data["data_source_urls"] == ["collection://" + DEST]
             return {"results": [{"url": "https://app.notion.com/p/" + uid} for uid, page in self.pages.items() if page["properties"]["名称"] == data["params"][0]]}
@@ -162,6 +162,14 @@ class NotionUploadTests(unittest.TestCase):
         self.assertIsNone(NotionBridge(cache_path=cache)._cached())
         self.assertTrue(notion_bridge.CONNECTED_FOR > 0)
 
+    def test_new_page_is_ready_and_a_set_status_is_kept(self):
+        self.run_upload()
+        page = self.bridge.pages[notion_id(PAGE)]
+        self.assertEqual("就绪", page["properties"]["视频状态"])
+        page["properties"]["视频状态"] = "已发布"
+        self.assertEqual("completed", self.run_upload(self.body(title="🔴Another title#tag"))["status"])
+        self.assertEqual("已发布", page["properties"]["视频状态"])
+
     def sql_calls(self):
         return [args for action, args in self.bridge.calls if action == "query_data_sources"]
 
@@ -190,9 +198,27 @@ class NotionUploadTests(unittest.TestCase):
         with self.assertRaises(VoiceError) as caught:
             unpack(limit)
         self.assertIn("额度", str(caught.exception))
+        # Other errors name the step and keep what Notion said.
         with self.assertRaises(VoiceError) as caught:
-            unpack({"isError": True, "content": [{"type": "text", "text": "other"}]})
+            unpack({"isError": True, "content": [{"type": "text", "text": "Could not find page  with ID abc"}]}, "update_page")
+        self.assertIn("更新排期页面", str(caught.exception))
+        self.assertIn("Could not find page with ID abc", str(caught.exception))
+        with self.assertRaises(VoiceError) as caught:
+            unpack({"isError": True, "content": []})
         self.assertIn("权限", str(caught.exception))
+
+    def test_a_creators_last_successful_account_is_offered_next_time(self):
+        self.manager.settings["accounts"] = {}
+        self.assertEqual(self.manager.detail(JOB, "timeline-1")["account"], "Fixture")
+        failed = self.run_upload(self.body(account="lab"))
+        self.assertIn("发布账号", failed["error"])
+        # The account Notion could not find is not offered again.
+        self.assertEqual(self.manager.detail(JOB, "timeline-1")["account"], "Fixture")
+        self.assertEqual(self.run_upload(self.body(account="fixture"))["status"], "completed")
+        data = self.app.production.read()
+        data["jobs"][0]["timelines"].append({"unique_id": "timeline-2", "name": "Fixture261104-202-1", "creator": "Fixture", "take_id": TAKE, "saved": True})
+        self.app.production.write(data)
+        self.assertEqual(self.manager.detail(JOB, "timeline-2")["account"], "fixture")
 
     def test_new_account_relation_is_preferred_over_old_one(self):
         # The calendar keeps its old 「发布账号」 column (no relation now) next to the new 「账号」 relation.

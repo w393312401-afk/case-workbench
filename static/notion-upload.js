@@ -42,7 +42,7 @@ window.NotionUpload = (() => {
     dialog.innerHTML = `<form><div class="dialog-heading"><h2>${esc(receipt?.page_id ? '更新到 Notion' : '上传到 Notion')}</h2><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div>
       <div class="script-editor-body notion-upload-fields"><p class="context-note">${esc(data.name)} → ${esc(data.destination)}。成片存入「文件和媒体」，正文放中英文案和钩子屏显。</p>
       <div class="notion-upload-connection"><span data-connection-status role="status">正在检查 Notion 连接…</span><button type="button" class="secondary compact" data-notion-connect hidden>连接 Notion</button><button type="button" class="secondary compact" data-notion-recheck hidden>重新检查</button><a data-notion-authorize target="_blank" rel="noopener noreferrer" hidden>前往 Notion 授权</a></div>
-      <label class="field"><span>本地成片完整路径</span><input name="file_path" required maxlength="2000" value="${esc(data.file_path)}" placeholder="C:\\Videos\\最终成片.mp4"></label>
+      <label class="field"><span>本地成片完整路径</span><input name="file_path" required maxlength="2000" value="${esc(data.file_path)}" placeholder="C:\\Videos\\最终成片.mp4"></label>${data.file_path ? '' : '<p class="context-note">还没找到这条时间线导出的成片：先在「视频预览」里导出，或填本地文件的完整路径。</p>'}
       <p class="context-note">超过 20 MiB 会生成上传版，本地高清原件保留。</p>
       <div class="form-row"><label class="field"><span>发布日期</span><input name="published_on" type="date" required value="${esc(pickedDay || data.published_on)}"></label><label class="field"><span>发布账号</span><input name="account" required maxlength="200" value="${esc(data.account)}" placeholder="Notion 账号列表里的用户名"></label></div>
       ${titles.length > 1 ? `<label class="field"><span>选择发布标题</span><select data-notion-title-choice>${titles.map((title,index) => `<option value="${index}">${esc(titleLabel(title,data.copy?.titles_zh?.[index]))}</option>`).join('')}</select></label>` : titles.length ? `<p class="context-note" data-notion-title-zh>${esc(data.copy?.titles_zh?.[0] ? '中文：' + data.copy.titles_zh[0] : '')}</p>` : ''}
@@ -76,6 +76,7 @@ window.NotionUpload = (() => {
           request = null;const result = dialog.querySelector('[data-notion-result]');result.href = link(current);result.hidden = false;
           progress.textContent = current.warning || '已上传到 Notion。';
           if (typeof toast === 'function') toast('已上传到 Notion。');
+          window.VideoPublication?.markNotionUploaded?.(host,data.timeline_uid);
           // The selected timeline's own marker changes, preserving any typed post ID.
           if (host.querySelector('[data-notion-upload]')?.dataset.notionUpload === data.timeline_uid) {
             const mark = host.querySelector('[data-calendar-toggle]');
@@ -143,7 +144,8 @@ window.NotionUpload = (() => {
       catch (problem) {root.querySelector('[data-notion-status]').textContent = problem.message || 'Notion 状态暂时无法读取。';}
     };
     root.querySelector('[data-notion-open]').onclick = async () => {
-      try {if (!data) await load();if (data) open(data,{job,api,host,refresh});}
+      // Read again on every open: a preview exported after the panel was shown is the file to upload.
+      try {await load();if (data) open(data,{job,api,host,refresh});}
       catch (problem) {if (typeof toast === 'function') toast(problem.message,true);}
     };
     await load();

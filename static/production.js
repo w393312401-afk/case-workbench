@@ -503,12 +503,19 @@ window.CaseProduction = (() => {
   function productionSteps(data,kind) {
     const job = data.job, selected = (job.takes || []).find(take => take.id === job.selected_take);
     const publication = view.progress?.id === job.id ? view.progress.publication : null, published = publication?.source_current === true && (!publication.file || publication.file_available === true);
+    // Every current timeline is its own video: the step is done only when each is uploaded to Notion or registered.
+    const lines = view.publicationLines?.[job.id] || [], settled = lines.filter(line => line.notion_uploaded || line.registered && line.source_current);
+    const uploaded = lines.length > 0 && settled.length === lines.length, partly = settled.length > 0 && !uploaded;
+    // With several current timelines, the edit step is done only once each of them is cut.
+    const cutLines = activeTimelines(job).filter(item => item.take_id === job.selected_take), cutDone = cutLines.filter(item => editFocusState(job,item.unique_id)[0] === 'done' || publicationState(job,item.unique_id)).length;
+    const cutOpen = cutLines.length > 1 && cutDone < cutLines.length;
     return [
       {key:'lines',label:'脚本',note:`${job.lines.length} 个意群${job.problems?.length ? ` · ${job.problems.length} 项需核对` : ''}`,done:job.lines.length > 0,panels:[$('#job-script-panel')].filter(Boolean)},
       {key:'voice',label:'配音',note:job.voicing ? '生成中' : selected ? '已选用' : `${job.takes.length} 版`,done:!!selected,panels:[$('#take-panel'),$('#voice-panel')].filter(Boolean)},
       {key:'timeline',label:'达芬奇时间线',note:job.timeline_building ? (job.timeline_building.stage === 'waiting' ? '排队中' : '建线中') : `${activeTimelines(job).length} 条`,done:activeTimelines(job).some(item => selected && item.take_id === selected.id),panels:[$('#timeline-panel')].filter(Boolean)},
-      {key:'edit',label:'AI 剪辑与人工审查',note:(job.edits || []).some(edit => edit.status === 'running' && edit.waiting_timeline) ? '待建线后自动剪辑' : (job.edits || []).some(edit => edit.status === 'running') ? '剪辑中' : manualCompleted(job) ? '人工完成' : job.status === 'approved' ? '已完成' : `${(job.edits || []).length} 次`,done:job.status === 'approved',panels:[$('#edit-panel')].filter(Boolean)},
-      {key:'publish',label:'成片与发布',note:published ? '已登记发布' : publication ? '登记版本需核对' : '登记视频 ID',done:published,panels:[$('#video-publication-panel')].filter(Boolean)}
+      {key:'edit',label:'AI 剪辑与人工审查',note:(job.edits || []).some(edit => edit.status === 'running' && edit.waiting_timeline) ? '待建线后自动剪辑' : (job.edits || []).some(edit => edit.status === 'running') ? '剪辑中' : cutOpen ? `${cutDone}/${cutLines.length} 条剪完` : manualCompleted(job) ? '人工完成' : job.status === 'approved' ? '已完成' : `${(job.edits || []).length} 次`,done:job.status === 'approved' && !cutOpen,panels:[$('#edit-panel')].filter(Boolean)},
+      // Uploading a current timeline to Notion ends the workbench's part, as registering its post does.
+      {key:'publish',label:'成片与发布',note:uploaded ? (lines.length > 1 ? `${lines.length} 条都已完成` : lines[0].notion_uploaded ? '已上传 Notion' : '已登记发布') : partly ? `${settled.length}/${lines.length} 条已完成` : published ? '已登记发布' : publication ? '登记版本需核对' : '登记视频 ID',done:lines.length > 1 ? uploaded : published || uploaded,panels:[$('#video-publication-panel')].filter(Boolean)}
     ];
   }
   function refreshProductionProgress(data,kind) {
@@ -988,7 +995,8 @@ window.CaseProduction = (() => {
     const list = editTargets(job).map(item => ({key:item.unique_id,name:item.name,target:true}));
     for (const edit of [...(job.edits || [])].reverse()) {
       const key = editKey(edit);
-      if (key && !list.some(item => item.key === key)) list.push({key,name:edit.timeline_name || key,target:false});
+      // An archived or replaced timeline is history: its runs stay in the edit step's history, not in the strip.
+      if (key && !list.some(item => item.key === key) && !timelineOf(job,key)?.archived) list.push({key,name:edit.timeline_name || key,target:false});
     }
     return list;
   }
@@ -1020,6 +1028,7 @@ window.CaseProduction = (() => {
   const publicationState = (job,key) => {
     const line = (view.publicationLines?.[job.id] || []).find(row => row.unique_id === key);
     if (!line) return null;
+    if (line.notion_uploaded) return ['done','完成'];
     if (line.registered) return line.source_current ? ['done','已登记'] : ['problem','版本已变'];
     return line.can_register ? ['review','待登记'] : null;
   };
@@ -1029,8 +1038,11 @@ window.CaseProduction = (() => {
     const list = editFocusList(job);if (list.length < 2) return '';
     const focus = editFocus(job,choice);
     return `<span class="production-focus-label">当前时间线</span>${list.map(item => {
-      const [kind,label] = editFocusState(job,item.key), published = publicationState(job,item.key);
-      return `<button type="button" role="tab" class="pick-card" data-timeline-focus="${esc(item.key)}" aria-selected="${item.key === focus}" title="${esc(item.name)}"><span class="state-tag ${kind}" data-focus-edit>${esc(label)}</span>${published ? `<span class="state-tag ${published[0]}" data-focus-publish>${esc(published[1])}</span>` : ''}<span class="pick-card-name">${esc(item.name)}</span></button>`;
+      // One state per card: where its publication stands once it can be published, otherwise the cut.
+      const [kind,label] = editFocusState(job,item.key), published = kind === 'running' ? null : publicationState(job,item.key);
+      const replaced = timelineOf(job,item.key)?.imported_from;
+      return `<button type="button" role="tab" class="pick-card" data-timeline-focus="${esc(item.key)}" aria-selected="${item.key === focus}" title="${esc(item.name + (replaced ? `
+替换原版 ${replaced.timeline_name || ''}` : ''))}">${published ? `<span class="state-tag ${published[0]}" data-focus-publish>${esc(published[1])}</span>` : `<span class="state-tag ${kind}" data-focus-edit>${esc(label)}</span>`}<span class="pick-card-name">${esc(item.name)}</span>${replaced ? '<small class="pick-card-note">替换原版</small>' : ''}</button>`;
     }).join('')}`;
   }
   function syncFocusStrip(data) {
@@ -1108,6 +1120,8 @@ window.CaseProduction = (() => {
   const publicationLines = job => lines => {
     (view.publicationLines ||= {})[job.id] = lines;
     if (view.editFocusData?.job.id === job.id) syncFocusStrip(view.editFocusData);
+    // A Notion upload read with the lines settles the publish step; the step bar says so at once.
+    if (view.progress?.id === job.id && view.progress.data) refreshProductionProgress(view.progress.data,view.progress.kind);
   };
   function editTargetOptions(job,choice) {
     const targets = editTargets(job), request = pendingTimelineId(choice.edit_timeline);

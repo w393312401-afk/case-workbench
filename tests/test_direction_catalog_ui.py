@@ -148,7 +148,7 @@ class DirectionCatalogBrowserTests(unittest.TestCase):
                 "product": "202H", "video_id": "7664986913497009499", "direction_id": "202H-A8",
             })
         self.assertEqual(status, 200, linked)
-        page.locator(".back-link").click()
+        page.locator("#navigate-up").click()  # phones return through the pinned top-bar arrow
         card = page.locator('[data-direction-id="202H-A8"]')
         card.wait_for()
         self.assertIn("1 条视频", card.locator(".dir-sub").inner_text())

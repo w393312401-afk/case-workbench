@@ -122,19 +122,24 @@ class Project:
         return self.format.copy()
 
     def SetCurrentRenderFormatAndCodec(self, extension, codec):
+        if not extension or extension == "unknown" or not codec:
+            return False
         self.format = {"format": extension, "codec": codec}
         return True
 
     def SaveAsNewRenderPreset(self, name):
         self.page = "deliver"  # native Resolve jumps to Deliver here
-        self.presets[name] = copy.deepcopy(self.settings)
+        self.presets[name] = copy.deepcopy((self.settings, self.format, self.mode))
         return True
 
     def GetRenderPresetList(self):
         return ["H.264 Master", *self.presets]
 
     def LoadRenderPreset(self, name):
-        self.settings = copy.deepcopy(self.presets.get(name, {"ExportSubtitle": True}))
+        if name in self.presets:
+            self.settings, self.format, self.mode = copy.deepcopy(self.presets[name])
+        else:
+            self.settings = {"ExportSubtitle": True}
         return True
 
     def DeleteRenderPreset(self, name):
@@ -237,6 +242,78 @@ class TextlessTests(unittest.TestCase):
         self.assertFalse(self.project.render_snapshot["tracks"][("video", 2)])
         self.assert_restored()
 
+    def test_export_captures_format_once_deliver_is_initialized(self):
+        read = self.project.GetCurrentRenderFormatAndCodec
+        def read_format():
+            return {"format": "unknown", "codec": ""} if self.project.page == "edit" else read()
+        with patch.object(self.project, "GetCurrentRenderFormatAndCodec", side_effect=read_format):
+            worker.export_textless(self.resolve, self.request)
+        journal = json.loads(Path(self.request["recovery_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(journal["format"], {"format": "mov", "codec": "DNxHR"})
+        self.assert_restored()
+
+    def test_old_journal_with_unreadable_format_recovers_from_its_own_preset(self):
+        for original in ({"format": "unknown", "codec": ""}, {"format": "mov", "codec": ""}, None):
+            with self.subTest(original=original):
+                self.project.SaveAsNewRenderPreset("backup")
+                self.project.format = {"format": "mp4", "codec": "H264_NVIDIA"}
+                self.project.mode = 1
+                self.project.jobs["own"] = {"JobId": "own"}
+                self.project.target.enabled["subtitle", 1] = False
+                path = Path(self.request["recovery_path"])
+                worker.durable_json(path, {"project": "Project", "project_id": "project-uid",
+                    "timeline_uid": "target", "timeline_name": "target", "previous_uid": "previous", "page": "edit",
+                    "tracks": [{"kind": "subtitle", "index": 1, "name": "英文", "enabled": True}],
+                    "preset": "backup", "preset_saved": True, "format": original, "render_mode": 0,
+                    "render_job_id": "own", "restored": False})
+                self.project.current = self.project.target
+                with patch.object(self.project, "SetCurrentRenderFormatAndCodec") as setter:
+                    self.assertTrue(worker.restore_textless(self.resolve, self.request)["restored"])
+                    setter.assert_not_called()
+                self.assertTrue(json.loads(path.read_text(encoding="utf-8"))["restored"])
+                self.assert_restored()
+
+    def test_known_format_mismatch_keeps_backup_until_readback_matches(self):
+        original_load = self.project.LoadRenderPreset
+        def load_without_format(name):
+            current = self.project.format.copy()
+            ok = original_load(name)
+            self.project.format = current
+            return ok
+        with patch.object(self.project, "LoadRenderPreset", side_effect=load_without_format):
+            setter = self.project.SetCurrentRenderFormatAndCodec
+            def ignore_mov(extension, codec):
+                return True if extension == "mov" else setter(extension, codec)
+            with patch.object(self.project, "SetCurrentRenderFormatAndCodec", side_effect=ignore_mov):
+                with self.assertRaisesRegex(worker.WorkerError, "导出格式未恢复"):
+                    worker.export_textless(self.resolve, self.request)
+            path = Path(self.request["recovery_path"])
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
+            self.assertFalse(snapshot["restored"])
+            self.assertIn(snapshot["preset"], self.project.presets)
+            self.assertIn("own", self.project.jobs)
+            self.assertEqual(self.project.target.enabled, self.before_tracks)
+            worker.restore_textless(self.resolve, self.request)
+        self.assert_restored()
+
+    def test_unreadable_format_still_requires_a_loadable_backup(self):
+        load = self.project.LoadRenderPreset
+        with patch.object(self.project, "GetCurrentRenderFormatAndCodec", return_value={"format": "unknown", "codec": ""}):
+            with patch.object(self.project, "LoadRenderPreset", side_effect=lambda name: name == "H.264 Master" and load(name)):
+                with self.assertRaisesRegex(worker.WorkerError, "未能加载原导出设置备份"):
+                    worker.export_textless(self.resolve, self.request)
+            path = Path(self.request["recovery_path"])
+            snapshot = json.loads(path.read_text(encoding="utf-8"))
+            self.assertFalse(snapshot["restored"])
+            self.assertEqual(self.project.target.enabled, self.before_tracks)
+            backup = self.project.presets.pop(snapshot["preset"])
+            with self.assertRaisesRegex(worker.WorkerError, "备份已丢失"):
+                worker.restore_textless(self.resolve, self.request)
+            self.assertFalse(json.loads(path.read_text(encoding="utf-8"))["restored"])
+            self.project.presets[snapshot["preset"]] = backup
+            worker.restore_textless(self.resolve, self.request)
+        self.assert_restored()
+
     def test_failed_or_cancelled_render_restores_without_deleting_existing_queue(self):
         for outcome in ("Failed", "Cancelled"):
             with self.subTest(outcome=outcome):
@@ -248,10 +325,16 @@ class TextlessTests(unittest.TestCase):
     def test_normal_preview_preserves_subtitles_screen_text_and_audio(self):
         with patch.object(self.project.target, "SetTrackEnable", wraps=self.project.target.SetTrackEnable) as switch:
             result = worker.export_preview(self.resolve, self.request)
-            switch.assert_not_called()
+            # Only switched-off tracks are touched, and only to switch them on.
+            self.assertTrue(switch.call_args_list)
+            self.assertTrue(all(call.args[2] is True for call in switch.call_args_list))
         self.assertEqual(Path(result["video_path"]).name, "preview.mp4")
+        self.assertFalse(result["subtitles_off"])
         snapshot = self.project.render_snapshot
+        # A preview shows every track, and they stay on afterwards.
+        self.before_tracks = {key: True for key in self.before_tracks}
         self.assertEqual(snapshot["tracks"], self.before_tracks)
+        self.assertTrue(result["switched_on"])
         self.assertTrue(snapshot["settings"]["ExportSubtitle"])
         self.assertEqual(snapshot["settings"]["SubtitleFormat"], "BurnIn")
         self.assertTrue(snapshot["settings"]["ExportAudio"])
@@ -265,13 +348,21 @@ class TextlessTests(unittest.TestCase):
         self.assertEqual(self.project.render_snapshot["uid"], "target")
         self.assertTrue(self.project.render_snapshot["tracks"]["video", 1])
         self.assertEqual(self.project.previous.timecode, "01:00:12:08")
+        self.before_tracks = {key: True for key in self.before_tracks}
         self.assert_restored()
 
-    def test_normal_preview_does_not_turn_on_a_disabled_subtitle_track(self):
+    def test_preview_switches_on_every_disabled_track_for_the_export_and_puts_them_back(self):
         self.project.target.enabled["subtitle", 1] = False
+        self.project.target.enabled["video", 2] = False
         self.before_tracks = self.project.target.enabled.copy()
-        worker.export_preview(self.resolve, self.request)
-        self.assertFalse(self.project.render_snapshot["settings"]["ExportSubtitle"])
+        result = worker.export_preview(self.resolve, self.request)
+        snapshot = self.project.render_snapshot
+        self.assertTrue(snapshot["settings"]["ExportSubtitle"])
+        self.assertTrue(snapshot["tracks"]["subtitle", 1])
+        self.assertTrue(snapshot["tracks"]["video", 2])
+        self.assertFalse(result["subtitles_off"])
+        # Switched on for good: nothing turns them off again.
+        self.before_tracks = {key: True for key in self.before_tracks}
         self.assert_restored()
 
     def test_timeout_stops_only_its_render_then_restores(self):

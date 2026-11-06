@@ -52,11 +52,16 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         page.locator("#edit-panel").wait_for()
         return page
 
-    def assert_completed(self, page):
+    def assert_completed(self, page, open_note=None):
         page.locator("[data-revoke-job-completion]").wait_for()
         step = page.locator('.production-steps [data-step="edit"]')
-        self.assertIn("done", step.get_attribute("class").split())
-        step.get_by_text("人工完成", exact=True).wait_for()
+        if open_note:
+            # Another current timeline is still uncut, so the step stays open and counts what is done.
+            step.get_by_text(open_note, exact=True).wait_for()
+            self.assertNotIn("done", step.get_attribute("class").split())
+        else:
+            self.assertIn("done", step.get_attribute("class").split())
+            step.get_by_text("人工完成", exact=True).wait_for()
         page.locator(".page-heading .script-status").get_by_text("已人工完成", exact=True).wait_for()
         self.assertEqual(page.locator("[data-edit-id]").count(), 0)
         self.assertEqual(page.locator("dialog.production-dialog[open]").count(), 0)
@@ -76,7 +81,7 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         self.assertEqual(button.inner_text(), "手动标记成功")
         self.assertTrue(button.is_enabled())
         button.click()
-        self.assert_completed(page)
+        self.assert_completed(page, "1/2 条剪完")
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0]["body"]["completed"], True)
         self.assertEqual(self.calls[0]["body"]["timeline_uid"], "uid-selected-new")
@@ -85,7 +90,7 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         # After a reload the tab that still has work opens first; the completed one is one click away.
         page.locator('.production-steps [data-step="edit"]').click()
         page.locator('.production-focus [data-timeline-focus="uid-selected-new"]').click()
-        self.assert_completed(page)
+        self.assert_completed(page, "1/2 条剪完")
         self.assertEqual(len(self.calls), 1)
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 

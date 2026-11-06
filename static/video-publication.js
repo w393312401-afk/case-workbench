@@ -88,7 +88,7 @@ window.VideoPublication = (() => {
   function receipt(job,item,current = false) {
     const jobId = job.id, source = item.source || {}, audio = source.take || {}, timeline = source.timeline || {};
     return `<article class="video-publication-receipt"><div class="video-publication-head"><strong>${esc(item.account)} · ${esc(item.published_on)}</strong>
-      <span class="id-row">帖子 ${esc(item.post_id)}${typeof copyIdButton === 'function' ? copyIdButton(item.post_id,'视频 ID',{icon:true}) + openLinkButton(tiktokUrl(item,'video'),'原视频') : ''}</span><span class="video-publication-meta">脚本 v${esc(item.script_version)}${registrationTag(scriptPosts,item.post_id)}${item.file ? '' : '<small class="video-publication-aside" title="只登记了视频 ID，没有绑定成片文件">未绑定成片</small>'}${autoTag(item,current)}</span>${calendarLine(item,current,{inline:true})}</div>
+      <span class="id-row">帖子 ${esc(item.post_id)}${typeof copyIdButton === 'function' ? copyIdButton(item.post_id,'视频 ID',{icon:true}) + openLinkButton(tiktokUrl(item,'video'),'原视频') : ''}${current ? '<button type="button" class="subtle compact" data-edit-post title="帖子 ID、账号或发布日期登记错了：直接改这条登记">修改</button>' : ''}</span><span class="video-publication-meta">脚本 v${esc(item.script_version)}${registrationTag(scriptPosts,item.post_id)}${item.file ? '' : '<small class="video-publication-aside" title="只登记了视频 ID，没有绑定成片文件">未绑定成片</small>'}${autoTag(item,current)}</span>${calendarLine(item,current,{inline:true})}</div>
       <p class="video-publication-sub"><span title="${esc(audio.id)}">${esc(takeLabel(job,audio,true))}</span> · ${esc(timeline.name || timeline.unique_id)}${source.manual_completion?.at ? ' · 人工完成' : source.edit ? ` · <span title="${esc(source.edit.id)}">AI 剪辑</span>` : ' · 完成方式未保留'}${item.file ? ` · ${esc(item.file.name)} · ${size(item.file.size)} <a href="${base(jobId)}/${encodeURIComponent(item.id)}/download">领取登记成片</a>` : ''}</p>
       ${current && !item.source_current ? '<p class="video-publication-warning">当前制作版本或审查状态已变化；这条发布记录仍保留当时的成片、配音和审查依据。</p>' : ''}
       ${current && item.file && !item.file_available ? '<p class="video-publication-warning">托管成片缺失或大小有变化，请从完整备份恢复。</p>' : ''}
@@ -315,8 +315,19 @@ window.VideoPublication = (() => {
     const options = hookOptions(copy), onTimeline = timeline.hook_overlay?.text || '';
     const picked = onTimeline ? options.findIndex(option => hookWords(option.en) === hookWords(onTimeline)) : options.length ? 0 : -1;
     const hookText = picked < 0 ? onTimeline : options[picked].en;
-    return `<div class="video-publication-timeline" data-timeline-tools="${esc(uid)}"><div class="video-publication-timeline-bar"><span class="id-row"><strong>${esc(timeline.name)}</strong>${typeof copyIdButton === 'function' ? copyIdButton(timeline.name,'时间线名称',{icon:true}) : ''}</span><button type="button" class="secondary compact" data-open-timeline>在达芬奇打开</button><button type="button" class="secondary compact" data-check-subtitles ${lock ? 'disabled' : ''} title="${esc(lock || '和配音稿对比，用词错误直接改好，拿不准的列出来。')}">核对字幕</button><button type="button" class="secondary compact" data-add-hook data-hook-lock="${esc(hookLock)}" ${hookLock || !hookText ? 'disabled' : ''} title="${esc(hookTitle(hookLock,hookText))}">${timeline.hook_overlay ? '更新屏显' : '加屏显'}</button></div><div class="video-publication-hook-choice"><select data-hook-choice aria-label="选屏显文字" ${hookLock ? 'disabled' : ''}>${options.map((option,index) => `<option value="${index}" ${index === picked ? 'selected' : ''}>${esc(option.label ? `${option.label}：` : '')}${esc(option.en)}</option>`).join('')}<option value="custom" ${picked < 0 ? 'selected' : ''}>自己写…</option></select><input type="text" maxlength="300" data-hook-custom aria-label="自己写的屏显文字" placeholder="第一行 / 第二行" value="${esc(picked < 0 ? onTimeline : '')}" ${picked < 0 ? '' : 'hidden'} ${hookLock ? 'disabled' : ''}><small data-hook-reading>${esc(options[picked]?.zh || '')}</small></div>${campaignTools(timeline,copy,hookLock)}${subtitleResult(timeline)}${hookResult(timeline)}<p class="ai-error" data-timeline-tools-error role="alert" hidden></p></div>`;
+    return `<div class="video-publication-timeline" data-timeline-tools="${esc(uid)}"><div class="video-publication-timeline-bar"><span class="id-row"><strong>${esc(timeline.name)}</strong>${typeof copyIdButton === 'function' ? copyIdButton(timeline.name,'时间线名称',{icon:true}) : ''}</span><button type="button" class="secondary compact" data-open-timeline>在达芬奇打开</button><button type="button" class="secondary compact" data-check-subtitles ${lock ? 'disabled' : ''} title="${esc(lock || '和配音稿对比，用词错误直接改好，拿不准的列出来。')}">核对字幕</button><button type="button" class="secondary compact" data-add-hook data-hook-lock="${esc(hookLock)}" ${hookLock || !hookText ? 'disabled' : ''} title="${esc(hookTitle(hookLock,hookText))}">${timeline.hook_overlay ? '更新屏显' : '加屏显'}</button><button type="button" class="secondary compact" data-download-timeline title="下载这条时间线的 .drt 和它用的配音（不含视频素材），在另一台有同样素材的电脑上接着剪。">下载时间线</button><button type="button" class="secondary compact" data-home-timeline ${lock ? 'disabled' : ''} title="${esc(lock ? lock.replace('核对字幕','替换') : '上传另一台电脑在达芬奇导出的 .drt，导入成新时间线并接上这台电脑的素材；原时间线归档保留，可恢复。')}">换成家里剪的</button><input type="file" accept=".drt" data-home-timeline-file hidden></div>${importNote(timeline)}<div class="video-publication-hook-choice"><select data-hook-choice aria-label="选屏显文字" ${hookLock ? 'disabled' : ''}>${options.map((option,index) => `<option value="${index}" ${index === picked ? 'selected' : ''}>${esc(option.label ? `${option.label}：` : '')}${esc(option.en)}</option>`).join('')}<option value="custom" ${picked < 0 ? 'selected' : ''}>自己写…</option></select><input type="text" maxlength="300" data-hook-custom aria-label="自己写的屏显文字" placeholder="第一行 / 第二行" value="${esc(picked < 0 ? onTimeline : '')}" ${picked < 0 ? '' : 'hidden'} ${hookLock ? 'disabled' : ''}><small data-hook-reading>${esc(options[picked]?.zh || '')}</small></div>${campaignTools(timeline,copy,hookLock)}${subtitleResult(timeline)}${hookResult(timeline)}<p class="ai-error" data-timeline-tools-error role="alert" hidden></p></div>`;
   }
+  function importNote(timeline) {
+    const from = timeline.imported_from;if (!from) return '';
+    const warnings = timeline.warnings || [];
+    return `<p class="context-note">从另一台电脑导入，替换 ${esc(from.timeline_name)}${from.clips ? `，${from.clips} 个片段都接上了素材` : ''}。${warnings.map(esc).join(' ')}</p>`;
+  }
+  const fileBase64 = file => new Promise((resolve,reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(new Error('读不了这个文件，请重新选择。'));
+    reader.readAsDataURL(file);
+  });
   function bindTimelineTools(host,job,api,onTimelineChanged,copy) {
     const tools = host.querySelector('[data-timeline-tools]');
     if (!tools) return;
@@ -348,6 +359,33 @@ window.VideoPublication = (() => {
       const outcome = result.timeline.subtitle_check;
       toast(outcome.message,!['clean','fixed'].includes(outcome.status));
       await repaint(result.timeline);
+    });
+    const download = tools.querySelector('[data-download-timeline]');
+    download.addEventListener('click',async () => {
+      download.disabled = true;download.textContent = '导出中…';error.hidden = true;
+      try {
+        const response = await fetch(`${url}/timeline-file?uid=${encodeURIComponent(uid)}`,{credentials:'same-origin',cache:'no-store'});
+        if (!response.ok) {const result = await response.json().catch(() => ({}));throw new Error(result.error || '下载失败，请重新登录后再试。');}
+        const name = `${(job.timelines || []).find(row => row.unique_id === uid)?.name || 'timeline'}.zip`;
+        const link = URL.createObjectURL(await response.blob()), anchor = document.createElement('a');
+        anchor.href = link;anchor.download = name;anchor.click();setTimeout(() => URL.revokeObjectURL(link),1000);
+        toast(`已下载 ${name}：里面是时间线和配音。解压后先把配音拖进达芬奇媒体池，再导入 .drt。`);
+      } catch (failure) {problem(failure);}
+      finally {download.disabled = false;download.textContent = '下载时间线';}
+    });
+    const home = tools.querySelector('[data-home-timeline]'), homeFile = tools.querySelector('[data-home-timeline-file]');
+    home.addEventListener('click',() => {homeFile.value = '';homeFile.click();});
+    homeFile.addEventListener('change',async () => {
+      const file = homeFile.files[0];if (!file) return;
+      if (!/\.drt$/i.test(file.name)) {problem(new Error('请选择达芬奇导出的 .drt 时间线文件。'));return;}
+      if (file.size > 3 * 1024 * 1024) {problem(new Error('时间线文件超过 3 MB；只导出时间线，不要带素材。'));return;}
+      home.disabled = true;home.textContent = '导入中…';error.hidden = true;
+      let result;
+      try {result = await api(`${url}/home-timeline`,{method:'POST',body:{timeline_uid:uid,request_id:crypto.randomUUID(),file_name:file.name,data:await fileBase64(file)}});}
+      catch (failure) {problem(failure);home.disabled = false;home.textContent = '换成家里剪的';return;}
+      const warnings = result.timeline.warnings || [];
+      toast(`已导入 ${result.timeline.name}，原时间线已归档。${warnings.join(' ')}`,warnings.length > 0);
+      try {await onTimelineChanged?.();} catch {}
     });
     const choice = tools.querySelector('[data-hook-choice]'), custom = tools.querySelector('[data-hook-custom]'), reading = tools.querySelector('[data-hook-reading]');
     const options = hookOptions(copy);
@@ -456,7 +494,7 @@ window.VideoPublication = (() => {
     // One registration stands for each timeline. With several, a saved-but-unconfirmed request is kept per timeline, and the
     // order's header follows the current timeline only, never the one just being looked at.
     const lines = data.timelines || [], multi = lines.length > 1, key = multi ? `${job.id}:${data.timeline_uid}` : job.id;
-    host._videoPublicationShown = data.timeline_uid;host._videoPublicationOnLines?.(lines,data.timeline_uid);
+    host._videoPublicationShown = data.timeline_uid;host._videoPublicationLines = lines;host._videoPublicationOnLines?.(lines,data.timeline_uid);
     if (!multi || !host._videoPublicationTimeline || host._videoPublicationTimeline === lines[0].unique_id) onLoaded?.(item || null);
     let savedRequest;
     try {savedRequest = requests.get(key) || JSON.parse(sessionStorage.getItem(storageKey(key)) || 'null');} catch {}
@@ -480,7 +518,6 @@ window.VideoPublication = (() => {
       ${data.timeline_uid && window.PhotoCarousel ? window.PhotoCarousel.markup(data.timeline_uid) : ''}
       ${item ? receipt(job,item,true) + copyRow(data.copy) : canEdit ? candidateRows(data.candidates) + copyRow(data.copy) + formMarkup(calendarPlanMarkup()) : `<div class="video-publication-bar">${calendarPlanMarkup()}<span class="context-note">${esc(data.blocked_reason)}</span></div>${copyRow(data.copy)}`}
       <div class="video-publication-folds">
-      ${item && canEdit ? `<details class="video-publication-editor" ${savedRequest ? 'open' : ''}><summary>绑定另一个视频 / 修正当前登记</summary><p class="context-note">填新的视频 ID 会再绑定一个，原登记保留；填原 ID 是修正当前登记。</p>${formMarkup('')}</details>` : ''}
       ${item && !canEdit ? `<p class="context-note">${esc(data.blocked_reason)}</p>` : ''}
       ${historyFold(job,data.history,item)}
       </div>`;
@@ -512,6 +549,39 @@ window.VideoPublication = (() => {
         await api(`${base(job.id)}/pin`,{method:'POST',body:{publication_id:button.dataset.pinCleared,pin_cleared:true}});
         if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});
       } catch (problem) {button.disabled = false;toast(problem.message || '没能标记。',true);}
+    });
+    // Correct the standing registration in place; the frozen script, voiceover, timeline and file stay as registered.
+    host.querySelector('[data-edit-post]')?.addEventListener('click',event => {
+      const receiptNode = event.currentTarget.closest('.video-publication-receipt');
+      if (receiptNode.querySelector('[data-post-editor]')) return;
+      // One box: paste the TikTok link and the post ID, account and day all come from it. A bare ID keeps the account.
+      const editor = document.createElement('form');editor.className = 'video-publication-post-editor';editor.dataset.postEditor = '';
+      editor.innerHTML = `<label class="field"><span>粘贴正确的 TikTok 链接</span><input name="link" required maxlength="2000" placeholder="https://www.tiktok.com/@账号/video/…" autocomplete="off"></label><div class="video-publication-post-editor-actions"><button type="submit" class="primary compact" disabled>保存修改</button><button type="button" class="secondary compact" data-cancel-edit>取消</button></div><p class="context-note" data-edit-preview hidden></p><p class="ai-error" role="alert" hidden></p>`;
+      receiptNode.querySelector('.video-publication-head').after(editor);
+      const input = editor.elements.link, save = editor.querySelector('[type="submit"]'), preview = editor.querySelector('[data-edit-preview]'), error = editor.querySelector('.ai-error');
+      input.focus();
+      editor.querySelector('[data-cancel-edit]').onclick = () => editor.remove();
+      const read = () => {
+        const linked = fromLink(input.value), post = linked?.post_id || (/^\s*\d{6,25}\s*$/.test(input.value) ? input.value.trim() : '');
+        if (!post) return null;
+        // The same post keeps the day it was registered with; another post takes the day its ID was posted.
+        return {post_id:post,account:linked?.account || item.account || '',published_on:post === item.post_id ? item.published_on : postedOn(post) || item.published_on,...(linked ? {post_url:linked.post_url} : {})};
+      };
+      input.addEventListener('input',() => {
+        const next = read();error.hidden = true;save.disabled = !next;preview.hidden = !next;
+        if (next) preview.textContent = `将改为：${next.account ? '@' + next.account + ' · ' : ''}帖子 ${next.post_id} · ${next.published_on}`;
+      });
+      editor.addEventListener('submit',async submit => {
+        submit.preventDefault();
+        const next = read();
+        if (!next) {error.textContent = '请粘贴 TikTok 视频链接，或 6–25 位帖子 ID。';error.hidden = false;return;}
+        save.disabled = true;error.hidden = true;
+        try {
+          await api(`${base(job.id)}/edit`,{method:'POST',body:{publication_id:item.id,revision:data.revision,...next}});
+          toast('已修改这条发布登记。');
+          if (onSaved) await onSaved();else await mount(host,{job,api,onSaved,onLoaded,onTimelineChanged});
+        } catch (problem) {save.disabled = false;error.textContent = problem.message || '没能修改登记。';error.hidden = false;}
+      });
     });
     host.querySelector('[data-undo-auto]')?.addEventListener('click',async event => {
       const button = event.currentTarget;button.disabled = true;
@@ -597,5 +667,11 @@ window.VideoPublication = (() => {
     host._videoPublicationTimeline = uid;
     return mount(host,host._videoPublicationArgs);
   }
-  return {mount,normalize,localDate,postedOn,followPostDate,copyBlock,bindCopy,calendarLine,calendarChoice,calendarPlanMarkup,bindCalendarPlan,registrationTag,registrationHint,tiktokUrl,select};
+  // A finished Notion upload marks its timeline at once, without reloading the panel (which would drop a typed post ID).
+  function markNotionUploaded(host,uid) {
+    const lines = host?._videoPublicationLines;if (!lines) return;
+    const line = lines.find(row => row.unique_id === uid);if (!line) return;
+    line.notion_uploaded = true;host._videoPublicationOnLines?.(lines,host._videoPublicationShown);
+  }
+  return {mount,normalize,localDate,postedOn,followPostDate,copyBlock,bindCopy,calendarLine,calendarChoice,calendarPlanMarkup,bindCalendarPlan,registrationTag,registrationHint,tiktokUrl,select,markNotionUploaded};
 })();

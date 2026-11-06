@@ -97,6 +97,26 @@ class VideoPublicationTests(unittest.TestCase):
         self.video.unlink()
         self.assertEqual(self.bench.video_publication_file(JOB, record["id"]).read_bytes(), VIDEO)
 
+    def test_a_wrong_post_id_is_corrected_in_place_and_the_script_follows(self):
+        record = self.save()["publication"]
+        revision = self.bench.video_publication_detail(JOB)["revision"]
+        fixed = "7999999999999999902"
+        result = self.bench.edit_video_publication(JOB, {"publication_id": record["id"], "revision": revision, "post_id": fixed,
+                                                         "account": "sharpal_uk", "published_on": "2026-10-02"})
+        edited = result["publication"]
+        self.assertEqual((edited["id"], edited["post_id"], edited["account"], edited["published_on"]), (record["id"], fixed, "sharpal_uk", "2026-10-02"))
+        self.assertEqual(edited["edits"][0]["before"]["post_id"], POST)
+        # Still one registration: correcting is not registering again.
+        self.assertEqual(result["history"], [])
+        self.assertEqual(edited["file"], record["file"])
+        self.assertEqual(self.bench.creation.get_script(SCRIPT)["video_id"], fixed)
+        with self.assertRaises(VoiceError) as stale:
+            self.bench.edit_video_publication(JOB, {"publication_id": record["id"], "revision": revision, "post_id": POST, "published_on": "2026-10-02"})
+        self.assertEqual(stale.exception.status, 409)
+        with self.assertRaises(VoiceError) as bad:
+            self.bench.edit_video_publication(JOB, {"publication_id": record["id"], "revision": result["revision"], "post_id": "12", "published_on": "2026-10-02"})
+        self.assertEqual(bad.exception.status, 400)
+
     def test_replay_after_restart_does_not_copy_or_create_duplicate_history(self):
         body = self.body()
         saved = self.save(body)
@@ -590,3 +610,53 @@ class VideoPublicationHTTPTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NotionMarkedTests(unittest.TestCase):
+    """A timeline whose video is uploaded to Notion counts as done; failed or missing uploads do not."""
+
+    def test_only_completed_uploads_mark_a_timeline(self):
+        rows = {"uid-a": {"status": "completed"}, "uid-b": {"status": "failed"}}
+        bench = VideoPublishMixin()
+        bench.notion_uploads = type("Uploads", (), {"latest": lambda _, job, uid: rows.get(uid, {})})()
+        lines = bench._notion_marked("PRD-000000000001", [{"unique_id": "uid-a"}, {"unique_id": "uid-b"}, {"unique_id": "uid-c"}])
+        self.assertEqual([line["notion_uploaded"] for line in lines], [True, False, False])
+
+    def test_without_notion_nothing_is_marked(self):
+        lines = VideoPublishMixin()._notion_marked("PRD-000000000001", [{"unique_id": "uid-a"}])
+        self.assertFalse(lines[0]["notion_uploaded"])
+
+
+class OrderStatesTests(unittest.TestCase):
+    """The task panel reads each order's current need, summed over its current timelines only."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.bench = Bench(Path(temporary.name))
+        line = lambda uid, **extra: {"unique_id": uid, "name": uid, "take_id": TAKE, "saved": True, **extra}
+        job = {"id": JOB, "product": "051A", "script_id": SCRIPT, "title": "Test", "lines": [], "selected_take": TAKE,
+               "takes": [{"id": TAKE}], "edits": [], "archived": False, "history": [],
+               "timelines": [line("home", task_status="completed"), line("lab", task_status="completed"),
+                             line("old", task_status="in_progress", archived=True)]}
+        data = self.bench.production.empty()
+        data["jobs"] = [job]
+        self.bench.production.write(data)
+
+    def test_finished_cuts_wait_to_be_registered_and_archived_ones_are_not_counted(self):
+        self.assertEqual(self.bench.order_states([JOB, "not-an-order"]), {JOB: {"label": "2 条待登记", "tone": "warning"}})
+
+    def test_uploads_to_notion_make_the_order_done(self):
+        rows = {"NUP-000000000001": {"job_id": JOB, "timeline_uid": "home", "status": "completed", "updated_at": "1"},
+                "NUP-000000000002": {"job_id": JOB, "timeline_uid": "lab", "status": "failed", "updated_at": "1"}}
+        store = type("Store", (), {"read": lambda _: {"uploads": rows}})()
+        self.bench.notion_uploads = type("Uploads", (), {"store": store})()
+        self.assertEqual(self.bench.order_states([JOB])[JOB]["label"], "1 条待登记")
+        rows["NUP-000000000003"] = {"job_id": JOB, "timeline_uid": "lab", "status": "completed", "updated_at": "2"}
+        self.assertEqual(self.bench.order_states([JOB])[JOB], {"label": "完成", "tone": "success"})
+
+    def test_a_running_edit_says_so(self):
+        data = self.bench.production.read()
+        data["jobs"][0]["edits"] = [{"id": "EDT-1", "status": "running", "timeline_uid": "home"}]
+        self.bench.production.write(data)
+        self.assertEqual(self.bench.order_states([JOB])[JOB]["label"], "剪辑中")

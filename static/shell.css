@@ -122,6 +122,20 @@
 @media(max-width:760px){.sidebar-toggle,.sidebar-rail{display:none!important}}
 @media(max-width:760px){.sidebar-heading{display:contents}}
 @media(max-width:760px){.topbar-left{display:none}}
+/* Phones, detail pages: the product picker gives way to a pinned back arrow and the page name, so returning
+   never depends on the in-page link that scrolls away. */
+@media(max-width:760px){
+  body:has(#navigate-up:not([hidden])) .sidebar .global-product{display:none}
+  body:has(#navigate-up:not([hidden])) .topbar{justify-content:space-between}
+  body:has(#navigate-up:not([hidden])) .topbar-left{display:flex;flex:1 1 auto;gap:8px;min-width:0}
+  body:has(#navigate-up:not([hidden])) #breadcrumb{display:block;flex:1 1 auto;min-width:0}
+  body:has(#navigate-up:not([hidden])) #breadcrumb li:not(:last-child){display:none}
+  body:has(#navigate-up:not([hidden])) #breadcrumb li+li::before{content:none}
+  body:has(#navigate-up:not([hidden])) #breadcrumb .breadcrumb-current{max-width:none;font-size:15px;font-weight:600}
+  body:has(#navigate-up:not([hidden])) #content .back-link{display:none}
+  .navigate-up{width:var(--btn-h-lg);height:var(--btn-h-lg);border:0;border-radius:var(--btn-radius);background:var(--fill);color:var(--ink)}
+  .navigate-up:active{background:var(--surface-tint)}
+}
 /* Detail pages return through the pinned top-bar arrow and breadcrumb; the in-page link is only for phones, where the top bar hides them. */
 @media(min-width:761px){#content .back-link{display:none}}
 @media(prefers-reduced-motion:reduce){html.sidebar-collapsed body>.sidebar{transition:none}}

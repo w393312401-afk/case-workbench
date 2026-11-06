@@ -232,6 +232,29 @@ class ContentQueueTests(unittest.TestCase):
         self.assertFalse(_finished("script", "published", "2026-10-01", False, today))
         self.assertFalse(_finished("video", "published", "bad-date", False, today))
 
+    def test_uploaded_to_notion_is_done_but_stays_in_the_full_list(self):
+        marks = {"video:PRD-one": {"calendar_uploaded": True, "updated_at": "x"},
+                 "video:PRD-two": {"calendar_uploaded": True, "updated_at": "x"}}
+        rows = {row["id"]: row for row in self.queue(jobs=[job(status="approved"), job("PRD-two", status="awaiting_review")],
+                                                     management={"items": marks})}
+        done = rows["video:PRD-one"]
+        self.assertEqual((done["stage"], done["stage_label"]), ("uploaded", "完成"))
+        self.assertTrue(done["history"])
+        self.assertFalse(done["finished"])
+        self.assertFalse(done["needs_attention"])
+        # Unfinished work is not settled by an early calendar mark.
+        self.assertEqual(rows["video:PRD-two"]["stage"], "awaiting_review")
+
+    def test_an_order_with_several_timelines_is_done_only_when_each_is_uploaded(self):
+        lines = [{"unique_id": "uid-old", "take_id": "TAK-one"}, {"unique_id": "uid-new", "take_id": "TAK-one"}]
+        order = job(status="approved", selected_take="TAK-one", timelines=lines)
+        marks = {"video:PRD-one": {"calendar_uploaded": True, "updated_at": "x"}}
+        row = self.queue(jobs=[order], management={"items": marks})[0]
+        self.assertEqual(row["stage"], "awaiting_publication")
+        marks["video:PRD-one_tl_uid-old"] = {"calendar_uploaded": True, "updated_at": "x"}
+        row = self.queue(jobs=[order], management={"items": marks})[0]
+        self.assertEqual((row["stage"], row["stage_label"]), ("uploaded", "完成"))
+
     def test_skip_mark_settles_only_a_finished_unposted_video(self):
         marks = {"video:PRD-one": {"skip_publish": True, "skip_reason": "开头不行", "updated_at": "x"},
                  "video:PRD-two": {"skip_publish": True, "updated_at": "x"}}

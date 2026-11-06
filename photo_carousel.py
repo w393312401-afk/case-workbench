@@ -1,5 +1,6 @@
 """挂车图文 for one finished timeline: no-subtitle video → frames → AI writes 3 per-slide versions → pick one →
-three type styles → per-slide picture swaps (another frame or an uploaded photo, crop and text position) → freeze.
+three type styles → per-slide picture swaps (another frame or an uploaded photo, crop and text position; a slide can
+also be a 2- or 4-cell collage, each cell with its own picture and crop) → freeze.
 
 Only the copy is written by AI. Pictures are real frames or the user's own photos, laid out by carousel_render;
 swapping a picture never calls AI. Data lives in <runtime>/production/photo-sets/<PHS-id>/set.json; a frozen
@@ -22,6 +23,7 @@ from uuid import uuid4
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
 
 import carousel_render as render
+from resolve_bridge import render_recovery_message
 
 FPS = 5
 THUMB = (180, 320)
@@ -34,6 +36,34 @@ SET_ID = re.compile(r"PHS-[0-9a-f]{12}")
 APP_ROOT = Path(__file__).resolve().parent
 EXPORT_ROOT = APP_ROOT / "图文成品"
 SKILL = "tiktok-photo-commerce"
+# Each of the 3 versions is written one way (2026-11-06 user decision, replacing "big title + fact label").
+# The photo skill states the same rules; both prompts read them from here.
+WRITINGS = {"self": "达人自述", "qa": "顾虑问答", "list": "理由清单"}
+WRITING_ORDER = ("self", "qa", "list")
+WRITING_RULES = {
+    "self": ("达人自述：第一人称分享自己的发现和经历。标题给结论（I found… / Now I… / I don't… anymore），第二行用让步转折讲原因"
+             "（老办法能做到什么，但做不到我想要的），如“I FOUND THE *NEXT LEVEL* FOR MY STONE. / One stone gets it sharp, just not "
+             "the finish I'm after.”。只说视频或资料里有的经历，不新增亲历、数字和效果；视频口播不是第一人称时，gaps_zh 写“待核：出镜人需有此经历”。"),
+    "qa": ("顾虑问答：每张标题是买家买之前会问的一个问题，用观众自己的话（如“ALREADY OWN A *WHETSTONE?*”“WHAT IF ONE *WEARS OUT?*”），"
+           "第二行用口语回答，落到观众得到什么（如“Nope. All 7 plates come in one case.”）。问题按顾虑链排；首张的问题圈出目标人群、"
+           "说中他们的处境，不把产品摆到主打卖点的反面。"),
+    "list": ("理由清单：首张许诺“N 个理由”（N 等于后面的理由张数，如“*3 REASONS* I MOVED / PAST MY WHETSTONE”），之后每张一个编号理由"
+             "（标题以“1.”“2.”开头），第二行讲这个理由给观众带来什么；最后一个理由落到下单理由。"),
+}
+SECOND_LINE_RULE = ("第二行是一句口语（约 6–14 个英文词，排版最多两行），接着标题往下说：给原因、回答或结果。能带具体数字（件数、目数、年限、范围）"
+                    "就放进这句里说，信息量靠它；不写成规格标签，不描述画面拍到了什么（“… shown”“with the knife clamped behind it”“pictured” 都不算）。")
+# 2026-11-06 user: closings read like a contract ("3-year limited warranty, covering materials and workmanship",
+# "buy the full 202H at today's price"). Product-file wording and rule wording are for checking, not for the copy.
+# 2026-11-06 user: any B-tier reason that fits the copy can close (4-year warranty, 30-day returns, carry-case), not only 3-year warranty/price.
+CLOSING_REASON_RULE = ("理由从产品卖点分级表 B 类里选和这一版文案最搭的一项，回答观众下单前最后一个顾虑：质保（出问题怎么办）、"
+                       "退换（买了不合适怎么办）、价格（值不值）、整箱带走（前文讲帮朋友磨刀、带去别处用时）等；3 版尽量各用不同的理由。"
+                       "只说“有收纳箱、硬壳”不算理由；整套要说出观众因此避开什么（不用一件件凑、不会买错配件）。")
+CLOSING_VOICE_RULE = ("下单理由和入口用达人顺口说话的口吻，不念产品资料的条款原文，也不把规则里的中文要求翻进文案："
+                      "质保按资料能说到的最长年限，202H 注册后 4 年，如“It even comes with a 4-year warranty once you register it.”，"
+                      "不写 limited、covering materials and workmanship 这类条款词，不说终身、无条件；"
+                      "退换说“You've got 30 days to send it back.”，挂车页没写免费就不说 free；"
+                      "入口短，如“Check out the full 202H set below.”（下方看看整套 202H）；没给今天挂车价就不提价格，"
+                      "不写 at today's price、today's product page；不把理由、价格、整套、品牌全名塞进同一句。")
 
 
 class PhotoSetError(ValueError):
@@ -68,7 +98,42 @@ def clean_lines(values, limit, length=160):
     return [line[:length] for line in lines if line][:limit]
 
 
-def parse_plan(output):
+def _number(value, default, low=0.0, high=None):
+    try:
+        number = max(low, float(value))
+    except (TypeError, ValueError):
+        return default
+    return min(high, number) if high is not None else number
+
+
+WORD_KEYS = ("title_lines", "body_lines", "title_zh", "body_zh")
+
+
+def slide_id(slide):
+    """A stable id so AI wordings land on the right slide after copying, deleting or reordering."""
+    return slide.setdefault("id", uuid4().hex[:10])
+
+
+def cell_count(slide):
+    return len(render.LAYOUTS[render.layout_of(slide)][1])
+
+
+def fill_cells(slide):
+    """Make sure a collage slide has a picture for every cell after the first; new cells start as a copy of cell 1.
+    Cells beyond the current layout are kept, so switching back to four cells brings their pictures back."""
+    cells = slide.setdefault("cells", [])
+    while len(cells) < cell_count(slide) - 1:
+        cells.append({"image": copy.deepcopy(slide.get("image") or {}), "crop_x": 0.5, "crop_y": 0.5})
+    return slide
+
+
+def slide_cells(slide):
+    """Every cell of the slide's layout as {image, crop_x, crop_y}; cell 1 is the slide's own picture."""
+    first = {"image": slide.get("image") or {}, "crop_x": slide.get("crop_x", 0.5), "crop_y": slide.get("crop_y", 0.5)}
+    return [first] + list(fill_cells(copy.deepcopy(slide))["cells"])[:cell_count(slide) - 1]
+
+
+def _json_answer(output, problem):
     """Pull the JSON object out of the model's answer; tolerant of code fences and prose around it."""
     text = str(output or "")
     fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
@@ -76,7 +141,72 @@ def parse_plan(output):
     try:
         data = json.loads(raw)
     except ValueError as exc:
-        raise PhotoSetError(502, "AI 没按约定格式交回逐张表，可以再点一次。") from exc
+        raise PhotoSetError(502, problem) from exc
+    if not isinstance(data, dict):
+        raise PhotoSetError(502, problem)
+    return data
+
+
+def parse_slide(output, cta=""):
+    """One rewritten slide: title (required), fact lines (never the closing line), Chinese, optional text position."""
+    data = _json_answer(output, "AI 没按约定格式交回这一张，可以再点一次。")
+    title = clean_lines(data.get("title_lines"), 3, 60)
+    if not title:
+        raise PhotoSetError(502, "AI 交回的这一张没有标题，可以再点一次。")
+    out = {"title_lines": title,
+           "body_lines": [render.plain(line) for line in clean_lines(data.get("body_lines"), 2) if render.plain(line) != render.plain(cta)],
+           "title_zh": str(data.get("title_zh") or "")[:200], "body_zh": str(data.get("body_zh") or "")[:200]}
+    if data.get("text_position") in render.POSITIONS:
+        out["text_position"] = data["text_position"]
+    return out, str(data.get("change_zh") or "")[:200]
+
+
+def parse_options(output, cta=""):
+    """Up to three wordings for one slide; an answer that is a single slide still counts as one option."""
+    data = _json_answer(output, "AI 没按约定格式交回说法，可以再点一次。")
+    items = data.get("options") if isinstance(data.get("options"), list) else [data]
+    options = []
+    for item in items[:3]:
+        try:
+            words, change = parse_slide(json.dumps(item, ensure_ascii=False), cta)
+        except PhotoSetError:
+            continue
+        if any(o["title_lines"] == words["title_lines"] and o["body_lines"] == words["body_lines"] for o in options):
+            continue  # the same wording twice is not a choice
+        options.append({**words, "change_zh": change})
+    if not options:
+        raise PhotoSetError(502, "AI 交回的说法都没有标题，可以再点一次。")
+    return options
+
+
+HASHTAG = re.compile(r"#[^\s#]+")
+
+
+def publish_title(line):
+    """One publish title line in the video module's format: 🔴 + English title + hashtags straight after it
+    (no space before the first #, one space between tags)."""
+    text = re.sub(r"\s+", " ", str(line or "")).strip().lstrip("🔴").strip()
+    if not text:
+        return ""
+    first = text.find("#")
+    head, tags = (text, []) if first < 0 else (text[:first].strip(), HASHTAG.findall(text[first:]))
+    return "🔴" + head + " ".join(tags)
+
+
+def publish_titles(lines):
+    return [line for line in (publish_title(line)[:300] for line in (lines or [])) if line][:3]
+
+
+def fallback_titles(caption):
+    """Versions written before titles existed: one 🔴 line from the caption's first sentence and its hashtags."""
+    text = str(caption or "")
+    words = HASHTAG.sub("", text).strip()
+    first = re.split(r"(?<=[.!?])\s", words, maxsplit=1)[0].strip()
+    return publish_titles([first + " ".join(HASHTAG.findall(text))]) if first else []
+
+
+def parse_plan(output):
+    data = _json_answer(output, "AI 没按约定格式交回逐张表，可以再点一次。")
     versions = []
     for index, item in enumerate((data.get("versions") or [])[:3]):
         slides = []
@@ -92,6 +222,12 @@ def parse_plan(output):
                 crop = min(1.0, max(0.0, float(slide.get("crop_y", 0.5))))
             except (TypeError, ValueError):
                 crop = 0.5
+            layout = slide.get("layout") if slide.get("layout") in render.LAYOUTS else "single"
+            need = len(render.LAYOUTS[layout][1]) - 1
+            cells = [{"frame_time": round(_number(cell.get("frame_time"), time), 2), "crop_y": round(_number(cell.get("crop_y"), 0.5, 0.0, 1.0), 3)}
+                     for cell in (slide.get("cells") or [])[:need] if isinstance(cell, dict)]
+            if len(cells) < need:  # a collage without a picture for every cell falls back to one full picture
+                layout, cells = "single", []
             slides.append({
                 "title_lines": title, "body_lines": [render.plain(line) for line in clean_lines(slide.get("body_lines"), 2)
                                                      if render.plain(line) != render.plain(item.get("cta"))],
@@ -99,14 +235,17 @@ def parse_plan(output):
                 "picture_zh": str(slide.get("picture_zh") or "")[:200], "frame_time": round(time, 2), "crop_y": round(crop, 3),
                 "text_position": slide.get("text_position") if slide.get("text_position") in render.POSITIONS else "split",
                 "text_size": slide.get("text_size") if slide.get("text_size") in render.SIZES else "l",
+                "layout": layout, "cells": cells,
             })
         if not slides:
             continue
+        writing = item.get("writing") if item.get("writing") in WRITINGS else WRITING_ORDER[index]
         versions.append({
-            "key": "ABC"[index], "name_zh": str(item.get("name_zh") or f"第 {index + 1} 版")[:40],
+            "key": "ABC"[index], "writing": writing, "name_zh": str(item.get("name_zh") or f"第 {index + 1} 版")[:40],
             "buyer_zh": str(item.get("buyer_zh") or "")[:200], "motive_zh": str(item.get("motive_zh") or "")[:200],
             "recommended": bool(item.get("recommended")), "cta": clean_lines([item.get("cta")], 1, 60)[0] if item.get("cta") else "",
             "caption_en": str(item.get("caption_en") or "")[:1200], "caption_zh": str(item.get("caption_zh") or "")[:800],
+            "titles": publish_titles(item.get("titles")), "titles_zh": [str(t or "")[:200] for t in (item.get("titles_zh") or [])[:3]],
             "slides": slides,
         })
     if not versions:
@@ -119,13 +258,16 @@ def parse_plan(output):
 
 
 def new_work(version):
-    return {"key": version["key"], "name_zh": version.get("name_zh", ""), "status": "todo", "style": "bar",
+    return {"key": version["key"], "name_zh": version.get("name_zh", ""), "writing": version.get("writing") or "", "status": "todo", "style": "bar",
             "cta": version.get("cta") or "", "caption_en": version.get("caption_en", ""), "caption_zh": version.get("caption_zh", ""),
+            "titles": list(version.get("titles") or []), "titles_zh": list(version.get("titles_zh") or []),
             "slides": [{**{k: s.get(k) for k in ("title_lines", "body_lines", "title_zh", "body_zh", "picture_zh", "crop_y",
                                                 "text_position", "text_size")},
                         "body_lines": [render.plain(line) for line in s.get("body_lines") or []
                                        if render.plain(line) != render.plain(version.get("cta"))],
-                        "image": {"kind": "frame", "t": s["frame_time"]}} for s in version.get("slides") or []],
+                        "image": {"kind": "frame", "t": s["frame_time"]}, "layout": s.get("layout") or "single",
+                        "cells": [{"image": {"kind": "frame", "t": c["frame_time"]}, "crop_x": 0.5, "crop_y": c.get("crop_y", 0.5)}
+                                  for c in s.get("cells") or []]} for s in version.get("slides") or []],
             "history": [], "exports": []}
 
 
@@ -213,7 +355,7 @@ class PhotoCarousels:
     def _interrupt_stale(self):
         """Work cut off by a restart is reported, never silently resumed."""
         for data in self._all():
-            for key in ("frames_job", "ai"):
+            for key in ("frames_job", "ai", "slide_ai"):
                 job = data.get(key) or {}
                 if job.get("status") == "running":
                     job.update(status="failed", error="工作台重启打断了这一步，请再点一次。", finished_at=_now())
@@ -233,17 +375,24 @@ class PhotoCarousels:
         if not data:
             return {"exists": False}
         out = {key: data.get(key) for key in ("id", "job_id", "timeline_uid", "timeline_name", "case_id", "product", "created_at",
-                                              "updated_at", "video", "frames_job", "ai", "versions", "gaps", "current")}
+                                              "updated_at", "video", "frames_job", "ai", "slide_ai", "versions", "gaps", "current")}
         out["exists"] = True
+        out["slide_ai"] = {k: v for k, v in data["slide_ai"].items() if k != "snapshot"} if data.get("slide_ai") else None
         out["works"] = [{"key": w["key"], "name_zh": w.get("name_zh", ""), "status": w["status"], "exports": len(w.get("exports") or []),
                          "openable": self._openable(data, w["key"])} for w in data.get("works") or []]
         work = self._work(data, required=False)
-        out["work"] = ({key: work.get(key) for key in ("key", "name_zh", "status", "slides", "style", "cta", "caption_en", "caption_zh", "exports")}
-                       | {"can_undo": bool(work.get("history"))}) if work else None
+        out["work"] = ({key: work.get(key) for key in ("key", "name_zh", "writing", "status", "slides", "style", "cta", "caption_en", "caption_zh", "exports")}
+                       | {"titles": work.get("titles") or fallback_titles(work.get("caption_en")), "titles_zh": work.get("titles_zh") or []}
+                       | {"can_undo": bool(work.get("history")), "can_redo": bool(work.get("future")),
+                          "undo_label": (work.get("history") or [{}])[-1].get("label", ""),
+                          "redo_label": (work.get("future") or [{}])[-1].get("label", "")}) if work else None
         nxt = self._next_todo(data)
         out["next"] = {"key": nxt["key"], "name_zh": nxt.get("name_zh", "")} if nxt and work and work["status"] == "done" else None
         out["styles"] = render.STYLES
         out["positions"] = render.POSITIONS
+        out["layouts"] = {key: label for key, (label, _) in render.LAYOUTS.items()}
+        out["writings"] = WRITINGS
+        out["max_slides"] = MAX_SLIDES
         out["sizes"] = {key: label for key, (label, _) in render.SIZES.items()}
         return out
 
@@ -284,7 +433,7 @@ class PhotoCarousels:
 
     def busy(self):
         with self.lock:
-            if any((data.get(key) or {}).get("status") == "running" for data in self._all() for key in ("frames_job", "ai")):
+            if any((data.get(key) or {}).get("status") == "running" for data in self._all() for key in ("frames_job", "ai", "slide_ai")):
                 return True
             return any(json.loads(path.read_text(encoding="utf-8")).get("status") == "running"
                        for path in (self.root / "resolve-imports").glob("*/job.json"))
@@ -386,7 +535,7 @@ class PhotoCarousels:
                     try:
                         self.app.resolve.run("restore_textless", payload, timeout=60, held=True)
                     except Exception as recovery_error:
-                        raise PhotoSetError(409, f"{exc}；字幕和屏显轨恢复未确认：{recovery_error}") from exc
+                        raise PhotoSetError(409, render_recovery_message(exc, recovery_error)) from exc
                     raise
             source = Path(result["video_path"]).resolve()
             if source != (scratch / "textless.mp4").resolve() or not source.is_file() or not source.stat().st_size:
@@ -526,9 +675,13 @@ class PhotoCarousels:
                 rows.append(f"{label}：{direction[key]}")
         return "\n".join(rows)
 
+    @staticmethod
+    def _script(job):
+        return "\n".join(f"{line.get('number')}. {line.get('spoken')}｜{line.get('zh') or ''}"
+                         + (f"｜画面：{line['proof']}" if line.get("proof") else "") for line in job.get("lines") or [])
+
     def prompt(self, data, job, refs, note=""):
-        lines = "\n".join(f"{line.get('number')}. {line.get('spoken')}｜{line.get('zh') or ''}"
-                          + (f"｜画面：{line['proof']}" if line.get("proof") else "") for line in job.get("lines") or [])
+        lines = self._script(job)
         duration = (data.get("video") or {}).get("duration") or 0
         sheets = sorted((self.root / data["id"] / "sheets").glob("*.jpg"))
         brief = self._video_brief(data, job)
@@ -541,28 +694,39 @@ class PhotoCarousels:
 {lines}
 {('这条视频已定的开头和方向（图文沿用同一群人、同一个收口）：' + chr(10) + brief) if brief else '这条视频没有登记方向，人群和卖点从脚本里读。'}
 
-每版都按三段写（技能「卖货理由链」；开头和收口的句位规则以写稿技能「开头、中段与收口」为准）：
-1. 首张说到心里：用观众自己的处境或烦恼开场（如角度一直靠猜、磨刀配件一直在买），不懂这个品类的人也认得出；首张标题不介绍产品、不报配置，型号最多放在事实行。至少 1 版首张沿用视频的开头（上面的开头屏显或脚本第一句）。
-2. 中段只讲 1–2 个卖点：每个卖点都回答首张那个烦恼，标题说观众得到的好处，事实行给证明，画面里看得见效果；一个卖点可以占一到两张。不把配件、磨板、箱子逐件列成清单，和首张烦恼无关的卖点不写。
-3. 末张给下单理由：一个已核实的理由加购买入口。理由按写稿技能的优先顺序：质保（按产品资料原样说年限和“有限”）或价格（没给今天挂车价就不写数字，可以写去看今天的价格）；脚本收口里已经说过的理由可以直接用；只有这些都没有时才用整套，并说出观众因此避开什么（不用一件件凑、不会买错配件）。收纳、硬壳这类不算下单理由。
-- 3 版用同一条视频、同一份事实，区别在首张说到的烦恼或开头写法（让步反差、结果先给、身份圈人、戳破以为正常），不是换一种买家；不默认做送礼版，除非补充说明要求。每版 3–5 张，不为凑张数加页。
+3 版各用一种写法，按顺序（同一条视频、同一份事实，区别就是写法），都用美国 TikTok 达人对着镜头说话的口吻（口语、短、有节奏，不要翻译腔、说明书腔和广告腔）：
+- A 版 {WRITING_RULES["self"]}
+- B 版 {WRITING_RULES["qa"]}
+- C 版 {WRITING_RULES["list"]}
+- 视频口播里已经说过、放在这一张合适的句子，优先缩短原话来用，不另起炉灶；口播里收窄过的主张不放宽。
+
+每版都按三段走（技能「卖货理由链」；开头和收口的句位规则以写稿技能「开头、中段与收口」为准）：
+1. 首张说到心里：用观众自己的处境或烦恼开场（如角度一直靠猜、磨刀配件一直在买），不懂这个品类的人也认得出；首张不介绍产品、不报配置，型号最多放在第二行。至少 1 版首张沿用视频开头的意思（按这一版的写法改说法）。
+2. 中段只讲 1–2 个卖点：每个卖点都回答首张那个烦恼，标题和第二行说观众得到什么、为什么，画面里看得见效果；一个卖点可以占一到两张。不把配件、磨板、箱子逐件列成清单，和首张烦恼无关的卖点不写。
+3. 末张给下单理由：一个理由加购买入口。{CLOSING_REASON_RULE}脚本收口里已经说过的理由可以直接用。
+   {CLOSING_VOICE_RULE}
+- 3 版不是换一种买家；不默认做送礼版，除非补充说明要求。每版 3–5 张，不为凑张数加页。
 - motive_zh 写这一版的三段：「烦恼：…｜卖点：…｜下单理由：…」。
-- 每张三层：大标题 1–2 短行（不懂这个品类的人 2 秒能懂，重点词用 *星号* 包起来），事实行 1–2 行（具体、可核实：数字、规格、件数、目数、范围），页码由排版自动加。
-- 每张选一个帧时间 frame_time（秒，必须是总览里看得到、画面能证明标题和事实行的那一格，优先清楚不糊的）；没有能证明的画面就收窄文案，不编。
+- 每张三层：大标题 1–2 短行（不懂这个品类的人 2 秒能懂，重点词用 *星号* 包起来），第二行 body_lines 一句（{SECOND_LINE_RULE}），页码由排版自动加。
+- 每张选一个帧时间 frame_time（秒，必须是总览里看得到、画面能证明标题和第二行的那一格，优先清楚不糊的）；画面负责证明文案，文案不描述画面；没有能证明的画面就收窄文案，不编。
 - 价格数字、优惠、活动期限只用下面补充说明给的；不写资料里列为无依据的说法。
 - 字尽量不挡主体（刀身、刃口、刀柄、磨刀架、夹具、磨板、箱子），缩成缩略图也要一眼认出拍的是什么；字放在桌面、墙、背景这类空处，其次手臂和杂物。
 - crop_y：成图是 3:4，竖屏视频要上下裁掉一截，0 保留顶部、1 保留底部、0.5 居中；按主体位置给，尽量把主体推到一侧，空出另一侧放字。
-- text_position：split（标题在上、事实在下，默认）、top（全部在上）、bottom（全部在下），选画面空的那一侧。
+- text_position：split（标题在上、第二行在下，默认）、top（全部在上）、middle（全部在中间）、bottom（全部在下），选画面空的那一侧。
+- layout：默认 single（一张整图）。只有两种情况才拼图：前后对比（之前/之后、钝/利）用 lr（左右）或 tb（上下），每格一个状态；套装或几件东西要在一张里说清楚用 grid（四格）或 lr。拼图时 frame_time 是第 1 格（左/上/左上），其余格按顺序写进 cells：[{{"frame_time":12.0,"crop_y":0.5}}]，格数配齐（lr、tb 再给 1 格，grid 再给 3 格），配不齐就用 single。每格都要对得上它那一半文案；拼图仍只写一个大标题和第二行，不因格子多就多写字。拼图时字放在某一格的空处，上下拼图可以用 middle 压在接缝上。
 - text_size：l（默认）、m、s；空处不够大时先缩字，还不够就换一帧主体更集中的画面，不要把字压在主体上。
 {('补充说明：' + note) if note else ''}
 
 只输出一个 JSON 对象，不要别的文字：
-{{"versions":[{{"name_zh":"不用再猜角度","buyer_zh":"卖给谁","motive_zh":"烦恼：…｜卖点：…｜下单理由：…","recommended":true,
-"cta":"GET YOUR *202H* BELOW.","caption_en":"发布文案英文 1–3 句 + 4–6 个标签","caption_zh":"中文对照",
-"slides":[{{"title_lines":["STILL *GUESSING*","YOUR ANGLE?"],"body_lines":["202H holds the knife for you"],
-"title_zh":"中文标题","body_zh":"中文事实行","frame_time":34.0,"picture_zh":"这张画面里看得到什么","crop_y":0.5,"text_position":"split","text_size":"l"}}]}}],
+{{"versions":[{{"writing":"self","name_zh":"不用再猜角度","buyer_zh":"卖给谁","motive_zh":"烦恼：…｜卖点：…｜下单理由：…","recommended":true,
+"cta":"GET YOUR *202H* BELOW.",
+"titles":["🔴I Found the Next Level for My Stone#SHARPAL202H #knifesharpening #knifesharpener #whetstone #guidedsharpening #sharpeningkit #tooltok #knifetok"],
+"titles_zh":["我找到了磨石的进阶方案（只写标题中文，不含标签）"],"caption_en":"发布正文英文 1–3 句，不带标签","caption_zh":"正文中文对照",
+"slides":[{{"title_lines":["I FOUND THE *NEXT LEVEL*","FOR MY STONE."],"body_lines":["One stone gets it sharp, just not the finish I'm after."],
+"title_zh":"中文标题","body_zh":"第二行的中文","frame_time":34.0,"picture_zh":"这张画面里看得到什么","crop_y":0.5,"text_position":"split","text_size":"l","layout":"single","cells":[]}}]}}],
 "gaps_zh":["缺什么画面、哪些说法因为没证据没写"]}}
-recommended 只给 1 版设 true。"""
+writing 依次是 self、qa、list。recommended 只给 1 版设 true。
+发布文案和视频一样（写稿技能「交付」的 3 行「🔴主题+tags」格式）：每版 titles 给 3 行，每行 = 🔴 + 英文标题 + 紧跟标题、不加空格的 hashtag 串（标签之间一个空格），产品型号标签放第一位，约 8–10 个相关标签，3 行标题切入角度不同、和这一版的写法与首张一致；titles_zh 是这 3 行标题的中文（不含标签）。caption_en 是发布正文 1–3 句、不带标签，caption_zh 是它的中文。"""
 
     def _plan(self, set_id, event, note):
         folder = self.root / set_id
@@ -585,6 +749,8 @@ recommended 只给 1 版设 true。"""
             for version in versions:
                 for slide in version["slides"]:
                     slide["frame_time"] = self.sharpest(items, slide["frame_time"])
+                    for cell in slide.get("cells") or []:
+                        cell["frame_time"] = self.sharpest(items, cell["frame_time"])
             with self.lock:
                 data = self._read(set_id)
                 data.update(versions=versions, gaps=gaps)
@@ -610,6 +776,164 @@ recommended 只给 1 版设 true。"""
         # Prefer the AI's own frame when it is nearly as sharp; only move off it to escape real blur.
         own = min(near, key=lambda item: abs(item["t"] - time))
         return own["t"] if own["sharp"] >= best * 0.85 else max(near, key=lambda item: item["sharp"])["t"]
+
+    # ---------- one slide: AI offers three ways to say it, the user picks one ----------
+    def rewrite_prompt(self, data, job, work, number, refs, pictures, note="", zh=""):
+        slides = work.get("slides") or []
+        slide = slides[number - 1]
+        rows = "\n".join(f"{i}. {' / '.join(s.get('title_lines') or [])}｜{' / '.join(s.get('body_lines') or [])}"
+                         + ("　← 要改的这一张" if i == number else "") for i, s in enumerate(slides, 1))
+        brief = self._video_brief(data, job)
+        where = ("这是第 1 张：用观众自己的处境或烦恼开场，不懂这个品类的人也认得出；标题不介绍产品、不报配置。" if number == 1 else
+                 f"这是最后一张：画面上会自动加收口「{render.plain(work.get('cta'))}」，标题和第二行给下单理由，不重复收口原话。{CLOSING_REASON_RULE}{CLOSING_VOICE_RULE}"
+                 if number == len(slides) and work.get("cta") else "这是中段：只讲一个卖点，标题说观众得到的好处，第二行说为什么。")
+        writing = WRITING_RULES.get(work.get("writing") or "")
+        collage = f"这一张是{render.LAYOUTS[render.layout_of(slide)][0]}拼图，附图按格子顺序给出。" if pictures > 1 else ""
+        meaning = (f"""用户用中文写了这一张要说的话（每行一句）：
+{zh}
+3 种说法按顺序这样分工，用户的意思优先于下面其他规则：
+1. 第 1 种「照你的意思」：严格按用户的意思和分行——用户第 1 行做标题，第 2 行做第二行（只有一行时整句做标题，第二行按规则补一句）。用户写到的每个信息点都要在，不加、不删、不换成别的卖点，只把说法变成地道的美式口语；这一种不受这一版写法的限制。
+2. 第 2、3 种「贴着意思发散」：还是用户这几个信息点、这个意思，只换说法、语气或先后顺序（如先说结果、换成问句、说成自己的经历），尽量贴这一版的写法。不引入用户没提到的卖点、部件或功能。"""
+                   if zh else f"这一张现在：{' / '.join(slide.get('title_lines') or [])}｜{' / '.join(slide.get('body_lines') or [])}（中文：{slide.get('title_zh') or ''}｜{slide.get('body_zh') or ''}）。意思不变，写得更抓人、更具体。")
+        spread = ("" if zh else "\n- 3 种说法讲同一个卖点，但整张都要不一样：标题换开头写法（如问句戳痛点、结果先给、让步反差、一句吐槽），"
+                  "第二行换说法角度（带上数字规格、说用完的结果、和老办法比）。3 种的第二行不能相同，也不能只差几个词。")
+        check = ("第 1 种的回译和用户写的中文一句一句对得上、信息点一个不少；第 2、3 种没有用户没说的卖点、部件或功能，第二行两两不同；标题读出来像人说话。"
+                 if zh else "3 种的第二行两两不同；第二行没有描述画面（没有 shown、pictured、in the photo）；标题读出来像人说话。")
+        return f"""按 tiktok-photo-commerce 技能，给这组 TikTok 挂车图文的第 {number} 张（共 {len(slides)} 张）出 3 种英文说法，其他张不动。用户会从 3 种里选一种。
+
+附图是这一张现在用的底图（没有字）。{collage}
+产品型号：{data.get('product') or '未登记'}。产品资料（只读，事实以它为准）：{'、'.join(refs) or '没有找到，请只写画面里看得见、脚本里说过的事实'}。
+
+视频脚本（英文｜中文｜画面要证明什么）：
+{self._script(job)}
+{('这条视频已定的开头和方向：' + chr(10) + brief) if brief else ''}
+
+整组现在的文案（标题｜第二行）。要和前后张接得上，不重复别张已经说过的卖点：
+{rows}
+
+这一张的画面说明：{slide.get('picture_zh') or '（没有说明，看附图）'}
+{meaning}
+{('用户的其他要求：' + note) if note else ''}
+
+规则（技能「卖货理由链」；句位规则以写稿技能「开头、中段与收口」为准）：
+- {where}{spread}{(chr(10) + '- 这一版的写法（这一张也照它写）：' + writing) if writing else ''}
+- 标题用美国 TikTok 达人对着镜头说话的口吻：口语、短、有节奏，用缩写和日常词，像跟朋友吐槽或安利，不要翻译腔、说明书腔和广告腔。对比：“SHARP ISN'T THE *FINISH LINE.*”“SHARP? COOL. NOW MAKE IT *SHINE.*” 是达人腔；“I FOUND A GUIDED WAY TO REFINE THE EDGE” 是翻译腔。
+- 大标题 1–2 短行（不懂这个品类的人 2 秒能懂，重点词用 *星号* 包起来）；第二行 body_lines 一句：{SECOND_LINE_RULE}
+- 文案必须是这张底图看得见、能证明的；底图证明不了就收窄说法，不编（用户自己写的话除外）。
+- 价格数字、优惠、活动期限只用用户写给的；不写资料里列为无依据的说法。
+- title_zh、body_zh 按你写的英文回译成中文，让用户核对意思有没有跑偏；不要抄用户写的中文。
+- 交回前自查：{check}
+
+只输出一个 JSON 对象，不要别的文字：
+{{"options":[{{"title_lines":["I FOUND THE *NEXT LEVEL*","FOR MY STONE."],"body_lines":["One stone gets it sharp, just not the finish I'm after."],"title_zh":"我找到了磨石的进阶方案","body_zh":"一块磨石能磨利，但磨不出我想要的刃面","change_zh":"一句话说这种写法的特点"}}]}}"""
+
+    def rewrite(self, set_id, number, body=None):
+        """AI offers three ways to word one slide (from the user's Chinese meaning, or the current words). Nothing is
+        replaced until the user picks one; pictures, crops and layout never change. Runs in the background."""
+        body = body or {}
+        note, zh = str(body.get("note") or "")[:500], str(body.get("zh") or "").strip()[:500]
+        with self.lock:
+            data = self._read(set_id)
+            work = self._work(data)
+            slides = work.get("slides") or []
+            if not 1 <= number <= len(slides):
+                raise PhotoSetError(404, "这一张不存在。")
+            if (data.get("slide_ai") or {}).get("status") == "running":
+                raise PhotoSetError(409, f"AI 正在给第 {data['slide_ai']['number']} 张出说法，等它写完或先停止。")
+            data["slide_ai"] = {"status": "running", "key": work["key"], "number": number, "slide_id": slide_id(slides[number - 1]),
+                                "note": note, "zh": zh, "started_at": _now(),
+                                "progress": f"AI 正在给第 {number} 张出 3 种说法…", "snapshot": copy.deepcopy(slides[number - 1])}
+            self._save(data)
+            event = threading.Event()
+            self._cancel[f"{set_id}:slide"] = event
+        threading.Thread(target=self._rewrite, args=(set_id, event), daemon=True, name=f"photo-slide-{set_id}").start()
+        return self.public(data)
+
+    def stop_rewrite(self, set_id):
+        event = self._cancel.get(f"{set_id}:slide")
+        if event:
+            event.set()
+        return self.public(self._read(set_id))
+
+    def _rewrite(self, set_id, event):
+        folder = self.root / set_id
+        try:
+            data = self._read(set_id)
+            task = data["slide_ai"]
+            job = self.app.production.job(data["job_id"])
+            work = self._work(data, task["key"])
+            number = task["number"]
+            pictures = self._bases(set_id, task["snapshot"])
+            refs = self._references(folder, data.get("product"))
+            try:
+                settings = self.app.ai.preferences()
+            except Exception:
+                settings = {}
+            def progress(text):
+                with self.lock:
+                    current = self._read(set_id)
+                    if (current.get("slide_ai") or {}).get("status") == "running":
+                        current["slide_ai"]["progress"] = str(text)[:200]
+                        self._save(current)
+            output = self.app.ai.bridge.run(self.rewrite_prompt(data, job, work, number, refs, len(pictures), task.get("note", ""), task.get("zh", "")),
+                                            cwd=str(folder), cancel_event=event, on_progress=progress,
+                                            model=settings.get("model"), reasoning_effort=settings.get("reasoning_effort"),
+                                            skills=self._skill(), images=[(f"第 {number} 张底图" + (f" 第 {i} 格" if len(pictures) > 1 else ""), path)
+                                                                          for i, path in enumerate(pictures, 1)])
+            if event.is_set():
+                raise PhotoSetError(409, "已停止。")
+            options = parse_options(output, work.get("cta"))
+            if task.get("zh"):
+                for index, option in enumerate(options):
+                    option["label"] = "照你的意思" if index == 0 else "贴着意思发散"
+            with self.lock:
+                data = self._read(set_id)
+                data["slide_ai"].update(status="done", options=options, picked=None, finished_at=_now())
+                data["slide_ai"].pop("progress", None)
+                self._save(data)
+        except Exception as exc:
+            cancelled = event.is_set()
+            with self.lock:
+                data = self._read(set_id)
+                task = data.get("slide_ai") or {}
+                data["slide_ai"] = {"status": "cancelled" if cancelled else "failed", "key": task.get("key"), "number": task.get("number"),
+                                    "zh": task.get("zh", ""), "note": task.get("note", ""), "finished_at": _now(),
+                                    "error": "已停止。" if cancelled else (str(exc) or "AI 没有完成，请再点一次。")[:400]}
+                self._save(data)
+        finally:
+            self._cancel.pop(f"{set_id}:slide", None)
+
+    def pick_option(self, set_id, number, body):
+        """Put one of the offered wordings on the slide they were written for, wherever it sits now. Only the words
+        change: a picture, crop or layout changed after the options were written stays. Picking is the user's own
+        click and can be undone, so it also replaces words typed by hand."""
+        with self.lock:
+            data = self._read(set_id)
+            task = data.get("slide_ai") or {}
+            work = self._work(data)
+            slides = work.get("slides") or []
+            if task.get("status") != "done" or task.get("key") != work["key"]:
+                raise PhotoSetError(409, "这一张没有可选的说法，先点「出 3 种说法」。")
+            if task.get("slide_id"):
+                number = next((i for i, s in enumerate(slides, 1) if s.get("id") == task["slide_id"]), 0)
+                if not number:
+                    raise PhotoSetError(409, "出说法的那一张已经删掉了，可以在别的张上再出一次。")
+            elif task.get("number") != number:
+                raise PhotoSetError(409, "这一张没有可选的说法，先点「出 3 种说法」。")
+            try:
+                index = int(body.get("index"))
+            except (TypeError, ValueError):
+                raise PhotoSetError(400, "选哪一种说法？") from None
+            options = task.get("options") or []
+            if not 0 <= index < len(options):
+                raise PhotoSetError(400, "这种说法不存在。")
+            words = {key: options[index].get(key) or ([] if key.endswith("lines") else "") for key in WORD_KEYS}
+            if all(slides[number - 1].get(key) == value for key, value in words.items()):
+                return self.public(data)
+            self._remember(work, number, f"第 {number} 张：换成 AI 第 {index + 1} 种说法")
+            slides[number - 1] = {**slides[number - 1], **words}
+            task.update(picked=index, number=number)
+            return self.public(self._save(data))
 
     # ---------- step 3/4: a queue of chosen versions, made one after another ----------
     @staticmethod
@@ -702,11 +1026,25 @@ recommended 只给 1 版设 true。"""
             return self.public(self._save(data))
 
     @staticmethod
-    def _remember(work, index, label):
-        work.setdefault("history", []).append({"at": _now(), "label": label, "slides": copy.deepcopy(work.get("slides") or []),
-                                               "caption_en": work.get("caption_en", ""), "caption_zh": work.get("caption_zh", ""),
-                                               "cta": work.get("cta", ""), "slide": index})
+    def _state(work, index, label):
+        return {"at": _now(), "label": label, "slides": copy.deepcopy(work.get("slides") or []),
+                "caption_en": work.get("caption_en", ""), "caption_zh": work.get("caption_zh", ""),
+                "titles": list(work.get("titles") or []), "titles_zh": list(work.get("titles_zh") or []),
+                "cta": work.get("cta", ""), "slide": index}
+
+    @staticmethod
+    def _restore(work, state):
+        work["slides"], work["cta"] = state["slides"], state.get("cta", "")
+        work["caption_en"], work["caption_zh"] = state.get("caption_en", ""), state.get("caption_zh", work.get("caption_zh", ""))
+        if "titles" in state:
+            work["titles"], work["titles_zh"] = state["titles"], state.get("titles_zh", [])
+
+    @classmethod
+    def _remember(cls, work, index, label):
+        """Save the state before a change. A new change drops whatever could still be redone."""
+        work.setdefault("history", []).append(cls._state(work, index, label))
         work["history"] = work["history"][-MAX_HISTORY:]
+        work["future"] = []
 
     def edit_slide(self, set_id, number, body):
         with self.lock:
@@ -717,6 +1055,20 @@ recommended 只给 1 版设 true。"""
                 raise PhotoSetError(404, "这一张不存在。")
             slide = copy.deepcopy(slides[number - 1])
             changed = []
+            if "layout" in body:
+                if body["layout"] not in render.LAYOUTS:
+                    raise PhotoSetError(400, "版式无效。")
+                slide["layout"] = body["layout"]
+                changed.append("版式")
+            if cell_count(slide) > 1:
+                fill_cells(slide)
+            try:
+                cell = int(body.get("cell", 1))
+            except (TypeError, ValueError):
+                raise PhotoSetError(400, "格子编号无效。") from None
+            if not 1 <= cell <= cell_count(slide):
+                raise PhotoSetError(400, "这一格不存在。")
+            target = slide if cell == 1 else slide["cells"][cell - 2]
             image = body.get("image")
             if isinstance(image, dict):
                 if image.get("kind") == "frame":
@@ -727,7 +1079,7 @@ recommended 只给 1 版设 true。"""
                         raise PhotoSetError(400, "帧时间无效。") from None
                     if not any(abs(item["t"] - time) < 1e-6 for item in items):
                         raise PhotoSetError(400, "这一帧不在抽帧里。")
-                    slide["image"] = {"kind": "frame", "t": time}
+                    target["image"] = {"kind": "frame", "t": time}
                 elif image.get("kind") == "upload":
                     source = Path(str(image.get("path") or ""))
                     if not self.app.video_files.temporary(source) or not source.is_file():
@@ -741,15 +1093,15 @@ recommended 只给 1 版设 true。"""
                     uploads.mkdir(exist_ok=True)
                     name = uuid4().hex[:12] + source.suffix.lower()
                     shutil.copy2(source, uploads / name)
-                    slide["image"] = {"kind": "upload", "file": name, "name": str(image.get("name") or source.name)[:200]}
-                    slide.setdefault("crop_y", 0.5)
+                    target["image"] = {"kind": "upload", "file": name, "name": str(image.get("name") or source.name)[:200]}
+                    target.setdefault("crop_y", 0.5)
                 else:
                     raise PhotoSetError(400, "图片来源无效。")
                 changed.append("换图")
             for key in ("crop_y", "crop_x"):
                 if key in body:
                     try:
-                        slide[key] = round(min(1.0, max(0.0, float(body[key]))), 3)
+                        target[key] = round(min(1.0, max(0.0, float(body[key]))), 3)
                     except (TypeError, ValueError):
                         raise PhotoSetError(400, "裁切位置无效。") from None
                     if "裁切" not in changed:
@@ -778,8 +1130,47 @@ recommended 只给 1 版设 true。"""
                     slide[key] = str(body[key] or "")[:200]
             if not changed and slide == slides[number - 1]:
                 return self.public(data)
-            self._remember(work, number, f"第 {number} 张：" + "、".join(dict.fromkeys(changed or ["中文"])))
+            where = f"第 {number} 张第 {cell} 格" if cell > 1 else f"第 {number} 张"
+            self._remember(work, number, f"{where}：" + "、".join(dict.fromkeys(changed or ["中文"])))
             slides[number - 1] = slide
+            return self.public(self._save(data))
+
+    def arrange(self, set_id, number, body):
+        """Copy a slide (the copy goes right after it), delete one, or move one to another position. Page numbers and the
+        closing line on the last slide follow automatically; every change can be undone."""
+        action = body.get("action")
+        with self.lock:
+            data = self._read(set_id)
+            work = self._work(data)
+            slides = work.get("slides") or []
+            if not 1 <= number <= len(slides):
+                raise PhotoSetError(404, "这一张不存在。")
+            if action == "duplicate":
+                if len(slides) >= MAX_SLIDES:
+                    raise PhotoSetError(409, f"一组最多 {MAX_SLIDES} 张，先删掉一张再复制。")
+                self._remember(work, number, f"复制第 {number} 张")
+                twin = copy.deepcopy(slides[number - 1])
+                twin.pop("id", None)  # the copy is a slide of its own
+                slides.insert(number, twin)
+            elif action == "delete":
+                if len(slides) <= 1:
+                    raise PhotoSetError(409, "至少要留一张。")
+                self._remember(work, number, f"删掉第 {number} 张")
+                slides.pop(number - 1)
+            elif action == "move":
+                try:
+                    to = int(body.get("to"))
+                except (TypeError, ValueError):
+                    raise PhotoSetError(400, "要移到第几张？") from None
+                if not 1 <= to <= len(slides):
+                    raise PhotoSetError(400, "要移到的位置不存在。")
+                if to == number:
+                    return self.public(data)
+                self._remember(work, number, f"第 {number} 张移到第 {to} 张")
+                slides.insert(to - 1, slides.pop(number - 1))
+            else:
+                raise PhotoSetError(400, "操作无效。")
+            work["slides"] = slides
             return self.public(self._save(data))
 
     def edit_set(self, set_id, body):
@@ -792,6 +1183,13 @@ recommended 只给 1 版设 true。"""
             for key, limit in (("caption_en", 1200), ("caption_zh", 800)):
                 if key in body:
                     work[key] = str(body[key] or "")[:limit]
+            if "titles" in body:
+                lines = body["titles"] if isinstance(body["titles"], list) else str(body["titles"] or "").splitlines()
+                work["titles"] = publish_titles(lines)
+                if "titles_zh" not in body:  # a hand-edited title has no Chinese yet
+                    work["titles_zh"] = []
+            if "titles_zh" in body:
+                work["titles_zh"] = [str(t or "")[:200] for t in (body["titles_zh"] or [])[:3]]
             return self.public(self._save(data))
 
     def undo(self, set_id):
@@ -801,8 +1199,21 @@ recommended 只给 1 版设 true。"""
             if not work.get("history"):
                 raise PhotoSetError(409, "没有可以撤销的改动。")
             last = work["history"].pop()
-            work["slides"], work["cta"] = last["slides"], last.get("cta", "")
-            work["caption_en"], work["caption_zh"] = last.get("caption_en", ""), last.get("caption_zh", work.get("caption_zh", ""))
+            work.setdefault("future", []).append(self._state(work, last.get("slide"), last.get("label", "")))
+            work["future"] = work["future"][-MAX_HISTORY:]
+            self._restore(work, last)
+            return self.public(self._save(data))
+
+    def redo(self, set_id):
+        with self.lock:
+            data = self._read(set_id)
+            work = self._work(data)
+            if not work.get("future"):
+                raise PhotoSetError(409, "没有可以恢复的改动。")
+            nxt = work["future"].pop()
+            work.setdefault("history", []).append(self._state(work, nxt.get("slide"), nxt.get("label", "")))
+            work["history"] = work["history"][-MAX_HISTORY:]
+            self._restore(work, nxt)
             return self.public(self._save(data))
 
     # ---------- pictures ----------
@@ -812,6 +1223,10 @@ recommended 只给 1 版设 true。"""
         if not path.is_file():
             raise PhotoSetError(404, "这一帧不存在。")
         return path
+
+    def _bases(self, set_id, slide):
+        """One picture per cell of the slide's layout (one for a plain slide)."""
+        return [self._base(set_id, cell) for cell in slide_cells(slide)]
 
     def _base(self, set_id, slide):
         image = slide.get("image") or {}
@@ -832,13 +1247,16 @@ recommended 只给 1 版设 true。"""
             slide["cta"] = work["cta"]
         return slide
 
-    def base_path(self, set_id, key, number):
-        """The uncropped picture behind one slide, for dragging the crop window in the page."""
+    def base_path(self, set_id, key, number, cell=1):
+        """The uncropped picture behind one slide (or one cell of a collage), for dragging the crop window in the page."""
         work = self._work(self._read(set_id), key, required=False) or {}
         slides = work.get("slides") or []
         if not 1 <= number <= len(slides):
             raise PhotoSetError(404, "这一张不存在。")
-        return self._base(set_id, slides[number - 1])
+        cells = slide_cells(slides[number - 1])
+        if not 1 <= cell <= len(cells):
+            raise PhotoSetError(404, "这一格不存在。")
+        return self._base(set_id, cells[cell - 1])
 
     def rendered(self, set_id, key, style, number, width=None):
         """Render on demand; cached by the exact inputs so an unchanged slide is never drawn twice."""
@@ -848,15 +1266,15 @@ recommended 只给 1 版设 true。"""
         if style not in render.STYLES or not 1 <= number <= len(slides):
             raise PhotoSetError(404, "这一张不存在。")
         spec = self._spec(work, number)
-        base = self._base(set_id, spec)
+        bases = self._bases(set_id, spec)
         width = int(width) if width and 120 <= int(width) <= render.W else render.W
-        key = hashlib.sha256(json.dumps([spec, str(base), base.stat().st_size, style, number, len(slides), width],
+        key = hashlib.sha256(json.dumps([spec, [(str(b), b.stat().st_size) for b in bases], style, number, len(slides), width],
                                         sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:24]
         cache = self.root / set_id / "renders"
         cache.mkdir(exist_ok=True)
         path = cache / f"{key}.jpg"
         if not path.is_file():
-            image = render.render(spec, base, style, number, len(slides))
+            image = render.render(spec, bases, style, number, len(slides))
             if width != render.W:
                 image = image.resize((width, round(width * render.H / render.W)), Image.LANCZOS)
             tmp = path.with_suffix(".part")
@@ -887,13 +1305,16 @@ recommended 只给 1 版设 true。"""
             sources = {}
             for number in range(1, len(slides) + 1):
                 spec = self._spec(work, number)
-                base = self._base(set_id, spec)
-                image = render.render(spec, base, style, number, len(slides))
+                bases = self._bases(set_id, spec)
+                image = render.render(spec, bases, style, number, len(slides))
                 image.save(folder / "无损PNG" / f"{number:02d}.png")
                 image.save(folder / "发布JPG" / f"{number:02d}.jpg", quality=93)
-                shutil.copy2(base, folder / "source" / f"{number:02d}{base.suffix}")
-                picture = spec["image"]
-                sources[str(number)] = (f"视频帧 {picture['t']} 秒" if picture["kind"] == "frame" else f"用户上传图 {picture.get('name')}")
+                described = []
+                for cell, (base, picture) in enumerate(zip(bases, (c["image"] for c in slide_cells(spec))), 1):
+                    shutil.copy2(base, folder / "source" / (f"{number:02d}{base.suffix}" if cell == 1 else f"{number:02d}-{cell}{base.suffix}"))
+                    text = f"视频帧 {picture['t']} 秒" if picture["kind"] == "frame" else f"用户上传图 {picture.get('name')}"
+                    described.append(f"第 {cell} 格 {text}" if len(bases) > 1 else text)
+                sources[str(number)] = "；".join(described)
             copy_json = {
                 "content_type": "photo_carousel", "product": data.get("product"), "source_case_id": data.get("case_id"),
                 "source_production": f"{data['job_id']} / 时间线 {data.get('timeline_name')}", "photo_set": set_id,
@@ -901,15 +1322,19 @@ recommended 只给 1 版设 true。"""
                 "buyer_zh": version.get("buyer_zh", ""), "chosen_layout": render.STYLES[style],
                 "slides": [{"number": n, "title_lines": [render.plain(t) for t in s["title_lines"]], "body": " / ".join(s.get("body_lines") or []),
                             "title_zh": s.get("title_zh", ""), "body_zh": s.get("body_zh", ""), "picture_zh": s.get("picture_zh", ""),
-                            "source": sources[str(n)], "crop_y": s.get("crop_y"), "crop_x": s.get("crop_x", 0.5), "text_position": s.get("text_position")}
+                            "source": sources[str(n)], "crop_y": s.get("crop_y"), "crop_x": s.get("crop_x", 0.5), "text_position": s.get("text_position"),
+                            "layout": render.LAYOUTS[render.layout_of(s)][0]}
                            for n, s in enumerate(slides, 1)],
                 "cta": render.plain(work.get("cta")), "caption_en": work.get("caption_en", ""), "caption_zh": work.get("caption_zh", ""),
+                "titles": work.get("titles") or fallback_titles(work.get("caption_en")), "titles_zh": work.get("titles_zh") or [],
                 "market": "US", "image_language": "en", "dimensions": [render.W, render.H], "aspect_ratio": "3:4",
                 "gaps_zh": data.get("gaps") or [], "version": folder.name, "exported_at": _now(),
-                "method": "满版原图（视频帧或用户上传图）等比裁切铺满，文字直接叠加；未调用生图模型，未改背景、手或产品。",
+                "method": "满版原图（视频帧或用户上传图，拼图时每格一张）等比裁切铺满，文字直接叠加；未调用生图模型，未改背景、手或产品。",
             }
             _write_json(folder / "copy.json", copy_json)
-            (folder / "发布文案.txt").write_text(f"{work.get('caption_en', '')}\n\n{work.get('caption_zh', '')}\n", encoding="utf-8")
+            titles = work.get("titles") or fallback_titles(work.get("caption_en"))
+            (folder / "发布文案.txt").write_text("\n".join(titles + ["", work.get("caption_zh", ""), "", work.get("caption_en", "")]).strip() + "\n",
+                                                encoding="utf-8")
             work.setdefault("exports", []).append({"at": _now(), "folder": str(folder), "name": folder.name, "style": style})
             work["status"] = "done"
             self._save(data)

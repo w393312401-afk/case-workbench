@@ -24,12 +24,19 @@ from elevenlabs_client import VoiceError
 UPLOAD_LIMIT = 20 * 1024 * 1024
 
 
-def unpack(result):
+ACTION_LABELS = {"fetch": "读取页面", "query_data_sources": "查询发布日历", "create_pages": "新建排期页面",
+                 "update_page": "更新排期页面", "create_file_upload": "准备上传成片", "get_tool_access": "检查访问权限"}
+
+
+def unpack(result, action=""):
     if result.get("isError"):
         detail = " ".join(item.get("text", "") for item in result.get("content", []) if item.get("type") == "text")
         if "usage_limit_reached" in detail or "used up its Query Data Source allowance" in detail:
             raise VoiceError(429, "Notion 数据库查询额度暂时用完了，约 1 小时内恢复，到时再点上传即可；本地成片和文案都已保留。")
-        raise VoiceError(502, "Notion 未完成这次操作，请检查页面权限和连接后重试。")
+        # Say which step failed and what Notion said, so the cause is visible instead of a generic retry hint.
+        step = ACTION_LABELS.get(action, action)
+        said = re.sub(r"\s+", " ", detail).strip()[:240]
+        raise VoiceError(502, f"Notion 未完成{'「' + step + '」' if step else '这次操作'}" + (f"：{said}" if said else "，请检查页面权限和连接后重试。"))
     if isinstance(result.get("structuredContent"), dict):
         return result["structuredContent"]
     texts = [item.get("text", "") for item in result.get("content", []) if item.get("type") == "text"]
@@ -111,7 +118,7 @@ class _Client:
             raise VoiceError(409, f"本机 Notion 连接尚不支持 {action}，请更新 Codex 的 Notion 连接后重试。")
         result = self.session.request("mcpServer/tool/call", {"threadId": self.session.thread_id,
             "server": self.server, "tool": names[0], "arguments": arguments}, startup=False)
-        value = unpack(result)
+        value = unpack(result, action)
         if value.get("warnings"):
             self.warnings.extend(str(item) for item in value["warnings"] if item)
         return value

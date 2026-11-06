@@ -13,7 +13,7 @@ from PIL import Image
 import carousel_render as render
 import photo_carousel
 import test_server as http_fixture
-from photo_carousel import PhotoCarousels, PhotoSetError, migrate, parse_plan
+from photo_carousel import PhotoCarousels, PhotoSetError, migrate, parse_options, parse_plan, parse_slide
 from resolve_bridge import ResolveBridge
 
 PLAN = {
@@ -100,6 +100,34 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(render.crop_fit(wide, 0.5, 1).getpixel((render.W - 5, 10)), (0, 0, 255))
         self.assertNotEqual(render.crop_fit(wide, 0.5, 0).getpixel((render.W - 5, 10)), (0, 0, 255))
 
+    def test_collage_puts_each_picture_in_its_cell(self):
+        red, blue = Image.new("RGB", (720, 1280), (255, 0, 0)), Image.new("RGB", (720, 1280), (0, 0, 255))
+        slide = {"title_lines": ["BEFORE / *AFTER*"], "layout": "lr", "cells": [{"crop_x": 0.5, "crop_y": 0.5}], "text_position": "middle"}
+        out = render.render(slide, [red, blue], "bar", 1, 3)
+        self.assertEqual(out.size, (render.W, render.H))
+        self.assertEqual(out.getpixel((40, render.H // 2 + 200)), (255, 0, 0))
+        self.assertEqual(out.getpixel((render.W - 40, render.H // 2 + 200)), (0, 0, 255))
+        self.assertEqual(out.getpixel((render.W // 2, render.H - 200)), (255, 255, 255))  # thin seam between cells
+        grid = render.compose({"layout": "grid"}, [red, blue, blue, red])
+        self.assertEqual([grid.getpixel(xy) for xy in ((10, 10), (render.W - 10, 10), (10, render.H - 10), (render.W - 10, render.H - 10))],
+                         [(255, 0, 0), (0, 0, 255), (0, 0, 255), (255, 0, 0)])
+        with self.assertRaises(render.RenderError):
+            render.compose({"layout": "tb"}, [red])
+        self.assertEqual(render.compose({"layout": "unknown"}, [red]).getpixel((render.W // 2, render.H // 2)), (255, 0, 0))
+
+    def test_a_long_spoken_second_line_breaks_into_two_even_rows(self):
+        sentence = "One stone gets it sharp, just not the finish I'm after."
+        rows = render.balance([sentence], lambda line: len(line) > 40)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(" ".join(rows), sentence)
+        self.assertLess(abs(len(rows[0]) - len(rows[1])), 12)
+        self.assertEqual(render.balance(["Short."], lambda line: True), ["Short."])  # one word cannot be split
+        self.assertEqual(render.balance(["a b", "c d"], lambda line: True), ["a b", "c d"])  # two rows already
+        image = Image.new("RGB", (720, 1280), (90, 120, 150))
+        for style in render.STYLES:
+            out = render.render({"title_lines": ["I FOUND THE *NEXT LEVEL*", "FOR MY STONE."], "body_lines": [sentence]}, image, style, 1, 5)
+            self.assertEqual(out.size, (render.W, render.H))
+
     def test_bad_style_is_refused(self):
         with self.assertRaises(render.RenderError):
             render.render({"title_lines": ["X"]}, Image.new("RGB", (10, 10)), "neon", 1, 1)
@@ -113,6 +141,50 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(sum(v["recommended"] for v in versions), 1)
         self.assertEqual(gaps, ["没有荡刀特写"])
         self.assertEqual(versions[0]["slides"][1]["body_lines"], ["3-year limited warranty"])  # the CTA is not a fact line
+
+    def test_collage_needs_a_picture_for_every_cell(self):
+        plan = {"versions": [{"name_zh": "对比", "slides": [
+            {"title_lines": ["DULL / *SHARP*"], "frame_time": 0.2, "layout": "lr", "cells": [{"frame_time": 1.4, "crop_y": 3}]},
+            {"title_lines": ["FULL KIT"], "frame_time": 0.2, "layout": "grid", "cells": [{"frame_time": 1.0}]},
+            {"title_lines": ["PLAIN"], "frame_time": 0.2, "layout": "mosaic"}]}]}
+        slides = parse_plan(json.dumps(plan))[0][0]["slides"]
+        self.assertEqual((slides[0]["layout"], slides[0]["cells"]), ("lr", [{"frame_time": 1.4, "crop_y": 1.0}]))
+        self.assertEqual((slides[1]["layout"], slides[1]["cells"]), ("single", []))
+        self.assertEqual(slides[2]["layout"], "single")
+        work = photo_carousel.new_work(parse_plan(json.dumps(plan))[0][0])
+        self.assertEqual(work["slides"][0]["cells"], [{"image": {"kind": "frame", "t": 1.4}, "crop_x": 0.5, "crop_y": 1.0}])
+
+    def test_rewritten_slide_is_cleaned_like_the_plan(self):
+        answer = "好的\n```json\n" + json.dumps({"title_lines": ["  ONE CASE,  ", "*ALL SEVEN*", "x", "y"], "body_lines": ["7 *plates*", "GET YOUR 202H BELOW."],
+                                                 "title_zh": "一箱装下", "text_position": "nowhere", "change_zh": "改讲件数"}) + "\n```"
+        words, change = parse_slide(answer, "GET YOUR *202H* BELOW.")
+        self.assertEqual(words, {"title_lines": ["ONE CASE,", "*ALL SEVEN*", "x"], "body_lines": ["7 plates"], "title_zh": "一箱装下", "body_zh": ""})
+        self.assertEqual(change, "改讲件数")
+        self.assertEqual(parse_slide('{"title_lines":["A"],"text_position":"middle"}')[0]["text_position"], "middle")
+        for bad in ("没有 JSON", '{"title_lines":[]}', "[1, 2]"):
+            with self.assertRaises(PhotoSetError):
+                parse_slide(bad)
+
+    def test_options_keep_up_to_three_usable_wordings(self):
+        answer = json.dumps({"options": [{"title_lines": ["ONE"], "body_lines": ["GET YOUR 202H BELOW."], "change_zh": "问句"},
+                                         {"title_lines": []}, {"title_lines": ["TWO"]}, {"title_lines": ["THREE"]}, {"title_lines": ["FOUR"]}]})
+        options = parse_options(answer, "GET YOUR *202H* BELOW.")
+        self.assertEqual([o["title_lines"] for o in options], [["ONE"], ["TWO"]])  # the first three, the empty one dropped
+        self.assertEqual((options[0]["body_lines"], options[0]["change_zh"]), ([], "问句"))
+        self.assertEqual(parse_options('{"title_lines":["SOLO"]}')[0]["title_lines"], ["SOLO"])
+        twice = json.dumps({"options": [{"title_lines": ["SAME"], "body_lines": ["x"]}, {"title_lines": ["SAME"], "body_lines": ["x"]},
+                                        {"title_lines": ["SAME"], "body_lines": ["y"]}]})
+        self.assertEqual([o["body_lines"] for o in parse_options(twice)], [["x"], ["y"]])
+        with self.assertRaises(PhotoSetError):
+            parse_options('{"options":[{"title_lines":[]}]}')
+
+    def test_three_versions_take_the_three_writings_in_order(self):
+        plan = {"versions": [{"slides": [{"title_lines": ["A"]}]}, {"writing": "list", "slides": [{"title_lines": ["B"]}]},
+                             {"writing": "nonsense", "slides": [{"title_lines": ["C"]}]}]}
+        versions = parse_plan(json.dumps(plan))[0]
+        self.assertEqual([v["writing"] for v in versions], ["self", "list", "list"])  # the AI's own valid choice is kept
+        self.assertEqual(photo_carousel.new_work(versions[0])["writing"], "self")
+        self.assertEqual(photo_carousel.WRITINGS, {"self": "达人自述", "qa": "顾虑问答", "list": "理由清单"})
 
     def test_garbage_is_reported(self):
         with self.assertRaises(PhotoSetError):
@@ -210,6 +282,263 @@ class FlowTests(unittest.TestCase):
         state = self.sets.remove_work(set_id, {"key": "B"})
         self.assertEqual([w["key"] for w in state["works"]], ["A"])
 
+    def test_slides_can_be_copied_deleted_and_reordered_with_undo(self):
+        set_id = self.ready()
+        self.sets.plan(set_id)
+        wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["ai"]["status"] != "running")
+        state = self.sets.choose(set_id, {"versions": ["A"]})
+        titles = lambda st: [s["title_lines"][0] for s in st["work"]["slides"]]
+        self.assertEqual(titles(state), ["STOP BUYING STONES", "IT ALL PACKS"])
+        self.assertEqual(state["max_slides"], photo_carousel.MAX_SLIDES)
+        state = self.sets.arrange(set_id, 1, {"action": "duplicate"})
+        self.assertEqual(titles(state), ["STOP BUYING STONES", "STOP BUYING STONES", "IT ALL PACKS"])
+        state = self.sets.edit_slide(set_id, 2, {"title_lines": ["NEW *ONE*"], "image": {"kind": "frame", "t": 1.6}})
+        self.assertNotEqual(state["work"]["slides"][0]["image"], state["work"]["slides"][1]["image"])  # the copy is independent
+        state = self.sets.arrange(set_id, 3, {"action": "move", "to": 1})
+        self.assertEqual(titles(state), ["IT ALL PACKS", "STOP BUYING STONES", "NEW *ONE*"])
+        self.assertTrue(self.sets.rendered(set_id, "A", "bar", 3, 360).is_file())  # closing line on the new last slide
+        state = self.sets.arrange(set_id, 2, {"action": "delete"})
+        self.assertEqual(titles(state), ["IT ALL PACKS", "NEW *ONE*"])
+        state = self.sets.undo(set_id)
+        self.assertEqual(titles(state), ["IT ALL PACKS", "STOP BUYING STONES", "NEW *ONE*"])
+        labels = [h["label"] for h in self.sets._read(set_id)["works"][0]["history"]]
+        self.assertEqual(labels[0], "复制第 1 张")
+        self.assertIn("第 3 张移到第 1 张", labels)
+        for body in ({"action": "move", "to": 9}, {"action": "move", "to": "x"}, {"action": "spin"}):
+            with self.assertRaises(PhotoSetError):
+                self.sets.arrange(set_id, 1, body)
+        with self.assertRaises(PhotoSetError):
+            self.sets.arrange(set_id, 7, {"action": "delete"})
+        before = self.sets._read(set_id)["updated_at"]
+        self.sets.arrange(set_id, 2, {"action": "move", "to": 2})  # no-op, nothing saved
+        self.assertEqual(self.sets._read(set_id)["updated_at"], before)
+        while len(self.sets._read(set_id)["works"][0]["slides"]) < photo_carousel.MAX_SLIDES:
+            self.sets.arrange(set_id, 1, {"action": "duplicate"})
+        with self.assertRaises(PhotoSetError):
+            self.sets.arrange(set_id, 1, {"action": "duplicate"})
+        while len(self.sets._read(set_id)["works"][0]["slides"]) > 1:
+            self.sets.arrange(set_id, 1, {"action": "delete"})
+        with self.assertRaises(PhotoSetError):  # at least one slide stays
+            self.sets.arrange(set_id, 1, {"action": "delete"})
+        result = self.sets.export(set_id)
+        self.assertEqual([p.name for p in (Path(result["export"]["folder"]) / "发布JPG").iterdir()], ["01.jpg"])
+
+    def chosen(self):
+        set_id = self.ready()
+        self.sets.plan(set_id)
+        wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["ai"]["status"] != "running")
+        self.sets.choose(set_id, {"versions": ["A"]})
+        return set_id
+
+    def rewritten(self, set_id):
+        wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["slide_ai"]["status"] != "running")
+        return self.sets.detail("PRD-0123456789ab", "uid-1")
+
+    def test_chinese_meaning_gives_three_wordings_and_only_the_picked_one_is_used(self):
+        set_id = self.chosen()
+        self.sets.edit_slide(set_id, 2, {"layout": "lr", "image": {"kind": "frame", "t": 1.4}})
+        before = self.sets._read(set_id)["works"][0]["slides"]
+        self.app.ai.bridge.output = json.dumps({"options": [
+            {"title_lines": ["3 YEARS", "*COVERED.*"], "body_lines": ["3-year limited warranty", "GET YOUR *202H* BELOW."],
+             "title_zh": "三年质保", "body_zh": "三年有限质保", "change_zh": "结果先给"},
+            {"title_lines": ["WORRIED IT *BREAKS?*"], "body_lines": ["3-year limited warranty"], "title_zh": "怕坏？", "change_zh": "问句"},
+            {"title_lines": ["*NO RISK*", "FOR 3 YEARS"], "text_position": "top"}]})
+        state = self.sets.rewrite(set_id, 2, {"zh": "三年有限质保，坏了能找我们", "note": "短一点"})
+        self.assertEqual(state["slide_ai"]["status"], "running")
+        self.assertNotIn("snapshot", state["slide_ai"])
+        with self.assertRaises(PhotoSetError):  # one at a time
+            self.sets.rewrite(set_id, 1, {})
+        state = self.rewritten(set_id)
+        self.assertEqual(state["slide_ai"]["status"], "done", state["slide_ai"])
+        self.assertEqual([o["title_lines"][0] for o in state["slide_ai"]["options"]], ["3 YEARS", "WORRIED IT *BREAKS?*", "*NO RISK*"])
+        plain = lambda slide: {k: v for k, v in slide.items() if k != "id"}  # the slide gets a stable id when AI writes for it
+        self.assertEqual([plain(s) for s in state["work"]["slides"]], before)  # nothing replaced before a pick
+        prompt, options = self.app.ai.bridge.calls[-1]
+        self.assertIn("出 3 种英文说法", prompt)
+        self.assertIn("三年有限质保，坏了能找我们", prompt)
+        self.assertIn("美国 TikTok 达人", prompt)
+        self.assertIn("第 1 种「照你的意思」：严格按用户的意思和分行", prompt)  # one faithful, two close variations
+        self.assertIn("第 2、3 种「贴着意思发散」", prompt)
+        self.assertIn("不引入用户没提到的卖点", prompt)
+        self.assertNotIn("3 种的第二行不能相同", prompt)
+        self.assertEqual([o["label"] for o in state["slide_ai"]["options"]], ["照你的意思", "贴着意思发散", "贴着意思发散"])
+        self.assertIn("不要抄用户写的中文", prompt)
+        self.assertIn("用户的其他要求：短一点", prompt)
+        self.assertIn(photo_carousel.SECOND_LINE_RULE, prompt)
+        self.assertIn("1. STOP BUYING STONES / *ONE BY ONE.*｜7 plates in one case", prompt)
+        self.assertIn("这一版的写法（这一张也照它写）：" + photo_carousel.WRITING_RULES["self"], prompt)  # A is 达人自述
+        self.assertIn("这是最后一张", prompt)
+        self.assertIn("左右拼图", prompt)
+        self.assertEqual([label for label, _ in options["images"]], ["第 2 张底图 第 1 格", "第 2 张底图 第 2 格"])
+        for bad in ({"index": 3}, {"index": "x"}):
+            with self.assertRaises(PhotoSetError):
+                self.sets.pick_option(set_id, 2, bad)
+        state = self.sets.pick_option(set_id, 2, {"index": 0})
+        slide = state["work"]["slides"][1]
+        self.assertEqual((slide["title_lines"], slide["body_lines"], slide["title_zh"]), (["3 YEARS", "*COVERED.*"], ["3-year limited warranty"], "三年质保"))
+        self.assertEqual((slide["image"], slide["layout"], slide["cells"]), (before[1]["image"], "lr", before[1]["cells"]))
+        self.assertNotIn("change_zh", slide)
+        self.assertNotIn("label", slide)
+        self.assertEqual(plain(state["work"]["slides"][0]), before[0])
+        state = self.sets.pick_option(set_id, 2, {"index": 2})  # switching to another wording is allowed
+        slide = state["work"]["slides"][1]
+        self.assertEqual((slide["title_lines"], slide["body_lines"]), (["*NO RISK*", "FOR 3 YEARS"], []))
+        self.assertEqual(slide["text_position"], before[1].get("text_position"))  # only words change, never the layout
+        self.assertEqual(slide["title_zh"], "")
+        self.assertEqual(state["slide_ai"]["picked"], 2)
+        state = self.sets.undo(set_id)
+        self.assertEqual(state["work"]["slides"][1]["title_lines"], ["3 YEARS", "*COVERED.*"])
+        state = self.sets.undo(set_id)
+        self.assertEqual(plain(state["work"]["slides"][1]), before[1])
+        self.sets.pick_option(set_id, 2, {"index": 1})  # after undoing back to the original, picking still works
+        self.sets.edit_slide(set_id, 2, {"title_lines": ["MY OWN"], "image": {"kind": "frame", "t": 0.2}, "layout": "single"})
+        state = self.sets.pick_option(set_id, 2, {"index": 0})  # a later picture or hand edit never blocks a click
+        slide = state["work"]["slides"][1]
+        self.assertEqual((slide["title_lines"], slide["image"], slide["layout"]), (["3 YEARS", "*COVERED.*"], {"kind": "frame", "t": 0.2}, "single"))
+        before_noop = self.sets._read(set_id)["updated_at"]
+        self.sets.pick_option(set_id, 2, {"index": 0})  # the wording already on the slide: nothing saved
+        self.assertEqual(self.sets._read(set_id)["updated_at"], before_noop)
+        with self.assertRaises(PhotoSetError):
+            self.sets.rewrite(set_id, 5, {})
+        self.sets.rewrite(set_id, 1, {})
+        self.rewritten(set_id)
+        prompt = self.app.ai.bridge.calls[-1][0]
+        self.assertIn("意思不变，写得更抓人", prompt)  # no Chinese given: keep the meaning
+        self.assertIn("3 种的第二行不能相同", prompt)
+        self.assertNotIn("照你的意思", prompt)
+        self.assertNotIn("label", self.sets.detail("PRD-0123456789ab", "uid-1")["slide_ai"]["options"][0])
+        self.assertIn("这是第 1 张", prompt)
+
+    def test_publish_titles_use_the_video_format_and_copy_list(self):
+        self.assertEqual(photo_carousel.publish_title("I found it  #SHARPAL202H  #knife"), "🔴I found it#SHARPAL202H #knife")
+        self.assertEqual(photo_carousel.publish_title("🔴 Already red #a"), "🔴Already red#a")
+        self.assertEqual(photo_carousel.publish_titles(["a", "", "b", "c", "d"]), ["🔴a", "🔴b", "🔴c"])
+        self.assertEqual(photo_carousel.fallback_titles("One case. Seven plates. #SHARPAL202H #knife"), ["🔴One case.#SHARPAL202H #knife"])
+        plan = {"versions": [{"titles": ["Title one#SHARPAL202H #a", "🔴Two#b"], "titles_zh": ["标题一", "二"], "caption_en": "Text.",
+                              "slides": [{"title_lines": ["A"]}]}]}
+        version = parse_plan(json.dumps(plan))[0][0]
+        self.assertEqual((version["titles"], version["titles_zh"]), (["🔴Title one#SHARPAL202H #a", "🔴Two#b"], ["标题一", "二"]))
+        set_id = self.chosen()
+        prompt = self.app.ai.bridge.calls[0][0]
+        self.assertIn("3 行「🔴主题+tags」", prompt)
+        state = self.sets.detail("PRD-0123456789ab", "uid-1")
+        self.assertEqual(state["work"]["titles"], ["🔴One case.#KnifeSharpening"])  # written before titles existed
+        state = self.sets.edit_set(set_id, {"titles": ["My own title #SHARPAL202H #knife", "  ", "Second"]})
+        self.assertEqual((state["work"]["titles"], state["work"]["titles_zh"]), (["🔴My own title#SHARPAL202H #knife", "🔴Second"], []))
+        state = self.sets.undo(set_id)
+        self.assertEqual(state["work"]["titles"], ["🔴One case.#KnifeSharpening"])
+        self.sets.redo(set_id)
+        folder = Path(self.sets.export(set_id)["export"]["folder"])
+        text = (folder / "发布文案.txt").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("🔴My own title#SHARPAL202H #knife\n🔴Second\n\n一箱装下。\n\nOne case. #KnifeSharpening"), text)
+        self.assertEqual(json.loads((folder / "copy.json").read_text(encoding="utf-8"))["titles"][1], "🔴Second")
+
+    def test_undo_can_be_redone_until_a_new_change(self):
+        set_id = self.chosen()
+        titles = lambda st: [s["title_lines"][0] for s in st["work"]["slides"]]
+        self.sets.edit_slide(set_id, 1, {"title_lines": ["FIRST"]})
+        state = self.sets.edit_slide(set_id, 1, {"title_lines": ["SECOND"]})
+        self.assertEqual((state["work"]["can_undo"], state["work"]["can_redo"], state["work"]["undo_label"]), (True, False, "第 1 张：文案"))
+        with self.assertRaises(PhotoSetError):
+            self.sets.redo(set_id)
+        state = self.sets.undo(set_id)
+        state = self.sets.undo(set_id)
+        self.assertEqual(titles(state)[0], "STOP BUYING STONES")
+        self.assertEqual((state["work"]["can_redo"], state["work"]["redo_label"]), (True, "第 1 张：文案"))
+        state = self.sets.redo(set_id)
+        self.assertEqual(titles(state)[0], "FIRST")
+        state = self.sets.redo(set_id)
+        self.assertEqual(titles(state)[0], "SECOND")
+        self.assertFalse(state["work"]["can_redo"])
+        state = self.sets.undo(set_id)
+        self.assertEqual(titles(state)[0], "FIRST")
+        state = self.sets.arrange(set_id, 1, {"action": "duplicate"})  # a new change drops what could be redone
+        self.assertFalse(state["work"]["can_redo"])
+        state = self.sets.undo(set_id)
+        self.assertEqual(titles(state), ["FIRST", "IT ALL PACKS"])
+        state = self.sets.redo(set_id)
+        self.assertEqual(titles(state), ["FIRST", "FIRST", "IT ALL PACKS"])
+
+    def test_a_wording_follows_its_slide_after_moves_and_writing_can_be_stopped(self):
+        set_id = self.chosen()
+        self.app.ai.bridge.output = json.dumps({"options": [{"title_lines": ["AI WORDS"]}]})
+        self.sets.rewrite(set_id, 1, {"zh": "别一块块买"})
+        state = self.rewritten(set_id)
+        self.assertTrue(state["slide_ai"]["slide_id"])
+        self.sets.arrange(set_id, 1, {"action": "duplicate"})  # the copy gets an id of its own
+        state = self.sets.arrange(set_id, 1, {"action": "move", "to": 3})
+        ids = [s.get("id") for s in state["work"]["slides"]]
+        self.assertEqual(ids[2], state["slide_ai"]["slide_id"])
+        self.assertNotEqual(ids[0], ids[2])
+        state = self.sets.pick_option(set_id, 1, {"index": 0})  # clicked while showing slide 1's number: lands on slide 3
+        self.assertEqual([s["title_lines"][0] for s in state["work"]["slides"]], ["STOP BUYING STONES", "IT ALL PACKS", "AI WORDS"])
+        self.assertEqual(state["slide_ai"]["number"], 3)
+        self.sets.arrange(set_id, 3, {"action": "delete"})
+        with self.assertRaises(PhotoSetError) as caught:
+            self.sets.pick_option(set_id, 1, {"index": 0})
+        self.assertIn("已经删掉", str(caught.exception))
+        gate, started = threading.Event(), threading.Event()
+
+        class Slow:
+            def run(self, prompt, **options):
+                started.set()
+                while not gate.is_set() and not options["cancel_event"].is_set():
+                    time.sleep(.05)
+                return json.dumps({"options": [{"title_lines": ["LATE"]}]})
+        self.app.ai.bridge = Slow()
+        self.sets.rewrite(set_id, 1, {"zh": "中文"})
+        started.wait(10)
+        self.sets.stop_rewrite(set_id)
+        state = self.rewritten(set_id)
+        self.assertEqual((state["slide_ai"]["status"], state["slide_ai"]["error"], state["slide_ai"]["zh"]), ("cancelled", "已停止。", "中文"))
+        data = self.sets._read(set_id)
+        data["slide_ai"] = {"status": "running", "number": 1}
+        self.sets._save(data)
+        self.assertTrue(self.sets.busy())
+        PhotoCarousels(self.app, export_root=self.tmp / "图文成品")  # a restart reports the cut-off job
+        self.assertEqual(self.sets._read(set_id)["slide_ai"]["status"], "failed")
+
+    def test_collage_cells_have_their_own_pictures_and_crops(self):
+        set_id = self.ready()
+        self.sets.plan(set_id)
+        wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["ai"]["status"] != "running")
+        state = self.sets.choose(set_id, {"versions": ["A"]})
+        self.assertEqual(state["layouts"], {"single": "单图", "lr": "左右", "tb": "上下", "grid": "四格"})
+        with self.assertRaises(PhotoSetError):  # a plain slide has only one cell
+            self.sets.edit_slide(set_id, 1, {"cell": 2, "crop_x": 0})
+        with self.assertRaises(PhotoSetError):
+            self.sets.edit_slide(set_id, 1, {"layout": "mosaic"})
+        first = state["work"]["slides"][0]["image"]
+        state = self.sets.edit_slide(set_id, 1, {"layout": "lr"})
+        slide = state["work"]["slides"][0]
+        self.assertEqual((slide["layout"], slide["cells"]), ("lr", [{"image": first, "crop_x": 0.5, "crop_y": 0.5}]))
+        state = self.sets.edit_slide(set_id, 1, {"cell": 2, "image": {"kind": "frame", "t": 1.6}, "crop_x": 0.1})
+        slide = state["work"]["slides"][0]
+        self.assertEqual(slide["image"], first)  # cell 1 untouched
+        self.assertEqual(slide["cells"][0], {"image": {"kind": "frame", "t": 1.6}, "crop_x": 0.1, "crop_y": 0.5})
+        self.assertEqual(self.sets.base_path(set_id, "A", 1, 2).name, "0009.jpg")
+        with self.assertRaises(PhotoSetError):
+            self.sets.base_path(set_id, "A", 1, 3)
+        with self.assertRaises(PhotoSetError):
+            self.sets.edit_slide(set_id, 1, {"cell": 3, "crop_x": 0})
+        plain = self.sets.rendered(set_id, "A", "bar", 2, 360)
+        collage = self.sets.rendered(set_id, "A", "bar", 1, 360)
+        self.assertEqual(Image.open(collage).size, (360, 480))
+        state = self.sets.edit_slide(set_id, 1, {"layout": "grid"})
+        self.assertEqual(len(state["work"]["slides"][0]["cells"]), 3)
+        self.assertNotEqual(self.sets.rendered(set_id, "A", "bar", 1, 360), collage)
+        state = self.sets.edit_slide(set_id, 1, {"layout": "tb"})
+        self.assertEqual(state["work"]["slides"][0]["cells"][0]["image"], {"kind": "frame", "t": 1.6})  # kept across layouts
+        self.assertIn("第 1 张：版式", [h["label"] for h in self.sets._read(set_id)["works"][0]["history"]])
+        result = self.sets.export(set_id)
+        folder = Path(result["export"]["folder"])
+        self.assertEqual(sorted(p.name for p in (folder / "source").iterdir()), ["01-2.jpg", "01.jpg", "02.jpg"])
+        copy_json = json.loads((folder / "copy.json").read_text(encoding="utf-8"))
+        self.assertEqual(copy_json["slides"][0]["layout"], "上下")
+        self.assertIn("第 2 格 视频帧 1.6 秒", copy_json["slides"][0]["source"])
+        self.assertEqual(copy_json["slides"][1]["layout"], "单图")
+        self.assertTrue(plain.is_file())
+
     def test_prompt_follows_three_part_chain_and_carries_video_hook_and_direction(self):
         direction = {"product": "202H", "direction_id": "202H-S1", "audience": "徒手磨石守不住角度的人",
                      "main_difference": "S1 夹持控角", "concern": "S1 → 夹得住吗", "closing": "下方看整套 202H"}
@@ -224,6 +553,23 @@ class FlowTests(unittest.TestCase):
                          "画面：手在磨石上来回", "首张说到心里", "只讲 1–2 个卖点", "末张给下单理由", "不默认做送礼版"):
             self.assertIn(expected, prompt)
         self.assertNotIn("送礼、打消顾虑", prompt)
+        for key in ("self", "qa", "list"):  # each version is written one way, in order A/B/C
+            self.assertIn(photo_carousel.WRITING_RULES[key], prompt)
+        self.assertIn("A 版 " + photo_carousel.WRITING_RULES["self"], prompt)
+        self.assertIn("C 版 " + photo_carousel.WRITING_RULES["list"], prompt)
+        self.assertIn(photo_carousel.SECOND_LINE_RULE, prompt)
+        self.assertIn("优先缩短原话来用", prompt)
+        self.assertIn("writing 依次是 self、qa、list", prompt)
+        self.assertNotIn("事实行", prompt)
+        # The closing is spoken, not read off the warranty terms (2026-11-06).
+        self.assertIn(photo_carousel.CLOSING_VOICE_RULE, prompt)
+        # Any fitting B-tier reason can close, not only warranty and price.
+        self.assertIn(photo_carousel.CLOSING_REASON_RULE, prompt)
+        for reason in ("退换", "整箱带走", "4 年"):
+            self.assertIn(reason, prompt)
+        self.assertNotIn("不把注册延保算进去", prompt)
+        self.assertNotIn("原样说年限", prompt)
+        self.assertNotIn("去看今天的价格", prompt)
         # No direction store and no hook: still a valid prompt that says where to read the audience from.
         del self.app.directions
         bare = self.sets.prompt({"id": "PHS-x", "timeline_uid": "uid-1", "product": "202H"}, self.app.production.job("PRD-0123456789ab"), [])
@@ -396,6 +742,19 @@ class FlowTests(unittest.TestCase):
         detail = self.sets.detail("PRD-0123456789ab", "uid-1")
         self.assertEqual(detail["resolve_import"]["status"], "done", detail)
         wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["frames_job"]["status"] != "running")
+
+    def test_resolve_import_reports_recovery_failure_once_without_mislabeling_tracks(self):
+        self.bind_resolve()
+        reason = "原导出设置备份已丢失。请核对达芬奇后重试。"
+        initial = "导出后恢复未完成：" + reason
+        for error, expected in ((initial, initial), ("导出超时。", "导出超时。再次恢复时，" + reason)):
+            with self.subTest(error=error), patch.object(self.app.resolve, "run",
+                    side_effect=[RuntimeError(error), RuntimeError(reason)]):
+                self.sets.import_resolve("PRD-0123456789ab", {"timeline_uid": "uid-1"})
+                wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["resolve_import"]["status"] != "running")
+                detail = self.sets.detail("PRD-0123456789ab", "uid-1")
+                self.assertEqual(detail["resolve_import"]["error"], expected)
+                self.assertFalse(detail["exists"])
 
 
 class PhotoRoutesTests(unittest.TestCase):

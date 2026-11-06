@@ -69,5 +69,16 @@
   .runway-days{display:none}
   .runway-body{justify-content:flex-end}
 }
-/* Below this the fixed product picker sits over the left of the top bar, leaving the runway no room. */
-@media(max-width:760px){.campaign-runway{display:none}}
+/* Phones: the runway shrinks to a pill (count + two-line unit) beside the icons; the fixed product picker
+   gives up --runway-space for it. The full summary stays in the link's title and aria-label. */
+@media(max-width:760px){
+  body:has(#campaign-runway:not([hidden])){--runway-space:63px}
+  .campaign-runway{flex:none;height:var(--btn-h-lg);padding:0 8px;background:var(--fill);border-radius:var(--btn-radius);container:none}
+  .campaign-runway:active{background:var(--surface-tint)}
+  .campaign-runway .runway-body{gap:3px;height:100%}
+  .campaign-runway .runway-count{font-size:18px;line-height:22px}
+  .campaign-runway .is-live .runway-count,.campaign-runway.is-live .runway-count{padding:0 5px;border-radius:5px}
+  .campaign-runway .runway-words{white-space:normal;line-height:12px}
+  .campaign-runway .runway-words strong{display:block;width:2.4em;font-size:10px;font-weight:600}
+  .campaign-runway .runway-words small,.campaign-runway .runway-days{display:none}
+}

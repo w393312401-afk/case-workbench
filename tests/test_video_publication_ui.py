@@ -203,12 +203,9 @@ class VideoPublicationBrowserTests(unittest.TestCase):
         # An earlier registration typed on the day it was entered; pasting the same post again must not move it.
         self.mount("""window.publicationDetail.publication = {id:'VPU-111111111111', post_id:'7697632860966030623', published_on:'2026-10-19',
           account:'sharpaledgelab', script_version:1, registered_at:'2026-10-19T05:27:48Z', source:{}}""")
-        self.page.locator('.video-publication-editor > summary').click()
-        post, date = self.page.locator('[name="post_id"]'), self.page.locator('[name="published_on"]')
-        self.assertEqual(date.input_value(), '2026-10-19')
-        post.fill('https://www.tiktok.com/@sharpaledgelab/video/7697632860966030623')
-        post.blur()
-        self.assertEqual(date.input_value(), '2026-10-19')
+        self.page.locator('[data-edit-post]').click()
+        self.page.locator('[data-post-editor] [name="link"]').fill('https://www.tiktok.com/@sharpaledgelab/video/7697632860966030623')
+        self.assertIn('7697632860966030623 · 2026-10-19', self.page.locator('[data-edit-preview]').inner_text())
 
     def test_unknown_result_locks_form_and_replays_same_request_after_reload(self):
         self.fill()

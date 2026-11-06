@@ -118,7 +118,8 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(done["status"], "done", done)
         self.assertEqual(done["video"]["kind"], "成片预览")
         self.assertNotEqual(done["video"]["version"], original)
-        self.assertEqual(len(list(self.previews._folder(JOB, "one").glob("runs/*/preview.mp4"))), 2)
+        # The fresh capture replaces the older preview instead of piling up beside it.
+        self.assertEqual(len(list(self.previews._folder(JOB, "one").glob("runs/*/preview.mp4"))), 1)
 
     def test_revoked_confirmation_is_not_exported_after_waiting_for_resolve(self):
         result = self.confirmation()
@@ -176,6 +177,17 @@ class PreviewTests(unittest.TestCase):
         self.assertTrue(self.previews.busy(JOB))
         self.gate.set()
         wait(lambda: not self.previews.busy())
+
+    def test_a_new_preview_replaces_the_earlier_ones(self):
+        _, first = self.start()
+        runs = self.previews._folder(JOB, "one") / "runs"
+        stuck = runs / "unrestored"
+        stuck.mkdir(parents=True)
+        (stuck / "recovery.json").write_text(json.dumps({"restored": False}), encoding="utf-8")
+        _, second = self.start()
+        # Only the newest capture stays, plus a run whose DaVinci state still needs restoring.
+        self.assertEqual(sorted(path.name for path in runs.iterdir()), sorted([second["video"]["version"].split("-")[0], "unrestored"]))
+        self.assertEqual(self.previews.video_file(JOB, "one", second["video"]["version"]).read_bytes(), b"preview-video")
 
     def test_failure_recovers_and_keeps_the_previous_video(self):
         _, old = self.start()

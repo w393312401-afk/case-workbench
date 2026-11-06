@@ -19,7 +19,7 @@ from pathlib import Path
 from production_operations import durable_json, file_lock
 from content_naming import content_heading, label_task_starts, task_created_at
 from production_naming import timeline_label
-from production_store import (current_timeline, job_status, manual_completion_current)
+from production_store import (active_timelines, current_timeline, job_status, manual_completion_current)
 from workbench_video_publish import reviewed_source
 
 
@@ -263,6 +263,16 @@ def _bound_posts(row, kind):
     return [{"post_id": post, "url": _tiktok_url(record, kind)} for post, record in latest.items()]
 
 
+def _all_calendar_marked(identifier, row, overrides):
+    """Whether every current timeline of an order is marked uploaded to the publish calendar. The newest keeps the
+    order's own entry; each older one has its own (video-publication.js builds the same IDs)."""
+    if not isinstance(overrides, dict):
+        return False
+    lines = list(reversed(active_timelines(row))) if isinstance(row.get("timelines"), list) else []
+    keys = [identifier] + [f"{identifier}_tl_{re.sub(r'[^A-Za-z0-9-]', '', str(line.get('unique_id') or ''))[:120]}" for line in lines[1:]]
+    return all(isinstance(overrides.get(key), dict) and overrides[key].get("calendar_uploaded") is True for key in keys)
+
+
 def _calendar_state(posted, own, kind):
     """Registration mark once posted (None for old records without one); otherwise the manual mark, default not uploaded."""
     if kind != "video":
@@ -389,6 +399,10 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
         # 不发了 only settles a finished, unposted video; a later post or a reopened edit shows its real stage again.
         if kind == "video" and state[0] == "awaiting_publication" and own.get("skip_publish") is True:
             state = ("skipped", "不发了", "查看成片与发布", "publish", False, True)
+        # Uploaded to the Notion publish calendar (by the upload, or marked by hand): the workbench's part is done.
+        # With several current timelines each is its own video, so every one of them must be marked.
+        elif kind == "video" and state[0] == "awaiting_publication" and _all_calendar_marked(identifier, row, overrides):
+            state = ("uploaded", "完成", "查看成片与发布", "publish", False, True)
         stage, label, action, step, attention, completed = state
         source_archived = bool(row.get("archived") or kind == "script" and row.get("status") == "archived")
         archived = source_archived or bool(own.get("archived"))

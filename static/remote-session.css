@@ -14,5 +14,5 @@
    (writing.css reserves four); the account button is a fifth, 40px plus its 6px gap. */
 @media(max-width:760px){
   .remote-account>summary{width:var(--btn-h-lg);height:var(--btn-h-lg);justify-content:center;padding:0}
-  body:not(.public-text-mode):has(.topbar .remote-account) .sidebar .global-product{width:min(calc(100vw - 251px),220px)}
+  body:not(.public-text-mode):has(.topbar .remote-account) .sidebar .global-product{width:min(calc(100vw - 251px - var(--runway-space,0px)),220px)}
 }
