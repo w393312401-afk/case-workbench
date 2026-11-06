@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import urllib.request
+import webbrowser
+from http.client import HTTPException
 from pathlib import Path
 
 
@@ -40,3 +44,20 @@ def load_config(root=APP_ROOT):
                                           else root / Path(path).expanduser()))
                                       for path in config.get("legacy_runtime_roots", [])]
     return config
+
+
+def open_edit_import():
+    """Both editing launchers open the configured port when the workbench is ready."""
+    url = f"http://127.0.0.1:{load_config()['port']}"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        try:
+            with opener.open(url + "/api/service/status", timeout=2) as response:
+                status = json.load(response)
+            if isinstance(status, dict) and status.get("app") == "video-case-workbench":
+                webbrowser.open(url + "/#production/import")
+                return
+        except (OSError, HTTPException, ValueError):
+            pass
+        time.sleep(1)

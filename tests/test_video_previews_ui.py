@@ -33,11 +33,13 @@ def test_unpublished_timeline_can_be_previewed_played_and_downloaded(stations, p
                     page.locator('#login-submit').click();page.wait_for_url(origin+'/')
                 page.goto(origin+f'/#production/{identifier}')
                 page.locator('.production-steps [data-step="publish"]').click()
-                button = page.locator('[data-preview-generate]')
+                page.get_by_text('轻量 MP4 预览', exact=True).click()
+                portable = page.locator('[data-video-preview]')
+                button = portable.locator('[data-preview-generate]')
                 expect(button).to_be_enabled()
                 button.click()
-                expect(page.locator('[data-preview-player]')).to_be_visible(timeout=10000)
-                player = page.locator('[data-preview-player]')
+                expect(portable.locator('[data-preview-player]')).to_be_visible(timeout=10000)
+                player = portable.locator('[data-preview-player]')
                 player.evaluate('async video => {video.muted=true;await video.play();}')
                 page.wait_for_function('''() => {
                     const video = document.querySelector('[data-preview-player]');
@@ -46,7 +48,7 @@ def test_unpublished_timeline_can_be_previewed_played_and_downloaded(stations, p
                 player.evaluate('video => video.pause()')
                 expect(button).to_have_text('重新生成预览')
                 with page.expect_download() as received:
-                    page.locator('[data-preview-download]').click()
+                    portable.locator('[data-preview-download]').click()
                 destination = tmp_path / 'download.mp4';received.value.save_as(destination)
                 assert destination.read_bytes() == preview_media.read_bytes()
                 assert server.app.production.job(identifier) == original
@@ -54,7 +56,7 @@ def test_unpublished_timeline_can_be_previewed_played_and_downloaded(stations, p
                 old_url = player.get_attribute('src')
                 server.app.resolve.busy = lambda:True
                 button.click()
-                expect(page.locator('[data-preview-status]')).to_contain_text('其他操作')
+                expect(portable.locator('[data-preview-status]')).to_contain_text('其他操作')
                 expect(button).to_be_enabled()
                 assert player.get_attribute('src') == old_url and len(server.app.resolve.calls) == 1
                 server.app.resolve.busy = lambda:False

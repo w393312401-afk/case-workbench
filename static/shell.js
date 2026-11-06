@@ -583,7 +583,8 @@ window.keepReadingPlace = change => {
     if (selectControllers.has(picker)) return selectControllers.get(picker);
     const prefix = options.prefix || `filter-picker-${++selectSequence}`, listId = `${prefix}-options`;
     const title = options.title || "选择筛选项", label = options.label || title;
-    const value = options.getValue || (() => picker.value);
+    const multiple = !!options.multiple;
+    const value = options.getValue || (() => multiple ? [...picker.selectedOptions].map(row => row.value).filter(Boolean) : picker.value);
     const choices = options.getChoices || (() => [...picker.options].filter(row => !row.hidden && !row.closest("optgroup[hidden]")).map(row => ({ value: row.value, label: row.label, disabled: row.disabled || !!row.closest("optgroup[disabled]"), group: row.closest("optgroup")?.label || "" })));
     const choiceLabel = options.getLabel || (code => choices().find(row => row.value === code)?.label || code);
     let opened = false, active = -1, rows = [], destroyed = false, invalid = false, resetTimer;
@@ -610,10 +611,14 @@ window.keepReadingPlace = change => {
     if (options.preserveNative) panel.classList.add("workbench-select-panel");
     panel.setAttribute("popover", "manual");
     panel.hidden = true;
-    panel.innerHTML = `<div class="${classes("heading")}"><strong>${esc(title)}</strong><span data-picker-result-count${options.product ? " data-product-result-count" : ""} role="status"></span></div><div class="${classes("search-wrap")}">${icon("search")}<input type="search" class="${classes("search")}" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="${listId}" placeholder="${esc(options.searchPlaceholder || "搜索选项")}" aria-label="${esc(options.searchLabel || "搜索筛选项")}" autocomplete="off"></div><ul id="${listId}" class="${classes("list")}" role="listbox" aria-label="${esc(options.listLabel || label)}"></ul><div class="${classes("foot")}"><span>↑↓ 选择 · Enter 确认</span>${options.manage ? `<button type="button" class="${classes("link")}" data-combo-manage>管理产品</button>` : '<small>Esc 收起</small>'}</div>`;
+    panel.innerHTML = `<div class="${classes("heading")}"><strong>${esc(title)}</strong><span data-picker-result-count${options.product ? " data-product-result-count" : ""} role="status"></span></div><div class="${classes("search-wrap")}">${icon("search")}<input type="search" class="${classes("search")}" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-controls="${listId}" placeholder="${esc(options.searchPlaceholder || "搜索选项")}" aria-label="${esc(options.searchLabel || "搜索筛选项")}" autocomplete="off"></div><ul id="${listId}" class="${classes("list")}" role="listbox" aria-label="${esc(options.listLabel || label)}"></ul><div class="${classes("foot")}"><span>↑↓ 选择 · Enter 确认</span>${options.manage ? `<button type="button" class="${classes("link")}" data-combo-manage>管理产品</button>` : multiple ? `<button type="button" class="${classes("link")}" data-picker-select-all>全选账号</button>` : '<small>Esc 收起</small>'}</div>`;
     const ownerDialog = picker.closest("dialog");
     (ownerDialog || document.body).append(panel);
     const trigger = root.querySelector("button"), search = panel.querySelector("input"), list = panel.querySelector("ul");
+    if (multiple) {
+      list.setAttribute("aria-multiselectable", "true");
+      panel.querySelector(`.${prefix}-foot span`).textContent = "↑↓ 选择 · Enter 勾选";
+    }
     function setActive(index, scroll = false) {
       active = index;
       const items = [...list.querySelectorAll('[data-picker-value]:not([aria-disabled="true"])')];
@@ -626,6 +631,7 @@ window.keepReadingPlace = change => {
     }
     function renderList(reset = false) {
       const query = search.value.trim(), selected = value();
+      const isSelected = code => multiple ? (code ? selected.includes(code) : !selected.length) : code === selected;
       const parts = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
       const entries = choices().filter(row => (options.preserveNative || row.value) && parts.every(part => `${row.value} ${row.label}`.toLocaleLowerCase().includes(part)));
       const codes = entries.map(row => row.value);
@@ -639,14 +645,14 @@ window.keepReadingPlace = change => {
         const heading = options.group?.(code, selected) || (options.preserveNative ? entries.find(row => row.value === code)?.group : "") || "";
         if (heading && heading !== group) markup += `<li class="${classes("group")}" role="presentation">${heading}</li>`;
         group = heading;
-        markup += `<li id="${prefix}-option-${index}" role="option" class="${classes("option")}${code === selected ? " is-current" : ""}" data-picker-value="${esc(code)}"${options.product ? ` data-product="${esc(code)}"` : ""} aria-selected="${code === selected}"${disabled.has(code) ? ' aria-disabled="true"' : ""} title="${esc(choiceLabel(code))}"><span>${esc(choiceLabel(code))}</span><span class="${classes("check")}" aria-hidden="true">${code === selected ? "✓" : ""}</span></li>`;
+        markup += `<li id="${prefix}-option-${index}" role="option" class="${classes("option")}${isSelected(code) ? " is-current" : ""}" data-picker-value="${esc(code)}"${options.product ? ` data-product="${esc(code)}"` : ""} aria-selected="${isSelected(code)}"${disabled.has(code) ? ' aria-disabled="true"' : ""} title="${esc(choiceLabel(code))}"><span>${esc(choiceLabel(code))}</span><span class="${classes("check")}" aria-hidden="true">${isSelected(code) ? "✓" : ""}</span></li>`;
       });
       if (!markup) markup = `<li class="${classes("empty")}" role="presentation">${esc(options.emptyText || "没有找到匹配的选项")}<br><small>${esc(options.emptyHint || "试试其他关键词")}</small></li>`;
       if (list.innerHTML !== markup) list.innerHTML = markup;
       panel.querySelector("[data-picker-result-count]").textContent = options.countLabel?.(entries.length) || `${entries.length} 个选项`;
       const manage = panel.querySelector("[data-combo-manage]");
       if (manage) manage.hidden = !canManageProducts();
-      let index = reset ? rows.indexOf(query ? rows[0] : selected) : rows.indexOf(previous);
+      let index = reset ? rows.indexOf(query ? rows[0] : multiple ? selected[0] || "" : selected) : rows.indexOf(previous);
       if (index < 0 && rows.length) index = 0;
       setActive(index, reset);
     }
@@ -673,7 +679,7 @@ window.keepReadingPlace = change => {
       if (destroyed) return;
       const selected = value(), entries = choices().map(row => [row.value, row.label]);
       // A saved historical filter can still be displayed without adding it to the catalogue.
-      if (selected && !entries.some(([code]) => code === selected)) entries.push([selected, choiceLabel(selected)]);
+      if (!multiple && selected && !entries.some(([code]) => code === selected)) entries.push([selected, choiceLabel(selected)]);
       if (!options.preserveNative) {
         const markup = entries.map(([code, text]) => `<option value="${esc(code)}">${esc(text)}</option>`).join("");
         if (picker.innerHTML !== markup) picker.innerHTML = markup;
@@ -682,12 +688,14 @@ window.keepReadingPlace = change => {
       const unavailable = picker.hidden || picker.dataset.guestHidden === "true" || picker.dataset.publicHidden === "true" || getComputedStyle(picker).display === "none";
       if (root.hidden !== unavailable) root.hidden = unavailable;
       if (trigger.disabled !== picker.matches(":disabled")) trigger.disabled = picker.matches(":disabled");
-      trigger.querySelector("span").textContent = choiceLabel(selected);
+      const selectedLabel = multiple ? (!selected.length ? choiceLabel("") : selected.length === 1 ? choiceLabel(selected[0]) : `已选 ${selected.length} 个${label}`) : choiceLabel(selected);
+      const selectedTitle = multiple && selected.length ? selected.map(choiceLabel).join("、") : selectedLabel;
+      trigger.querySelector("span").textContent = selectedLabel;
       // A phone's top bar has room for the model only; the full name stays in the title and label.
       if (options.getShortLabel) trigger.querySelector("span").dataset.short = options.getShortLabel(selected);
-      trigger.title = choiceLabel(selected);
+      trigger.title = selectedTitle;
       const controlLabel = options.getControlLabel?.() || label;
-      trigger.setAttribute("aria-label", `${controlLabel}，当前：${choiceLabel(selected)}`);
+      trigger.setAttribute("aria-label", `${controlLabel}，当前：${selectedTitle}`);
       if (options.preserveNative) {
         panel.querySelector("strong").textContent = controlLabel;
         search.placeholder = `搜索${controlLabel}`;
@@ -734,6 +742,21 @@ window.keepReadingPlace = change => {
     }
     function choose(code) {
       if (picker.matches(":disabled") || choices().find(row => row.value === code)?.disabled) return;
+      if (multiple) {
+        const option = [...picker.options].find(row => row.value === code);
+        if (!option) return;
+        if (!code) {
+          for (const row of picker.options) row.selected = !row.value;
+        } else {
+          option.selected = !option.selected;
+          const all = [...picker.options].find(row => !row.value);
+          if (all) all.selected = ![...picker.options].some(row => row.value && row.selected);
+        }
+        picker.dispatchEvent(new Event("input", { bubbles: true }));
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+        refresh();
+        return;
+      }
       setOpen(false, true);
       if (code === value()) return;
       picker.value = code;
@@ -782,6 +805,12 @@ window.keepReadingPlace = change => {
     listen(list, "click", event => {
       const row = event.target.closest("[data-picker-value]");
       if (row) choose(row.dataset.pickerValue);
+    });
+    if (multiple) listen(panel.querySelector("[data-picker-select-all]"), "click", () => {
+      for (const row of picker.options) row.selected = !!row.value && !row.disabled;
+      picker.dispatchEvent(new Event("input", { bubbles: true }));
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+      refresh();
     });
     if (options.manage) listen(panel.querySelector("[data-combo-manage]"), "click", options.manage);
     listen(document, "keydown", event => {
@@ -846,12 +875,13 @@ window.keepReadingPlace = change => {
   function enhanceSelects(scope = document) {
     const candidates = [...(scope.matches?.("select") ? [scope] : []), ...scope.querySelectorAll("select")];
     for (const picker of candidates) {
-      if (!picker.isConnected || picker.multiple || picker.size > 1 || selectControllers.has(picker)) continue;
+      const multiple = picker.multiple && picker.hasAttribute("data-multi-filter");
+      if (!picker.isConnected || (picker.multiple && !multiple) || picker.size > 1 || selectControllers.has(picker)) continue;
       const computed = getComputedStyle(picker), box = picker.getBoundingClientRect();
       const fontSize = computed.fontSize, controlHeight = Math.max(30, Math.min(42, parseFloat(computed.height) || 38));
       const parentStyle = getComputedStyle(picker.parentElement);
       const controller = createFilterPicker(picker, {
-        prefix: `workbench-select-${++selectSequence}`, preserveNative: true,
+        prefix: `workbench-select-${++selectSequence}`, preserveNative: true, multiple,
         title: selectLabel(picker), getControlLabel: () => selectLabel(picker),
         getLabel: code => [...picker.options].find(row => row.value === code)?.label || code,
       });
@@ -915,7 +945,7 @@ window.keepReadingPlace = change => {
       for (const picker of pending) {
         const enhanced = enhancedSelects.get(picker);
         if (!enhanced) { enhanceSelects(picker); continue; }
-        if (picker.multiple || picker.size > 1) enhanced.destroy();
+        if ((picker.multiple && !picker.hasAttribute("data-multi-filter")) || picker.size > 1) enhanced.destroy();
         else enhanced.refresh();
       }
     });

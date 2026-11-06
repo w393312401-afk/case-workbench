@@ -1,9 +1,9 @@
 """AI editing task: hand a voiced timeline to a local AI client with Resolve and the editing skill.
 
 Clients run restricted: no command tools, file tools confined to the task folder, and only the Resolve
-MCP tools. The current editing skill owns the edit and save; an extra engineering readback runs only
-when the user explicitly requests it. After a saved edit the workbench keeps the delivered timeline as a
-record (delivered-timeline.json) for comparing with the human polish later; it judges nothing.
+MCP tools. Before delivery the workbench inherits source audio settings for the newly placed clips;
+an extra general engineering readback still runs only when the user explicitly requests it. After a
+saved edit the workbench keeps a record for comparing with the human polish later.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import time
 from types import SimpleNamespace
 from uuid import uuid4
 
+from claude_bridge import EFFORTS as CLAUDE_EFFORTS, add_usage
 from codex_bridge import BridgeCancelled
 from ai_tasks import AITaskError
 from case_replica import handoff_section, until_filled
@@ -28,21 +29,21 @@ from creation_store import CreationError
 from direction_store import now
 from edit_candidates import (INDEX_DIR, VisualIndex, add_in_progress_usage, build_candidates, compose_grid, merge_notes,
                              planned_spans, rank_by_relevance, refreshed_usage, remember, sample_frames, write_task_files)
-from edit_planning import ANALYSIS_WORKERS, analyze_candidates, mode_selection_rules
+from edit_planning import ANALYSIS_WORKERS, analyze_candidates, mode_selection_rules, planner_settings
 from elevenlabs_client import VoiceError
 from production_operations import file_lock
 from production_store import EDIT_ID, FRAME_RATES, JOB_ID, current_edit
 from production_validation import (MANUAL_SCOPE, delivery_gap_status, engineering_summary, failed_validation, rate,
                                    review_current_coverage, snapshot, validate_edit, voice_track)
 from resolve_bridge import locate_mcp
+from resolve_share import ProjectShares, TurnServer
 from variant_parse import variant_notes
 from workbench_production import creator_project_base, meaning_markers, same_creator_project, timeline_location
 from task_activity import activity_label, record_activity, safe_error
 
 SKILL_NAME = "davinci-product-video-editing"
 MODES = {"explain": "解释画面逻辑", "sync": "音画同步", "montage": "主题蒙太奇", "replica": "1:1 复刻原片"}
-EDIT_MODELS = ("claude-default", "claude-opus", "claude-sonnet")
-EFFORTS = (None, "high", "xhigh", "max")
+EFFORTS = (None, *CLAUDE_EFFORTS)
 EDIT_TIMEOUT = 150 * 60
 RESOLVE_TOOLS = ("run_script", "search_scripting_api", "get_scripting_api", "get_scripting_docs", "get_resolve_status", "get_whats_new")
 FILE_TOOLS = ("Read", "Write", "Edit", "Glob", "Grep")
@@ -58,6 +59,21 @@ EDIT_RULES = (
 )
 PROMPT_PREFIX = "请执行本次剪辑任务。交接内容如下（同一份也保存在当前目录的 handoff.md）。\n\n"
 DELIVERY_SNAPSHOT = "delivered-timeline.json"
+AUDIO_HANDOFF = """
+## 本次原声设置
+
+逐片放入并链接原声，保留已有原声和配音。本次新增原声的片段音量和音频插件由工作台在交付前统一从对应素材继承，你只需放置并链接原声，不要另行复制这两项；已有不同插件或不同的非默认音量不会擅自覆盖。插件参数与动画若无法读取仍须人工核对。若本次额外要求明确指定不同的原声音量或插件，按该要求处理，并在最终 JSON 的 `audio_overrides` 数组中列出受影响的目标原声音频片段 UniqueId，工作台不会覆盖这些片段。
+
+放置每段原声时，记录它对应的具体素材片段：在最终 JSON 的 `audio_sources` 数组中逐片填写 `{"item_uid":"目标原声音频片段 UniqueId","timeline_uid":"素材时间线 UniqueId","source_item_uid":"素材视频片段 UniqueId"}`，后两项直接取自 candidates.json。同一媒体可能在素材时间线里有多段、不同片段的声音设置也可能不同，不能只记录文件名。入出点按半开区间使用，保留放置后 API 返回的真实片段身份。
+""".strip()
+# A specific sound adjustment needs the editor to identify the clips it changed; a general request to
+# keep original sound does not exempt those clips from normal source inheritance.
+AUDIO_CUSTOM_REQUEST = re.compile(
+    r"(?:-?\d+(?:\.\d+)?\s*(?:dB|分贝)|静音|消音|混音|均衡|压缩器|音量(?:调|设|改|降|升)|"
+    r"(?:调低|调高|压低|降低|提高|放大|关闭|开启|删除|替换).{0,8}(?:原声|音频|声音|音量|降噪|插件)|"
+    r"(?:不要|不用|不继承|去掉|禁用).{0,8}(?:原声|音频|声音|音量|降噪|插件)|"
+    r"(?:原声|音频|声音|音量|降噪|插件).{0,8}(?:调低|调高|压低|降低|提高|放大|关闭|开启|删除|替换|不继承|禁用)|"
+    r"\b(?:mute|unmute|audio\s+mix|volume\s*(?:to|=|:)|(?:lower|raise|change|remove|disable|enable)\s+(?:the\s+)?(?:audio|volume|noise|plugin))\b)", re.I)
 FRAME_CHUNK = 15
 # First edits of new footage export what fits in this time, most relevant clips first; later edits continue from the cache.
 PREPARE_BUDGET = 8 * 60
@@ -86,7 +102,8 @@ def candidates_section(stats=None, error=""):
         reason = error or "素材时间线里没有可用片段"
         return "\n".join(["## 候选画面", "", f"- 工作台这次没能整理候选画面（{reason}），按技能自己查看画面。", ""])
     lines = ["## 候选画面（工作台已整理）", "",
-             f"- 清单：当前目录 candidates.md（同内容 candidates.json）。素材片段共 {stats['clips']} 个，列出 {stats['listed']} 个。",
+             f"- 清单：当前目录 candidates.md（同内容 candidates.json）。素材片段共 {stats['clips']} 个，列出 {stats['listed']} 个。"
+             "选材读 candidates.md；candidates.json 很大，不要整份读取，片段 UniqueId、素材时间线 UniqueId 等字段用 Grep 按候选编号查对应那一条。",
              f"- 标签资料：{stats['verified']} 个片段是「已核标签」（片段名称或打标签技能的逐片标记，看过画面后写的）。",
              f"- 其余片段（标签待核、手写标签或无标签）中有 {stats['to_look']} 个没有描述，已有画面描述的 {stats['described']} 个。"
              "对照图位于 candidates/<候选编号>.jpg，同一片段按时间顺序含 3 或 6 帧。",
@@ -97,7 +114,7 @@ def candidates_section(stats=None, error=""):
              "只有依据未覆盖且影响理解的细节需要再看图，标签未写细节不等于缺素材。"
              "这只针对选片段；清单里带「动作区间」的片段，入出点直接取区间，不导出静帧（可循环动作在区间内任取一段；要接下一镜头时最多看一张尾帧），优先于技能「定入出点」的看图步骤。"
              "没有动作区间的片段，只截取一部分时入出点按技能「定入出点」看画面后再定，动作镜头按技能「动作完整」取。"
-             "入出点拿不准或动作看不出是否完整时，放最接近的一段并写进 questions，不因此留空。",
+             "入出点拿不准时先看帧定下来，交付前不留没看过画面的入出点；看过仍看不出动作是否完整时，放最接近的一段，不因此留空，也不写进 questions。",
              "- 看过对照图的片段，把描述写入当前目录 visual-notes.json（一个 JSON 数组，覆盖写入完整数组），工作台会存下来供以后复用。格式：",
              "", "```json", NOTES_EXAMPLE, "```", ""]
     return "\n".join(lines)
@@ -139,6 +156,26 @@ def final_report(text):
     except ValueError:
         return None
     return value if isinstance(value, dict) else None
+
+
+# Fixed reminders older edits carried on every run; the user can't act on them, so they are no longer added and a
+# sound-only retry drops them from old reports. The *_unverified flags stay on the audio record.
+LEGACY_AUDIO_REMINDERS = (
+    "原声插件参数和动画无法全部通过脚本读取，请人工核对。",
+    "素材音量自动化或关键帧（如有）无法通过脚本完整核对，请人工确认。",
+    "部分原声经过截取或变速，音量及插件动画的时间对应需人工核对。",
+)
+
+
+def audio_questions(audio):
+    """Only the questions generated by the sound step, so a sound-only retry can replace its own old failures."""
+    questions = []
+    for item in (audio or {}).get("issues", []):
+        if not isinstance(item, dict):
+            continue
+        position = (f"[{item['start']}, {item['end']}) 帧：" if item.get("start") is not None and item.get("end") is not None else "")
+        questions.append("原声" + position + str(item.get("message") or "声音设置未确认。"))
+    return questions
 
 
 def edit_summary(inspect, job, record, fps):
@@ -211,6 +248,30 @@ def handoff_project_location(handoff, config):
                   lambda match: f"- 达芬奇项目：{location}（已打开）；目标时间线：", handoff, count=1)
 
 
+def edit_usage(editor, planning):
+    """One edit's client use: the main editor, the parallel planners and both together; None when nothing was reported."""
+    if not editor and not planning:
+        return None
+    return {"editor": editor, "planning": planning, "total": add_usage(add_usage(None, editor), planning)}
+
+
+class MaterialsAbsent(VoiceError):
+    """None of the picked material timelines is in the target's project: the edit stops before any AI round."""
+
+
+def absent_materials(materials, listing):
+    """Stop when every picked material timeline is missing from the project; a partial miss is left to the edit."""
+    wanted = [name for name in materials or [] if isinstance(name, str) and name]
+    missing = set(listing.get("missing") or [])
+    if not wanted or not all(name in missing for name in wanted):
+        return
+    project = listing.get("project") or "目标工程"
+    present = [name for name in listing.get("library") or [] if isinstance(name, str)]
+    there = f"工程里现有的素材时间线：{'、'.join(present[:12])}{' 等' if len(present) > 12 else ''}。" if present else "工程里没有名称含「素材」的时间线。"
+    raise MaterialsAbsent(409, f"「{project}」里没有所选的素材时间线（{'、'.join(wanted)}），本次没有开始剪辑，达芬奇里没有改动。"
+                               f"{there}请在这个工程里准备好这位达人的素材时间线，或改选工程里已有的素材后重新剪辑。")
+
+
 def where(config):
     """Which DaVinci project a Resolve call is about; the worker opens it when another one is open."""
     return {key: config[key] for key in ("project", "creator", "folder", "project_id") if config.get(key)}
@@ -224,6 +285,14 @@ def project_key(config):
     only recorded from 2026-10-19. Records without a creator fall back to the folder, then the project id."""
     return (creator_project_base(config["project"], config.get("creator")),
             str(config.get("creator") or "").casefold() or config.get("folder") or config.get("project_id") or "")
+
+
+def visual_hint(job, line, mode):
+    """An order made from a case points every line at the original's shots; only the 1:1 mode may follow that."""
+    proof = line.get("proof") or ""
+    if job.get("replica") and mode != "replica" and proof.startswith("照原片"):
+        return "无推荐（按当前模式选画面，不照原片镜头）"
+    return proof or "无推荐"
 
 
 def handoff_markdown(job, take, timeline, config, *, mode, instruction, materials, notes, voice_label, ledger=None, baseline=None, reference="reference"):
@@ -264,7 +333,7 @@ def handoff_markdown(job, take, timeline, config, *, mode, instruction, material
     lines += ["## 意群表（含实际配音区间）", "",
               "| # | 口播 | 中文 | 画面推荐（写稿线索） | 检索标签 | 写稿时证据备注 | 标记区间（帧，半开） | 配音（秒） |", "|---|---|---|---|---|---|---|---|"]
     for line, marker, group in zip(job["lines"], markers, take["groups"]):
-        cells = [str(line["number"]), line["spoken"], line.get("zh") or "", line.get("proof") or "无推荐", line.get("tags") or "",
+        cells = [str(line["number"]), line["spoken"], line.get("zh") or "", visual_hint(job, line, mode), line.get("tags") or "",
                  line.get("evidence") or "", f"[{marker['frame']}, {marker['frame'] + marker['duration']})",
                  f"{group['start']:.2f}–{group['end']:.2f}"]
         lines.append("| " + " | ".join(cell.replace("|", "／").replace("\n", " ") for cell in cells) + " |")
@@ -278,11 +347,12 @@ def handoff_markdown(job, take, timeline, config, *, mode, instruction, material
     lines += ["## 交付", "",
               "- 在目标时间线上按技能剪辑：画面放视频轨，逐片原声放音频 1，配音轨不动；不导出、不渲染。",
               "- 按当前模式查看相关候选，确无合适素材的范围按技能原位留空，不在时间线上打缺素材标记；"
-              "已覆盖画面的未核实细节写入 questions，不报为空段，也不以未核实为由宣称缺素材。每处实际空段都写进最后 json 的 gaps："
+              "已覆盖画面的细节交付前自己看画面核实，不报为空段，也不以未核实为由宣称缺素材。每处实际空段都写进最后 json 的 gaps："
               "已查看相关候选并确认没有合适画面填 status=missing；仍需查看或确认素材的空段填 status=unverified，并在 need 说明待核实原因。"
               "（start/end 为目标时间线帧，半开，"
               "从第 0 帧算；need 写对应口播、所需动作与部件、景别和时长）。",
               "- 剪完保存工程。最终回复先用几句话说明做了什么、哪些地方缺素材，最后附一个 json 代码块：",
+              "- questions 只写必须由用户决定、你按默认规则也定不了的事，没有就写空数组。画面与要求的差异、选材理由、没看帧的提醒都不写进 questions，差异写在正文。",
               "", "```json",
               '{"timeline": "目标时间线名", "shots": 0, "materials": ["实际用到的素材时间线"], '
               '"gaps": [{"start": 0, "end": 0, "status": "missing", "need": "所需画面或待核实原因"}], "questions": ["需要用户确认的事"], "saved": true}',
@@ -366,8 +436,8 @@ class EditingWorkbenchMixin:
         if body.get("provider", provider) != provider:
             raise VoiceError(400, "模型与客户端选择不一致。")
         if provider == "claude":
-            if model not in EDIT_MODELS or effort not in EFFORTS:
-                raise VoiceError(400, "当前模型或思考强度不支持 AI 剪辑，请选择本次剪辑使用的兼容模型。")
+            if effort not in EFFORTS:
+                raise VoiceError(400, "思考强度选择无效。")
         elif model == "codex-default" and effort is not None:
             raise VoiceError(400, "Codex 客户端默认模型须使用客户端默认思考强度。")
         if not self.edit_client_status()["providers"][provider].get("available"):
@@ -783,20 +853,50 @@ class EditingWorkbenchMixin:
         if message:
             self._progress(edit_id, message)
 
+    def _resolve_shares(self):
+        with self.lock:
+            shares = self.__dict__.get("_edit_resolve_shares")
+            if shares is None:
+                # Timeline builds queue on their own list; either kind of waiter stops new edits joining a share.
+                shares = self._edit_resolve_shares = ProjectShares(self.resolve, foreign_waiting=lambda: bool(
+                    getattr(self.resolve, "_access_waiters", None) or getattr(self, "_edit_resolve_waiters", None)))
+            return shares
+
     @contextmanager
-    def _edit_resolve_access(self, edit_id, phase, message, queued=None, waiting=None, ticket=None, ahead_of=()):
+    def _edit_resolve_access(self, edit_id, phase, message, queued=None, waiting=None, ticket=None, ahead_of=(), project=None):
         """FIFO access to the shared application, cancellable even before admission.
 
+        Edits of one DaVinci project share it (resolve_share): this yields the project's share, and Resolve work inside
+        goes in `_edit_turn` turns. Without `project` nothing is shared.
         `queued` is called once this request holds its place in the queue, whether it waits or is admitted at once;
         `waiting` replaces the default progress line shown until admission. `ticket` and `ahead_of` are passed to
         ResolveBridge.access, so a candidate snapshot can go ahead of its project's editing requests still waiting."""
         cancel = self._edit_cancel[edit_id]
         self._edit_phase(edit_id, "waiting_" + phase, waiting or "等待达芬奇：" + message)
-        with self.resolve.access(cancel_event=cancel, timeout=EDIT_TIMEOUT, on_wait=queued, ticket=ticket, ahead_of=ahead_of):
+        with self._resolve_shares().session(project if project is not None else object(), edit_id, cancel=cancel,
+                                            timeout=EDIT_TIMEOUT, on_wait=queued, ticket=ticket, ahead_of=ahead_of) as share:
             if queued:
                 queued()
             self._edit_phase(edit_id, phase, message)
+            yield share
+
+    @contextmanager
+    def _edit_turn(self, share, edit_id, cancel=None):
+        with self._resolve_shares().turn(share, edit_id, cancel=cancel or self._edit_cancel[edit_id], timeout=EDIT_TIMEOUT):
             yield
+
+    @contextmanager
+    def _edit_gate(self, share, edit_id, profile):
+        """The AI's Resolve MCP behind resolve_mcp_gate: each scripting call takes its own turn in the project's share,
+        so DaVinci serves the project's other edits while this one thinks."""
+        server = TurnServer(self._resolve_shares(), share, edit_id, self._edit_cancel[edit_id], EDIT_TIMEOUT)
+        try:
+            mcp = dict(profile.get("mcp") or {})
+            if "resolve" in mcp:
+                mcp["resolve"] = server.mcp_config(mcp["resolve"])
+            yield {**profile, "mcp": mcp}, server
+        finally:
+            server.close()
 
     @contextmanager
     def _edit_selection_access(self, edit_id, project):
@@ -918,6 +1018,7 @@ class EditingWorkbenchMixin:
             bridge = self.editor if provider == "claude" else self.edit_planner
         self._edit_phase(edit_id, "planning", "正在并行选材")
         self._edit_stage(edit_id, "choice", "正在根据候选快照并行选择镜头。")
+        model, effort = planner_settings(model, effort, provider)
         result = analyze_candidates(folder, handoff, bridge, cancel=self._edit_cancel[edit_id], model=model, effort=effort,
                                     slots=self._edit_analysis_slots, progress=lambda text: self._progress(edit_id, text))
         self._edit_stage(edit_id, "choice", status="partial" if result.get("failed") else "completed")
@@ -949,7 +1050,10 @@ class EditingWorkbenchMixin:
             if event.get("type") == "message" and event.get("text") and event.get("complete"):
                 self._log_step(task_id, "AI：" + str(event["text"]), tools=False)
             with self.lock:
-                if event.get("type") == "message" and event.get("text"):
+                if event.get("type") == "usage":
+                    # A 1:1 edit may run the client more than once; every run counts.
+                    live["editor_usage"] = add_usage(live.get("editor_usage"), event)
+                elif event.get("type") == "message" and event.get("text"):
                     live.update(latest=str(event["text"])[-2000:], updated_at=now())
                 elif event.get("type") == "session":
                     for key, source in (("effective_model", "model"), ("effective_effort", "reasoning_effort")):
@@ -1092,6 +1196,7 @@ class EditingWorkbenchMixin:
             if not isinstance(listing.get("materials"), list):
                 raise ValueError("达芬奇没有返回素材片段清单")
             adopt_project_location(config, listing)
+            absent_materials(materials, {**listing, "project": listing.get("project") or config["project"]})
             index = self._visual_index(config["project"])
             counted = listing.get("usage_counted") is True
             found = build_candidates(listing, count_usage=counted)
@@ -1114,6 +1219,9 @@ class EditingWorkbenchMixin:
                 self._edit_stage(edit_id, "grid", status="skipped", grid={"attempted": 0, "total": 0, "exported": 0, "deferred": 0})
             stats.update(write_task_files(folder, found, index, entries, listing, count_usage=counted))
         except BridgeCancelled:
+            raise
+        except MaterialsAbsent:
+            self._edit_stage(edit_id, "materials", status="failed")
             raise
         except Exception as exc:
             stats["error"] = str(exc)[:300] or type(exc).__name__
@@ -1157,6 +1265,92 @@ class EditingWorkbenchMixin:
                            f"{changed} 个片段次数有变化，现在 {stats['unused']} 个片段还没用过。"
                            "前文和 planning.md 里的使用次数以更新后的清单为准。", ""]) if changed else "")
         return summary, note
+
+    def _capture_edit_audio_ids(self, edit_id, config, timeline):
+        """Protect already present clips without taking an engineering snapshot."""
+        try:
+            self._progress(edit_id, "正在记录已有原声片段，避免覆盖用户调整。")
+            reply = self.resolve.run("edit_audio_baseline", {**where(config), "unique_id": timeline["unique_id"],
+                                     "name": timeline["name"], "current_only": True}, timeout=60, held=True)
+            if any(not isinstance(reply.get(key), list) or any(not isinstance(uid, str) or not uid for uid in reply[key])
+                   for key in ("video_ids", "audio_ids")):
+                raise ValueError("已有片段身份不完整")
+            return {key: reply[key] for key in ("video_ids", "audio_ids")}
+        except Exception as exc:
+            return {"error": str(exc)[:300] or type(exc).__name__}
+
+    def _inherit_edit_audio(self, edit_id, folder, config, timeline, baseline, report, instruction, previous=None):
+        """Apply source sound settings to this run's new clips and return an honest delivery receipt."""
+        def unavailable(message):
+            return {"status": "needs_attention", "saved": None, "new_audio": 0, "processed": 0,
+                    "plugins_copied": 0, "parameters_unverified": False, "issues": [{"message": message}]}
+
+        if not isinstance(baseline, dict) or baseline.get("error"):
+            return unavailable("未能记录剪前已有片段，原声设置没有自动覆盖；请人工核对。")
+        overrides = (report or {}).get("audio_overrides", [])
+        if (not isinstance(overrides, list) or any(not isinstance(uid, str) or not uid or len(uid) > 200 for uid in overrides)):
+            return unavailable("自定义原声片段身份无效，原声设置没有自动覆盖；请人工核对。")
+        if AUDIO_CUSTOM_REQUEST.search(str(instruction or "")) and not overrides:
+            return unavailable("本次要求包含声音调整，但未标明受影响的原声片段；工作台没有自动覆盖，请人工核对。")
+        retry_audio, retry_video, unresolved = set(), set(), []
+        previous_audio = (previous or {}).get("audio_inheritance") or {}
+        previous_issues = previous_audio.get("issues") if isinstance(previous_audio, dict) else []
+        for item in previous_issues if isinstance(previous_issues, list) else []:
+            if not isinstance(item, dict):
+                continue
+            uid = item.get("item_uid")
+            if not uid:
+                unresolved.append({"message": "上次未能确定受影响的原声片段，本次没有覆盖已有声音，请人工核对。"})
+                continue
+            if uid in baseline["audio_ids"]:
+                retry_audio.add(uid)
+            if uid in baseline["video_ids"]:
+                retry_video.add(uid)
+            links = item.get("linked_ids")
+            linked_video = {link for link in (links if isinstance(links, list) else []) if link in baseline["video_ids"]}
+            retry_video.update(linked_video)
+            if uid not in baseline["audio_ids"] and uid not in baseline["video_ids"] and not linked_video:
+                unresolved.append({"message": "上次未确认的声音片段已变化或不在当前时间线，无法自动确认，请人工核对。"})
+        sources = (report or {}).get("audio_sources", [])
+        if (not isinstance(sources, list) or any(not isinstance(row, dict) or
+                any(not isinstance(row.get(key), str) or not row[key] or len(row[key]) > 200
+                    for key in ("item_uid", "timeline_uid", "source_item_uid")) for row in sources)):
+            return unavailable("原声素材来源的片段身份无效，原声设置没有自动覆盖；请人工核对。")
+        sources = [{key: row[key] for key in ("item_uid", "timeline_uid", "source_item_uid")} for row in sources]
+        current_sources = {row["item_uid"] for row in sources}
+        sources.extend({key: row[key] for key in ("item_uid", "timeline_uid", "source_item_uid")}
+                       for row in previous_audio.get("sources", []) if isinstance(row, dict) and
+                       row.get("item_uid") in retry_audio - current_sources and
+                       all(isinstance(row.get(key), str) and row[key] for key in ("item_uid", "timeline_uid", "source_item_uid")))
+        try:
+            try:
+                data = json.loads((Path(folder) / "candidates.json").read_text(encoding="utf-8"))
+                rows = data.get("candidates")
+            except (OSError, ValueError, AttributeError):
+                rows = []
+            if not isinstance(rows, list):
+                rows = []  # The worker reports any new clips it cannot match; an unchanged timeline needs no source.
+            # The worker receives just the identity and source range, not descriptions or user text.
+            candidates = [{key: row.get(key) for key in ("timeline_uid", "item_uid", "media_id", "source", "has_audio")}
+                          for row in rows if isinstance(row, dict)]
+            self._progress(edit_id, "正在为新放入的逐片原声继承素材音量和插件。")
+            reply = self.resolve.run("inherit_edit_audio", {**where(config), "unique_id": timeline["unique_id"],
+                "name": timeline["name"], "current_only": True, "audio_baseline": baseline,
+                "candidates": candidates, "audio_overrides": overrides, "retry_audio_ids": sorted(retry_audio),
+                "retry_video_ids": sorted(retry_video), "audio_sources": sources}, timeout=180, held=True)
+            if (reply.get("status") not in {"completed", "needs_attention"} or not isinstance(reply.get("issues"), list)
+                    or reply.get("saved") not in (True, False)):
+                raise ValueError("原声处理结果不完整")
+            result = {key: value for key, value in reply.items() if key != "ok"}
+            for key in ("parameters_unverified", "volume_animation_unverified", "timing_unverified"):
+                if previous_audio.get(key):
+                    result[key] = True  # Earlier successful clips still carry these limits on scripted readback.
+            if unresolved:
+                result["issues"].extend(unresolved)
+                result["status"] = "needs_attention"
+            return result
+        except Exception as exc:
+            return unavailable("原声设置处理未确认：" + (str(exc)[:200] or type(exc).__name__))
 
     def _snapshot_delivery(self, edit_id, folder, config, timeline):
         """Keep the target timeline as the client delivered it, to compare with the human polish later.
@@ -1247,19 +1441,22 @@ class EditingWorkbenchMixin:
     def _run_edit(self, job_id, edit_id, folder, handoff, profile, model, effort, config, timeline, baseline, provider="claude"):
         execution_status, output, error = "failed", "", ""
         preparation, notes, planning, usage, delivery, refresh = None, None, None, None, None, None
+        audio_baseline, audio_inheritance, resolve_turns = None, None, None
         actual = {"effective_model": None, "effective_effort": None}
-        stopped = "已按你的要求停止；达芬奇里可能留有做到一半的结果，请先核对。"
+        stopped ="已按你的要求停止；达芬奇里可能留有做到一半的结果，请先核对。"
         try:
             try:
                 job = self.production.job(job_id)
-                materials = next(item for item in job.get("edits", []) if item["id"] == edit_id).get("materials") or []
+                edit_record = next(item for item in job.get("edits", []) if item["id"] == edit_id)
+                materials = edit_record.get("materials") or []
                 wanted = " ".join(str(line.get(key) or "") for line in job["lines"] for key in ("zh", "proof", "tags", "evidence"))
                 # Taken once: the snapshot may add the folder and project id to config, which must not move this edit's queue.
                 project = project_key(config)
                 rivals = recut_rivals(job, timeline["unique_id"])
                 with self._edit_selection_access(edit_id, project) as turn:
                     with self._edit_resolve_access(edit_id, "preparing", "整理候选画面", queued=turn.queued.set,
-                                                   ahead_of=self._editing_places(project)):
+                                                   ahead_of=self._editing_places(project), project=project) as share, \
+                            self._edit_turn(share, edit_id):
                         section, preparation = self._prepare_candidates(edit_id, folder, config, timeline, materials, wanted, project, rivals)
                     handoff = handoff_project_location(handoff, config).rstrip("\n") + "\n\n" + section
                     (folder / "handoff.md").write_text(handoff, encoding="utf-8")
@@ -1273,7 +1470,8 @@ class EditingWorkbenchMixin:
                         self._progress(edit_id, "并行选材暂未完成，主剪辑将直接按候选清单继续。")
                     planning["occupied"], planning["unpicked"] = self._occupy_planned(edit_id, folder, project, timeline["name"])
                 if (folder / "planning.md").is_file():
-                    handoff += ("\n\n## 并行选材\n\n先读取 planning.md 中各分工的候选建议，结合 candidates.json、本次画面模式与当前技能决定镜头。"
+                    handoff += ("\n\n## 并行选材\n\n先读取 planning.md 中各分工的候选建议，结合 candidates.md、本次画面模式与当前技能决定镜头；"
+                                "需要某个片段的字段时用 Grep 按候选编号查 candidates.json，不整份读取。"
                                 "建议仅来自快照，可能不完整；需现场查看的画面仍由你查看。"
                                 "各组末尾的 picks 是该组首选清单，只供参考和工作台登记占用，不限定你的选择。"
                                 "分组未找到或细节待核实不等于全部素材缺失，也不能增设身份辨认、全过程或词级同步门槛；选材建议里的源帧范围未看过画面，入出点仍按技能「定入出点」确定。"
@@ -1281,39 +1479,60 @@ class EditingWorkbenchMixin:
                     (folder / "handoff.md").write_text(handoff, encoding="utf-8")
                 with self._editing_place(project) as place, self._edit_resolve_access(
                         edit_id, "editing", "执行达芬奇剪辑", ticket=place,
-                        waiting="等待达芬奇：同项目下一条剪辑先整理候选画面，之后开始剪辑。" if turn.handed_over else None):
-                    # Another creator's edit may have opened its own project since the snapshot; open this one again.
-                    state = self.resolve.run("status", where(config), timeout=30, held=True)
-                    adopt_project_location(config, state)
-                    handoff = handoff_project_location(handoff, config)
-                    refresh, note = self._refresh_usage(edit_id, folder, config, timeline, materials, project, rivals)
-                    if note:
-                        handoff = handoff.rstrip("\n") + "\n\n" + note
-                    (folder / "handoff.md").write_text(handoff, encoding="utf-8")
-                    execution_status, output, error, actual = self._run_edit_ai(edit_id, folder, PROMPT_PREFIX + handoff, profile, model, effort,
-                        [{"name": SKILL_NAME, "path": str(folder / "skill" / "SKILL.md")}], stopped, provider)
-                    if next(item for item in job.get("edits", []) if item["id"] == edit_id).get("mode") == "replica":
-                        execution_status, output, error, actual = until_filled(
-                            (execution_status, output, error, actual),
-                            lambda prompt: self._run_edit_ai(edit_id, folder, prompt, profile, model, effort,
-                                [{"name": SKILL_NAME, "path": str(folder / "skill" / "SKILL.md")}], stopped, provider),
-                            final_report)
-                    # The visual index is shared. Both snapshot preparation and
-                    # its read/merge/write happen under the Resolve lease.
-                    try:
-                        notes = merge_notes(folder, self._visual_index(config["project"]),
-                                            source={"edit_id": edit_id, "model": actual.get("effective_model") or model})
-                    except Exception as exc:
-                        notes = {"saved": 0, "rejected": 0, "error": str(exc)[:300]}
-                    if execution_status == "completed" and (final_report(output) or {}).get("saved") is True:
-                        # Taken before usage marking, which only touches the material timelines.
-                        delivery = self._snapshot_delivery(edit_id, folder, config, timeline)
-                        usage = self._mark_material_usage(edit_id, config)
+                        waiting="等待达芬奇：同项目下一条剪辑先整理候选画面，之后开始剪辑。" if turn.handed_over else None,
+                        project=project) as share:
+                    with self._edit_turn(share, edit_id):
+                        # Another creator's edit may have opened its own project since the snapshot; open this one again.
+                        state = self.resolve.run("status", where(config), timeout=30, held=True)
+                        adopt_project_location(config, state)
+                        handoff = handoff_project_location(handoff, config)
+                        refresh, note = self._refresh_usage(edit_id, folder, config, timeline, materials, project, rivals)
+                        if note:
+                            handoff = handoff.rstrip("\n") + "\n\n" + note
+                        handoff = handoff.rstrip("\n") + "\n\n" + AUDIO_HANDOFF + "\n"
+                        (folder / "handoff.md").write_text(handoff, encoding="utf-8")
+                        audio_baseline = self._capture_edit_audio_ids(edit_id, config, timeline)
+                    # Between its scripting calls DaVinci serves this project's other edits; see resolve_share.
+                    with self._edit_gate(share, edit_id, profile) as (gated, gate):
+                        execution_status, output, error, actual = self._run_edit_ai(edit_id, folder, PROMPT_PREFIX + handoff, gated, model, effort,
+                            [{"name": SKILL_NAME, "path": str(folder / "skill" / "SKILL.md")}], stopped, provider)
+                        if next(item for item in job.get("edits", []) if item["id"] == edit_id).get("mode") == "replica":
+                            execution_status, output, error, actual = until_filled(
+                                (execution_status, output, error, actual),
+                                lambda prompt: self._run_edit_ai(edit_id, folder, prompt, gated, model, effort,
+                                    [{"name": SKILL_NAME, "path": str(folder / "skill" / "SKILL.md")}], stopped, provider),
+                                final_report)
+                    resolve_turns = dict(gate.stats)
+                    # Delivery bookkeeping always finishes, even when the edit was stopped meanwhile.
+                    with self._edit_turn(share, edit_id, cancel=threading.Event()):
+                        # The visual index is shared. Both snapshot preparation and
+                        # its read/merge/write happen in turns of the project's share.
+                        try:
+                            notes = merge_notes(folder, self._visual_index(config["project"]),
+                                                source={"edit_id": edit_id, "model": actual.get("effective_model") or model})
+                        except Exception as exc:
+                            notes = {"saved": 0, "rejected": 0, "error": str(exc)[:300]}
+                        if execution_status == "completed" and (final_report(output) or {}).get("saved") is True:
+                            previous = next((item for item in job.get("edits", []) if item["id"] == edit_record.get("retry_of")), None)
+                            audio_inheritance = self._inherit_edit_audio(edit_id, folder, config, timeline, audio_baseline,
+                                                                        final_report(output), edit_record.get("instruction"), previous)
+                            # Taken before usage marking, which only touches the material timelines.
+                            delivery = self._snapshot_delivery(edit_id, folder, config, timeline)
+                            usage = self._mark_material_usage(edit_id, config)
             except BridgeCancelled:
                 execution_status, error = "cancelled", "已按你的要求停止；还没开始剪辑，达芬奇里的时间线没有改动。"
         except Exception as exc:
             execution_status, error = "failed", str(exc)[:1000] or type(exc).__name__
         report = final_report(output)
+        if report is not None and audio_inheritance:
+            questions = report.get("questions") if isinstance(report.get("questions"), list) else []
+            questions = list(questions)
+            original_count = len(questions)
+            questions.extend(audio_questions(audio_inheritance))
+            if len(questions) != original_count:
+                report["questions"] = list(dict.fromkeys(questions))
+            if audio_inheritance.get("saved") is False:
+                report["saved"] = False
         status = execution_status
         if execution_status == "completed" and (report or {}).get("saved") is not True:
             status = "needs_repair"
@@ -1321,6 +1540,9 @@ class EditingWorkbenchMixin:
                      "剪辑执行已结束，但最终回复未说明工程保存状态。")
         elif execution_status == "completed" and delivery_gap_status(report):
             status = delivery_gap_status(report)
+        if execution_status == "completed" and audio_inheritance and audio_inheritance.get("status") != "completed":
+            status = "needs_repair"
+            error = "原声音量或插件未能完整继承，请查看待确认事项；现有剪辑已保留。"
         if execution_status == "completed":
             self._edit_stage(edit_id, "saved", "客户端已报告工程保存，正在登记交付。" if (report or {}).get("saved") is True else "客户端未确认工程保存，交付需要修正。",
                              status="running" if (report or {}).get("saved") is True else "failed")
@@ -1328,8 +1550,10 @@ class EditingWorkbenchMixin:
         result = {"status": status, "execution_status": execution_status, "finished_at": now(), "output": str(output or "")[-60000:], "error": error,
                   "summary": None, "report": report, "readback_error": "", "validation": None, "completion_policy": "skill_delivery",
                   "preparation": preparation, "planning": planning, "visual_notes": notes, "usage_marks": usage,
-                  "delivery_snapshot": delivery, "usage_refresh": refresh,
-                  "stages": copy.deepcopy(live.get("stages", {})), "grid": copy.deepcopy(live.get("grid")), **actual}
+                  "delivery_snapshot": delivery, "usage_refresh": refresh, "audio_inheritance": audio_inheritance,
+                  "audio_baseline": audio_baseline, "resolve_turns": resolve_turns,
+                  "ai_usage": edit_usage(live.get("editor_usage"), (planning or {}).get("usage")),
+                  "stages":copy.deepcopy(live.get("stages", {})), "grid": copy.deepcopy(live.get("grid")), **actual}
         if execution_status == "completed" and (report or {}).get("saved") is True:
             # This milestone records the client's explicit save report, not an engineering readback.
             result["stages"]["saved"] = {"status": "completed", "at": now(), "confirmation": "client_report"}
@@ -1404,17 +1628,19 @@ class EditingWorkbenchMixin:
                 extra, validation = {}, failed_validation("readback_failed", readback_error)
                 if kind == "edit_recheck" and edit.get("completion_policy") == "skill_delivery":
                     validation["scope"] = "current_coverage"
-            result = {**extra, "status": validation["status"], "summary": summary, "validation": validation,
+            audio_pending = (edit.get("audio_inheritance") or {}).get("status") == "needs_attention"
+            result_status = "needs_repair" if kind == "edit_recheck" and audio_pending else validation["status"]
+            result = {**extra, "status": result_status, "summary": summary, "validation": validation,
                       "readback_error": readback_error, "checked_at": validation["checked_at"]}
             result_obtained = True
             saved = self.production.mutate(kind, body, result)
-            passed = validation["status"] == "awaiting_review"
+            passed = result_status == "awaiting_review"
             approved = kind == "edit_approve" and passed
             record_activity(self, activity_id, status="completed" if approved else "needs_attention", phase="核验结果已保存",
                             message="工程核验及人工确认已完成" if approved else
                             ("当前画面覆盖已核对，内容待人工审查" if current_coverage else "工程核验通过，待人工审查") if passed else
                             ("当前画面覆盖核对已结束，存在待处理问题" if current_coverage else "工程核验已结束，存在待处理问题"),
-                            result_count=1, event_key="saved:" + validation["status"])
+                            result_count=1, event_key="saved:" + result_status)
             return saved
         except Exception as exc:
             if activity_started:
@@ -1427,6 +1653,8 @@ class EditingWorkbenchMixin:
 
     def recheck_edit(self, identifier, edit_id, body):
         """Read and save the user's current timeline, without AI editing or media generation."""
+        if isinstance(body, dict) and body.get("repair_audio") is True:
+            return self.repair_edit_audio(identifier, edit_id, body)
         if isinstance(body, dict) and body.get("recover_result") is True:
             self._validate_edit_request(body)
             if self.edit_running():
@@ -1441,6 +1669,64 @@ class EditingWorkbenchMixin:
                 raise VoiceError(503, "这次剪辑结果尚未恢复，请保留已有资料后重试；本次没有重新剪辑或核验工程。")
             return {"job": job, "edit": edit, "recovered_result": True, "recovered": recovered["recovered"]}
         return self._edit_readback("edit_recheck", identifier, edit_id, body, keep_failure=True)
+
+    def repair_edit_audio(self, identifier, edit_id, body):
+        """Retry only identified failed sound clips on the current delivery, without invoking an editor."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        body = {**body, "job_id": identifier, "edit_id": edit_id}
+        self._validate_edit_request(body)
+        kind = "edit_audio_repair"
+        prior = self.production.replay(kind, body)
+        if prior:
+            return prior
+        with self.lock:
+            job = self.production.job(identifier)
+            edit = next((item for item in job.get("edits", []) if item["id"] == edit_id), None)
+            if not edit:
+                raise VoiceError(404, "这次剪辑记录不存在。")
+            if job.get("archived") or not current_edit(job, edit):
+                raise VoiceError(409, "只能补齐当前未归档时间线的原声继承。")
+            if self.edit_running() or edit.get("status") == "running" or edit.get("result_pending") or self.edit_pending(edit_id):
+                raise VoiceError(409, "剪辑仍在运行或结果待恢复，请处理后再补齐原声。")
+            if (edit.get("audio_inheritance") or {}).get("status") != "needs_attention":
+                raise VoiceError(409, "这次剪辑没有待补齐的原声继承。")
+            timeline, _, _, _ = self._edit_context(job, edit["timeline_uid"])
+            config = with_location(self.production.product_settings(self.production.records(), job["product"]), timeline)
+        if not self.resolve.lock.acquire(blocking=False):
+            raise VoiceError(409, "达芬奇正在执行另一项工作台操作，请稍后再补齐原声。")
+        try:
+            prior = self.production.replay(kind, body)
+            if prior:
+                return prior
+            baseline = self._capture_edit_audio_ids(edit_id, config, timeline)
+            folder = self.production.root / "edits" / edit_id
+            report = copy.deepcopy(edit.get("report") or {})
+            audio = self._inherit_edit_audio(edit_id, folder, config, timeline, baseline, report, edit.get("instruction"), previous=edit)
+            old_questions = set(audio_questions(edit.get("audio_inheritance"))) | set(LEGACY_AUDIO_REMINDERS)
+            questions = report.get("questions") if isinstance(report.get("questions"), list) else []
+            report["questions"] = list(dict.fromkeys([question for question in questions if question not in old_questions] + audio_questions(audio)))
+            status, error = edit["status"], edit.get("error", "")
+            if audio.get("status") == "completed":
+                if error == "原声音量或插件未能完整继承，请查看待确认事项；现有剪辑已保留。":
+                    error = ""
+                # A sound repair cannot clear an unrelated failed save, picture check, or material gap.
+                if status == "needs_repair" and not error and edit.get("execution_status") == "completed" and report.get("saved") is True:
+                    status = (edit.get("validation") or {}).get("status") or delivery_gap_status(report) or "completed"
+            else:
+                status = "needs_repair"
+                error = error or "原声音量或插件未能完整继承，请查看待确认事项；现有剪辑已保留。"
+            result = {"status": status, "error": error, "report": report, "audio_inheritance": audio, "audio_repaired_at": now()}
+            # Preserve a concrete receipt before committing it to the catalog; the original AI result remains historical.
+            receipt = folder / ("audio-repair-" + hashlib.sha256(body["request_id"].encode("utf-8")).hexdigest()[:24] + ".json")
+            receipt.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            saved = self.production.mutate(kind, body, result)
+            record_activity(self, "edit:" + edit_id, status="completed" if status == "completed" else "needs_attention",
+                            phase="原声继承已补齐" if audio.get("status") == "completed" else "原声仍需处理",
+                            message="已单独处理原声继承，画面和配音未重剪", event_key="audio-repair:" + body["request_id"])
+            return saved
+        finally:
+            self.resolve.lock.release()
 
     def approve_edit(self, identifier, edit_id, body):
         """Record the user's review; skill deliveries do not trigger another engineering readback."""
@@ -1473,9 +1759,14 @@ class EditingWorkbenchMixin:
                 raise VoiceError(404, "这次剪辑记录不存在。")
             if edit.get("completion_policy") == "skill_delivery":
                 check(job, edit)
-                return self.production.mutate("edit_approve", {**body, "job_id": identifier, "edit_id": edit_id})
+                result = self.production.mutate("edit_approve", {**body, "job_id": identifier, "edit_id": edit_id})
+            else:
+                result = None
 
-        return self._edit_readback("edit_approve", identifier, edit_id, body, check=check)
+        if result is None:
+            result = self._edit_readback("edit_approve", identifier, edit_id, body, check=check)
+        previews = getattr(self, "video_previews", None)
+        return previews.after_confirmation(identifier, result) if previews else result
 
     def adopt_edit_baseline(self, identifier, edit_id, body):
         """Restore historical evidence and check the current edit against it.

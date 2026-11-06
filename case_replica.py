@@ -102,24 +102,31 @@ def estimated_spans(spoken, duration):
     return spans
 
 
-def snapshot(case_id, source, spoken):
-    """The frozen reference a job carries: shots of the original and which script line each one sits under."""
+def snapshot(case_id, source, spoken, aligned=False):
+    """The frozen reference a job carries: shots of the original and which script line each one sits under.
+
+    `aligned` is an optimized script written line for line against the original (照原片优化): when its line count
+    still matches, line n keeps the time of the original's line n, so the cuts carry over as for the original words."""
     video = detect_shots(source["video"])
     same = [line["spoken"] for line in source["lines"]] == spoken
-    timed = same and source["timed"]
+    matched = same or (aligned and len(spoken) == len(source["lines"]))
+    timed = matched and source["timed"]
     spans = ([{"start": line["start"], "end": line["end"]} for line in source["lines"]] if timed else
              estimated_spans(spoken, video["duration"]))
     for shot in video["shots"]:
         shot["lines"] = [n for n, span in enumerate(spans, 1) if min(shot["end"], span["end"]) - max(shot["start"], span["start"]) > .05]
     notes = []
-    if not same:
+    if not matched:
         notes.append("口播和原稿不完全相同，每句对应的原片时间按字数估算，镜头切点可能有偏差。")
+    elif not same and timed:
+        notes.append("口播是逐句对应原稿的优化稿，每句沿用原稿那一句的原片时间；措辞变了，配音快慢会让切点略有偏差。")
     elif not timed:
         notes.append("原稿没有时间戳，每句对应的原片时间按字数估算，镜头切点可能有偏差；可先在案例里重新转写。")
     if source["machine_transcript"]:
         notes.append("口播来自机器转写，没有人工听校；配音前请核对，有错到案例的「编辑文案」改后重新创建。")
     return {"case_id": case_id, "case_title": source["title"], "duration": video["duration"], "width": video["width"],
-            "height": video["height"], "timed": timed, "spans": spans, "shots": video["shots"], "notes": notes}
+            "height": video["height"], "timed": timed, "spans": spans, "shots": video["shots"], "notes": notes,
+            "wording": "original" if same else "aligned" if matched else "changed"}
 
 
 def line_records(spoken, chinese, reference):
@@ -199,7 +206,7 @@ def until_filled(result, rerun, read_report, limit=MAX_CONTINUATIONS):
         ranges = "；".join(f"[{gap.get('start')}, {gap.get('end')})" for gap in gaps)
         result = rerun("上一轮交付不完整，这条 1:1 复刻还没剪完。目标时间线上已放的镜头保留，先确认当前项目和目标时间线（按 UniqueId），"
                        f"再按当前目录的 handoff.md 和 planning.md 补满这些空段（帧，半开）：{ranges}。"
-                       "每个空段都放标签最接近的片段，不能再报 status=unverified；差异写进 questions。"
+                       "每个空段都放标签最接近的片段并看帧定好入出点，不能再报 status=unverified；差异写在正文，不写进 questions。"
                        "剪完保存工程，最终回复按 handoff.md 的格式附完整 json（统计整条时间线）。")
     return result
 
@@ -217,19 +224,21 @@ def handoff_section(job, take, timeline, fps, lead_frames, folder="reference"):
     return "\n".join([
         "## 原片镜头表（1:1 复刻，本次的主要依据）", "",
         f"- 原片：案例 {reference['case_id']}「{reference['case_title']}」，{reference['duration']:.1f} 秒，{len(rows)} 个镜头。"
-        "口播已和原片逐句相同，配音是新录的，所以目标区间是把原片切点按实际配音换算过来的。",
+        + {"aligned": "口播是逐句对应原片的优化稿（第 n 行对应原片第 n 句，措辞改过），",
+           "changed": "口播和原片不是逐句相同，每句对应的原片时间是按字数估算的，"}.get(reference.get("wording"), "口播已和原片逐句相同，")
+        + "配音是新录的，所以目标区间是把原片切点按实际配音换算过来的。",
         "- 分两遍做。第一遍铺满：读参考图（图内按时间顺序排列，左上角是原片秒数），按 planning.md 的首选和已核标签，"
         "把表里每个镜头都放上片段，已核标签对得上就直接放，不用先把候选看完。第二遍替换：查看对照图，把不够贴合的镜头换成更贴合的。"
         "镜头顺序和切点都照表，不合并、不调换、不跳过。",
-        "- 本次不使用 status=unverified，也不能以「还没核实、还没比较」为由留空或提前交付：没看完的镜头同样放标签最接近的片段，写进 questions。"
+        "- 本次不使用 status=unverified，也不能以「还没核实、还没比较」为由留空或提前交付：没看完的镜头同样先放标签最接近的片段，交付前看帧核对入出点，不把「未看帧核对」留给用户。"
         "这条优先于下面交付里关于待核实空段的说法。status=missing 只用于相关候选都看过、确实没有相关画面的镜头。",
         "- 判断同一画面按这个优先级：同动作同部件同工序阶段 > 动作方向和结果 > 景别和机位角度 > 手、刀型和背景。"
         "原片里的动作从哪开始、到哪结束，入出点就取到哪。素材片段比目标区间短时，用同一次操作的相邻片段接满，再不够才变速，不留空。",
         "- 本表的镜头时长和切点优先于技能的分类时长上限、开头规则、信息重复检查和素材防复用：最贴合原片的片段即使用过也用，"
         "只有同样贴合时才看使用次数。动作和工序必须真实，不用其他阶段冒充。",
         "- 参考图上烧录的字幕和贴纸是原片后期，不用找，也不要加；产品在原片里和本次产品不同时，用本次产品的同一动作。",
-        "- 找不到完全相同的画面时不留空：依次放同动作不同角度、同工序不同动作的片段，并把每一处写进 questions，"
-        "写法「镜头 N：原片是什么，这次用了什么，差在哪」。实在没有相关画面才按交付要求报 gaps。",
+        "- 找不到完全相同的画面时不留空：依次放同动作不同角度、同工序不同动作的片段。差异只写在最终回复正文的逐镜头对比里，"
+        "写法「镜头 N：原片是什么，这次用了什么，差在哪」，不写进 questions。实在没有相关画面才按交付要求报 gaps。",
         '- 最后的 json 多加一项统计每个镜头的贴合程度，四个数加起来等于镜头数：'
         '"replica": {"exact": 0, "close": 0, "substitute": 0, "missing": 0}（完全对上 / 只差角度或景别 / 换了动作 / 留空）。', "",
         *table, ""])

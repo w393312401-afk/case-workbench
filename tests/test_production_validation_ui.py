@@ -91,7 +91,7 @@ class ProductionValidationBrowserTests(unittest.TestCase):
             card.locator(".script-status").get_by_text(label, exact=True).wait_for()
             self.assertTrue(card.get_by_role("button", name="重新核验", exact=True).is_enabled())
         page.locator(".edit-validation-issues").get_by_text("配音轨内容和建线时不一致。", exact=True).wait_for()
-        page.get_by_text("字幕、声音和导出由你处理。", exact=False).wait_for()
+        page.locator('[data-edit-id="EDT-000000000000"]').get_by_text("确认完成后自动导出成片。", exact=False).wait_for()
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 
     def test_recheck_reads_existing_edit_without_starting_another_edit_or_voice(self):
@@ -130,6 +130,34 @@ class ProductionValidationBrowserTests(unittest.TestCase):
         self.assertRegex(body.pop("request_id"), r"^[\w-]{10,100}$")
         self.assertEqual(body, {"timeline": "uid-own", "mode": "explain", "instruction": "开头用切纸结果",
                                 "materials": ["素材时间线"], "retry_of": "EDT-bbbbbbbbbbbb"})
+
+    def test_audio_failure_can_be_repaired_without_starting_ai_editing(self):
+        edit = {**self.edit("needs_repair", validated=False), "completion_policy": "skill_delivery",
+                "report": {"saved": True, "questions": ["原声未继承。"]},
+                "audio_inheritance": {"status": "needs_attention", "issues": [{"item_uid": "bad-audio"}]}}
+        self.payload["job"]["edits"] = [edit]
+        self.payload["job"].update(selected_take="take-own", timelines=[{
+            "unique_id": "uid-own", "name": edit["timeline_name"], "take_id": "take-own", "archived": False}])
+
+        def finish(route):
+            self.assertTrue(route.request.url.endswith("/edits/EDT-0123456789ab/recheck"))
+            edit.update(status="completed", audio_inheritance={"status": "completed", "issues": []})
+            edit["report"]["questions"] = []
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"edit": edit}))
+
+        page = self.open_page(width=390, post=finish)
+        page.get_by_role("button", name="补齐原声继承", exact=True).click()
+        page.wait_for_function("() => document.body.innerText.includes('原声继承已补齐')")
+        self.assertEqual(len(self.calls), 1)
+        body = dict(self.calls[0]["body"])
+        self.assertRegex(body.pop("request_id"), r"^[\w-]{10,100}$")
+        self.assertEqual(body, {"repair_audio": True})
+        self.assertEqual(page.get_by_role("button", name="补齐原声继承", exact=True).count(), 0)
+        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
+        edit.update(status="needs_repair", audio_inheritance={"status": "needs_attention"})
+        self.payload["job"]["selected_take"] = "take-new"
+        page = self.open_page()
+        self.assertEqual(page.get_by_role("button", name="补齐原声继承", exact=True).count(), 0)
 
     def test_unsaved_report_with_gap_status_still_offers_retry(self):
         # The stored status can show gaps ("素材待核实") while the report says the project was never saved.
@@ -392,7 +420,7 @@ class ProductionValidationBrowserTests(unittest.TestCase):
         page = self.open_page(post=approve)
         form = page.locator('[data-edit-review="EDT-0123456789ab"]')
         form.wait_for()
-        self.assertIn("只登记你的人工审查，不会读回工程核验", form.locator(".production-hint-body").text_content())
+        self.assertIn("自动导出当前时间线的成片", form.locator(".production-hint-body").text_content())
         submit = form.get_by_role("button", name="确认完成", exact=True)
         self.assertTrue(submit.is_disabled())
         for box in form.locator('input[name="reviewed"]').all():

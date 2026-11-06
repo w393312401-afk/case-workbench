@@ -47,10 +47,14 @@ class VideoCampaignFilterTests(unittest.TestCase):
             video("unknown", None, "2026-09-27"),
             video("other-product", "2026-09-18", "2026-10-04", product="SHARPAL 129N"),
         ]
-        # [video index, week, views, impressions, clicks, orders, items, gmv]; the activity touches the weeks of 09-14 and 09-21.
+        # Daily rows cover the activity's first four days; its second week is a complete weekly report.
         self.analytics = {"videos": [[IDS["start"], "tester", "202H", "2026-09-10"], [IDS["inside"], "tester", "202H", "2026-09-18"]],
             "weekly": [[0, "2026-09-07", 10, 10, 10, 50, 50, 500], [0, "2026-09-14", 10, 10, 100, 5, 5, 50],
                 [1, "2026-09-14", 10, 10, 100, 4, 3, 30.25], [1, "2026-09-21", 10, 10, 100, 6, 7, 70.25], [1, "2026-09-28", 10, 10, 10, 100, 100, 1000]],
+            "daily_dates": ["2026-09-17", "2026-09-18", "2026-09-19", "2026-09-20"],
+            "daily": [[0, "2026-09-17", 10, 10, 100, 5, 5, 50], [1, "2026-09-17", 10, 10, 100, 4, 3, 30.25]],
+            "report_weeks": ["2026-09-21", "2026-09-28"],
+            "report_weekly": [[1, "2026-09-21", 10, 10, 100, 6, 7, 70.25], [1, "2026-09-28", 10, 10, 10, 100, 100, 1000]],
             "monthly": [], "months": {}, "shop_daily": []}
 
     def open_list(self, *, width=1100, scheme="light", failures=0, query="tab=list", analytics="ok"):
@@ -131,16 +135,16 @@ class VideoCampaignFilterTests(unittest.TestCase):
     def headers(self, page):
         return [page.locator(f'[data-sort="{key}"]').text_content()[:-1] for key in ("items", "gmv", "ctor")]
 
-    def test_campaign_sales_columns_cover_its_weeks_and_sort_by_them(self):
+    def test_campaign_sales_columns_cover_exact_dates_and_sort_by_them(self):
         page = self.open_list()
         self.choose(page)
         self.wait_ids(page, ["start", "inside", "end"])
-        page.wait_for_function("document.querySelector('[data-sort=items]').textContent.startsWith('活动周')")
-        self.assertEqual(self.headers(page), ["活动周售出", "活动周 GMV", "活动周 CTOR"])
-        self.assertIn("2026-09-14 至 2026-09-27", page.locator("#perf-campaign-hint").inner_text())
-        # Weeks outside the activity are left out, and a whole week still counts when only part of it overlaps.
-        self.assertEqual(self.sales(page, "start"), ["5", "$50", "5.00%"])
-        self.assertEqual(self.sales(page, "inside"), ["10", "$101", "5.00%"])
+        page.wait_for_function("document.querySelector('[data-sort=items]').textContent.startsWith('活动期')")
+        self.assertEqual(self.headers(page), ["活动期售出", "活动期 GMV", "活动期 CTOR"])
+        self.assertIn("2026-09-17 至 2026-09-27", page.locator("#perf-campaign-hint").inner_text())
+        # The first partial week uses daily data, and the fully selected second week uses its weekly report.
+        self.assertEqual(self.sales(page, "start"), ["5", "$50.00", "5.00%"])
+        self.assertEqual(self.sales(page, "inside"), ["10", "$100.50", "5.00%"])
         self.assertEqual(self.sales(page, "end"), ["—", "—", "—"])
         cell = page.locator(f'[data-video-row="{IDS["inside"]}"] td.num').nth(2)
         self.assertEqual(cell.get_attribute("title"), "累计售出 999")
@@ -154,14 +158,14 @@ class VideoCampaignFilterTests(unittest.TestCase):
         self.assertEqual(self.sales(page, "inside"), ["999", "$9,999", "50.00%"])
         self.assertIsNone(page.locator(f'[data-video-row="{IDS["inside"]}"] td.num').nth(2).get_attribute("title"))
 
-    def test_picked_date_sales_columns_cover_its_weeks_while_videos_stay_by_publication_date(self):
+    def test_picked_date_sales_cover_exact_dates_while_videos_stay_by_publication_date(self):
         page = self.open_list(query="tab=list&period=2026-09-17~2026-09-20")
         self.wait_ids(page, ["inside"])
-        page.wait_for_function("document.querySelector('[data-sort=items]').textContent.startsWith('所选周')")
-        self.assertEqual(self.headers(page), ["所选周售出", "所选周 GMV", "所选周 CTOR"])
-        self.assertIn("2026-09-14 至 2026-09-20", page.locator("#perf-date-note").inner_text())
-        # Only the week of 09-14 is touched, so the following weeks' sales are left out.
-        self.assertEqual(self.sales(page, "inside"), ["3", "$30", "4.00%"])
+        page.wait_for_function("document.querySelector('[data-sort=items]').textContent.startsWith('所选日期')")
+        self.assertEqual(self.headers(page), ["所选日期售出", "所选日期 GMV", "所选日期 CTOR"])
+        self.assertIn("2026-09-17 至 2026-09-20", page.locator("#perf-date-note").inner_text())
+        # The selected daily rows are counted; all following weeks are excluded.
+        self.assertEqual(self.sales(page, "inside"), ["3", "$30.25", "4.00%"])
         cell = page.locator(f'[data-video-row="{IDS["inside"]}"] td.num').nth(2)
         self.assertEqual(cell.get_attribute("title"), "累计售出 999")
         # A wider date keeps the same columns; clearing it returns to totals with no note.
@@ -176,35 +180,36 @@ class VideoCampaignFilterTests(unittest.TestCase):
         page.locator("#perf-board").wait_for()
         self.assertEqual(page.locator("#perf-date-note").count(), 0)
 
-    def test_picked_date_sales_say_they_are_totals_until_weeks_load(self):
+    def test_picked_date_sales_wait_for_date_data_without_showing_cumulative_values(self):
         page = self.open_list(query="tab=list&period=2026-09-17~2026-09-20", analytics="hold")
         self.wait_ids(page, ["inside"])
-        self.assertEqual(self.headers(page), ["售出", "GMV", "CTOR"])
-        self.assertIn("暂为累计值", page.locator("#perf-date-note").inner_text())
+        self.assertEqual(self.headers(page), ["所选日期售出", "所选日期 GMV", "所选日期 CTOR"])
+        self.assertEqual(self.sales(page, "inside"), ["—", "—", "—"])
+        self.assertIn("暂不显示", page.locator("#perf-date-note").inner_text())
         while not self.held_analytics:
             page.wait_for_timeout(50)
         self.held_analytics[0].fulfill(json=self.analytics)
-        page.wait_for_function("document.querySelector('[data-sort=items]').textContent.startsWith('所选周')")
+        page.wait_for_function("document.querySelector('[data-sort=items]').textContent.startsWith('所选日期')")
         self.assertIn("鼠标悬停", page.locator("#perf-date-note").inner_text())
-        self.assertEqual(self.sales(page, "inside"), ["3", "$30", "4.00%"])
+        self.assertEqual(self.sales(page, "inside"), ["3", "$30.25", "4.00%"])
 
-    def test_campaign_sales_say_they_are_totals_until_weeks_load_and_when_they_fail(self):
+    def test_campaign_sales_wait_for_date_data_and_stay_blank_when_it_fails(self):
         page = self.open_list(query="tab=list&campaign=" + CAMPAIGN, analytics="hold")
         self.wait_ids(page, ["start", "inside", "end"])
-        self.assertEqual(self.headers(page), ["售出", "GMV", "CTOR"])
-        self.assertEqual(self.sales(page, "inside"), ["999", "$9,999", "50.00%"])
-        self.assertIn("暂为累计值", page.locator("#perf-campaign-hint").inner_text())
+        self.assertEqual(self.headers(page), ["活动期售出", "活动期 GMV", "活动期 CTOR"])
+        self.assertEqual(self.sales(page, "inside"), ["—", "—", "—"])
+        self.assertIn("暂不显示", page.locator("#perf-campaign-hint").inner_text())
         while not self.held_analytics:
             page.wait_for_timeout(50)
         self.held_analytics[0].fulfill(json=self.analytics)
-        page.wait_for_function("document.querySelector('[data-sort=items]').textContent.startsWith('活动周')")
-        self.assertEqual(self.sales(page, "inside"), ["10", "$101", "5.00%"])
+        page.wait_for_function("document.querySelector('[data-sort=items]').textContent.startsWith('活动期')")
+        self.assertEqual(self.sales(page, "inside"), ["10", "$100.50", "5.00%"])
         self.assertIn("鼠标悬停", page.locator("#perf-campaign-hint").inner_text())
         failed = self.open_list(query="tab=list&campaign=" + CAMPAIGN, analytics="fail")
         self.wait_ids(failed, ["start", "inside", "end"])
         failed.wait_for_function("document.querySelector('#perf-campaign-hint')?.textContent.includes('暂时读不到')")
-        self.assertEqual(self.headers(failed), ["售出", "GMV", "CTOR"])
-        self.assertEqual(self.sales(failed, "inside"), ["999", "$9,999", "50.00%"])
+        self.assertEqual(self.headers(failed), ["活动期售出", "活动期 GMV", "活动期 CTOR"])
+        self.assertEqual(self.sales(failed, "inside"), ["—", "—", "—"])
 
     def test_campaign_persists_on_reload_sidebar_return_and_video_deep_link(self):
         page = self.open_list()

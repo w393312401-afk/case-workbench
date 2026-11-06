@@ -1,4 +1,5 @@
 """Configuration must work from a fresh clone without exposing local settings."""
+import io
 import json
 import os
 from pathlib import Path
@@ -6,7 +7,9 @@ import subprocess
 import tempfile
 import unittest
 
-from app_config import load_config
+from unittest.mock import patch
+
+from app_config import load_config, open_edit_import
 
 
 class AppConfigTests(unittest.TestCase):
@@ -32,6 +35,19 @@ class AppConfigTests(unittest.TestCase):
             self.assertEqual(value["runtime_root"], str(root / "private" / "runtime"))
             self.assertEqual(value["performance_sources"], [str(root / "private" / "sales")])
             self.assertEqual(path.read_bytes(), before)
+
+    def test_edit_launcher_waits_for_the_workbench_on_the_configured_port(self):
+        with (patch('app_config.load_config', return_value={'port': 9876}),
+              patch('app_config.urllib.request.build_opener') as opener,
+              patch('app_config.time.sleep') as sleep,
+              patch('app_config.webbrowser.open') as browser):
+            get_status = opener.return_value.open
+            get_status.side_effect = [ConnectionRefusedError(), io.BytesIO(b'{"app":"video-case-workbench"}')]
+            open_edit_import()
+            self.assertEqual(get_status.call_count, 2)
+            get_status.assert_called_with('http://127.0.0.1:9876/api/service/status', timeout=2)
+            sleep.assert_called_once()
+            browser.assert_called_once_with('http://127.0.0.1:9876/#production/import')
 
     def test_rejects_non_object_configuration(self):
         with tempfile.TemporaryDirectory() as folder:

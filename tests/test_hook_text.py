@@ -242,19 +242,43 @@ class WorkerTests(unittest.TestCase):
         title = timeline.tracks["video"][1][0]
         self.assertEqual((title.start, title.end), (0, 90))
         self.assertEqual(title.tool.inputs["StyledText"], "Stop guessing\nCheck the bevel")
-        self.assertEqual((title.tool.inputs["Font"], title.tool.inputs["Style"], title.tool.inputs["Size"]), ("CapCut Sans Text", "Medium", 0.0673))
+        self.assertEqual((title.tool.inputs["Font"], title.tool.inputs["Style"], title.tool.inputs["Size"]), ("TikTok Sans", "Medium", 0.1))
+        self.assertEqual((title.tool.inputs["Enabled4"], title.tool.inputs["ElementShape4"], title.tool.inputs["Level4"]), (1, 2, 1))
         self.assertEqual(title.tool.inputs["Center"], {1: 0.5, 2: 0.809})
         self.assertEqual(resolve.manager.saves, 1)
+
+    def test_campaign_card_sits_at_the_end_on_its_own_track(self):
+        resolve, _, timeline = self.world()
+        self.add(resolve)
+        result = worker.add_campaign_card(resolve, {"project": "202H", "unique_id": "TL-1", "text": "Black Friday sale\nThrough Nov 30"})
+        self.assertEqual(result, {"created": True, "start": 30, "end": 120, "saved": True})
+        self.assertEqual((timeline.GetTrackName("video", 2), timeline.GetTrackName("video", 3)), ("屏显", "活动屏显"))
+        self.assertEqual(timeline.movements[-1], {"trackIndex": 3, "startFrame": 30})
+        self.assertEqual([(item.start, item.end) for item in timeline.tracks["video"][0]], [(0, 60), (60, 120)])
+        self.assertEqual(timeline.GetEndFrame(), 120)
+        self.assertEqual(timeline.locked, set())
+        # The opening hook is untouched, and a second click rewrites the card in place.
+        self.assertEqual((timeline.tracks["video"][1][0].start, timeline.tracks["video"][1][0].end), (0, 90))
+        again = worker.add_campaign_card(resolve, {"project": "202H", "unique_id": "TL-1", "text": "Cyber Monday"})
+        self.assertEqual((again["created"], timeline.tracks["video"][2][0].tool.inputs["StyledText"]), (False, "Cyber Monday"))
+
+    def test_campaign_card_comes_off_and_leaves_the_rest(self):
+        resolve, _, timeline = self.world()
+        worker.add_campaign_card(resolve, {"project": "202H", "unique_id": "TL-1", "text": "Black Friday sale"})
+        self.assertEqual(worker.remove_campaign_card(resolve, {"project": "202H", "unique_id": "TL-1"}), {"removed": 1, "saved": True})
+        self.assertEqual(timeline.tracks["video"][1], [])
+        self.assertEqual([(item.start, item.end) for item in timeline.tracks["video"][0]], [(0, 60), (60, 120)])
+        self.assertEqual(worker.remove_campaign_card(resolve, {"project": "202H", "unique_id": "TL-1"})["removed"], 0)
 
     def test_long_line_shrinks_to_stay_inside_the_frame(self):
         resolve, _, timeline = self.world()
         self.add(resolve, "x" * 76)
-        self.assertAlmostEqual(timeline.tracks["video"][1][0].tool.inputs["Size"], 0.03365)
+        self.assertAlmostEqual(timeline.tracks["video"][1][0].tool.inputs["Size"], 3.0 / 76)
 
     def test_line_that_fits_keeps_the_styles_size(self):
         resolve, _, timeline = self.world()
         self.add(resolve, "x" * 38)
-        self.assertEqual(timeline.tracks["video"][1][0].tool.inputs["Size"], 0.0673)
+        self.assertAlmostEqual(timeline.tracks["video"][1][0].tool.inputs["Size"], 3.0 / 38)
 
     def test_a_named_style_is_used_for_a_new_hook(self):
         resolve, _, timeline = self.world()
@@ -464,6 +488,62 @@ class HookRunner(FakeRunner):
         return subprocess.CompletedProcess(args, 0, json.dumps(body).encode("utf-8"), b"")
 
 
+class CampaignRunner(FakeRunner):
+    def __call__(self, args, input, **options):
+        request = json.loads(input.decode("utf-8"))
+        if request["command"] not in {"add_campaign_card", "remove_campaign_card"}:
+            return super().__call__(args, input, **options)
+        self.calls.append(request)
+        body = ({"ok": True, "created": True, "start": 30, "end": 120, "saved": True} if request["command"] == "add_campaign_card"
+                else {"ok": True, "removed": 1, "saved": True})
+        return subprocess.CompletedProcess(args, 0, json.dumps(body).encode("utf-8"), b"")
+
+
+class CampaignFlowTests(unittest.TestCase):
+    """The end card is offered only while a trusted campaign runs; the voice-over never changes."""
+
+    RUNNING = {"name": "Black Friday / Cyber Monday（黑五网一）", "start": "2026-11-11", "end": "2026-11-30", "status": "running"}
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="campaign-flow-")
+        self.addCleanup(temp.cleanup)
+        self.bench = Bench(temp.name, FakeEleven())
+        self.runner = CampaignRunner()
+        self.bench.resolve = ResolveBridge(runner=self.runner)
+        self.bench._video_publish_copy = lambda job: None
+        FlowTests.mutate(self, "settings", settings={"creators": ["Zack", "Lab"]})
+        self.job, _ = BuildTests.voiced_job(self)
+        self.line = self.bench.build_timeline(self.job["id"], {"request_id": uuid4().hex, "creator": "Lab"})["timeline"]
+
+    def mutate(self, kind, **values):
+        return FlowTests.mutate(self, kind, **values)
+
+    def click(self, action="add", text=""):
+        return self.bench.set_timeline_campaign(self.job["id"], {"timeline_uid": self.line["unique_id"], "request_id": uuid4().hex,
+                                                                 "action": action, "text": text})
+
+    def calls(self):
+        return [call for call in self.runner.calls if call["command"] in {"add_campaign_card", "remove_campaign_card"}]
+
+    def test_no_running_campaign_no_card(self):
+        self.bench._campaign_now = lambda: {"running": None, "upcoming": dict(self.RUNNING, status="upcoming")}
+        with self.assertRaisesRegex(VoiceError, "没有进行中的活动"):
+            self.click()
+        self.assertEqual(self.calls(), [])
+
+    def test_card_is_made_from_the_calendar_and_taken_off_later(self):
+        self.bench._campaign_now = lambda: {"running": self.RUNNING, "upcoming": None}
+        card = self.click()["timeline"]["campaign_overlay"]
+        self.assertEqual(self.calls()[0]["text"], "Black Friday & Cyber Monday sale\nEnds Nov 30")
+        self.assertEqual((card["status"], card["campaign"]["end"], card["message"]), ("saved", "2026-11-30", "活动屏显已加"))
+        spoken = [line["spoken"] for line in self.bench.production.job(self.job["id"])["lines"]]
+        self.assertEqual(spoken, [line["spoken"] for line in self.job["lines"]])
+        removed = self.click("remove")["timeline"]["campaign_overlay"]
+        self.assertEqual((removed["status"], self.runner.calls[-1]["command"]), ("removed", "remove_campaign_card"))
+        with self.assertRaisesRegex(VoiceError, "最多两行"):
+            self.click(text="a / b / c")
+
+
 class FlowTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix="hook-flow-")
@@ -516,8 +596,8 @@ class FlowTests(unittest.TestCase):
         self.set_hook("无开头屏显：第一句够强")
         with self.assertRaisesRegex(VoiceError, "还没有开头屏显"):
             self.click()
-        self.set_hook("one / two / three")
-        with self.assertRaisesRegex(VoiceError, "最多两行"):
+        self.set_hook("one / two / three / four")
+        with self.assertRaisesRegex(VoiceError, "最多三行"):
             self.click()
         self.assertEqual(self.hook_calls(), [])
 
@@ -531,9 +611,9 @@ class FlowTests(unittest.TestCase):
         self.bench.add_timeline_hook(self.job["id"], {"timeline_uid": self.line["unique_id"], "request_id": uuid4().hex, "text": "My own words"})
         self.assertEqual(self.hook_calls()[0]["text"], "My own words")
 
-    def test_own_wording_past_two_lines_is_refused(self):
-        with self.assertRaisesRegex(VoiceError, "最多两行"):
-            self.bench.add_timeline_hook(self.job["id"], {"timeline_uid": self.line["unique_id"], "request_id": uuid4().hex, "text": "a / b / c"})
+    def test_own_wording_past_three_lines_is_refused(self):
+        with self.assertRaisesRegex(VoiceError, "最多三行"):
+            self.bench.add_timeline_hook(self.job["id"], {"timeline_uid": self.line["unique_id"], "request_id": uuid4().hex, "text": "a / b / c / d"})
         self.assertEqual(self.hook_calls(), [])
 
     def test_unknown_timeline_is_refused(self):

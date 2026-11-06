@@ -105,7 +105,12 @@ class CampaignBrowserTests(unittest.TestCase):
         self.assertTrue(page.locator("#campaign-runway .runway-count").is_visible())
         self.assertFalse(page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth"))
         page = self.runway("2026-10-31T12:00:00-07:00", width=740)
-        self.assertTrue(page.locator("#campaign-runway").is_hidden(), "The product picker covers this part of the top bar")
+        # Phones keep a compact pill (count + unit) that the fixed product picker leaves room for.
+        self.assertTrue(page.locator("#campaign-runway .runway-count").is_visible())
+        self.assertTrue(page.locator("#campaign-runway .runway-days").is_hidden())
+        picker = page.locator(".sidebar .global-product").bounding_box()
+        pill = page.locator("#campaign-runway").bounding_box()
+        self.assertLess(picker["x"] + picker["width"], pill["x"], "picker overlaps the runway pill")
         self.assertFalse(page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth"))
 
     def test_board_lists_every_node_with_how_far_its_date_can_be_trusted(self):

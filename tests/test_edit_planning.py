@@ -307,7 +307,7 @@ class EditPlanningTests(unittest.TestCase):
             self.assertIsNone(call["model"])
             self.assertEqual(call["reasoning_effort"], "high")
             self.assertIs(call["cancel_event"], self.cancel)
-            self.assertIsNone(call["on_event"])
+            self.assertTrue(callable(call["on_event"]))  # Collects the run's usage only.
         results = json.loads((self.folder / "planning-results.json").read_text(encoding="utf-8"))
         self.assertEqual([row["worker"] for row in results], [1, 2, 3])
         summary = (self.folder / "planning.md").read_text(encoding="utf-8")
@@ -407,6 +407,62 @@ class EditPlanningTests(unittest.TestCase):
         self.assertEqual(len({call["cwd"] for call in bridge.calls}), 6)
         self.assertTrue((self.folder / "planning.md").is_file())
         self.assertTrue((second / "planning.md").is_file())
+
+class EditCostTests(unittest.TestCase):
+    """Quota bookkeeping and the cheaper planner set-up."""
+
+    def test_usage_is_read_from_the_result_event_and_summed(self):
+        from claude_bridge import add_usage, run_usage
+        one = run_usage({"num_turns": 12, "total_cost_usd": 0.5, "duration_ms": 61000, "modelUsage": {"claude-sonnet-5-5": {}},
+                         "usage": {"input_tokens": 10, "output_tokens": 2000, "cache_read_input_tokens": 300000,
+                                   "cache_creation_input_tokens": 40000}})
+        self.assertEqual((one["turns"], one["seconds"], one["cache_read_input_tokens"], one["models"]), (12, 61, 300000, ["claude-sonnet-5-5"]))
+        self.assertEqual(run_usage({"usage": {"input_tokens": "x"}})["input_tokens"], 0)
+        total = add_usage(add_usage(None, one), one)
+        self.assertEqual((total["runs"], total["turns"], total["output_tokens"], total["cost_usd"]), (2, 24, 4000, 1.0))
+        # Adding an earlier sum keeps its run count.
+        self.assertEqual(add_usage(add_usage(None, one), total)["runs"], 3)
+        self.assertIsNone(add_usage(None, None))
+
+    def test_planners_run_sonnet_at_most_medium_effort_for_claude_only(self):
+        from edit_planning import planner_settings
+        self.assertEqual(planner_settings("claude-opus", "high", "claude"), ("claude-sonnet", "medium"))
+        self.assertEqual(planner_settings("claude-default", None, "claude"), ("claude-sonnet", "medium"))
+        self.assertEqual(planner_settings("claude-sonnet", "low", "claude"), ("claude-sonnet", "low"))
+        self.assertEqual(planner_settings("gpt-6", "high", "codex"), ("gpt-6", "high"))
+
+    def test_candidates_file_keeps_one_clip_per_line(self):
+        from edit_candidates import candidates_text
+        data = {"schema_version": 1, "missing": [], "materials": ["素材甲"],
+                "candidates": [{"key": "XJ001-a", "uid": "u1", "label": "推磨"}, {"key": "XJ002-b", "uid": "u2"}]}
+        text = candidates_text(data)
+        self.assertEqual(json.loads(text), data)
+        line = next(row for row in text.splitlines() if "XJ001-a" in row)
+        self.assertIn('"uid": "u1"', line)
+        self.assertIn('"label": "推磨"', line)
+
+
+class PlannerCostTests(unittest.TestCase):
+    setUp = EditPlanningTests.setUp
+    candidates = EditPlanningTests.candidates
+    write_candidates = EditPlanningTests.write_candidates
+    analyze = EditPlanningTests.analyze
+
+    def test_planner_skill_copy_skips_davinci_rules_and_usage_is_summed(self):
+        skill = self.folder / "skill"
+        (skill / "references" / "archive").mkdir(parents=True)
+        (skill / "SKILL.md").write_text("技能", encoding="utf-8")
+        for name in ("resolve-integrity.md", "CHANGELOG.md", "knife-sharpener.md", "archive/source-ledger.md"):
+            (skill / "references" / name).write_text("x", encoding="utf-8")
+        self.candidates()
+
+        def respond(call):
+            call["on_event"]({"type": "usage", "turns": 3, "output_tokens": 100, "cost_usd": 0.1})
+            return "建议"
+        result = self.analyze(FakePlanner(respond))
+        self.assertEqual((result["usage"]["runs"], result["usage"]["turns"], result["usage"]["output_tokens"]), (3, 9, 300))
+        references = self.folder / "planning" / "worker-1" / "skill" / "references"
+        self.assertEqual(sorted(path.name for path in references.iterdir()), ["knife-sharpener.md"])
 
 
 if __name__ == "__main__":

@@ -65,8 +65,8 @@
 
   /* Settings, brand and product leave the tab bar for the top bar (fixed, so they escape the aside). */
   body .sidebar #files-nav {
-    position: fixed; top: 8px; right: 10px; flex: none; width: 40px; height: 40px; padding: 0; font-size: 0; gap: 0;
-    border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); z-index: 31;
+    position: fixed; top: 8px; right: 10px; flex: none; width: var(--btn-h-lg); height: var(--btn-h-lg); padding: 0; font-size: 0; gap: 0;
+    border: 0; border-radius: var(--btn-radius); background: var(--fill); color: var(--ink); z-index: 31;
   }
   body .sidebar #files-nav.active { border-color: var(--accent); color: var(--accent-text); }
   body .sidebar #files-nav.active span[data-icon] { background: none; color: inherit; padding: 0; }
@@ -78,12 +78,12 @@
   }
   body .sidebar .global-product > span { display: none; }
   body .sidebar .global-product select {
-    height: 40px; padding: 0 22px 0 8px; font-size: 16px; font-weight: 600; letter-spacing: 0; border-color: var(--line); background-color: var(--surface); color: var(--ink);
+    height: var(--btn-h-lg); padding: 0 22px 0 8px; font-size: 16px; font-weight: 600; letter-spacing: 0; border-color: var(--line); background-color: var(--surface); color: var(--ink);
   }
 
   /* The local workbench also shows 收录案例 in the top bar; video import stays a desktop task. */
   #import-video-top, #replica-top { display: none !important; }
-  body:not(.public-text-mode) .sidebar .global-product { width: min(calc(100vw - 205px), 220px); }
+  body:not(.public-text-mode) .sidebar .global-product { width: min(calc(100vw - 205px - var(--runway-space, 0px)), 220px); }
 
   main { margin-left: 0; padding-bottom: calc(var(--mobile-tabs) + env(safe-area-inset-bottom) + 12px); min-width: 0; }
   .topbar {
@@ -92,9 +92,9 @@
   }
   #breadcrumb { display: none; }
   .topbar-right { gap: 6px; flex-wrap: nowrap; }
-  .global-search-trigger { width: 40px; height: 40px; padding: 0; justify-content: center; }
+  .global-search-trigger { width: var(--btn-h-lg); height: var(--btn-h-lg); padding: 0; justify-content: center; }
   .global-search-trigger .search-label, .global-search-trigger kbd { display: none; }
-  #add-top { height: 40px; padding: 0 10px; font-size: 0; gap: 0; }
+  #add-top { height: var(--btn-h-lg); padding: 0 10px; font-size: 0; gap: 0; }
   #add-top svg { width: 19px; height: 19px; }
   .content { padding: 18px 14px 24px; }
   .banner { margin: 10px 14px 0; }
@@ -119,8 +119,7 @@
 
   /* Comfortable taps and no iOS zoom on focus. */
   input:not([type=checkbox]):not([type=radio]):not([type=range]), select, textarea { font-size: 16px; }
-  .content button:not(.nav-item):not(.ai-title-line), .content .button, dialog button { min-height: 38px; }
-  .content select, .content input[type=text], .content input[type=search], .content input:not([type]) { min-height: 42px; }
+  .content button:not([class]):not(.nav-item), dialog button:not([class]) { min-height: var(--btn-h); }
 
   /* Cards breathe less so text gets the width. */
   .section-card, .home-section { padding: 16px 14px; border-radius: 12px; }
@@ -148,7 +147,7 @@
 @media (max-width: 360px) {
   body .sidebar .nav-item, body .sidebar #materials-nav { font-size: 9.5px; }
   body .sidebar .global-product { width: 48vw; }
-  body:not(.public-text-mode) .sidebar .global-product { width: calc(100vw - 205px); }
+  body:not(.public-text-mode) .sidebar .global-product { width: calc(100vw - 205px - var(--runway-space, 0px)); }
 }
 
 /* ---- writing: compact task rows, a conversation page, and a composer fixed at the bottom ---- */
@@ -241,15 +240,6 @@
 #content .ai-message-label{font-size:12px;color:var(--muted-soft);font-weight:500;margin-bottom:4px}
 #content .ai-stream-message.answer .ai-message-label{display:none}
 #content .ai-title-lines{margin-top:14px;background:var(--surface-alt);border:0;border-radius:12px}
-.ai-menu{position:relative}
-.ai-menu>summary{list-style:none;cursor:pointer;width:32px;height:32px}
-.ai-menu>summary::-webkit-details-marker{display:none}
-.ai-menu>summary svg{width:18px;height:18px}
-.ai-menu[open]>summary{background:var(--fill)}
-.ai-menu>div{position:absolute;right:0;top:calc(100% + 4px);z-index:6;min-width:130px;padding:5px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow-menu)}
-.ai-menu>div>button{display:block;width:100%;text-align:left;background:transparent;color:var(--ink);font-size:13px;padding:7px 10px;border-radius:6px}
-.ai-menu>div>button:hover{background:var(--accent);color:var(--on-accent)}
-.ai-menu>div>button[hidden]{display:none}
 #content .ai-composer{position:sticky;bottom:16px;z-index:4;margin:18px 0 0;padding:12px 14px;border:1px solid var(--line);border-radius:16px;background:color-mix(in srgb,var(--surface) 92%,transparent);-webkit-backdrop-filter:saturate(180%) blur(20px);backdrop-filter:saturate(180%) blur(20px);box-shadow:0 8px 30px #0000001f}
 #content .ai-composer textarea{width:100%;min-height:44px;max-height:220px;resize:vertical;border:0;background:transparent;color:var(--ink);font:inherit;font-size:14px;line-height:1.6;padding:4px 2px;outline:0}
 #content .ai-composer .ai-continue-footer{display:flex;align-items:center;gap:10px;margin:6px 0 0;padding:0;border:0}
@@ -306,7 +296,7 @@
 /* script versions: one row per version, same rhythm as the task list */
 #content .script-list-filters{display:flex;align-items:center;gap:12px;margin:0 0 20px}
 #content .script-list-filters .search{flex:1;max-width:none}
-#content .script-list-filters .search input{background:var(--fill);border-color:transparent;border-radius:10px}
+#content .script-list-filters .search input{background:var(--fill);border-color:transparent}
 .script-status-choice{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted-soft)}
 .script-status-choice select{border:0;background:transparent;color:var(--ink);font-size:13px;font-weight:500;padding:4px 2px}
 #content .script-list-group>h2{display:flex;align-items:baseline;gap:10px;font-size:15px;font-weight:600;margin:0 0 10px 4px}

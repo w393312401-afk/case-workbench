@@ -1,7 +1,7 @@
 "use strict";
 
 // Date range picker for the video dashboard: preset list on the left, two month calendars on the right.
-// The chosen period is "all" or "YYYY-MM-DD~YYYY-MM-DD"; the dashboard counts every week the range touches.
+// The chosen period is "all" or "YYYY-MM-DD~YYYY-MM-DD"; each source explains its own date coverage.
 (() => {
   const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
   const MODES = [["day", "日"], ["week", "周"], ["month", "月"], ["custom", "自定义"]];
@@ -116,7 +116,7 @@
       <div class="perf-date-main">
         <div class="perf-date-modes" role="group" aria-label="选择方式">${MODES.map(([k, label]) => `<button type="button" data-mode="${k}" aria-pressed="${k === s.mode}">${label}</button>`).join("")}</div>
         <div class="perf-cal-months">${body}</div>
-        <p class="perf-date-hint">${escape(s.ctx.hint || "看板按周、海外达人按导出月份汇总，所选日期碰到的整周或整月都会计入；自制视频按发布日期筛选，售出、GMV、CTOR 按碰到的整周统计。四个页签共用这个日期，选日期会取消活动期。")}</p>
+        <p class="perf-date-hint">${escape(s.ctx.hint || "自制视频的售出、GMV、CTOR 按所选日期统计：优先使用日期完全一致的区间报表，缺数据时会提示；视频列表仍按发布日期筛选。图文和海外达人按重叠的整份导出统计，可能包含范围外日期。四个页签共用这个日期，选日期会取消活动期。")}</p>
       </div></div>`;
   }
 

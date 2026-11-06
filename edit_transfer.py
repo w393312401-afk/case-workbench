@@ -127,15 +127,17 @@ def frozen(job):
     return {key: copy.deepcopy(job.get(key)) for key in ('lines', 'selected_take', 'product', 'replica')}
 
 
-def _idle(job):
-    if job.get('voicing') or job.get('timeline_building') or any(e.get('status') == 'running' for e in job.get('edits', [])):
-        raise VoiceError(409, '这张制作单仍有任务运行，请完成后再转移。')
+def _cut_settled(job):
+    # Only a receipt reports cuts, so only a cut still in progress makes it incomplete.
+    if job.get('timeline_building') or any(e.get('status') == 'running' for e in job.get('edits', [])):
+        raise VoiceError(409, '这张制作单还在剪辑或生成时间线，请完成后再回传结果。')
 
 
 def export_package(app, identifier):
+    # Running tasks never block this: the package snapshots frozen inputs under the lock, and a
+    # later change of script or selected take is caught by the fingerprint when the result returns.
     with app.lock:
         job = app.production_job(identifier)['job']
-        _idle(job)
         take = next((t for t in job.get('takes', []) if t['id'] == job.get('selected_take')), None)
         if not take:
             raise VoiceError(409, '请先生成并选用配音，再转到本机剪辑。')
@@ -330,7 +332,7 @@ def import_package(app, raw):
 def export_receipt(app, identifier):
     with app.lock:
         job = app.production_job(identifier)['job']
-        _idle(job)
+        _cut_settled(job)
         origin = job.get('local_edit_origin')
         if not origin:
             raise VoiceError(409, '只有从共享工作台领取的制作单才能回传结果。')

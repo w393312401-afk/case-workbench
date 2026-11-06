@@ -67,7 +67,6 @@
 @media (max-width: 760px) {
   #content:has(.detail-heading) .detail-layout { grid-template-columns: minmax(0, 1fr); }
   #content:has(.detail-heading) .detail-side { grid-template-columns: minmax(0, 1fr); }
-  #content:has(.detail-heading) .detail-action-row .detail-tabs { gap: 18px; }
   .detail-overview-metrics { padding: 16px; }
   .detail-overview-metrics .case-summary-metrics strong { font-size: 19px; }
 }
@@ -86,21 +85,7 @@
 #content:has(.detail-heading) .case-dock{border:0;box-shadow:0 1px 0 var(--line)}
 .case-step{font-size:12px}
 /* tabs as a segmented control */
-#content:has(.detail-heading) .detail-tabs{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--fill);border:0;margin:0}
-#content:has(.detail-heading) .detail-tabs .tab{padding:6px 14px;border:0;border-radius:8px;color:var(--muted);font-size:13px;font-weight:500}
-#content:has(.detail-heading) .detail-tabs .tab.active{background:var(--selected-fill);color:var(--ink);box-shadow:0 1px 3px #0000001f}
 .detail-tools{display:flex;align-items:center;gap:6px}
-.detail-menu{position:relative}
-.detail-menu>summary{list-style:none;cursor:pointer;width:34px;height:34px}
-.detail-menu>summary::-webkit-details-marker{display:none}
-.detail-menu>summary svg{width:18px;height:18px}
-.detail-menu[open]>summary{background:var(--fill)}
-.detail-menu>div{position:absolute;right:0;top:calc(100% + 4px);z-index:20;min-width:160px;padding:5px;background:var(--surface);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow-menu)}
-.detail-menu>div>button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:transparent;color:var(--ink);font-size:13px;padding:7px 10px;border-radius:6px}
-.detail-menu>div>button svg{width:15px;height:15px}
-.detail-menu>div>button:hover:not(:disabled){background:var(--accent);color:var(--on-accent)}
-.detail-menu>div>button.is-danger{color:var(--danger-ink)}
-.detail-menu>div>button.is-danger:hover:not(:disabled){background:var(--danger);color:var(--on-accent)}
 #content:has(.detail-heading) .detail-main .section-card{border:0}
 @media(max-width:1180px){#content:has(.detail-heading) .detail-layout{grid-template-columns:minmax(200px,26%) minmax(0,1fr)}}
 @media(max-width:900px){
@@ -167,16 +152,8 @@ details.structure-chip.is-bad { display: inline-block; color: var(--warm-ink); b
   .breakdown-overview .auto-breakdown-meta { margin-left: 0; flex-basis: 100%; }
 }
 /* 案例详情标签：分段按钮，选中项用强调色，历史条数做成小圆标 */
-#content:has(.detail-heading) .detail-tabs, #content:has(.detail-heading) .detail-action-row .detail-tabs { gap: 2px; padding: 4px; border-radius: 12px; background: var(--surface-alt); border: 1px solid var(--line); }
-#content:has(.detail-heading) .detail-tabs .tab, #content:has(.detail-heading) .detail-action-row .detail-tabs .tab { display: inline-flex; align-items: center; gap: 6px; padding: 7px 16px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font-size: 14px; font-weight: 500; line-height: 1.4; transition: background .15s, color .15s; }
-#content:has(.detail-heading) .detail-tabs .tab:hover, #content:has(.detail-heading) .detail-action-row .detail-tabs .tab:hover { color: var(--ink); background: color-mix(in srgb, var(--ink) 6%, transparent); }
-#content:has(.detail-heading) .detail-tabs .tab.active, #content:has(.detail-heading) .detail-action-row .detail-tabs .tab.active, #content:has(.detail-heading) .detail-tabs .tab[aria-selected="true"], #content:has(.detail-heading) .detail-action-row .detail-tabs .tab[aria-selected="true"] { background: color-mix(in srgb, var(--accent) 16%, var(--surface)); color: var(--accent-text); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); font-weight: 600; }
-#content:has(.detail-heading) .detail-tabs .tab:focus-visible, #content:has(.detail-heading) .detail-action-row .detail-tabs .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 #content:has(.detail-heading) .detail-tabs .tab-count, #content:has(.detail-heading) .detail-action-row .detail-tabs .tab-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; background: color-mix(in srgb, var(--ink) 10%, transparent); color: var(--muted); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
 #content:has(.detail-heading) .detail-tabs .tab[aria-selected="true"] .tab-count, #content:has(.detail-heading) .detail-action-row .detail-tabs .tab[aria-selected="true"] .tab-count { background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--accent-text); }
-@media (max-width: 650px) {
-  #content:has(.detail-heading) .detail-tabs .tab, #content:has(.detail-heading) .detail-action-row .detail-tabs .tab { padding: 6px 11px; font-size: 13px; }
-}
 /* 所属产品：标题下的产品名可点开改 */
 .detail-product { display: inline-block; position: relative; min-width: 0; max-width: min(300px, 100%); }
 .detail-product > summary { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; cursor: pointer; list-style: none; color: inherit; border-bottom: 1px dashed color-mix(in srgb, var(--muted-soft) 70%, transparent); }

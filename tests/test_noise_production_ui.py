@@ -76,7 +76,11 @@ class NoiseVideoReviewTests(unittest.TestCase):
         edit.pop('approval')
         self.payload['job']['status'] = 'awaiting_review'
         page.reload()
-        page.get_by_role('heading', name='待你确认', exact=True).wait_for()
+        # Before approval the notes stay folded too; only gaps lead the card.
+        history = page.locator('.edit-delivery-questions')
+        self.assertFalse(history.evaluate('node => node.open'))
+        self.assertIn('更多说明（1 条）', history.locator('summary').inner_text())
+        self.assertIn('无缺口', page.locator('.edit-card .edit-facts').first.inner_text())
         self.assertTrue(page.locator('.edit-review-form').is_visible())
 
     def test_exact_heading_duplicate_is_removed_but_variant_number_and_timeline_stay(self):
@@ -133,8 +137,9 @@ class NoisePublicationTests(unittest.TestCase):
         self.assertEqual(receipt.locator('.delivery-provenance dt', has_text='登记时间').count(), 1)
         receipt.locator('[data-copy-take]').click()
         self.assertEqual(page.evaluate('window.copiedText'), 'TAK-frozen')
-        page.locator('.video-publication-editor > summary').click()
-        self.assertIn('绑定另一个视频', page.locator('.video-publication-editor > summary').inner_text())
+        # A registration is corrected with its own 修改 button; no second registration form sits under it.
+        self.assertEqual(page.locator('.video-publication-editor').count(), 0)
+        self.assertTrue(receipt.locator('[data-edit-post]').is_visible())
 
 if __name__ == '__main__':
     unittest.main()

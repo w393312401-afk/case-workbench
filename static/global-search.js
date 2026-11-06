@@ -32,7 +32,7 @@ window.WorkbenchSearch = (() => {
   // The public text copy is read-only: it offers no actions and no settings page.
   const available = () => document.body?.classList?.contains("public-text-mode") ? commands.filter(command => !command.run && command.key !== "page:settings") : commands;
   const platforms = { amazon: "Amazon", tiktok_shop: "TikTok Shop", tiktok_video: "TikTok 视频", reddit: "Reddit", facebook: "Facebook" };
-  let dialog, input, list, status, scope, feedback, previousFocus;
+  let dialog, input, list, status, scope, feedback, previousFocus, openedHash = "";
   let query = "", sequence = 0, timer, controller, active = -1, results = [];
   let sections = {}, pending = false, failures = [], initialized = false;
 
@@ -298,6 +298,7 @@ window.WorkbenchSearch = (() => {
     initialize();
     if (!dialog.open) {
       previousFocus = document.activeElement;
+      openedHash = location.hash;
       dialog.showModal();
       warm();
       search(0);
@@ -374,7 +375,8 @@ window.WorkbenchSearch = (() => {
       if (command || slash) { event.preventDefault(); open(); }
     });
     window.addEventListener("workbench:productchange", () => { if (dialog.open) { warm(); search(0); } });
-    window.addEventListener("hashchange", () => { if (dialog.open) close(); });
+    // The hashchange of the page just opened can arrive after Ctrl+K; only leaving that page closes the search.
+    window.addEventListener("hashchange", () => { if (dialog.open && location.hash !== openedHash) close(); });
   }
 
   // This file can precede app.js among deferred scripts. "interactive" still means

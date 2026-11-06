@@ -24,9 +24,9 @@ Export shapes, recognised by the header row:
 Shops: every table carries a `shop` column. A file's shop is the first folder under a source folder when that folder
 is a shop folder (本土店 / 跨境店), otherwise the local shop. Deleting a re-imported range only touches its own shop.
 
-Per-video figures combine daily rows and 7-day periods without double
-counting: a day covered by a weekly export uses the weekly rows. Monthly
-ranges are kept for reference only.
+Per-video lifetime figures combine daily rows and 7-day periods without double
+counting: a day covered by a weekly export uses the weekly rows. Longer exports
+can be used directly when the selected dates match their complete range.
 """
 from __future__ import annotations
 
@@ -673,6 +673,18 @@ class PerformanceStore:
                            {", ".join(f"SUM({m}) {m}" for m in SUMMED)}, MIN(start) first_data, MAX(end) last_data,
                            COUNT(*) data_rows, COUNT(orders) order_rows, COUNT(clicks) click_rows
                     FROM facts GROUP BY video_id""").fetchall()
+                # A video can exist only in a longer export. Keep it selectable for an exact report range, but do not
+                # present that arbitrary interval as its lifetime total or as evidence for a weekly observation window.
+                report_only = connection.execute("""
+                    SELECT * FROM (SELECT video_id, shop, account, title, posted_at, products, range_start, range_end,
+                           ROW_NUMBER() OVER (PARTITION BY video_id ORDER BY range_end DESC, span_days DESC, range_start DESC) rank
+                           FROM periods p WHERE span_days > 7 AND NOT EXISTS
+                           (SELECT 1 FROM facts f WHERE f.video_id = p.video_id)) WHERE rank = 1""").fetchall()
+                for row in report_only:
+                    rows.append({"video_id": row["video_id"], "shop": row["shop"], "account": row["account"],
+                                 "title": row["title"], "posted_at": row["posted_at"], "products": row["products"],
+                                 **{metric: None for metric in SUMMED}, "first_data": row["range_start"],
+                                 "last_data": row["range_end"], "data_rows": 1, "order_rows": 0, "click_rows": 0})
                 window = {row[0]: row[1] for row in connection.execute("""
                     SELECT video_id, SUM(views) FROM facts
                     WHERE end <= date(substr(posted_at,1,10), '-' || ((strftime('%w', substr(posted_at,1,10)) + 6) % 7) || ' days', '+13 days')
@@ -951,11 +963,19 @@ class PerformanceStore:
         weekly:  one row per video and Monday-start week (the facts view, so daily and weekly exports never double count).
         monthly: the same per video and month, in the report each month is best known from: a monthly export when there is
                  one, else the daily rows, else the weekly ones (a week belongs to the month holding its Thursday).
+        daily: raw per-video day exports, including days covered by a week, for exact date selections.
+        report_weekly: per-video rows from Monday-to-Sunday reports, usable only when that whole week is selected.
+        report_periods / report_ranges: longer per-video exports, used only when the selected dates match exactly.
+        daily_dates / report_weeks: export coverage, including valid exports with no video rows.
         shop_daily: all-video daily totals, which are a different caliber from the per-video rows and never mixed with them.
         Row layout is [video index, week|month, views, impressions, clicks, orders, items, gmv]."""
         def clone(value):
             # All row cells are immutable scalars; copy the mutable containers.
             return {"videos": [row[:] for row in value["videos"]], "weekly": [row[:] for row in value["weekly"]],
+                    "daily": [row[:] for row in value["daily"]], "daily_dates": value["daily_dates"][:],
+                    "report_weekly": [row[:] for row in value["report_weekly"]], "report_weeks": value["report_weeks"][:],
+                    "report_periods": [row[:] for row in value["report_periods"]], "report_ranges": [row[:] for row in value["report_ranges"]],
+                    "invalid_report_ranges": [row[:] for row in value["invalid_report_ranges"]],
                     "monthly": [row[:] for row in value["monthly"]], "months": dict(value["months"]),
                     "shop_daily": [dict(row) for row in value["shop_daily"]]}
         return self._read_cached(("analytics", self._check_shop(shop)), lambda: self._read_analytics(shop), clone)
@@ -970,13 +990,44 @@ class PerformanceStore:
                 weekly = connection.execute(f"""
                     SELECT video_id, date(start, '-' || ((strftime('%w', start) + 6) % 7) || ' days') week, {measures}
                     FROM facts GROUP BY video_id, week ORDER BY week, video_id""").fetchall()
+                daily = connection.execute(f"""
+                    SELECT video_id, date, {measures} FROM daily
+                    WHERE (:shop IS NULL OR shop = :shop) GROUP BY video_id, date ORDER BY date, video_id""", scope).fetchall()
+                report_weekly = connection.execute(f"""
+                    SELECT video_id, range_start, {measures} FROM periods
+                    WHERE span_days = 7 AND strftime('%w', range_start) = '1' AND (:shop IS NULL OR shop = :shop)
+                    GROUP BY video_id, range_start ORDER BY range_start, video_id""", scope).fetchall()
+                report_periods = connection.execute(f"""
+                    SELECT video_id, range_start, range_end, {measures} FROM periods
+                    WHERE span_days > 7 AND (:shop IS NULL OR shop = :shop)
+                    GROUP BY video_id, range_start, range_end ORDER BY range_start, range_end, video_id""", scope).fetchall()
+                report_status = connection.execute("""
+                    SELECT i.range_start, i.range_end, COUNT(DISTINCT i.shop), MAX(EXISTS (
+                        SELECT 1 FROM periods p WHERE p.shop = i.shop AND p.range_start = i.range_start
+                        AND p.range_end = i.range_end AND (p.gmv IS NULL OR p.views IS NULL OR p.impressions IS NULL
+                            OR p.clicks IS NULL OR p.orders IS NULL OR p.items IS NULL)))
+                    FROM imports i WHERE i.kind = 'periods' AND julianday(i.range_end) - julianday(i.range_start) > 6
+                    AND (:shop IS NULL OR i.shop = :shop) GROUP BY i.range_start, i.range_end
+                    ORDER BY i.range_start, i.range_end""", scope).fetchall()
+                shops = connection.execute("SELECT COUNT(DISTINCT shop) FROM imports WHERE kind IN ('daily', 'periods')").fetchone()[0] if shop is None else 1
+                report_ranges = [[r[0], r[1]] for r in report_status if not r[3] and r[2] == shops]
+                invalid_report_ranges = [[r[0], r[1]] for r in report_status if r[3]]
+                daily_dates = [row[0] for row in connection.execute("""
+                    SELECT DISTINCT range_start FROM imports WHERE kind = 'daily' AND range_start = range_end
+                    AND (:shop IS NULL OR shop = :shop) ORDER BY range_start""", scope)]
+                report_weeks = [row[0] for row in connection.execute("""
+                    SELECT DISTINCT range_start FROM imports WHERE kind = 'periods'
+                    AND julianday(range_end) - julianday(range_start) = 6 AND strftime('%w', range_start) = '1'
+                    AND (:shop IS NULL OR shop = :shop) ORDER BY range_start""", scope)]
                 month_of = "CASE WHEN start = end THEN substr(start, 1, 7) ELSE substr(date(start, '+3 days'), 1, 7) END"
                 derived = connection.execute(f"""
                     SELECT video_id, {month_of} month, start = end is_daily, {measures}
                     FROM facts GROUP BY video_id, month, is_daily""").fetchall()
                 reported = connection.execute(f"""
                     SELECT video_id, substr(range_start, 1, 7) month, {measures}
-                    FROM periods WHERE span_days >= 28 AND (:shop IS NULL OR shop = :shop) GROUP BY video_id, month""", scope).fetchall()
+                    FROM periods WHERE span_days BETWEEN 28 AND 31
+                    AND substr(range_start, 1, 7) = substr(range_end, 1, 7)
+                    AND (:shop IS NULL OR shop = :shop) GROUP BY video_id, month""", scope).fetchall()
                 attributes = connection.execute("""
                     SELECT video_id, MIN(account), MIN(products), MIN(posted_at) FROM (
                         SELECT video_id, account, products, posted_at FROM daily WHERE (:shop IS NULL OR shop = :shop)
@@ -1003,6 +1054,10 @@ class PerformanceStore:
         return {
             "videos": [[v, a, product_short(p), (t or "")[:10] or None] for v, a, p, t in attributes],
             "weekly": [[index[r[0]], r[1], *rounded(r[2:])] for r in weekly],
+            "daily": [[index[r[0]], r[1], *rounded(r[2:])] for r in daily], "daily_dates": daily_dates,
+            "report_weekly": [[index[r[0]], r[1], *rounded(r[2:])] for r in report_weekly], "report_weeks": report_weeks,
+            "report_periods": [[index[r[0]], r[1], r[2], *rounded(r[3:])] for r in report_periods], "report_ranges": report_ranges,
+            "invalid_report_ranges": invalid_report_ranges,
             "monthly": monthly, "months": dict(sorted(basis.items())),
             "shop_daily": [{"date": r[0], "gmv": round(r[1] or 0, 2), "orders": int(r[2] or 0), "views": int(r[3] or 0), "clicks": int(r[4] or 0)} for r in totals],
         }
@@ -1224,6 +1279,8 @@ class PerformanceStore:
                     FROM (SELECT video_id, MIN(posted_at) p FROM facts GROUP BY video_id) GROUP BY 1""").fetchall())
                 imports = connection.execute("SELECT COUNT(*), MAX(imported_at) FROM imports WHERE (:shop IS NULL OR shop = :shop)", scope).fetchone()
                 totals = connection.execute("SELECT MIN(date), MAX(date) FROM totals_daily WHERE (:shop IS NULL OR shop = :shop)", scope).fetchone()
+                video_range = connection.execute("""SELECT MIN(range_start), MAX(range_end) FROM imports
+                    WHERE kind IN ('daily', 'periods') AND (:shop IS NULL OR shop = :shop)""", scope).fetchone()
                 shops = []
                 for key, name in SHOPS.items():
                     files, first, last, photo = connection.execute(
@@ -1245,7 +1302,8 @@ class PerformanceStore:
             start = date.fromisoformat(week["week"])
             week["complete"] = all((start + timedelta(days=i)).isoformat() in covered for i in range(7))
         return {
-            "coverage": {"first": covered[0] if covered else None, "last": covered[-1] if covered else None, "gaps": gaps},
+            "coverage": {"first": min(filter(None, (covered[0] if covered else None, video_range[0])), default=None),
+                         "last": max(filter(None, (covered[-1] if covered else None, video_range[1])), default=None), "gaps": gaps},
             "shop": shop, "shops": shops,
             "weeks": weeks, "imports": {"files": imports[0], "last": imports[1]},
             "totals_range": list(totals) if totals and totals[0] else None,

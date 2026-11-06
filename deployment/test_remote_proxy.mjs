@@ -16,7 +16,7 @@ const fixturePassword = 'fixture9!';
 const fixtureSalt = '12'.repeat(32);
 const fixtureHash = scryptSync(fixturePassword, Buffer.from(fixtureSalt, 'hex'), 64,
   { N: 32768, r: 8, p: 3, maxmem: 64 * 1024 * 1024 }).toString('hex');
-async function passwordFixture(t, { guest = false } = {}) {
+async function passwordFixture(t, { guest = false, now = Date.now, upstreamCookie } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'workbench-proxy-test-'));
   const accountFile = join(directory, 'account.json');
   const account = { version: 1, username: 'fixture-admin', salt: fixtureSalt, password_hash: fixtureHash,
@@ -37,19 +37,21 @@ async function passwordFixture(t, { guest = false } = {}) {
     const received = { url: req.url, cookie: req.headers.cookie, token: req.headers['x-workbench-token'],
       contentType: req.headers['content-type'], bytes: 0 };
     seen.push(received);
+    if (upstreamCookie) res.setHeader('set-cookie', upstreamCookie);
     req.on('data', chunk => { received.bytes += chunk.length; });
     req.on('end', () => res.end('protected-workbench'));
   });
   const upstreamPort = await listen(upstream);
-  const proxy = createRemoteProxy({ hostname: config.hostname, authMode: 'password', guestEnabled: guest },
-    { accountFile, guestSite, upstream: `http://127.0.0.1:${upstreamPort}` });
-  const port = await listen(proxy);
+  const makeProxy = () => createRemoteProxy({ hostname: config.hostname, authMode: 'password', guestEnabled: guest },
+    { accountFile, guestSite, upstream: `http://127.0.0.1:${upstreamPort}`, now });
+  let proxy = makeProxy(), port = await listen(proxy);
+  const restart = async () => { await close(proxy); proxy = makeProxy(); port = await listen(proxy); return port; };
   t.after(async () => { await close(proxy); await close(upstream); await rm(directory, { recursive: true, force: true }); });
   const plain = { host: config.hostname };
   const post = { ...plain, origin: `https://${config.hostname}`, 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' };
   const login = (body = { username: account.username, password: fixturePassword }, extra = {}) => request(port,
     { path: '/auth/login', method: 'POST', headers: { ...post, ...extra }, body: JSON.stringify(body) });
-  return { port, upstreamPort, seen, account, accountFile, plain, post, login, guestSite };
+  return { port, upstreamPort, seen, account, accountFile, plain, post, login, guestSite, restart };
 }
 
 test('guest browsing reads only the prepared snapshot and never sends private requests upstream', async t => {
@@ -199,6 +201,41 @@ test('password login, session, protected requests and logout use a private revoc
   assert.equal(logout.status, 200);
   assert.match(logout.headers['set-cookie'][0], /Max-Age=0/);
   assert.equal((await request(port, { path: '/api/state', headers: { ...plain, cookie } })).status, 401);
+});
+
+test('a browser stays authenticated across proxy restarts and logout stays revoked', async t => {
+  const { plain, post, login, restart } = await passwordFixture(t);
+  const signed = await login();
+  const cookie = signed.headers['set-cookie'][0].split(';')[0];
+  let port = await restart();
+  assert.equal((await request(port, { path: '/auth/session', headers: { ...plain, cookie } })).status, 200);
+  assert.equal((await request(port, { path: '/api/state', headers: { ...plain, cookie } })).body, 'protected-workbench');
+  assert.equal((await request(port, { path: '/auth/logout', method: 'POST', headers: { ...post, cookie } })).status, 200);
+  port = await restart();
+  assert.equal((await request(port, { path: '/auth/session', headers: { ...plain, cookie } })).status, 401);
+});
+
+test('session and forwarded responses renew persistent login without losing upstream cookies', async t => {
+  let clock = 1800000000000;
+  const { port, plain, login, seen } = await passwordFixture(t, {
+    now: () => clock, upstreamCookie: 'upstream=value; Path=/',
+  });
+  const signed = await login();
+  const cookie = signed.headers['set-cookie'][0].split(';')[0];
+  clock += 2 * 24 * 60 * 60 * 1000;
+  const session = await request(port, { path: '/auth/session', headers: { ...plain, cookie } });
+  assert.equal(session.status, 200);
+  assert.match(session.headers['set-cookie'][0], /Max-Age=7776000$/);
+  assert.equal(session.headers['cache-control'], 'no-store');
+  const unchanged = await request(port, { path: '/auth/session', headers: { ...plain, cookie } });
+  assert.equal(unchanged.headers['set-cookie'], undefined, 'avoid renewing on every request');
+  clock += 2 * 24 * 60 * 60 * 1000;
+  const resource = await request(port, { path: '/api/state', headers: { ...plain, cookie } });
+  assert.equal(resource.status, 200);
+  assert.ok(resource.headers['set-cookie'].includes('upstream=value; Path=/'));
+  assert.ok(resource.headers['set-cookie'].some(value => value.startsWith(cookie) && value.endsWith('Max-Age=7776000')));
+  assert.equal(resource.headers['cache-control'], 'private, no-store');
+  assert.equal(seen[0].cookie, undefined);
 });
 
 test('password endpoints require the expected host and same-origin writes with bounded JSON', async t => {
@@ -597,6 +634,37 @@ test('preserves browser caching only for authenticated program assets', async t 
   const before = reached;
   assert.equal((await request(port, { path, headers: { host: config.hostname } })).status, 401);
   assert.equal(reached, before, 'cached static responses never bypass authentication');
+});
+
+test('versioned preview videos keep private browser caching through authenticated range requests', async t => {
+  let reached = 0;
+  const upstream = http.createServer((req, res) => {
+    reached++;
+    const path = new URL(req.url, 'http://localhost');
+    const status = path.searchParams.has('error') ? 404 : req.headers['if-none-match'] ? 304 : req.headers.range ? 206 : 200;
+    res.writeHead(status, { 'content-type': path.searchParams.has('json') ? 'application/json' : 'video/mp4',
+      'cache-control': 'private, max-age=31536000, immutable', etag:'"preview-1"',
+      ...(status === 206 ? {'content-range':'bytes 0-3/8','accept-ranges':'bytes'} : {}) });
+    res.end(status === 304 ? undefined : 'data');
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createRemoteProxy(config, {...options,upstream:`http://127.0.0.1:${upstreamPort}`});
+  const port = await listen(proxy);
+  t.after(async () => {await close(proxy);await close(upstream);});
+  const path = '/api/production/jobs/PRD-0123456789ab/preview/video?timeline=uid-1&version=123456abcdef-web1';
+  for (const extra of [{}, {range:'bytes=0-3'}, {'if-none-match':'"preview-1"'}]) {
+    const result = await request(port,{path,headers:headers(extra)});
+    assert.equal(result.headers['cache-control'],'private, max-age=31536000, immutable');
+    assert.equal(result.headers.vary,'Cookie');
+    assert.equal(result.headers.etag,'"preview-1"');
+  }
+  for (const unsafe of [path.replace('&version=123456abcdef-web1',''),path+'&version=123456abcdef-web1',
+      path+'&json=1',path+'&error=1','/api/state?timeline=uid-1&version=123456abcdef-web1']) {
+    assert.equal((await request(port,{path:unsafe})).headers['cache-control'],'private, no-store');
+  }
+  const before = reached;
+  assert.equal((await request(port,{path,headers:{host:config.hostname}})).status,401);
+  assert.equal(reached,before);
 });
 
 test('streams SSE before completion, cancels on disconnect, and preserves media Range/status/headers', async t => {

@@ -51,6 +51,8 @@ const icons = {
   archive: '<path d="M4 8h16v13H4ZM3 3h18v5H3Zm6 9h6"/>',
   restore: '<path d="M4 10a8 8 0 1 1 1 8M4 4v6h6M12 8v5l3 2"/>',
   trash: '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/>',
+  download: '<path d="M12 4v11m-5-5 5 5 5-5M4 20h16"/>',
+  upload: '<path d="M12 20V9m-5 5 5-5 5 5M4 4h16"/>',
   globe:
     '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>',
   layers: '<path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/>',
@@ -1277,6 +1279,60 @@ $("#bulk-dialog").addEventListener("cancel", (event) => {
 window.addEventListener("hashchange", () => {
   void route();
 });
+
+// Native details keeps the trigger keyboard-accessible; menus share dismissal and viewport placement.
+(() => {
+  const selector = '.script-more-actions,.ai-menu:not(.flow-saved-menu):not(.flow-sort-menu),.rev-menu,.detail-menu,.dir-menu,.home-menu,.perf-menu';
+  const openMenus = () => $$(selector).filter(menu => menu.open);
+  function place(menu) {
+    const panel = menu.querySelector(':scope > div');
+    if (!panel || !menu.open) return;
+    panel.style.setProperty('--menu-shift-x','0px');
+    panel.style.setProperty('--menu-shift-y','0px');
+    const bounds = panel.getBoundingClientRect(), trigger = menu.querySelector('summary').getBoundingClientRect();
+    const edge = 8;
+    const x = Math.max(edge - bounds.left, Math.min(0, innerWidth - edge - bounds.right));
+    let y = 0;
+    if (bounds.bottom > innerHeight - edge) {
+      y = trigger.top - bounds.height - 4 >= edge
+        ? trigger.top - 4 - bounds.bottom
+        : innerHeight - edge - bounds.bottom;
+    }
+    panel.style.setProperty('--menu-shift-x',`${x}px`);
+    panel.style.setProperty('--menu-shift-y',`${y}px`);
+  }
+  document.addEventListener('toggle',event => {
+    const menu = event.target;
+    if (!menu.matches?.(selector) || !menu.open) return;
+    openMenus().forEach(other => {if (other !== menu) other.open = false;});
+    place(menu);
+  },true);
+  window.addEventListener('click',event => {
+    openMenus().forEach(menu => {if (!menu.contains(event.target)) menu.open = false;});
+  },true);
+  document.addEventListener('click',event => {
+    const item = event.target.closest?.('button,a'), menu = item?.closest(selector);
+    if (menu && !item.matches(':disabled,[aria-disabled="true"]')) menu.open = false;
+  });
+  window.addEventListener('keydown',event => {
+    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    const menus = openMenus();
+    if (!menus.length) return;
+    const active = menus.find(menu => menu.contains(document.activeElement)) || menus[menus.length - 1];
+    menus.forEach(menu => {menu.open = false;});
+    active.querySelector('summary').focus();
+    event.preventDefault();
+    event.stopPropagation();
+  },true);
+  let frame = 0;
+  function reposition(event) {
+    if (!openMenus().length || event?.target?.closest?.(`:is(${selector}) > div`)) return;
+    if (!frame) frame = requestAnimationFrame(() => {frame = 0;openMenus().forEach(place);});
+  }
+  window.addEventListener('resize',reposition);
+  document.addEventListener('scroll',reposition,true);
+})();
+
 document.addEventListener("keydown", (event) => {
   if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing)
     return;

@@ -1,7 +1,5 @@
 .library-filter-panel{padding:20px;margin-bottom:20px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
 .library-presets{display:flex;flex-wrap:wrap;gap:7px;padding-bottom:18px;border-bottom:1px solid var(--line)}
-.library-presets button{border:1px solid transparent;padding:8px 12px;border-radius:7px;background:var(--surface-alt);color:var(--muted-soft);font-size:13px}
-.library-presets button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent);background:var(--surface-tint);font-weight:600}
 .library-saved-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin:18px 0}
 .library-saved-row>label,.library-saved-row>div{display:flex;align-items:center;gap:10px}
 .library-saved-row>label>span{font-size:13px;color:var(--muted-soft);white-space:nowrap}
@@ -21,15 +19,11 @@
 /* ---- case library: one search row, a category segment, the rest in the drawer ---- */
 .lib-heading{align-items:flex-end;margin-bottom:20px}
 #content .lib-layout{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--fill);border:0}
-#content .lib-layout button{display:inline-flex;align-items:center;gap:5px;padding:6px 12px;border-radius:8px;background:transparent;color:var(--muted);font-size:13px;font-weight:500;box-shadow:none}
-#content .lib-layout button svg{width:15px;height:15px}
-#content .lib-layout button.active{background:var(--selected-fill);color:var(--ink);box-shadow:0 1px 3px #0000001f}
 #content .lib-toolbar{padding:0;margin:0 0 16px;border:0;background:none;box-shadow:none;display:flex;flex-direction:column;gap:12px}
 .lib-search-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .lib-search-row .search{flex:1 1 280px;max-width:none}
-.lib-search-row .search input{background:var(--fill);border-color:transparent;border-radius:10px}
-.lib-filter-open{gap:7px;padding:10px 14px;border-radius:10px}
-.lib-filter-open svg{width:17px;height:17px}
+.lib-search-row .search input{background:var(--fill);border-color:transparent}
+.lib-filter-open{gap:6px}
 #content .lib-views{display:flex;align-items:center;gap:4px;margin:0;padding:0;border:0}
 #content .lib-views label{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted-soft)}
 #content .lib-views select{border:1px solid transparent;border-radius:8px;background:var(--fill);color:var(--ink);font-size:13px;font-weight:500;padding:6px 8px;min-width:112px;max-width:200px;text-overflow:ellipsis;cursor:pointer}
@@ -39,8 +33,6 @@
 
 #content .lib-views .subtle svg{width:14px;height:14px}
 #content .lib-presets{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;border-radius:10px;background:var(--fill);width:fit-content;max-width:100%;border:0;margin:0}
-#content .lib-presets button{padding:6px 12px;border-radius:8px;border:0;background:transparent;color:var(--muted);font-size:13px;font-weight:500}
-#content .lib-presets button[aria-pressed=true]{background:var(--selected-fill);color:var(--ink);box-shadow:0 1px 3px #0000001f}
 .lib-categories{display:grid;gap:9px;min-width:0;padding-top:2px}
 .lib-category-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .lib-category-heading h2{font-size:12px;font-weight:600;color:var(--muted-soft)}
@@ -48,7 +40,7 @@
 
 .lib-category-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;flex-wrap:wrap}
 #content .lib-category-tabs{min-width:0;flex:0 1 auto}
-#content .lib-category-tabs button{display:inline-flex;align-items:center;gap:7px;min-height:34px;max-width:100%;overflow-wrap:anywhere;white-space:normal;text-align:left}
+#content .lib-category-tabs button{display:inline-flex;align-items:center;gap:7px;min-height:var(--btn-h-sm);max-width:100%;overflow-wrap:anywhere;white-space:normal;text-align:left}
 .lib-category-tabs small{font-size:11px;color:var(--muted-soft);font-variant-numeric:tabular-nums}
 .lib-product-classify{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:100%;margin-left:auto}
 .lib-product-classify>span:first-child{font-size:12px;color:var(--muted-soft);white-space:nowrap}

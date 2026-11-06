@@ -5,21 +5,26 @@ voiceover take stores its audio, the exact text sent and the timing of every mea
 """
 from __future__ import annotations
 
+import base64
+import binascii
 from contextlib import contextmanager
 import copy
 from datetime import datetime
 import difflib
 import hashlib
+import io
 import json
 import math
 import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import threading
 import time
 from uuid import uuid4
+import zipfile
 
 from creation_store import CreationError
 from direction_store import fingerprint, now, product_key
@@ -28,6 +33,7 @@ from production_operations import ProductionOperations, durable_json
 from production_store import (FRAME_RATES, JOB_ID, TAKE_ID, apply_readings, current_manual_receipt, skill_delivery_reviewable,
                               supplement_markdown, take_quality, job_status)
 from subtitle_check import compare, summary
+from workbench_video_publish import campaign_card_text
 from task_activity import activity_label, record_activity, safe_error, settle_resolved_activity
 from variant_parse import parse_variants, same_lines, spoken_lines, variant_directions, variant_script
 
@@ -39,6 +45,7 @@ VOICE_TRACK = 2  # Existing timelines keep source audio on A1 (stereo) and the v
 MAX_LEAD_SECONDS = 10
 QUEUE_GRACE = 5  # Brief DaVinci holds (status reads, clip reveals) end before a build is reported as queued.
 TIMELINE_WAIT = 150 * 60  # As long as an AI edit may hold DaVinci.
+MAX_TIMELINE_FILE = 3 * 1024 * 1024  # A .drt holds edit decisions only; 4 MB JSON bodies carry it base64-encoded.
 OPTION_KEYS = {"code", "name", "fps", "width", "height", "lead_seconds", "markers"}
 
 
@@ -468,6 +475,7 @@ class ProductionWorkbenchMixin:
                     "script": script, "variant": variant, "voices": catalog["voices"], "defaults": catalog["defaults"],
                     "models": copy.deepcopy(MODELS), "default_model": DEFAULT_MODEL, "creators": catalog["settings"]["creators"],
                     "product_settings": self.production.product_settings(catalog, job["product"]),
+                    "material_combos": self.production.material_combos(catalog, job["product"]),
                     "today": datetime.now().strftime("%y%m%d")}
 
     def production_variants(self, task_id, round_id):
@@ -609,7 +617,9 @@ class ProductionWorkbenchMixin:
         """Record manual step-four success without launching or fabricating an AI edit."""
         if not isinstance(body, dict):
             raise VoiceError(400, "成功标记参数格式无效。")
-        return self.production.mutate("job_completion", {**body, "job_id": identifier})
+        result = self.production.mutate("job_completion", {**body, "job_id": identifier})
+        previews = getattr(self, "video_previews", None)
+        return previews.after_confirmation(identifier, result) if previews else result
 
     def _forced_alignment(self, lines, audio_path):
         """Cache the external alignment response; an unknown attempt is never billed again."""
@@ -1040,6 +1050,39 @@ class ProductionWorkbenchMixin:
         check["message"] = summary(check)
         return self.production.mutate("timeline_subtitles", request, check)
 
+    def set_timeline_campaign(self, identifier, body):
+        """Put the campaign's end card on a timeline (its own 活动屏显 track, last seconds), or take it off when the campaign is over.
+        The voice-over never changes: the script's swappable line stays the timeless one."""
+        if not isinstance(body, dict) or body.get("action") not in {"add", "remove"}:
+            raise VoiceError(400, "活动屏显参数无效。")
+        request = {"request_id": body.get("request_id"), "job_id": identifier, "timeline_uid": body.get("timeline_uid"),
+                   "action": body["action"], "text": str(body.get("text") or "").strip()[:300]}
+        prior = self.production.replay("timeline_campaign", request)
+        if prior:
+            return prior
+        job = self.production.job(identifier)
+        record = next((item for item in job.get("timelines", []) if item["unique_id"] == body.get("timeline_uid")), None)
+        if not record:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        if job.get("archived") or record.get("archived"):
+            raise VoiceError(409, "已归档的时间线不能改活动屏显，请先恢复。")
+        where = {"project": record["project"], "unique_id": record["unique_id"], "name": record["name"], **timeline_location(record)}
+        if request["action"] == "remove":
+            done = self.resolve.run("remove_campaign_card", where, timeout=90)
+            message = ("活动屏显已去掉" if done["removed"] else "这条时间线没有活动屏显") + ("" if done["saved"] else "，但工程没有保存，请到达芬奇保存")
+            return self.production.mutate("timeline_campaign", request, {"at": now(), "status": "removed", "text": "", "campaign": None, "message": message})
+        campaign = (self._campaign_now() if hasattr(self, "_campaign_now") else {}).get("running")
+        if not campaign:
+            raise VoiceError(409, "现在没有进行中的活动，不能加活动屏显。活动开始后再加。")
+        lines = hook_lines(request["text"] or campaign_card_text(campaign))
+        if not lines or len(lines) > 2:
+            raise VoiceError(409, "活动屏显最多两行，请先改短。")
+        done = self.resolve.run("add_campaign_card", {**where, "text": "\n".join(lines), "style": ""}, timeout=90)
+        message = ("活动屏显已加" if done["created"] else "活动屏显已更新") if done["saved"] else "活动屏显已写入，但工程没有保存，请到达芬奇保存"
+        return self.production.mutate("timeline_campaign", request, {"at": now(), "status": "saved" if done["saved"] else "unsaved", "text": " / ".join(lines),
+                                                                     "campaign": {key: campaign[key] for key in ("name", "start", "end")},
+                                                                     "start": done["start"], "end": done["end"], "message": message})
+
     def add_timeline_hook(self, identifier, body):
         """Put the order's opening hook on a timeline as Text+; clicking again rewrites it with the order's current wording."""
         if not isinstance(body, dict):
@@ -1058,10 +1101,136 @@ class ProductionWorkbenchMixin:
         lines = hook_lines(request["text"] or (self._video_publish_copy(job) or {}).get("screen_en") or "")
         if not lines:
             raise VoiceError(409, "这张制作单还没有开头屏显。")
-        if len(lines) > 2:
-            raise VoiceError(409, "开头屏显最多两行，请先改短。")
+        if len(lines) > 3:
+            raise VoiceError(409, "开头屏显最多三行，请先改短。")
         where = {"project": record["project"], "unique_id": record["unique_id"], "name": record["name"], **timeline_location(record)}
         done = self.resolve.run("add_hook", {**where, "text": "\n".join(lines), "style": request["style"]}, timeout=90)
         message = ("屏显已加" if done["created"] else "屏显已更新") if done["saved"] else "屏显已写入，但工程没有保存，请到达芬奇保存"
         return self.production.mutate("timeline_hook", request, {"at": now(), "status": "saved" if done["saved"] else "unsaved", "created": done["created"],
                                                                  "text": " / ".join(lines), "start": done["start"], "end": done["end"], "message": message})
+
+    def import_home_timeline(self, identifier, body):
+        """Put a timeline cut on another computer (an uploaded .drt) in place of one of the order's timelines.
+
+        DaVinci gets it as a new timeline next to the old one, linked to this computer's media; a timeline with offline
+        clips is never recorded. The old timeline is archived, not deleted, so it can be restored."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        try:
+            raw = base64.b64decode(str(body.get("data") or ""), validate=True)
+        except (ValueError, binascii.Error):
+            raise VoiceError(400, "时间线文件没有完整上传，请重新选择。")
+        if not raw or len(raw) > MAX_TIMELINE_FILE:
+            raise VoiceError(413, "时间线文件为空或超过 3 MB；只上传达芬奇导出的 .drt，不要带素材。")
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                names = archive.namelist()
+        except zipfile.BadZipFile:
+            names = []
+        if not any(name.startswith("SeqContainer/") for name in names):
+            raise VoiceError(400, "这不是达芬奇时间线文件。请在达芬奇里用「文件 → 导出 → 时间线」导出 .drt 再上传。")
+        request = {"request_id": body.get("request_id"), "job_id": identifier, "timeline_uid": body.get("timeline_uid"),
+                   "file_sha256": hashlib.sha256(raw).hexdigest(), "file_name": str(body.get("file_name") or "")[:200]}
+        prior = self.production.replay("timeline_import", request)
+        if prior:
+            return prior
+        job = self.production.job(identifier)
+        record = next((item for item in job.get("timelines", []) if item["unique_id"] == request["timeline_uid"]), None)
+        if not record:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        if job.get("archived") or record.get("archived"):
+            raise VoiceError(409, "已归档的时间线不能替换，请先恢复。")
+        if any(edit.get("timeline_uid") == record["unique_id"] and edit.get("status") == "running" for edit in job.get("edits", [])):
+            raise VoiceError(409, "这条时间线的 AI 剪辑还在运行，结束后再替换。")
+        folder = self.production.root / "timeline-imports" / identifier
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{uuid4().hex}.drt"
+        path.write_bytes(raw)
+        where = {"project": record["project"], "unique_id": record["unique_id"], "name": f"{record['name']}-家里", **timeline_location(record)}
+        take = next((item for item in job.get("takes", []) if item["id"] == record.get("take_id")), None) or {}
+        result = self.resolve.run("import_timeline", {**where, "file": str(path.resolve()), "voice_track": VOICE_TRACK,
+                                                      "take_seconds": take.get("duration") or 0,
+                                                      "home_voice_seconds": voice_file_seconds(raw)}, timeout=180)
+        warnings = list(result.get("warnings") or [])
+        missing = [str(font)[:100] for font in result.get("missing_fonts") or []]
+        if missing:
+            warnings.append(f"这台电脑没装屏显用的字体：{'、'.join(missing)}，达芬奇会用别的字体代替，导出前请装上。")
+        if result.get("voice_relinked"):
+            warnings.append("配音按文件名接到了别的单的配音，已换回这张单的配音，位置和长度照家里剪的。")
+        if not result.get("saved"):
+            warnings.append("工程没有保存，请到达芬奇保存。")
+        new = {key: copy.deepcopy(record[key]) for key in ("project", "creator", "take_id", "width", "height", "lead_frames",
+                                                           "group_markers", "materials", "folder", "project_id") if key in record}
+        new.update(name=result["name"], unique_id=result["unique_id"], fps=result.get("fps") or record.get("fps"),
+                   frames=result["end_frame"] - result["start_frame"], markers=0, warnings=warnings, built_at=now(),
+                   saved=result.get("saved") is True, imported_from={"timeline_uid": record["unique_id"], "timeline_name": record["name"],
+                                                                     "file_name": request["file_name"], "file_sha256": request["file_sha256"],
+                                                                     "clips": result.get("clips"), "fonts": result.get("fonts") or []},
+                   **{key: result[key] for key in ("folder", "project_id") if result.get(key)})
+        return self.production.mutate("timeline_import", request, new)
+
+    def export_timeline_file(self, identifier, uid):
+        """One of the order's timelines as a ZIP: the .drt and the voiceover its voice track plays, under the file name it
+        has here. Unpacked on another computer that has the same footage, the timeline opens with its voice linked, and
+        it comes back linked to the same file. Only voiceovers kept by the workbench travel; footage never does."""
+        job = self.production.job(identifier)
+        record = next((item for item in job.get("timelines", []) if item["unique_id"] == uid), None)
+        if not record:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        folder = self.production.root / "timeline-exports"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{uuid4().hex}.drt"
+        where = {"project": record["project"], "unique_id": record["unique_id"], "name": record["name"], **timeline_location(record)}
+        try:
+            result = self.resolve.run("export_drt", {**where, "file": str(path.resolve()), "voice_track": VOICE_TRACK}, timeout=120)
+            content = path.read_bytes() if path.is_file() else b""
+        finally:
+            path.unlink(missing_ok=True)
+        if not content or len(content) > MAX_TIMELINE_FILE:
+            raise VoiceError(409, "导出的时间线文件为空或超过 3 MB，请在达芬奇里手动导出。")
+        audio_root = self.production.audio.resolve()
+        voices, skipped = [], []
+        for value in result.get("voice_files") or []:
+            file = Path(str(value)).resolve()
+            if file.is_relative_to(audio_root) and file.is_file() and file.suffix.lower() in {".wav", ".mp3"}:
+                voices.append(file)
+            else:
+                skipped.append(Path(str(value)).name)
+        name = record["name"]
+        guide = [f"{name}：在另一台电脑接着剪", "",
+                 "1. 把配音文件拖进达芬奇媒体池（文件名不要改）。",
+                 f"2. 用「文件 → 导入 → 时间线」打开 {name}.drt，素材和配音会按文件名自动接上。",
+                 "3. 剪好后用「文件 → 导出 → 时间线」存成 .drt，在工作台这条时间线上点「换成家里剪的」上传。"]
+        if skipped:
+            guide += ["", f"这些配音不在工作台的配音目录里，没有打包：{'、'.join(skipped)}。"]
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(f"{name}.drt", content)
+            for file in voices:
+                archive.write(file, file.name)
+            archive.writestr("说明.txt", "\r\n".join(guide))
+        return output.getvalue(), f"{name}.zip"
+
+VOICE_CLIP = re.compile(r"<Sm2TiAudioClip[ >].*?</Sm2TiAudioClip>", re.S)
+
+
+def voice_file_seconds(raw):
+    """How long the other computer's voiceover files are, read from a .drt: audio clips named voiceover.*, whose media
+    time map records the file's length in seconds. Only files named that way are carried voiceovers; nothing else is read."""
+    seconds = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            for name in archive.namelist():
+                if not name.startswith("SeqContainer/"):
+                    continue
+                text = archive.read(name).decode("utf-8", "replace")
+                for clip in VOICE_CLIP.findall(text):
+                    title = re.search(r"<Name>([^<]*)</Name>", clip)
+                    timemap = re.search(r"<MediaTimemapBA>02([0-9a-fA-F]{16})</MediaTimemapBA>", clip)
+                    if title and timemap and title.group(1).casefold().startswith("voiceover"):
+                        value = struct.unpack(">d", bytes.fromhex(timemap.group(1)))[0]
+                        if 0 < value < 3600:
+                            seconds.append(round(value, 3))
+    except (zipfile.BadZipFile, KeyError, ValueError, struct.error):
+        return []
+    return seconds

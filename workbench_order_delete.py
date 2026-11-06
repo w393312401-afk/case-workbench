@@ -46,6 +46,9 @@ class OrderDeleteMixin:
         audio = root / "audio" / job["id"]
         if _safe_folder(audio, root / "audio"):
             folders.append(audio)
+        previews = root / "video-previews" / job["id"]
+        if _safe_folder(previews, root / "video-previews"):
+            folders.append(previews)
         for edit in job.get("edits", []):
             if EDIT_ID.fullmatch(str(edit.get("id"))):
                 folder = root / "edits" / edit["id"]
@@ -95,9 +98,9 @@ class OrderDeleteMixin:
                 not self._production_operations().recovery_file(record).exists())
 
     def _job_blockers(self, job):
-        previews = getattr(self, "preview_exports", None)
-        if previews and previews.busy(job["id"]):
-            return "这张制作单正在导出视频预览，请完成后再删除。"
+        for manager in (getattr(self, "preview_exports", None), getattr(self, "video_previews", None)):
+            if manager and manager.busy(job["id"]):
+                return "这张制作单正在导出视频预览，请完成后再删除。"
         notion = getattr(self, "notion_uploads", None)
         if notion and notion.busy(job["id"]):
             return "这张制作单正在上传到 Notion，请等它结束。"
@@ -244,9 +247,9 @@ class OrderDeleteMixin:
         return folders, files
 
     def _timeline_blockers(self, job, timeline):
-        previews = getattr(self, "preview_exports", None)
-        if previews and previews.busy(job["id"]):
-            return "这张制作单正在导出视频预览，请完成后再删除时间线。"
+        for manager in (getattr(self, "preview_exports", None), getattr(self, "video_previews", None)):
+            if manager and manager.busy(job["id"]):
+                return "这张制作单正在导出视频预览，请完成后再删除时间线。"
         with self.lock:
             self._edits()
             for edit in timeline_edits(job, timeline):

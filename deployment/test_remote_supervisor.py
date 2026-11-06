@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -75,6 +76,10 @@ class RemoteSupervisorTests(unittest.TestCase):
         (self.runtime / "config.json").write_text(json.dumps(self.config), encoding="utf-8")
         (self.runtime / "tunnel-token.txt").write_text("fixture-token", encoding="utf-8")
         self.settings = supervisor.load_settings(self.root)
+        self.real_probe = supervisor.probe_tunnel
+        probe_patch = patch.object(supervisor, "probe_tunnel", return_value=True)
+        probe_patch.start()
+        self.addCleanup(probe_patch.stop)
 
     def files(self):
         return {path.relative_to(self.root): path.read_bytes() for path in self.root.rglob("*") if path.is_file()}
@@ -170,7 +175,11 @@ class RemoteSupervisorTests(unittest.TestCase):
         service = supervisor.Supervisor(settings, spawn=spawn, job=Job())
         with patch.object(service.wakeup, "wait", side_effect=lambda _timeout: service.stop_event.set()):
             service.run()
-        self.assertEqual(commands, [settings.commands()[kind] for kind in settings.child_kinds()])
+        tunnel_command = commands[-1]
+        metrics = tunnel_command[tunnel_command.index("--metrics") + 1]
+        self.assertEqual(metrics.split(":")[0], "127.0.0.1")
+        self.assertGreater(int(metrics.split(":")[1]), 0)
+        self.assertEqual(commands, [settings.commands(tunnel_metrics=metrics)[kind] for kind in settings.child_kinds()])
         self.assertEqual(joined, created)
         self.assertEqual(len(created), 3)
         self.assertTrue(all(process.terminated for process in created))
@@ -415,6 +424,9 @@ class RemoteSupervisorTests(unittest.TestCase):
         self.assertEqual(command[command.index("--token-file") + 1], str(self.settings.token))
         self.assertEqual(command[command.index("--config") + 1], str(self.runtime / "cloudflared.yml"))
         self.assertNotIn("fixture-token", command)
+        # Connector diagnostics stay inside this workbench's private runtime directory.
+        self.assertEqual(command[command.index("--log-directory") + 1], str(self.runtime / "cloudflared-logs"))
+        self.assertEqual(command[command.index("--loglevel") + 1], "warn")
         with patch.dict(os.environ, {"TUNNEL_TOKEN": "another-app-token", "TUNNEL_CONFIG": "another-app.yml",
                                      "ALL_PROXY": "http://outside.example:1", "HTTPS_PROXY": "http://outside.example:2"}):
             connector = self.settings.environment("tunnel")
@@ -455,6 +467,149 @@ class RemoteSupervisorTests(unittest.TestCase):
         self.assertTrue(created[0].terminated)
         self.assertFalse(unrelated.terminated)
         self.assertTrue(all(child["process"] is None for child in service.children.values()))
+
+    def test_disconnected_live_tunnel_restarts_without_touching_proxy_or_guest(self):
+        self.guest_config()
+        settings = supervisor.load_settings(self.root)
+        now, connected, created, probed = [0.0], [True], [], []
+
+        def spawn(*args, **kwargs):
+            process = FakeProcess()
+            created.append(process)
+            return process
+
+        def probe(port):
+            probed.append(port)
+            return connected[0]
+
+        unrelated = FakeProcess()
+        service = supervisor.Supervisor(settings, clock=lambda: now[0], spawn=spawn, probe=probe)
+        self.addCleanup(service.stop_children)
+        service.tick()
+        guest, proxy, tunnel = created
+        metrics_port = service.tunnel_metrics_port
+        now[0] = 1
+        service.tick()
+        self.assertTrue(service.status()["tunnel_connected"])
+        now[0] = 120
+        service.tick()
+        connected[0] = False
+        now[0] = 135
+        service.tick()
+        self.assertEqual(service.state, "tunnel_disconnected")
+        self.assertFalse(service.status()["tunnel_connected"])
+        self.assertEqual(service.status()["tunnel_failed_checks"], 1)
+        now[0] = 135.5
+        service.tick()
+        self.assertEqual(len(probed), 3, "checks must be throttled independently of the run loop")
+        now[0] = 150
+        service.tick()
+        self.assertFalse(tunnel.terminated)
+        now[0] = 165
+        with self.assertLogs(service.logger, level="WARNING") as captured:
+            service.tick()
+        self.assertIn("tunnel_unhealthy checks=3", "\n".join(captured.output))
+        self.assertTrue(tunnel.terminated)
+        self.assertIsNone(service.children["tunnel"]["process"])
+        self.assertEqual(service.children["tunnel"]["retry_at"], 166)
+        self.assertTrue(all(port == metrics_port for port in probed))
+        self.assertFalse(guest.terminated)
+        self.assertFalse(proxy.terminated)
+        self.assertFalse(unrelated.terminated)
+        connected[0] = True
+        now[0] = 166
+        service.tick()
+        replacement = service.children["tunnel"]["process"]
+        self.assertIsNot(replacement, tunnel)
+        self.assertIsNone(service.status()["tunnel_connected"])
+        now[0] = 167
+        service.tick()
+        self.assertTrue(service.status()["tunnel_connected"])
+        self.assertEqual(service.state, "children_running")
+        self.assertIs(service.children["proxy"]["process"], proxy)
+        self.assertIs(service.children["guest_snapshot"]["process"], guest)
+
+    def test_tunnel_startup_grace_and_repeated_unready_backoff(self):
+        now, created = [0.0], []
+
+        def spawn(*args, **kwargs):
+            process = FakeProcess()
+            created.append(process)
+            return process
+
+        service = supervisor.Supervisor(self.settings, clock=lambda: now[0], spawn=spawn, probe=lambda port: False)
+        self.addCleanup(service.stop_children)
+        service.tick()
+        tunnel = created[1]
+        for now[0] in (1, 16, 31, 46):
+            service.tick()
+            self.assertFalse(tunnel.terminated, "allow the connector one minute to establish its first connection")
+        now[0] = 61
+        service.tick()
+        self.assertTrue(tunnel.terminated)
+        self.assertEqual(service.children["tunnel"]["failures"], 1)
+        now[0] = 62
+        service.tick()
+        for now[0] in (63, 78, 93, 108, 123):
+            service.tick()
+        self.assertEqual(service.children["tunnel"]["failures"], 2)
+        self.assertEqual(service.children["tunnel"]["retry_at"], 125)
+        self.assertFalse(created[0].terminated)
+
+    def test_transient_tunnel_outage_recovers_without_restart(self):
+        now, connected = [0.0], [True]
+        service = supervisor.Supervisor(self.settings, clock=lambda: now[0],
+                                        spawn=lambda *args, **kwargs: FakeProcess(), probe=lambda port: connected[0])
+        self.addCleanup(service.stop_children)
+        service.tick()
+        tunnel = service.children["tunnel"]["process"]
+        now[0] = 1
+        service.tick()
+        connected[0] = False
+        for now[0] in (76, 91):
+            service.tick()
+        self.assertEqual(service.tunnel_failed_checks, 2)
+        connected[0] = True
+        now[0] = 106
+        service.tick()
+        self.assertIs(service.children["tunnel"]["process"], tunnel)
+        self.assertFalse(tunnel.terminated)
+        self.assertEqual(service.tunnel_failed_checks, 0)
+        self.assertTrue(service.status()["tunnel_connected"])
+        self.assertEqual(service.state, "children_running")
+
+    def test_readiness_probe_uses_local_endpoint_and_rejects_invalid_or_unready_responses(self):
+        reply = [200, b'{"readyConnections":2}']
+        paths = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                paths.append(self.path)
+                self.send_response(reply[0])
+                self.send_header("Content-Length", str(len(reply[1])))
+                self.send_header("Location", "https://must-not-follow.invalid/")
+                self.end_headers()
+                self.wfile.write(reply[1])
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+        with patch.dict(os.environ, {"HTTP_PROXY": "http://must-not-use.invalid:1", "NO_PROXY": ""}):
+            self.assertTrue(self.real_probe(port))
+            for status, body in ((503, b'{"readyConnections":0}'), (200, b'{"readyConnections":0}'),
+                                 (200, b'{"readyConnections":true}'), (200, b'[]'), (200, b'invalid'),
+                                 (200, b'x' * 4097), (302, b'{"readyConnections":2}')):
+                with self.subTest(status=status, body=body[:40]):
+                    reply[:] = [status, body]
+                    self.assertFalse(self.real_probe(port))
+        self.assertTrue(all(path == "/ready" for path in paths))
+        with patch.object(supervisor.http.client.HTTPConnection, "request", side_effect=TimeoutError("fixture-secret")):
+            self.assertFalse(self.real_probe(port))
 
     def test_instance_stop_request_and_process_lock_prevent_cross_instance_stop(self):
         service = supervisor.Supervisor(self.settings)

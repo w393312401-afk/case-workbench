@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from uuid import uuid4
 
-from content_management import ContentManagementStore, build_content_items
+from datetime import date
+
+from content_management import ContentManagementStore, _finished, build_content_items
 from content_naming import content_heading, content_title, task_topic_hint, variant_labels
 from creation_store import CreationError
 from direction_store import fingerprint
@@ -220,6 +222,54 @@ class ContentQueueTests(unittest.TestCase):
         self.assertEqual(posted["stage"], "published")
         self.assertTrue(posted["history"])
 
+    def test_posted_videos_finish_seven_days_after_posting_and_skipped_ones_at_once(self):
+        today = date(2026, 11, 5)
+        self.assertFalse(_finished("video", "published", "2026-10-30", False, today))
+        self.assertTrue(_finished("video", "published", "2026-10-29", False, today))
+        self.assertTrue(_finished("video", "skipped", "", False, today))
+        self.assertFalse(_finished("video", "published", "2026-10-01", True, today))
+        self.assertFalse(_finished("video", "awaiting_publication", "", False, today))
+        self.assertFalse(_finished("script", "published", "2026-10-01", False, today))
+        self.assertFalse(_finished("video", "published", "bad-date", False, today))
+
+    def test_uploaded_to_notion_is_done_but_stays_in_the_full_list(self):
+        marks = {"video:PRD-one": {"calendar_uploaded": True, "updated_at": "x"},
+                 "video:PRD-two": {"calendar_uploaded": True, "updated_at": "x"}}
+        rows = {row["id"]: row for row in self.queue(jobs=[job(status="approved"), job("PRD-two", status="awaiting_review")],
+                                                     management={"items": marks})}
+        done = rows["video:PRD-one"]
+        self.assertEqual((done["stage"], done["stage_label"]), ("uploaded", "完成"))
+        self.assertTrue(done["history"])
+        self.assertFalse(done["finished"])
+        self.assertFalse(done["needs_attention"])
+        # Unfinished work is not settled by an early calendar mark.
+        self.assertEqual(rows["video:PRD-two"]["stage"], "awaiting_review")
+
+    def test_an_order_with_several_timelines_is_done_only_when_each_is_uploaded(self):
+        lines = [{"unique_id": "uid-old", "take_id": "TAK-one"}, {"unique_id": "uid-new", "take_id": "TAK-one"}]
+        order = job(status="approved", selected_take="TAK-one", timelines=lines)
+        marks = {"video:PRD-one": {"calendar_uploaded": True, "updated_at": "x"}}
+        row = self.queue(jobs=[order], management={"items": marks})[0]
+        self.assertEqual(row["stage"], "awaiting_publication")
+        marks["video:PRD-one_tl_uid-old"] = {"calendar_uploaded": True, "updated_at": "x"}
+        row = self.queue(jobs=[order], management={"items": marks})[0]
+        self.assertEqual((row["stage"], row["stage_label"]), ("uploaded", "完成"))
+
+    def test_skip_mark_settles_only_a_finished_unposted_video(self):
+        marks = {"video:PRD-one": {"skip_publish": True, "skip_reason": "开头不行", "updated_at": "x"},
+                 "video:PRD-two": {"skip_publish": True, "updated_at": "x"}}
+        rows = {row["id"]: row for row in self.queue(jobs=[job(status="approved"), job("PRD-two", status="awaiting_review")],
+                                                     management={"items": marks})}
+        skipped = rows["video:PRD-one"]
+        self.assertEqual((skipped["stage"], skipped["stage_label"], skipped["skip_reason"]), ("skipped", "不发了", "开头不行"))
+        self.assertTrue(skipped["finished"])
+        self.assertTrue(skipped["history"])
+        self.assertFalse(skipped["needs_attention"])
+        # A reopened edit shows its real stage again; the old mark does not hide it.
+        self.assertEqual(rows["video:PRD-two"]["stage"], "awaiting_review")
+        self.assertFalse(rows["video:PRD-two"]["finished"])
+        self.assertEqual(rows["video:PRD-two"]["skip_reason"], "")
+
     def test_timeline_building_and_material_verification_have_correct_next_steps(self):
         waiting = job(timeline_building={"stage": "waiting", "progress": "等待达芬奇建线"})
         original = copy.deepcopy(waiting)
@@ -373,6 +423,16 @@ class ContentManagementStoreTests(unittest.TestCase):
         self.assertFalse(self.store.path.exists())
         self.store.mutate(self.body({"archived": False}))
         self.assertFalse(self.store.public()["items"]["task:AIT-one"]["archived"])
+
+
+    def test_skip_mark_takes_a_switch_and_a_short_reason(self):
+        for patch in ({"skip_publish": "yes"}, {"skip_reason": 3}, {"skip_reason": "长" * 201}):
+            with self.subTest(patch=patch), self.assertRaises(CreationError) as error:
+                self.store.mutate(self.body(patch))
+            self.assertEqual(error.exception.status, 400)
+        self.store.mutate(self.body({"skip_publish": True, "skip_reason": "同方向已发过"}))
+        entry = self.store.public()["items"]["task:AIT-one"]
+        self.assertEqual((entry["skip_publish"], entry["skip_reason"]), (True, "同方向已发过"))
 
     def test_unknown_entry_and_corrupt_store_fail_without_overwriting(self):
         with self.assertRaises(CreationError) as unknown:

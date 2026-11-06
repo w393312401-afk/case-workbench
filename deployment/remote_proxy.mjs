@@ -292,18 +292,28 @@ async function sendGuest(request, response, guestView, hostname) {
   response.end(request.method === 'HEAD' ? undefined : Buffer.from(await result.arrayBuffer()));
 }
 
-function staticCachePolicy(request, incoming) {
-  if (!['GET', 'HEAD'].includes(request.method) || ![200, 304].includes(incoming.statusCode)
+function browserCachePolicy(request, incoming) {
+  if (!['GET', 'HEAD'].includes(request.method) || ![200, 206, 304].includes(incoming.statusCode)
       || incoming.headers['set-cookie']) return 'private, no-store';
   const url = new URL(request.url, 'http://localhost');
+  const policy = incoming.headers['cache-control'];
+  const type = String(incoming.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  // Versioned preview videos keep their bytes in this authenticated browser session.
+  // Vary: Cookie below separates accounts and renewed sessions; shared edge caches stay disabled.
+  if (/^\/api\/production\/jobs\/PRD-[a-f0-9]{12}\/preview\/video$/.test(url.pathname)
+      && [...url.searchParams.keys()].length === 2 && url.searchParams.getAll('timeline').length === 1
+      && /^[A-Za-z0-9-]{1,128}$/.test(url.searchParams.get('timeline') || '')
+      && url.searchParams.getAll('version').length === 1
+      && /^(?:[a-f0-9]{12}|existing-[a-f0-9]{16})(?:-web1)?$/.test(url.searchParams.get('version') || '')
+      && (incoming.statusCode === 304 || type === 'video/mp4')
+      && policy === 'private, max-age=31536000, immutable') return policy;
+  if (incoming.statusCode === 206) return 'private, no-store';
   // Cache program assets only. Documents, business data, downloads and errors
   // can change with the signed-in user and must never inherit this policy.
   const match = /^\/[A-Za-z0-9_-]+\.(js|css|svg)$/.exec(url.pathname);
   if (!match) return 'private, no-store';
-  const type = String(incoming.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   const types = { js: ['text/javascript', 'application/javascript'], css: ['text/css'], svg: ['image/svg+xml'] };
   if (incoming.statusCode !== 304 && !types[match[1]].includes(type)) return 'private, no-store';
-  const policy = incoming.headers['cache-control'];
   if (policy === 'private, no-cache') return policy;
   const versions = url.searchParams.getAll('v');
   if (policy === 'private, max-age=31536000, immutable' && versions.length === 1 && /^[a-f0-9]{12}$/.test(versions[0])) return policy;
@@ -372,6 +382,7 @@ export function createRemoteProxy(config, { resolveKey, upstream, now = Date.now
           if (guestDocument && error.status === 401) { await sendGuest(request, response, guestView, config.hostname); return; }
           throw error;
         }
+        if (user.cookie) response.setHeader('set-cookie', user.cookie);
         if (pathname === '/auth/session' && request.method === 'GET') {
           jsonResponse(response, { authenticated: true, username: user.username }); return;
         }
@@ -400,7 +411,12 @@ export function createRemoteProxy(config, { resolveKey, upstream, now = Date.now
       response.once('close', () => { if (!response.writableFinished) close(); });
       forwarded.once('response', incoming => {
         const outgoingHeaders = filterHeaders(incoming.headers);
-        outgoingHeaders['cache-control'] = staticCachePolicy(request, incoming);
+        outgoingHeaders['cache-control'] = browserCachePolicy(request, incoming);
+        const renewedCookie = response.getHeader('set-cookie');
+        if (renewedCookie) {
+          outgoingHeaders['set-cookie'] = [].concat(outgoingHeaders['set-cookie'] || [], renewedCookie);
+          outgoingHeaders['cache-control'] = 'private, no-store';
+        }
         outgoingHeaders.vary = [...new Set(String(outgoingHeaders.vary || '').split(',').map(value => value.trim()).filter(Boolean).concat('Cookie'))].join(', ');
         if (typeof outgoingHeaders.location === 'string' && outgoingHeaders.location.startsWith(`${target.origin}/`)) {
           outgoingHeaders.location = `https://${config.hostname}${outgoingHeaders.location.slice(target.origin.length)}`;

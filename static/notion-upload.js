@@ -5,6 +5,20 @@ window.NotionUpload = (() => {
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const url = id => `/api/production/jobs/${encodeURIComponent(id)}/notion`;
   const link = receipt => receipt?.page_id && /^[a-f0-9-]{32,36}$/i.test(receipt.page_id) ? `https://www.notion.so/${receipt.page_id.replaceAll('-','')}` : '';
+  // Option text: the headline the post uses, then its Chinese reading for the eye only.
+  const titleLabel = (title,zh) => title.split('#')[0].trim() + (zh ? `｜${zh}` : '');
+  // Missing readings are made once and saved (shared with 成片与发布); uploading never waits for them.
+  async function fillTitleChinese(dialog,job,api,data) {
+    const titles = data.copy?.titles || [];
+    if (!titles.length || data.copy.titles_zh?.every(Boolean)) return;
+    let chinese = [];
+    try {chinese = (await api(`/api/production/jobs/${encodeURIComponent(job.id)}/publication/title-zh`,{method:'POST',body:{}})).titles_zh || [];} catch {return;}
+    if (!dialog.isConnected) return;
+    data.copy.titles_zh = chinese;
+    dialog.querySelectorAll('[data-notion-title-choice] option').forEach(option => {option.textContent = titleLabel(titles[Number(option.value)],chinese[Number(option.value)]);});
+    const single = dialog.querySelector('[data-notion-title-zh]');
+    if (single && chinese[0]) single.textContent = '中文：' + chinese[0];
+  }
   const markup = uid => `<div class="notion-upload" data-notion-upload="${esc(uid)}"><button type="button" class="secondary compact" data-notion-open>上传到 Notion</button><span data-notion-status role="status"></span><a data-notion-link target="_blank" rel="noopener noreferrer" hidden>查看 Notion</a></div>`;
   function render(root,data) {
     const receipt = data.receipt, busy = receipt?.status === 'running';
@@ -27,11 +41,11 @@ window.NotionUpload = (() => {
     const pickedDay = host.querySelector('[data-calendar-plan] input[type="date"]')?.value;
     dialog.innerHTML = `<form><div class="dialog-heading"><h2>${esc(receipt?.page_id ? '更新到 Notion' : '上传到 Notion')}</h2><button type="button" class="icon-button" data-close aria-label="关闭">×</button></div>
       <div class="script-editor-body notion-upload-fields"><p class="context-note">${esc(data.name)} → ${esc(data.destination)}。成片存入「文件和媒体」，正文放中英文案和钩子屏显。</p>
-      <div class="notion-upload-connection"><span data-connection-status role="status">正在检查 Notion 连接…</span><button type="button" class="secondary compact" data-notion-connect hidden>连接 Notion</button><a data-notion-authorize target="_blank" rel="noopener noreferrer" hidden>前往 Notion 授权</a></div>
-      <label class="field"><span>本地成片完整路径</span><input name="file_path" required maxlength="2000" value="${esc(data.file_path)}" placeholder="C:\\Videos\\最终成片.mp4"></label>
+      <div class="notion-upload-connection"><span data-connection-status role="status">正在检查 Notion 连接…</span><button type="button" class="secondary compact" data-notion-connect hidden>连接 Notion</button><button type="button" class="secondary compact" data-notion-recheck hidden>重新检查</button><a data-notion-authorize target="_blank" rel="noopener noreferrer" hidden>前往 Notion 授权</a></div>
+      <label class="field"><span>本地成片完整路径</span><input name="file_path" required maxlength="2000" value="${esc(data.file_path)}" placeholder="C:\\Videos\\最终成片.mp4"></label>${data.file_path ? '' : '<p class="context-note">还没找到这条时间线导出的成片：先在「视频预览」里导出，或填本地文件的完整路径。</p>'}
       <p class="context-note">超过 20 MiB 会生成上传版，本地高清原件保留。</p>
       <div class="form-row"><label class="field"><span>发布日期</span><input name="published_on" type="date" required value="${esc(pickedDay || data.published_on)}"></label><label class="field"><span>发布账号</span><input name="account" required maxlength="200" value="${esc(data.account)}" placeholder="Notion 账号列表里的用户名"></label></div>
-      ${titles.length > 1 ? `<label class="field"><span>选择发布标题</span><select data-notion-title-choice>${titles.map((title,index) => `<option value="${index}">${esc(title.split('#')[0])}</option>`).join('')}</select></label>` : ''}
+      ${titles.length > 1 ? `<label class="field"><span>选择发布标题</span><select data-notion-title-choice>${titles.map((title,index) => `<option value="${index}">${esc(titleLabel(title,data.copy?.titles_zh?.[index]))}</option>`).join('')}</select></label>` : titles.length ? `<p class="context-note" data-notion-title-zh>${esc(data.copy?.titles_zh?.[0] ? '中文：' + data.copy.titles_zh[0] : '')}</p>` : ''}
       <label class="field"><span>标题＋tags</span><textarea name="title" rows="3" required maxlength="2000">${esc(receipt?.title || titles[0] || '')}</textarea></label>
       <div class="form-row"><label class="field"><span>钩子屏显</span><textarea name="screen_en" rows="2" maxlength="300">${esc(timeline?.hook_overlay?.text || data.copy?.screen_en || '')}</textarea></label><label class="field"><span>屏显中文</span><textarea name="screen_zh" rows="2" maxlength="300">${esc(data.copy?.screen_zh || '')}</textarea></label></div>
       <details><summary>查看上传的中英文案</summary><h4>英文文案</h4><pre>${esc(data.copy?.en || '')}</pre><h4>中文文案</h4><pre>${esc(data.copy?.zh || '尚未补充中文文案')}</pre></details>
@@ -62,6 +76,7 @@ window.NotionUpload = (() => {
           request = null;const result = dialog.querySelector('[data-notion-result]');result.href = link(current);result.hidden = false;
           progress.textContent = current.warning || '已上传到 Notion。';
           if (typeof toast === 'function') toast('已上传到 Notion。');
+          window.VideoPublication?.markNotionUploaded?.(host,data.timeline_uid);
           // The selected timeline's own marker changes, preserving any typed post ID.
           if (host.querySelector('[data-notion-upload]')?.dataset.notionUpload === data.timeline_uid) {
             const mark = host.querySelector('[data-calendar-toggle]');
@@ -71,22 +86,30 @@ window.NotionUpload = (() => {
               void window.VideoPublication.bindCalendarPlan(host,data.content_id,api,{form:host.querySelector('.video-publication-form')});
             }
           }
-        } else fail(new Error(current?.error || '上传中断，可重试恢复。'));
+        } else {
+          fail(new Error(current?.error || '上传中断，可重试恢复。'));
+          // A failed upload may have cleared the remembered connection; show the real state again.
+          if (/连接|授权/.test(current?.error || '')) void checkConnection();
+        }
       } catch (problem) {fail(problem);pollTimer = setTimeout(watch,3000);}
     };
-    const checkConnection = async () => {
+    const checkConnection = async (refresh = false) => {
       if (!dialog.isConnected) return;
-      const note = dialog.querySelector('[data-connection-status]'), connect = dialog.querySelector('[data-notion-connect]'), authorize = dialog.querySelector('[data-notion-authorize]');
+      const note = dialog.querySelector('[data-connection-status]'), connect = dialog.querySelector('[data-notion-connect]'), authorize = dialog.querySelector('[data-notion-authorize]'), recheck = dialog.querySelector('[data-notion-recheck]');
+      if (refresh) {note.textContent = '正在检查 Notion 连接…';recheck.hidden = true;}
       try {
-        const state = await api('/api/notion/connection');
+        // The workbench remembers a confirmed connection, so this normally answers at once.
+        const state = await api(refresh ? '/api/notion/connection?refresh=1' : '/api/notion/connection');
         connected = state.status === 'connected';updateSubmit();
+        recheck.hidden = !connected;
         note.textContent = state.status === 'connected' ? 'Notion 已连接' : state.error || '请连接 Notion，并允许访问发布日历。';
         connect.hidden = state.status === 'connected';connect.disabled = false;
         if (state.authorization_url && /^https:\/\//.test(state.authorization_url)) {authorize.href = state.authorization_url;authorize.hidden = false;}
         else authorize.hidden = true;
-        if (state.status === 'waiting' || state.status === 'preparing') connectionTimer = setTimeout(checkConnection,2000);
+        if (state.status === 'waiting' || state.status === 'preparing') connectionTimer = setTimeout(() => checkConnection(),2000);
       } catch (problem) {connected = false;updateSubmit();note.textContent = problem.message || '连接检查未完成。';connect.hidden = false;connect.disabled = false;}
     };
+    dialog.querySelector('[data-notion-recheck]').onclick = () => void checkConnection(true);
     dialog.querySelector('[data-notion-connect]').onclick = async event => {
       event.currentTarget.disabled = true;error.hidden = true;
       try {const state = await api('/api/notion/connect',{method:'POST',body:{}});if (state.error) throw new Error(state.error);await checkConnection();}
@@ -95,6 +118,7 @@ window.NotionUpload = (() => {
     if (!data.configured) fail(new Error('请先在本机配置 Notion 发布日历地址。'));
     if (data.blocked_reason) fail(new Error(data.blocked_reason));
     void checkConnection();
+    void fillTitleChinese(dialog,job,api,data);
     if (active) {form.querySelectorAll('input,textarea,select').forEach(node => node.disabled = true);void watch();}
     form.onsubmit = async event => {
       event.preventDefault();if (busy || !connected) return;
@@ -120,7 +144,8 @@ window.NotionUpload = (() => {
       catch (problem) {root.querySelector('[data-notion-status]').textContent = problem.message || 'Notion 状态暂时无法读取。';}
     };
     root.querySelector('[data-notion-open]').onclick = async () => {
-      try {if (!data) await load();if (data) open(data,{job,api,host,refresh});}
+      // Read again on every open: a preview exported after the panel was shown is the file to upload.
+      try {await load();if (data) open(data,{job,api,host,refresh});}
       catch (problem) {if (typeof toast === 'function') toast(problem.message,true);}
     };
     await load();

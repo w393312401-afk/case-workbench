@@ -19,14 +19,18 @@ from pathlib import Path
 from production_operations import durable_json, file_lock
 from content_naming import content_heading, label_task_starts, task_created_at
 from production_naming import timeline_label
-from production_store import (current_timeline, job_status, manual_completion_current)
+from production_store import (active_timelines, current_timeline, job_status, manual_completion_current)
 from workbench_video_publish import reviewed_source
 
 
 # Scheduling (priority, dates, pausing, notes) was removed unused; a content row is only archived or not.
 DEFAULT_MANAGEMENT = {"archived": False}
 # calendar_uploaded: a pre-publish reminder that the order sits in the publish calendar; a registration's own mark wins once posted.
-MANAGEMENT_FIELDS = frozenset({*DEFAULT_MANAGEMENT, "calendar_uploaded", "calendar_date"})
+# skip_publish: a finished video the user decided not to post (不发了), with an optional one-line reason.
+MANAGEMENT_FIELDS = frozenset({*DEFAULT_MANAGEMENT, "calendar_uploaded", "calendar_date", "skip_publish", "skip_reason"})
+SKIP_REASON_LIMIT = 200
+# A posted video leaves the working lists this many days after its posting day (已完结); nothing is deleted.
+FINISH_AFTER_DAYS = 7
 CONTENT_ID = re.compile(r"(?:task|script|video):[A-Za-z0-9][A-Za-z0-9_-]{0,199}\Z")
 # Marks saved for retired picture orders stay in the file; nothing new can be written for them.
 STORED_ID = re.compile(r"(?:task|script|video|carousel):[A-Za-z0-9][A-Za-z0-9_-]{0,199}\Z")
@@ -43,11 +47,14 @@ def _valid_day(value):
 
 def _validate_patch(patch):
     if not isinstance(patch, dict) or not patch or set(patch) - MANAGEMENT_FIELDS:
-        raise CreationError(400, "内容进程只能归档、恢复或标记发布日历。")
+        raise CreationError(400, "内容进程只能归档、恢复、标记发布日历或标记不发。")
     day = patch.get("calendar_date")
     if "calendar_date" in patch and not (day == "" or isinstance(day, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and _valid_day(day)):
         raise CreationError(400, "发布日期须为有效的 YYYY-MM-DD。")
-    if any(type(value) is not bool for key, value in patch.items() if key != "calendar_date"):
+    reason = patch.get("skip_reason")
+    if "skip_reason" in patch and not (isinstance(reason, str) and len(reason) <= SKIP_REASON_LIMIT):
+        raise CreationError(400, f"不发原因最多 {SKIP_REASON_LIMIT} 字。")
+    if any(type(value) is not bool for key, value in patch.items() if key not in {"calendar_date", "skip_reason"}):
         raise CreationError(400, "归档与发布日历须为明确的开关。")
     return copy.deepcopy(patch)
 
@@ -256,6 +263,16 @@ def _bound_posts(row, kind):
     return [{"post_id": post, "url": _tiktok_url(record, kind)} for post, record in latest.items()]
 
 
+def _all_calendar_marked(identifier, row, overrides):
+    """Whether every current timeline of an order is marked uploaded to the publish calendar. The newest keeps the
+    order's own entry; each older one has its own (video-publication.js builds the same IDs)."""
+    if not isinstance(overrides, dict):
+        return False
+    lines = list(reversed(active_timelines(row))) if isinstance(row.get("timelines"), list) else []
+    keys = [identifier] + [f"{identifier}_tl_{re.sub(r'[^A-Za-z0-9-]', '', str(line.get('unique_id') or ''))[:120]}" for line in lines[1:]]
+    return all(isinstance(overrides.get(key), dict) and overrides[key].get("calendar_uploaded") is True for key in keys)
+
+
 def _calendar_state(posted, own, kind):
     """Registration mark once posted (None for old records without one); otherwise the manual mark, default not uploaded."""
     if kind != "video":
@@ -263,6 +280,21 @@ def _calendar_state(posted, own, kind):
     if posted:
         return posted["calendar_uploaded"] if isinstance(posted.get("calendar_uploaded"), bool) else None
     return own.get("calendar_uploaded") is True
+
+
+def _finished(kind, stage, published_on, archived, today=None):
+    """已完结: a video posted more than FINISH_AFTER_DAYS ago, or one marked 不发了. Archived rows stay 已归档."""
+    if kind != "video" or archived:
+        return False
+    if stage == "skipped":
+        return True
+    if stage != "published" or not isinstance(published_on, str):
+        return False
+    try:
+        posted = datetime.strptime(published_on[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return ((today or datetime.now().date()) - posted).days >= FINISH_AFTER_DAYS
 
 
 def _workflow_steps(row, values):
@@ -362,9 +394,16 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
     result = []
 
     def make(identifier, row, kind, related_scripts, related_tasks, production_ids, state):
-        stage, label, action, step, attention, completed = state
         own = overrides.get(identifier, {}) if isinstance(overrides, dict) else {}
         own = own if isinstance(own, dict) else {}
+        # 不发了 only settles a finished, unposted video; a later post or a reopened edit shows its real stage again.
+        if kind == "video" and state[0] == "awaiting_publication" and own.get("skip_publish") is True:
+            state = ("skipped", "不发了", "查看成片与发布", "publish", False, True)
+        # Uploaded to the Notion publish calendar (by the upload, or marked by hand): the workbench's part is done.
+        # With several current timelines each is its own video, so every one of them must be marked.
+        elif kind == "video" and state[0] == "awaiting_publication" and _all_calendar_marked(identifier, row, overrides):
+            state = ("uploaded", "完成", "查看成片与发布", "publish", False, True)
+        stage, label, action, step, attention, completed = state
         source_archived = bool(row.get("archived") or kind == "script" and row.get("status") == "archived")
         archived = source_archived or bool(own.get("archived"))
         busy = bool(row.get("busy") or row.get("stopping") or row.get("voicing") or row.get("timeline_building") or
@@ -441,7 +480,10 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
                        "calendar_uploaded": _calendar_state(posted, own, kind),
                        "post_url": _tiktok_url(posted, kind),
                        "posts": _bound_posts(row, kind) if posted else [],
-                       "published_on": (posted or {}).get("published_on") or "", **_workflow(row, kind)})
+                       "published_on": (posted or {}).get("published_on") or "",
+                       "finished": _finished(kind, stage, (posted or {}).get("published_on"), archived),
+                       "skip_reason": str(own.get("skip_reason") or "") if stage == "skipped" else "",
+                       **_workflow(row, kind)})
 
     def related(row, include_family=False):
         script = by_script.get(row.get("script_id"))

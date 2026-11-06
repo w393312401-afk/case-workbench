@@ -8,6 +8,7 @@ import test_performance_creators as creators
 import test_performance_shops as shops
 import test_server as fixture
 import test_ui_regressions as browser
+from performance_store import PerformanceStore
 
 LINKED, CROSS_VIDEO = exports.LINKED, shops.CROSS_VIDEO
 
@@ -131,6 +132,138 @@ class ShopPageTests(unittest.TestCase):
         self.assertIn("$100", card.nth(2).inner_text())  # creators unchanged
         self.assertIn("$0", card.nth(1).inner_text())    # none of the photo posts is bushcraftedge's
 
+    def test_account_multi_select_combines_video_and_photo_and_survives_navigation(self):
+        first = [exports.row(LINKED, 8000, 3, 200, 450.0),
+                 exports.row("7600000000000000002", 500, 2, 20, 200.0),
+                 exports.row("7600000000000000003", 400, 1, 10, 100.0)]
+        first[1][exports.HEADER.index("Video ID")] = "7600000000000000099"  # distinct from the cross-shop fixture
+        first[-1][exports.HEADER.index("Creator name")] = "bladesharptrevor"
+        exports.export(self.folder / "本土店" / "视频" / "第一周视频.xlsx", "2026-08-31", "2026-09-06", first)
+        self.assertEqual(self.request("POST", "/api/performance/sync", {})[2]["failed"], [])
+        page = self.open_data()
+        page.wait_for_function("() => [...document.querySelectorAll('.perf-source')].every(card => !card.textContent.includes('正在读取'))")
+        trigger = page.locator("#perf-account + .workbench-select button")
+        trigger.click()
+        panel = page.locator('.workbench-select-panel:popover-open')
+        self.assertEqual(panel.get_by_role("listbox").get_attribute("aria-multiselectable"), "true")
+        panel.get_by_role("option", name="bushcraftedge").click()
+        self.assertTrue(panel.is_visible())
+        self.assertIn("$600", page.locator(".perf-source").nth(0).inner_text())
+        self.assertIn("$0", page.locator(".perf-source").nth(1).inner_text())
+        panel.get_by_role("option", name="sharpal_us").click()
+        self.assertTrue(panel.is_visible())
+        self.assertEqual(trigger.inner_text().strip(), "已选 2 个账号")
+        self.assertIn("$800", page.locator(".perf-source").nth(0).inner_text())
+        self.assertIn("$121", page.locator(".perf-source").nth(1).inner_text())
+        self.assertIn("$100", page.locator(".perf-source").nth(2).inner_text())
+        self.assertEqual(panel.get_by_role("option", name="bladesharptrevor").get_attribute("aria-selected"), "false")
+        panel.get_by_role("button", name="全选账号").click()
+        self.assertEqual(trigger.inner_text().strip(), "已选 3 个账号")
+        self.assertIn("$900", page.locator(".perf-source").nth(0).inner_text())
+        search = panel.get_by_role("combobox")
+        search.fill("bladesharptrevor")
+        search.press("Enter")  # remove just this account while keeping the menu open
+        self.assertEqual(trigger.inner_text().strip(), "已选 2 个账号")
+        self.assertIn("$800", page.locator(".perf-source").nth(0).inner_text())
+        page.keyboard.press("Escape")
+        page.locator(".perf-tabs [data-perf-tab=list]").click()
+        page.locator(".perf-table").wait_for()
+        self.assertIn("bushcraftedge", page.locator(".perf-table").inner_text())
+        self.assertIn("sharpal_us", page.locator(".perf-table").inner_text())
+        self.assertNotIn("bladesharptrevor", page.locator(".perf-table").inner_text())
+        page.reload()
+        page.locator(".perf-table").wait_for()
+        self.assertEqual(page.locator("#perf-account + .workbench-select button").inner_text().strip(), "已选 2 个账号")
+        self.assertNotIn("bladesharptrevor", page.locator(".perf-table").inner_text())
+        page.locator("#perf-account + .workbench-select button").click()
+        page.locator('.workbench-select-panel:popover-open').get_by_role("option", name="全部账号").click()
+        self.assertEqual(page.locator("#perf-account + .workbench-select button").inner_text().strip(), "全部账号")
+        self.assertIn("bladesharptrevor", page.locator(".perf-table").inner_text())
+
+    def test_selected_dates_use_daily_values_and_warn_when_boundary_days_are_missing(self):
+        local = self.folder / "本土店" / "视频"
+        for day, own_gmv, other_gmv in (("2026-09-01", 25, 10), ("2026-09-02", 30, 15)):
+            other = exports.row("7600000000000000002", 120, 1, 10, other_gmv)
+            other[exports.HEADER.index("Video ID")] = "7600000000000000099"
+            exports.export(local / f"{day}.xlsx", day, day, [exports.row(LINKED, 200, 1, 10, own_gmv), other])
+        self.assertEqual(self.request("POST", "/api/performance/sync", {})[2]["failed"], [])
+        page = self.open_page("#/all/videos?period=2026-09-01~2026-09-02")
+        video = page.locator(".perf-sources .perf-source").first
+        video.get_by_text("$80.00", exact=True).wait_for()
+        self.assertIn("2026-09-01 至 2026-09-02", video.inner_text())
+        self.assertIn("首尾周只计所选日期", page.locator("#perf-board").inner_text())
+        page.locator("#perf-tab-list").click()
+        other_row = page.locator('[data-video-row="7600000000000000099"]')
+        other_row.wait_for()
+        self.assertEqual(other_row.locator("td").nth(6).inner_text(), "$25.00")
+        self.assertIn("按 2026-09-01 至 2026-09-02", page.locator("#perf-date-note").inner_text())
+
+        base = f"http://127.0.0.1:{self.server.server_port}"
+        page.goto(f"{base}/#/all/videos?tab=board&period=2026-09-01~2026-09-03")
+        page.locator(".perf-sources .perf-source").first.get_by_text("$80.00", exact=True).wait_for()
+        self.assertIn("缺少 2026-09-03", page.locator("#perf-board").inner_text())
+        self.assertIn("数据不全", page.locator(".perf-sources .perf-source").first.inner_text())
+
+        # Missing day reports do not prevent using a week entirely inside the selected range.
+        page.goto(f"{base}/#/all/videos?tab=board&period=2026-09-07~2026-09-13")
+        page.locator(".perf-sources .perf-source").first.get_by_text("$150.00", exact=True).wait_for()
+        self.assertNotIn("数据不全", page.locator(".perf-sources .perf-source").first.inner_text())
+
+    def test_quarter_report_takes_precedence_without_adding_overlapping_reports(self):
+        second = exports.row("7600000000000000002", 500, 2, 20, 200.25)
+        second[exports.HEADER.index("Video ID")] = "7600000000000000099"
+        third = exports.row("7600000000000000003", 400, 1, 10, 300.10)
+        third[exports.HEADER.index("Creator name")] = "bladesharptrevor"
+        exports.export(self.folder / "本土店" / "视频" / "Q3.xlsx", "2026-07-01", "2026-09-30",
+                       [exports.row(LINKED, 8000, 3, 200, 1025.43), second, third])
+        self.assertEqual(self.request("POST", "/api/performance/sync", {})[2]["failed"], [])
+        page = self.open_page("#/all/videos?tab=board&period=2026-07-01~2026-09-30")
+        card = page.locator(".perf-sources .perf-source").first
+        card.get_by_text("$1,525.78", exact=True).wait_for()
+        self.assertIn("完整区间报表", card.inner_text())
+        self.assertIn("不与日报或周报相加", page.locator("#perf-board").inner_text())
+        self.assertIn("周走势另用", page.locator("#perf-board").inner_text())
+        page.locator("#perf-account").select_option(["bushcraftedge", "sharpal_us"])
+        card.get_by_text("$1,225.68", exact=True).wait_for()
+        page.locator("#perf-tab-list").click()
+        row = page.locator('[data-video-row="7600000000000000099"]')
+        row.wait_for()
+        self.assertEqual(row.locator("td").nth(6).inner_text(), "$200.25")
+        self.assertEqual(page.locator('[data-video-row="7600000000000000003"]').count(), 0)
+
+    def test_quarter_report_alone_still_shows_accounts_and_totals(self):
+        folder = self.root / "quarter-only-exports"
+        second = exports.row("7600000000000000002", 500, 2, 20, 125.75)
+        second[exports.HEADER.index("Video ID")] = "7600000000000000099"
+        exports.export(folder / "Q3.xlsx", "2026-07-01", "2026-09-30",
+                       [exports.row(LINKED, 300, 3, 30, 500), second])
+        store = PerformanceStore(self.root / "quarter-only-runtime", [folder])
+        self.assertEqual(store.sync()["failed"], [])
+        self.server.app.performance = store
+        page = self.open_page("#/all/videos?tab=board&period=2026-07-01~2026-09-30")
+        page.locator(".perf-sources .perf-source").first.get_by_text("$625.75", exact=True).wait_for()
+        self.assertIn("暂无可绘制的每周数据", page.locator("#perf-board").inner_text())
+        self.assertEqual(page.locator("#perf-account option").all_inner_texts(), ["全部账号", "bushcraftedge", "sharpal_us"])
+        page.locator("#perf-account").select_option("sharpal_us")
+        page.locator(".perf-sources .perf-source").first.get_by_text("$125.75", exact=True).wait_for()
+        page.locator("#perf-tab-list").click()
+        row = page.locator('[data-video-row="7600000000000000099"]')
+        row.wait_for()
+        self.assertEqual(row.locator("td").nth(6).inner_text(), "$125.75")
+
+    def test_quarter_report_missing_gmv_is_not_shown_as_an_exact_total(self):
+        missing = exports.row(LINKED, 100, 1, 10, 0)
+        missing[exports.HEADER.index("Video-attributed GMV ($)")] = "--"
+        exports.export(self.folder / "本土店" / "视频" / "Q3缺销售额.xlsx", "2026-07-01", "2026-09-30", [missing])
+        self.assertEqual(self.request("POST", "/api/performance/sync", {})[2]["failed"], [])
+        page = self.open_page("#/all/videos?tab=board&period=2026-07-01~2026-09-30")
+        note = page.locator("#perf-board .perf-board-note[role=status]")
+        note.get_by_text("匹配的区间报表缺少必要指标", exact=False).wait_for()
+        self.assertIn("数据不全", note.inner_text())
+        card = page.locator(".perf-sources .perf-source").first
+        self.assertIn("$600.00", card.inner_text())  # Two fully contained weekly reports only.
+        self.assertNotIn("完整区间报表", card.inner_text())
+
     def test_product_filter_leaves_out_unattributed_photo_sales(self):
         page = self.open_data()
         page.locator(".perf-tabs [data-perf-tab=photos]").click()
@@ -162,6 +295,11 @@ class EmptyShopPageTests(ShopPageTests):
     test_per_post_table_lists_each_photo_and_links_its_production = None
     test_board_opens_with_three_sources_side_by_side_and_a_monthly_comparison = None
     test_account_filter_does_not_reach_the_creators = None
+    test_account_multi_select_combines_video_and_photo_and_survives_navigation = None
+    test_selected_dates_use_daily_values_and_warn_when_boundary_days_are_missing = None
+    test_quarter_report_takes_precedence_without_adding_overlapping_reports = None
+    test_quarter_report_alone_still_shows_accounts_and_totals = None
+    test_quarter_report_missing_gmv_is_not_shown_as_an_exact_total = None
 
 
 class PostsOnlyPageTests(ShopPageTests):
@@ -183,6 +321,11 @@ class PostsOnlyPageTests(ShopPageTests):
     test_per_post_table_lists_each_photo_and_links_its_production = None
     test_board_opens_with_three_sources_side_by_side_and_a_monthly_comparison = None
     test_account_filter_does_not_reach_the_creators = None
+    test_account_multi_select_combines_video_and_photo_and_survives_navigation = None
+    test_selected_dates_use_daily_values_and_warn_when_boundary_days_are_missing = None
+    test_quarter_report_takes_precedence_without_adding_overlapping_reports = None
+    test_quarter_report_alone_still_shows_accounts_and_totals = None
+    test_quarter_report_missing_gmv_is_not_shown_as_an_exact_total = None
 
 
 if __name__ == "__main__":

@@ -52,11 +52,16 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         page.locator("#edit-panel").wait_for()
         return page
 
-    def assert_completed(self, page):
+    def assert_completed(self, page, open_note=None):
         page.locator("[data-revoke-job-completion]").wait_for()
         step = page.locator('.production-steps [data-step="edit"]')
-        self.assertIn("done", step.get_attribute("class").split())
-        step.get_by_text("人工完成", exact=True).wait_for()
+        if open_note:
+            # Another current timeline is still uncut, so the step stays open and counts what is done.
+            step.get_by_text(open_note, exact=True).wait_for()
+            self.assertNotIn("done", step.get_attribute("class").split())
+        else:
+            self.assertIn("done", step.get_attribute("class").split())
+            step.get_by_text("人工完成", exact=True).wait_for()
         page.locator(".page-heading .script-status").get_by_text("已人工完成", exact=True).wait_for()
         self.assertEqual(page.locator("[data-edit-id]").count(), 0)
         self.assertEqual(page.locator("dialog.production-dialog[open]").count(), 0)
@@ -76,13 +81,16 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         self.assertEqual(button.inner_text(), "手动标记成功")
         self.assertTrue(button.is_enabled())
         button.click()
-        self.assert_completed(page)
+        self.assert_completed(page, "1/2 条剪完")
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0]["body"]["completed"], True)
         self.assertEqual(self.calls[0]["body"]["timeline_uid"], "uid-selected-new")
         self.assertEqual(self.payload["job"]["edits"], [])
         page.reload()
-        self.assert_completed(page)
+        # After a reload the tab that still has work opens first; the completed one is one click away.
+        page.locator('.production-steps [data-step="edit"]').click()
+        page.locator('.production-focus [data-timeline-focus="uid-selected-new"]').click()
+        self.assert_completed(page, "1/2 条剪完")
         self.assertEqual(len(self.calls), 1)
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 
@@ -223,11 +231,14 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         # Newest first: uid-new waits to be marked, uid-own is already marked and can be revoked.
         self.assertEqual(forms.nth(0).locator("[data-complete-job]").count(), 1)
         self.assertEqual(forms.nth(1).locator("[data-revoke-job-completion]").count(), 1)
+        # Each timeline is shown on its own tab; the newer one waiting to be marked comes first.
+        self.assertEqual(page.locator('.production-focus [data-timeline-focus][aria-selected="true"]').get_attribute("data-timeline-focus"), "uid-new")
         forms.nth(0).locator("[data-complete-job]").click()
-        page.locator("[data-revoke-job-completion]").nth(1).wait_for()
+        page.locator("[data-completion-timeline='uid-new'] [data-revoke-job-completion]").wait_for()
         self.assertEqual((len(self.calls), self.calls[0]["body"]["timeline_uid"], self.calls[0]["body"]["completed"]), (1, "uid-new", True))
         self.assertEqual(page.locator("[data-complete-job]").count(), 0)
         # Revoking one leaves the other marked, and the request names the one revoked.
+        page.locator('.production-focus [data-timeline-focus="uid-own"]').click()
         page.locator("[data-completion-timeline='uid-own'] [data-revoke-job-completion]").click()
         page.locator("[data-completion-timeline='uid-own'] [data-complete-job]").wait_for()
         self.assertEqual((self.calls[1]["body"]["timeline_uid"], self.calls[1]["body"]["completion_at"]), ("uid-own", self.receipt()["at"]))
@@ -263,16 +274,23 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         requested = []
         page.on("request", lambda request: requested.append(request.url) if "/publication" in request.url and request.method == "GET" else None)
         page.locator('.production-steps [data-step="publish"]').click()
-        picker = page.locator("[data-publication-timeline]")
-        picker.first.wait_for()
-        self.assertEqual([" ".join(text.split()) for text in picker.all_inner_texts()], ["Lab261012-202-2 待登记", "Lab261011-202-1 已登记"])
-        self.assertEqual(page.locator('[data-publication-timeline][aria-pressed="true"]').get_attribute("data-publication-timeline"), "uid-new")
+        # The shared 「当前时间线」 strip replaces the panel's own switch and carries each timeline's publication state.
+        strip = page.locator(".production-focus")
+        strip.locator('[data-timeline-focus="uid-own"] [data-focus-publish]').wait_for()
+        self.assertEqual(page.locator("[data-publication-timeline]").count(), 0)
+        self.assertEqual(strip.locator('[data-timeline-focus="uid-new"] [data-focus-publish]').inner_text(), "待登记")
+        self.assertEqual(strip.locator('[data-timeline-focus="uid-own"] [data-focus-publish]').inner_text(), "已登记")
+        self.assertEqual(strip.locator('[data-timeline-focus][aria-selected="true"]').get_attribute("data-timeline-focus"), "uid-new")
         # Choosing the other timeline reads that timeline's registration.
-        page.locator('[data-publication-timeline="uid-own"]').click()
+        strip.locator('[data-timeline-focus="uid-own"]').click()
+        for _ in range(50):
+            if any(url.endswith("/publication?timeline=uid-own") for url in requested):
+                break
+            page.wait_for_timeout(100)
         self.assertTrue(any(url.endswith("/publication?timeline=uid-own") for url in requested), requested)
         # Saving for the shown timeline names it, so the server cannot file it under another.
         self.payload["timeline_uid"] = "uid-new"
-        page.locator('[data-publication-timeline="uid-new"]').click()
+        strip.locator('[data-timeline-focus="uid-new"]').click()
         form = page.locator(".video-publication-form")
         form.locator('input[name="post_id"]').fill("7664986913497009999")
         form.locator('button[type="submit"]').click()
@@ -281,6 +299,42 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
                 break
             page.wait_for_timeout(100)
         self.assertEqual((saved[0]["timeline_uid"], saved[0]["post_id"]), ("uid-new", "7664986913497009999"))
+
+    def test_copy_comes_before_registering_and_the_strip_then_moves_to_the_next_waiting_timeline(self):
+        self.two_timelines()
+        self.payload.update(publication=None, can_register=True, blocked_reason="", revision="rev-1", source_signature="sig-new",
+                            timeline_uid="uid-new", history=[], script_registrations=[],
+                            copy={"version": 1, "titles": ["Title #fixture"], "zh": "中文发布稿", "en": "English copy"},
+                            source={"script": {"script_version": 1}, "take": {"id": TAKE_ID, "version": 1}, "timeline": {"name": "Lab261012-202-2", "unique_id": "uid-new"}},
+                            timelines=[{"unique_id": "uid-new", "name": "Lab261012-202-2", "can_register": True, "blocked_reason": "", "registered": False, "post_id": None, "source_current": False},
+                                       {"unique_id": "uid-own", "name": "Lab261011-202-1", "can_register": True, "blocked_reason": "", "registered": False, "post_id": None, "source_current": False}])
+        saved = []
+
+        def post(route):
+            saved.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json", body="{}")
+
+        page = self.open_page(post=post)
+        requested = []
+        page.on("request", lambda request: requested.append(request.url) if "/publication" in request.url and request.method == "GET" else None)
+        page.locator('.production-steps [data-step="publish"]').click()
+        strip = page.locator(".production-focus")
+        form = page.locator("#video-publication-panel .video-publication-form")
+        form.wait_for()
+        # The title and copy to paste into TikTok come before the video ID that posting gives back.
+        self.assertTrue(page.evaluate("document.querySelector('#video-publication-panel .video-publish-copy-row').compareDocumentPosition(document.querySelector('#video-publication-panel .video-publication-form')) & Node.DOCUMENT_POSITION_FOLLOWING"))
+        self.assertEqual(strip.locator('[data-timeline-focus][aria-selected="true"]').get_attribute("data-timeline-focus"), "uid-new")
+        form.locator('input[name="post_id"]').fill("7664986913497009999")
+        form.locator('button[type="submit"]').click()
+        # Once registered, the strip moves on to the timeline still waiting, and its registration is read.
+        page.locator("#toast").get_by_text("已登记。接着登记：Lab261011-202-1").wait_for()
+        page.locator('.production-focus [data-timeline-focus="uid-own"][aria-selected="true"]').wait_for()
+        for _ in range(50):
+            if any(url.endswith("/publication?timeline=uid-own") for url in requested):
+                break
+            page.wait_for_timeout(100)
+        self.assertTrue(any(url.endswith("/publication?timeline=uid-own") for url in requested), requested)
+        self.assertEqual([body.get("timeline_uid") for body in saved if body.get("post_id")], ["uid-new"])
 
 
 # Use the browser fixture without repeating its existing regression suite.

@@ -285,9 +285,10 @@ class FeedbackChainHTTPTests(unittest.TestCase):
             again, _ = self.task(review_video=window)
         self.assertIn(f"/video/{self.video_id}", seen[0])
         self.assertEqual(["opening.jpg", "shots1.jpg"], [Path(path).name for _, path in seen[1]])
-        from retro_draft import DRAFT_FRAMEWORK
+        from retro_draft import RETRO_RULES
         call = self.server.app.ai.bridge.calls[0]
-        self.assertNotIn(DRAFT_FRAMEWORK, call["prompt"])
+        self.assertIn(RETRO_RULES, call["prompt"])
+        self.assertNotIn("只许挑毛病", call["prompt"])
         self.assertIn("## 一句话：这条为什么出单", call["prompt"])
         self.assertIn("ctor_pct_selling", call["prompt"])
         self.assertIn("finish_rate_pct", call["prompt"])

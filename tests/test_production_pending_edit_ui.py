@@ -100,9 +100,11 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
         target = form.locator('[name="timeline"]')
         expect(target).to_have_value("pending:" + BUILD_REQUEST)
         expect(form.locator('[data-copy-handoff]')).to_be_disabled()
-        target.select_option("uid-older")
+        # Two targets: each has its own tab, which drives the hidden target select.
+        page.locator('.production-focus [data-timeline-focus="uid-older"]').click()
+        expect(target).to_have_value("uid-older")
         expect(form.locator('[data-copy-handoff]')).to_be_enabled()
-        target.select_option("pending:" + BUILD_REQUEST)
+        page.locator(f'.production-focus [data-timeline-focus="pending:{BUILD_REQUEST}"]').click()
         expect(form.locator('[data-copy-handoff]')).to_be_disabled()
         form.locator('button[type="submit"]').click()
         expect(page.locator("#toast")).to_contain_text("已提交剪辑")

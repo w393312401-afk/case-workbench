@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomBytes, scrypt } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdtemp, writeFile, rename, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, writeFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -29,8 +29,9 @@ async function fixture(t) {
     await rename(temporary, file);
   };
   await write(baseAccount);
-  const auth = createPasswordAuth({ file, hostname: 'workbench.example.com', now: () => time });
-  return { auth, file, write, advance: ms => { time += ms; } };
+  const restart = () => createPasswordAuth({ file, hostname: 'workbench.example.com', now: () => time });
+  const auth = restart();
+  return { auth, file, dir, sessionFile: join(dir, 'sessions.json'), restart, write, advance: ms => { time += ms; } };
 }
 
 test('valid Unicode passwords create private opaque sessions and invalid credentials share one error', async t => {
@@ -42,7 +43,7 @@ test('valid Unicode passwords create private opaque sessions and invalid credent
   ]) await assert.rejects(auth.login(username, value, 'fixture-client'), unauthorized);
   const login = await auth.login(baseAccount.username, password, 'fixture-client');
   assert.equal(login.username, baseAccount.username);
-  assert.match(login.cookie, /^__Host-WorkbenchSession=[A-Za-z0-9_-]{43}; Path=\/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400$/);
+  assert.match(login.cookie, /^__Host-WorkbenchSession=[A-Za-z0-9_-]{43}; Path=\/; Secure; HttpOnly; SameSite=Lax; Max-Age=7776000$/);
   assert.equal(login.cookie.includes(baseAccount.username), false);
   assert.equal(login.cookie.includes(password), false);
   assert.deepEqual(await auth.authenticate(cookieRequest(login.cookie)), { username: baseAccount.username });
@@ -56,20 +57,110 @@ test('valid Unicode passwords create private opaque sessions and invalid credent
   assert.equal((await auth.logout({})).cookie, logout.cookie);
 });
 
-test('idle expiration is renewed by activity and the absolute lifetime is never extended', async t => {
-  const { auth, advance } = await fixture(t);
+test('sessions survive idle hours and renew their persistent cookie during continued use', async t => {
+  const { auth, advance, restart } = await fixture(t);
   const first = cookieRequest((await auth.login(baseAccount.username, password, 'client-one')).cookie);
-  advance(2 * 60 * 60 * 1000 - 1);
-  await auth.authenticate(first);
-  advance(2 * 60 * 60 * 1000);
-  await assert.rejects(auth.authenticate(first), unauthorized);
-  const active = cookieRequest((await auth.login(baseAccount.username, password, 'client-two')).cookie);
-  for (let hour = 1; hour < 24; hour++) {
-    advance(60 * 60 * 1000);
-    await auth.authenticate(active);
+  advance(3 * 60 * 60 * 1000);
+  assert.deepEqual(await auth.authenticate(first), { username: baseAccount.username });
+  advance(2 * 24 * 60 * 60 * 1000);
+  const renewed = await auth.authenticate(first);
+  assert.equal(renewed.cookie.split(';')[0], first.headers.cookie);
+  assert.match(renewed.cookie, /Max-Age=7776000$/);
+  advance(89 * 24 * 60 * 60 * 1000);
+  assert.equal((await restart().authenticate(first)).username, baseAccount.username);
+});
+
+test('an unused session expires after 90 days even across a restart', async t => {
+  const { auth, advance, restart } = await fixture(t);
+  const request = cookieRequest((await auth.login(baseAccount.username, password, 'one')).cookie);
+  advance(90 * 24 * 60 * 60 * 1000);
+  await assert.rejects(restart().authenticate(request), unauthorized);
+});
+
+test('sessions survive fresh authentication instances without storing a bearer token or password', async t => {
+  const { auth, restart, sessionFile, dir } = await fixture(t);
+  const signed = await auth.login(baseAccount.username, password, 'one');
+  const request = cookieRequest(signed.cookie);
+  assert.deepEqual(await restart().authenticate(request), { username: baseAccount.username });
+  const stored = await readFile(sessionFile, 'utf8');
+  const value = JSON.parse(stored);
+  assert.equal(value.sessions.length, 1);
+  assert.match(value.sessions[0].hash, /^[a-f0-9]{64}$/);
+  for (const secret of [password, baseAccount.password_hash, baseAccount.salt, signed.cookie.split('=')[1].split(';')[0]]) {
+    assert.equal(stored.includes(secret), false);
   }
-  advance(60 * 60 * 1000);
-  await assert.rejects(auth.authenticate(active), unauthorized);
+  assert.equal((await readdir(dir)).some(name => name.endsWith('.tmp')), false);
+});
+
+test('logout stays revoked after restarting and does not sign out another browser', async t => {
+  const { auth, restart } = await fixture(t);
+  const first = cookieRequest((await auth.login(baseAccount.username, password, 'one')).cookie);
+  const second = cookieRequest((await auth.login(baseAccount.username, password, 'two')).cookie);
+  await restart().logout(first);
+  const next = restart();
+  await assert.rejects(next.authenticate(first), unauthorized);
+  assert.deepEqual(await next.authenticate(second), { username: baseAccount.username });
+});
+
+test('a new Node process restores an acknowledged login and preserves an acknowledged logout', async t => {
+  const { file } = await fixture(t);
+  const moduleURL = new URL('./password_auth.mjs', import.meta.url).href;
+  const setup = `import { createPasswordAuth } from ${JSON.stringify(moduleURL)};
+    const auth = createPasswordAuth({ file: process.argv[1], hostname: 'workbench.example.com', now: () => 1800000000000 });`;
+  const run = script => promisify(execFile)(process.execPath, ['--input-type=module', '-e', setup + script, file],
+    { windowsHide: true, maxBuffer: 16384 });
+  const signed = await run(`const result = await auth.login(${JSON.stringify(baseAccount.username)}, ${JSON.stringify(password)}, 'isolated-process');
+    process.stdout.write(JSON.stringify(result), () => process.exit(0));`);
+  const request = cookieRequest(JSON.parse(signed.stdout).cookie);
+  const checked = await run(`const request = ${JSON.stringify(request)};
+    const user = await auth.authenticate(request); await auth.logout(request);
+    process.stdout.write(JSON.stringify(user), () => process.exit(0));`);
+  assert.equal(JSON.parse(checked.stdout).username, baseAccount.username);
+  const revoked = await run(`try { await auth.authenticate(${JSON.stringify(request)}); process.stdout.write('accepted'); }
+    catch (error) { process.stdout.write(String(error.status)); }`);
+  assert.equal(revoked.stdout, '401');
+});
+
+test('credential rotation is checked against persisted sessions before and after restart', async t => {
+  const { auth, write, restart } = await fixture(t);
+  const request = cookieRequest((await auth.login(baseAccount.username, password, 'one')).cookie);
+  await write({ ...baseAccount, username: 'renamed-owner' });
+  await assert.rejects(restart().authenticate(request), unauthorized);
+  await write(baseAccount);
+  await assert.rejects(restart().authenticate(request), unauthorized);
+});
+
+test('corrupt, oversized and mismatched persisted sessions never restore an old login', async t => {
+  const { auth, restart, sessionFile } = await fixture(t);
+  const request = cookieRequest((await auth.login(baseAccount.username, password, 'one')).cookie);
+  const saved = JSON.parse(await readFile(sessionFile, 'utf8'));
+  for (const value of ['{invalid', 'x'.repeat(65537), { ...saved, version: 2 },
+    { ...saved, hostname: 'other.example.com' }, { ...saved, accountRevision: '0'.repeat(64) },
+    { ...saved, sessions: [saved.sessions[0], saved.sessions[0]] },
+    { ...saved, sessions: [{ ...saved.sessions[0], renewedAt: -1 }] }]) {
+    await writeFile(sessionFile, typeof value === 'string' ? value : JSON.stringify(value));
+    await assert.rejects(restart().authenticate(request), unauthorized);
+  }
+  const next = restart();
+  const signed = await next.login(baseAccount.username, password, 'new-login');
+  await restart().authenticate(cookieRequest(signed.cookie));
+});
+
+test('a failed durable write reports temporary failure and can be retried without losing an existing login', async t => {
+  const { auth, advance, sessionFile, dir } = await fixture(t);
+  const request = cookieRequest((await auth.login(baseAccount.username, password, 'one')).cookie);
+  const original = await readFile(sessionFile);
+  await rm(sessionFile);
+  await mkdir(sessionFile);
+  advance(24 * 60 * 60 * 1000);
+  const temporarilyUnavailable = error => error.status === 503 && !error.message.includes(dir);
+  await assert.rejects(auth.authenticate(request), temporarilyUnavailable);
+  await assert.rejects(auth.logout(request), temporarilyUnavailable);
+  await assert.rejects(auth.login(baseAccount.username, password, 'new-login'), temporarilyUnavailable);
+  await rm(sessionFile, { recursive: true });
+  await writeFile(sessionFile, original);
+  assert.match((await auth.authenticate(request)).cookie, /Max-Age=7776000$/);
+  assert.equal((await readdir(dir)).some(name => name.endsWith('.tmp')), false);
 });
 
 test('credential rotation, corruption and deletion revoke sessions; restoring the file does not restore sessions', async t => {

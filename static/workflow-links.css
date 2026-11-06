@@ -43,3 +43,8 @@
 .workflow-fold>summary .workflow-fold-attention{color:var(--warm-ink);font-weight:600}
 .workflow-fold-alert{margin:0 -18px 6px;padding:8px 18px}
 .workflow-fold-alert+.workflow-group{border-top:0;padding-top:4px}
+/* Closed, the order's provenance is one small line under the heading; opened, it is a card again. */
+.workflow-links.workflow-links-folded:not(:has(.workflow-fold[open])){margin:-14px 0 12px;background:none;border-color:transparent;box-shadow:none}
+.workflow-links.workflow-links-folded:not(:has(.workflow-fold[open])) .workflow-fold>summary{padding:2px 0;gap:6px 8px}
+.workflow-links.workflow-links-folded:not(:has(.workflow-fold[open])) .workflow-fold-title{font-size:var(--font-meta);font-weight:500;color:var(--muted)}
+.workflow-links.workflow-links-folded:not(:has(.workflow-fold[open])) .workflow-fold>summary small{margin-left:8px}

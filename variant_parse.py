@@ -592,6 +592,39 @@ def _loose_variants(text):
     return variants
 
 
+SWAP_LINE = re.compile(r"可换句[：:]\s*第\s*(\d+)\s*行")
+SWAP_OPTION = re.compile(r"可换句备选[：:]\s*(平时版|活动版)\s*[｜|]\s*`([^`]+)`\s*(?:[（(]([^）)]*)[）)])?(?:\s*[｜|]\s*(.+))?")
+PIN_COMMENT = re.compile(r"置顶评论建议[：:]\s*`([^`]+)`\s*(?:[（(]([^）)]*)[）)])?")
+
+
+def swap_notes(text, index):
+    """The writing skill's 可换句备选 of one variant: which line can be swapped, its 平时版 / 活动版 wording and the
+    suggested pinned comment. None when the variant has none; the spoken lines themselves never change from here."""
+    blocks = _blocks(text)
+    if isinstance(index, int) and 0 <= index < len(blocks):
+        block = blocks[index]
+    elif len(blocks) == 1:
+        block = blocks[0]
+    else:
+        return None
+    line, options, pin = None, [], None
+    for raw in block.splitlines():
+        row = re.sub(r"^[\s>*\-•]+|\*\*", "", raw).strip()
+        found = SWAP_LINE.search(row)
+        if found and line is None and "备选" not in row:
+            line = int(found.group(1))
+        found = SWAP_OPTION.search(row)
+        if found:
+            options.append({"kind": found.group(1), "en": found.group(2).strip(), "zh": (found.group(3) or "").strip(),
+                            "note": (found.group(4) or "").strip()})
+            continue
+        found = PIN_COMMENT.search(row)
+        if found and not pin:
+            pin = {"en": found.group(1).strip(), "zh": (found.group(2) or "").strip()}
+    if line is None and not options and not pin:
+        return None
+    return {"line": line, "options": options, "pin": pin}
+
 def publish_titles(text, index):
     """The 🔴 title-and-hashtag lines written for one variant, one copyable line each.
 

@@ -18,7 +18,7 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         self.payload["job"]["selected_take"] = "TAK-0123456789ab"
         self.payload["job"]["timelines"] = [{"unique_id": "uid-own", "name": "Lab261011-202-1", "creator": "Lab", "markers": 1,
             "frames": 60, "fps": "29.97", "take_id": "TAK-0123456789ab", "built_at": "2026-10-11"}]
-        self.timelines = ["蓝点折刀成品素材", "Lab261011-202-1", "户外猎刀成品素材", "混剪素材", "Buck110折刀", "繁體廚刀", "raw-001"]
+        self.timelines = ["禁用-蓝点折刀", "蓝点折刀成品素材", "Lab261011-202-1", "户外猎刀成品素材", "混剪素材", "Buck110折刀", "繁體廚刀", "raw-001"]
         page = self.open_page()
         steps = page.locator(".production-steps")
         self.assertEqual(steps.locator("[data-step] span").all_inner_texts(), ["脚本", "配音", "达芬奇时间线", "AI 剪辑与人工审查", "成片与发布"])
@@ -29,8 +29,10 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         options = page.locator('#edit-form input[name="material"]')
         options.first.wait_for()
         self.assertEqual([options.nth(i).get_attribute("value") for i in range(options.count())],
-                         ["蓝点折刀成品素材", "户外猎刀成品素材", "混剪素材", "Buck110折刀", "繁體廚刀"])
-        self.assertTrue(all(options.nth(i).is_checked() for i in range(options.count())))
+                         ["蓝点折刀成品素材", "户外猎刀成品素材", "混剪素材", "Buck110折刀", "繁體廚刀", "禁用-蓝点折刀"])
+        # With no earlier edit for this product nothing is ticked; the user picks the two or three needed.
+        self.assertEqual(page.locator('#edit-form input[name="material"]:checked').count(), 0)
+        page.locator("#edit-form [data-materials] .context-note").get_by_text("没有上次剪辑用过", exact=False).wait_for()
 
         steps.locator('[data-step="voice"]').click()
         page.locator("#voice-panel").wait_for()
@@ -44,6 +46,40 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         pinned = page.evaluate(PINNED)
         self.assertEqual(pinned["bar"], 0)
         self.assertEqual(pinned["steps"], pinned["height"])
+
+    def test_last_used_material_timelines_are_ticked_and_labelled(self):
+        self.payload["job"]["timelines"] = [{"unique_id": "uid-own", "name": "Lab261011-202-1", "creator": "Lab", "markers": 1,
+            "frames": 60, "fps": "29.97", "take_id": "", "built_at": "2026-10-11"}]
+        self.payload["job"]["edits"] = [self.edit("awaiting_review")]
+        self.timelines = ["禁用-蓝点折刀", "蓝点折刀成品素材", "户外猎刀成品素材", "混剪素材"]
+        self.timelines = ["禁用-蓝点折刀", "配件-木头", "蓝点折刀成品素材", "户外猎刀成品素材", "配件-瓷砖", "混剪素材"]
+        self.payload["product_settings"]["material_timelines"] = ["户外猎刀成品素材", "混剪素材", "已删的素材"]
+        self.payload["material_combos"] = [
+            {"materials": ["混剪素材", "户外猎刀成品素材"], "count": 4},
+            {"materials": ["蓝点折刀成品素材", "配件-木头"], "count": 3},
+            {"materials": ["蓝点折刀成品素材", "已删的素材"], "count": 2},
+            {"materials": ["配件-瓷砖"], "count": 1}]
+        page = self.open_page()
+        options = page.locator('#edit-form input[name="material"]')
+        options.first.wait_for()
+        picked = lambda: page.locator('#edit-form input[name="material"]:checked').evaluate_all("items => items.map(item => item.value)")
+        self.assertEqual(picked(), ["户外猎刀成品素材", "混剪素材"])
+        self.assertEqual(page.locator("#edit-form [data-materials] .context-note").count(), 0)
+        # Ungrouped first, then 配件, then 禁用; the last set and the remaining used-twice sets are one click away.
+        self.assertEqual(page.locator("#edit-form .material-group-name").all_inner_texts(), ["素材", "配件", "禁用"])
+        presets = page.locator("#edit-form [data-material-preset]")
+        self.assertEqual(presets.count(), 2)
+        self.assertIn("is-active", presets.nth(0).get_attribute("class"))
+        self.assertEqual(page.locator("#edit-form [data-material-picked]").inner_text(), "已选 2 条")
+        presets.nth(1).click()
+        self.assertEqual(picked(), ["蓝点折刀成品素材", "配件-木头"])
+        self.assertIn("is-active", presets.nth(1).get_attribute("class"))
+        page.locator('#edit-form .material-chip', has_text="配件-瓷砖").click()
+        self.assertEqual(page.locator("#edit-form [data-material-picked]").inner_text(), "已选 3 条")
+        self.assertNotIn("is-active", presets.nth(1).get_attribute("class"))
+        page.locator("#edit-panel").get_by_role("button", name="另建时间线并开始剪辑", exact=True).click()
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已另建时间线并加入剪辑任务')")
+        self.assertEqual(self.calls[0]["body"]["materials"], ["蓝点折刀成品素材", "配件-木头", "配件-瓷砖"])
 
     def test_without_chinese_material_timelines_names_can_be_typed(self):
         self.payload["job"]["timelines"] = [{"unique_id": "uid-own", "name": "Lab261011-202-1", "creator": "Lab", "markers": 1,

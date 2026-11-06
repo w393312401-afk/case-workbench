@@ -17,6 +17,14 @@ WORKER = Path(__file__).resolve().parent / "resolve_worker.py"
 MCP_FILES = (r"D:\DaVinci Resolve\ResolveMCP.exe", r"C:\Program Files\Blackmagic Design\DaVinci Resolve\ResolveMCP.exe")
 
 
+def render_recovery_message(export_error, recovery_error):
+    """A fresh recovery attempt can report the same failure the export worker already returned."""
+    initial, retry = str(export_error), str(recovery_error)
+    if initial.endswith(retry):
+        return initial
+    return f"{initial.rstrip('。')}。再次恢复时，{retry}"
+
+
 def locate_mcp():
     """DaVinci Resolve's own MCP server, used by the editing task."""
     found = next((path for path in (os.environ.get("RESOLVE_MCP"), *MCP_FILES) if path and Path(path).is_file()), None)

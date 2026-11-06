@@ -8,6 +8,14 @@ from tk_candidates import CandidateError, CandidateStore
 
 
 class TKCandidateWorkbenchMixin:
+    def _prune_tk_candidates(self):
+        """Check the complete order catalog, including archived orders, before pruning."""
+        with self.lock:
+            if not any(item.get("job_id") for item in self.tk_candidates.list()):
+                return 0
+            jobs = self.production.records()["jobs"]
+            return self.tk_candidates.prune_missing_jobs(job["id"] for job in jobs)
+
     def _associate_tk_candidate(self, identifier):
         """Register supplied card facts, then associate its exact saved records.
 
@@ -72,6 +80,7 @@ class TKCandidateWorkbenchMixin:
 
     def reconcile_tk_candidates(self, product=None):
         """Upgrade existing cards once at startup; safe to resume after recovery."""
+        self._prune_tk_candidates()
         candidates = self.tk_candidates.list(product)
         if not candidates:
             return {"associated": 0, "errors": []}

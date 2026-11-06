@@ -9,6 +9,8 @@ import base64
 import json
 import os
 import re
+import socket
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -89,8 +91,19 @@ def _message(raw):
 class ElevenLabsClient:
     def __init__(self, *, key_provider=read_key, transport=None, timeout=180):
         self.key_provider = key_provider
+        self.custom_transport = transport is not None
         self.transport = transport or self._urllib
         self.timeout = timeout
+
+    def _preflight(self, seconds=15):
+        """Open a TLS connection only (no request sent), so a dead network is known to be safe to retry."""
+        host = urllib.parse.urlparse(API).hostname
+        try:
+            with socket.create_connection((host, 443), timeout=seconds) as raw:
+                with ssl.create_default_context().wrap_socket(raw, server_hostname=host):
+                    return
+        except (OSError, TimeoutError) as exc:
+            raise VoiceError(502, "连不上 ElevenLabs（网络或代理没有放行 api.elevenlabs.io），本次没有发出请求，可直接重试。", retry_safe=True) from exc
 
     def key(self):
         value = self.key_provider()
@@ -108,7 +121,7 @@ class ElevenLabsClient:
         except urllib.error.HTTPError as exc:
             return exc.code, dict(exc.headers or {}), exc.read()
 
-    def call(self, method, path, *, query=None, payload=None, multipart=None):
+    def call(self, method, path, *, query=None, payload=None, multipart=None, preflight=False, timeout=None):
         headers = {"xi-api-key": self.key(), "Accept": "application/json"}
         data = None
         if payload is not None:
@@ -128,10 +141,12 @@ class ElevenLabsClient:
             data = b"".join(parts) + f"--{boundary}--\r\n".encode()
             headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
         url = API + path + ("?" + urllib.parse.urlencode(query) if query else "")
+        if preflight and not self.custom_transport:
+            self._preflight()
         try:
-            status, response_headers, raw = self.transport(method, url, headers, data, self.timeout)
+            status, response_headers, raw = self.transport(method, url, headers, data, timeout or self.timeout)
         except (OSError, TimeoutError) as exc:
-            raise VoiceError(502, "连接 ElevenLabs 失败，请检查网络后重试。") from exc
+            raise VoiceError(502, f"ElevenLabs 请求发出后连接中断或超时（{type(exc).__name__}）。") from exc
         if status >= 400:
             code, message = _message(raw)
             refusal = {"retry_safe": 400 <= status < 500, "provider_status": status}
@@ -166,7 +181,8 @@ class ElevenLabsClient:
 
     def speech(self, voice_id, text, model_id, settings):
         body, headers = self.call("POST", f"/v1/text-to-speech/{voice_id}/with-timestamps", query={"output_format": OUTPUT_FORMAT},
-                                  payload={"text": text, "model_id": model_id, "voice_settings": settings})
+                                  payload={"text": text, "model_id": model_id, "voice_settings": settings},
+                                  preflight=True, timeout=max(self.timeout, 300))
         try:
             audio = base64.b64decode(body["audio_base64"], validate=True)
         except (KeyError, TypeError, ValueError) as exc:

@@ -11,7 +11,7 @@ if not exist ".venv\Scripts\python.exe" (
 ".venv\Scripts\python.exe" -m pip install -q -r requirements.txt
 if errorlevel 1 goto fail
 echo 本机工作台已启动，浏览器会打开导入页。请保持这个窗口，关闭窗口就会停止。
-start "" /b ".venv\Scripts\python.exe" -c "import time, webbrowser; from app_config import load_config; time.sleep(4); webbrowser.open('http://127.0.0.1:{}/#production/import'.format(load_config()['port']))"
+start "" /b ".venv\Scripts\python.exe" -c "from app_config import open_edit_import; open_edit_import()"
 ".venv\Scripts\python.exe" server.py --no-open
 goto end
 :fail

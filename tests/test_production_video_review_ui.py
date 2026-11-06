@@ -123,9 +123,38 @@ class ProductionVideoReviewBrowserTests(unittest.TestCase):
         active.get_by_text("AI 剪辑：待人工审查", exact=True).wait_for()
         old_card = page.locator('[data-timeline-id="uid-old"]')
         self.assertEqual(old_card.locator('[data-timeline-task]').input_value(), 'completed')
+        # Two timelines are shown one at a time from the shared strip; the other is a click away and not folded.
+        self.assertFalse(old_card.is_visible())
+        page.locator('.production-focus [data-timeline-focus="uid-old"]').click()
         old_card.locator('[data-timeline-ai-state]').get_by_text("AI 剪辑：已完成", exact=True).wait_for()
+        self.assertEqual(old_card.locator('[data-timeline-fold]').count(), 0)
+        self.assertFalse(active.is_visible())
+        page.locator('.production-focus [data-timeline-focus="uid-own"]').click()
         active.get_by_role("button", name="在达芬奇打开", exact=True).click()
         self.assertEqual(self.calls[0]["body"], {"unique_id": "uid-own"})
+
+    def test_edit_step_shows_one_timeline_at_a_time_from_tabs(self):
+        self.reviewable()
+        old = copy.deepcopy(self.payload["job"]["timelines"][0]);old.update(unique_id="uid-old", name="旧时间线")
+        self.payload["job"]["timelines"].insert(0, old)
+        self.payload["job"]["edits"].insert(0, {**self.edit("approved", "EDT-old"), "timeline_uid": "uid-old", "timeline_name": "旧时间线",
+                                                "approval": {"at": "2026-10-13"}})
+        page = self.open_page()
+        page.locator('.production-steps [data-step="edit"]').click()
+        tabs = page.locator(".production-focus [data-timeline-focus]")
+        self.assertEqual(tabs.count(), 2)
+        # The timeline waiting for review is shown first; the finished one is one click away.
+        self.assertEqual(page.locator('.production-focus [data-timeline-focus][aria-selected="true"]').get_attribute("data-timeline-focus"), "uid-own")
+        self.assertEqual(page.locator('.production-focus [data-timeline-focus="uid-old"] [data-focus-edit]').inner_text(), "剪完")
+        own, older = page.locator('[data-edit-group="uid-own"]'), page.locator('[data-edit-group="uid-old"]')
+        self.assertTrue(own.is_visible())
+        self.assertFalse(older.is_visible())
+        self.assertFalse(page.locator("#edit-form [data-edit-target-field]").is_visible())
+        page.locator('.production-focus [data-timeline-focus="uid-old"]').click()
+        self.assertTrue(older.is_visible())
+        self.assertFalse(own.is_visible())
+        self.assertEqual(page.locator("#edit-panel #edit-form").evaluate("form => form.timeline.value"), "uid-old")
+        older.locator('[data-timeline-ai-state], .script-status').first.wait_for()
 
     def test_running_edit_stages_use_reported_counts_without_inventing_completed_steps(self):
         self.reviewable()

@@ -271,6 +271,7 @@ class CodexBridgeTests(unittest.TestCase):
         bridge, process, _ = self.runner("init_error")
         with self.assertRaisesRegex(BridgeError, "登录") as caught:
             self.run_bridge(bridge)
+        self.assertEqual(caught.exception.code, "CODEX_AUTH")
         self.assertNotIn("secret-token", str(caught.exception))
         self.assertFalse(any("分析当前" in message for message in self.progress))
         self.assertFalse(any(item.get("method") == "thread/start" for item in process.received))
@@ -319,8 +320,9 @@ class CodexBridgeTests(unittest.TestCase):
 
     def test_timeout_interrupts_and_terminates_its_stubborn_process(self):
         bridge, process, _ = self.runner(lambda proc, msg: proc.begin(msg), timeout=0.05, stubborn=True)
-        with self.assertRaisesRegex(BridgeError, "超时"):
+        with self.assertRaisesRegex(BridgeError, "超时") as caught:
             self.run_bridge(bridge)
+        self.assertEqual(caught.exception.code, "CODEX_TIMEOUT")
         self.assertTrue(process.terminated)
         self.assertTrue(any(item.get("method") == "turn/interrupt" for item in process.received))
 
@@ -358,7 +360,21 @@ class CodexBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, "额度") as caught:
             self.run_bridge(bridge)
         self.assertNotIn("secret", str(caught.exception))
+        self.assertEqual(caught.exception.code, "CODEX_QUOTA")
         self.assertIn("连接短暂中断，Codex 正在重试。", self.progress)
+
+    def test_transient_service_failures_have_stable_codes_without_raw_details(self):
+        for failure in ({"codexErrorInfo": "serverOverloaded"}, {"code": 503},
+                        {"codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 502}}}):
+            with self.subTest(failure=failure):
+                def scenario(process, message):
+                    process.begin(message)
+                    process.finish(status="failed", error={**failure, "message": "private server diagnostic"})
+                bridge, _, _ = self.runner(scenario)
+                with self.assertRaises(BridgeError) as caught:
+                    self.run_bridge(bridge)
+                self.assertEqual(caught.exception.code, "CODEX_CONNECTION")
+                self.assertNotIn("private", str(caught.exception))
 
     def test_unavailable_status_and_missing_executable_do_not_spawn(self):
         bridge, _, launches = self.runner()

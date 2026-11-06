@@ -37,10 +37,12 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.payload["job"]["timelines"] = [{"unique_id": "uid-own", "name": "Lab261011-202-1",
             "creator": "Lab", "markers": 1, "frames": 60, "fps": "29.97", "take_id": "", "built_at": "2026-10-11"}]
         self.timelines = ["蓝点折刀成品素材", "Lab261011-202-1"]
+        # Nothing is ticked by default any more; the last edit's material is.
+        self.payload["product_settings"]["material_timelines"] = ["蓝点折刀成品素材"]
         self.catalog = {"default_settings": {"model": "claude-opus", "reasoning_effort": "high"}, "models": [
             {"id": "claude-default", "name": "Claude 客户端默认", "available": True, "reasoning_efforts": ["high", "max"]},
-            {"id": "claude-opus", "name": "Claude Opus", "available": True, "reasoning_efforts": ["high", "max"]},
-            {"id": "claude-sonnet", "name": "Claude Sonnet", "available": True, "reasoning_efforts": ["high"]},
+            {"id": "claude-opus", "name": "Claude Opus", "available": True, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+            {"id": "claude-sonnet", "name": "Claude Sonnet", "available": True, "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
             {"id": "gpt-6.1-sol", "name": "Codex 测试模型", "provider": "codex", "available": True,
              "reasoning_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}], "skills": []}
         self.clients = {"providers": {"claude": {"available": True}, "codex": {"available": True}}, "busy": False}
@@ -66,8 +68,18 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.assertEqual((body["instruction"], body["mode"], body["materials"]),
                          ("开头使用切纸结果", "sync", ["蓝点折刀成品素材"]))
 
-    def test_incompatible_default_requires_a_choice_and_only_offers_supported_efforts(self):
-        self.catalog["default_settings"] = {"model": "claude-opus", "reasoning_effort": "low"}
+    def test_low_effort_default_is_used_without_an_override(self):
+        self.catalog["default_settings"] = {"model": "claude-sonnet", "reasoning_effort": "medium"}
+        page = self.open_page()
+        form = page.locator("#edit-form")
+        expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Claude Sonnet · medium")
+        expect(form.locator("[data-edit-override]")).to_be_hidden()
+        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
+        self.assertNotIn("effort", self.calls[0]["body"])
+
+    def test_incompatible_default_requires_a_choice_and_offers_every_model_effort(self):
+        self.catalog["default_settings"] = {"model": "claude-opus", "reasoning_effort": "ultra"}
         self.catalog["models"][2]["available"] = False
         page = self.open_page()
         form = page.locator("#edit-form")
@@ -77,7 +89,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         expect(form.locator('[data-copy-handoff]')).to_be_enabled()
         expect(form.locator('option[value="claude-sonnet"]')).to_have_attribute("disabled", "")
         form.locator('[name="model"]').select_option("claude-opus")
-        self.assertEqual(form.locator('[name="effort"] option').evaluate_all("rows => rows.map(row => row.value)"), ["", "high", "max"])
+        self.assertEqual(form.locator('[name="effort"] option').evaluate_all("rows => rows.map(row => row.value)"), ["", "low", "medium", "high", "xhigh", "max"])
         form.locator('[name="effort"]').select_option("max")
         form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
         page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
@@ -97,7 +109,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         expect(form.locator('[name="model"]')).to_have_value("")
         expect(form.locator('[name="effort"]')).to_have_value("")
         expect(form.locator('[name="model"]')).to_be_hidden()
-        self.catalog["default_settings"] = {"model": "claude-opus", "reasoning_effort": "low"}
+        self.catalog["default_settings"] = {"model": "claude-opus", "reasoning_effort": "ultra"}
         form.locator('[data-edit-default-refresh]').click()
         expect(form.locator("[data-edit-override]")).to_be_visible()
         expect(form.locator('[name="model"]')).to_have_value("")
@@ -149,20 +161,17 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertEqual((self.calls[0]["body"]["model"], self.calls[0]["body"]["effort"]), ("gpt-6.1-sol", "ultra"))
 
-    def test_unsupported_claude_model_is_not_offered_as_a_compatible_override(self):
+    def test_haiku_default_is_used_for_editing(self):
         self.catalog["models"].append({"id": "claude-haiku", "name": "Claude Haiku", "provider": "claude",
-                                       "available": True, "reasoning_efforts": ["high"]})
-        self.catalog["default_settings"] = {"model": "claude-haiku", "reasoning_effort": None}
+                                       "available": True, "reasoning_efforts": ["low", "medium", "high"]})
+        self.catalog["default_settings"] = {"model": "claude-haiku", "reasoning_effort": "medium"}
         page = self.open_page()
         form = page.locator("#edit-form")
-        expect(form.locator("[data-edit-default]")).to_contain_text("Claude Haiku")
-        expect(form.locator("[data-edit-override]")).to_be_visible()
-        expect(form.locator('[name="model"] option[value="claude-haiku"]')).to_have_count(0)
-        expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
-        form.locator('[name="model"]').select_option("codex-default")
-        self.assertEqual(form.locator('[name="effort"] option').evaluate_all("rows => rows.map(row => row.value)"), [""])
+        expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Claude Haiku · medium")
+        expect(form.locator("[data-edit-default]")).not_to_contain_text("不兼容")
+        expect(form.locator("[data-edit-override]")).to_be_hidden()
         expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_enabled()
-        self.assertEqual(self.calls, [])
+        self.assertEqual(form.locator('[name="model"] option[value="claude-haiku"]').count(), 1)
 
     def test_codex_unavailable_blocks_start_even_when_claude_is_connected(self):
         self.catalog["default_settings"] = {"model": "gpt-6.1-sol", "reasoning_effort": "high"}

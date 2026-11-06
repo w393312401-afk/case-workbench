@@ -18,12 +18,13 @@ import tempfile
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from campaign_store import pacific_today
 from creation_store import CreationError
 from direction_store import fingerprint, now
 from elevenlabs_client import VoiceError
 from production_operations import durable_json, file_lock
 from production_store import (JOB_ID, active_timelines, current_timeline, skill_delivery_reviewable, text, timeline_manual_receipt,
-                              timeline_running)
+                              timeline_running, timeline_task_status)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 CHUNK_BYTES = 8 * 1024 * 1024
@@ -72,6 +73,27 @@ def remap_publication_revisions(value, revisions):
             else:
                 remap_publication_revisions(item, revisions)
     return value
+
+
+def campaign_words(campaign):
+    """The campaign's name as viewers read it (the Chinese gloss dropped) and its last day, e.g. ("Black Friday & Cyber Monday", "Nov 30")."""
+    name = re.split(r"[（(]", str(campaign.get("name") or ""))[0].strip().replace(" / ", " & ")
+    try:
+        day = date.fromisoformat(campaign["end"])
+        return name, f"{day:%b} {day.day}"
+    except (KeyError, TypeError, ValueError):
+        return name, ""
+
+
+def campaign_card_text(campaign):
+    """Two lines for the end card: the campaign, and when it ends."""
+    name, end = campaign_words(campaign)
+    return f"{name} sale / Ends {end}" if end else f"{name} sale"
+
+
+def campaign_pin_text(campaign):
+    name, end = campaign_words(campaign)
+    return f"{name} sale{f' ends {end} (Pacific)' if end else ''}. Tap the cart below to grab it before then."
 
 
 def title_headline(line):
@@ -359,6 +381,11 @@ class VideoPublishMixin:
                     current["file_available"] = path.is_file() and path.stat().st_size == current["file"]["size"]
                 except (VoiceError, OSError):
                     current["file_available"] = False
+        if current:
+            # A post that went up during a campaign: once it is over its pinned comment and end card need changing.
+            campaign = self._campaign_on(current.get("published_on"))
+            if campaign:
+                current["campaign"] = {**campaign, "ended": campaign["end"] < pacific_today().isoformat()}
         candidates = []
         if source and not records and hasattr(self, "publication_candidates"):
             try:
@@ -372,8 +399,63 @@ class VideoPublishMixin:
         # Revision excludes presentation-only readback fields.
         return {"revision": revision, "source_signature": signature, "timeline_uid": uid, "can_register": bool(source),
                 "blocked_reason": reason, "source": source, "copy": publish_copy, "candidates": candidates,
-                "timelines": self._video_publication_timelines(job, store.entry(store.read(), identifier)),
+                "timelines": self._notion_marked(identifier, self._video_publication_timelines(job, store.entry(store.read(), identifier))),
                 "script_registrations": self.script_registrations(job["script_id"]), **entry}
+
+    def order_states(self, identifiers):
+        """What each order needs now, summed over its current timelines, for the task panel: a timeline is 完成 once
+        uploaded to Notion or registered, 待登记 once its cut is finished, otherwise 制作中. Archived and replaced timelines
+        are history and not counted. One read of each store serves every order."""
+        wanted = {value for value in identifiers if isinstance(value, str) and JOB_ID.fullmatch(value)}
+        if not wanted:
+            return {}
+        jobs = {job["id"]: job for job in self.production.records()["jobs"] if job["id"] in wanted}
+        publications = self._video_publications().read()
+        uploads = getattr(self, "notion_uploads", None)
+        uploaded = set()
+        if uploads is not None:
+            try:
+                rows = sorted(uploads.store.read()["uploads"].values(), key=lambda row: row.get("updated_at", ""))
+                latest = {(row["job_id"], row["timeline_uid"]): row.get("status") for row in rows}
+                uploaded = {key for key, status in latest.items() if status == "completed"}
+            except Exception:
+                uploaded = set()
+        states = {}
+        for identifier, job in jobs.items():
+            if job.get("archived"):
+                states[identifier] = {"label": "已归档", "tone": "muted"}
+                continue
+            if job.get("timeline_building") or any(edit.get("status") in {"running", "queued"} for edit in job.get("edits", [])):
+                states[identifier] = {"label": "剪辑中", "tone": "running"}
+                continue
+            entry = VideoPublicationStore.entry(publications, identifier)
+            counts = {}
+            for row in active_timelines(job):
+                uid = row.get("unique_id")
+                if (identifier, uid) in uploaded or timeline_records(entry, uid):
+                    key = "完成"
+                elif timeline_task_status(job, row) == "completed":
+                    key = "待登记"
+                else:
+                    key = "制作中"
+                counts[key] = counts.get(key, 0) + 1
+            if not counts:
+                states[identifier] = {"label": "还没有时间线", "tone": "muted"}
+                continue
+            open_parts = [f"{counts[key]} 条{key}" for key in ("待登记", "制作中") if counts.get(key)]
+            states[identifier] = ({"label": "完成", "tone": "success"} if not open_parts else
+                                  {"label": " · ".join(open_parts), "tone": "warning" if counts.get("待登记") else "neutral"})
+        return states
+
+    def _notion_marked(self, identifier, lines):
+        """Mark each timeline whose video has been uploaded to Notion: that upload is where its task ends."""
+        uploads = getattr(self, "notion_uploads", None)
+        for line in lines:
+            try:
+                line["notion_uploaded"] = bool(uploads) and uploads.latest(identifier, line["unique_id"]).get("status") == "completed"
+            except Exception:
+                line["notion_uploaded"] = False
+        return lines
 
     @staticmethod
     def _video_publication_timelines(job, entry):
@@ -392,9 +474,60 @@ class VideoPublishMixin:
                           "registered": bool(current), "source_current": bool(current and ready and current.get("source_signature") == signature)})
         return lines
 
+    def _campaign_now(self):
+        """The campaign running today and the next one starting soon, from the trusted calendar; empty when unreadable."""
+        try:
+            rows = self.campaigns.for_writing() if hasattr(self, "campaigns") else []
+        except Exception:
+            rows = []
+        pick = lambda status: next((dict(row) for row in rows if row["status"] == status), None)
+        return {"running": pick("running"), "upcoming": pick("upcoming")}
+
+    def _campaign_on(self, day):
+        """The trusted campaign a post went up during, if any."""
+        if not hasattr(self, "campaigns") or not isinstance(day, str):
+            return None
+        from campaign_store import WRITING_CONFIDENCE
+        try:
+            rows = self.campaigns.merged(self.campaigns.read())
+        except Exception:
+            return None
+        return next(({key: row[key] for key in ("name", "start", "end")} for row in rows
+                     if row["start"] <= day <= row["end"] and (row.get("verified") or row.get("confidence") in WRITING_CONFIDENCE)), None)
+
+    def _campaign_copy(self, swap):
+        """What the publish panel offers for 「为什么现在买」 in a campaign: the end card and the pinned comment.
+        The script's own 活动版 and 置顶评论建议 come first; without them the wording is made from the calendar."""
+        now = self._campaign_now()
+        campaign = now["running"] or now["upcoming"]
+        written = next((option for option in (swap or {}).get("options", []) if option["kind"] == "活动版"), None)
+        pin = (swap or {}).get("pin") or ({"en": campaign_pin_text(campaign), "zh": ""} if campaign else None)
+        return {"campaign": {**campaign, "status": "running" if now["running"] else "upcoming"} if campaign else None,
+                "card_text": campaign_card_text(campaign) if campaign else "", "pin": pin, "written": written}
+
+    def set_video_pin_status(self, identifier, body):
+        """Mark that a post's campaign pinned comment (and end card) were dealt with after the campaign ended."""
+        if not isinstance(body, dict) or set(body) - {"publication_id", "pin_cleared"} or not isinstance(body.get("pin_cleared"), bool):
+            raise VoiceError(400, "置顶评论参数无效。")
+        with self._video_publication_job_guard(identifier):
+            store = self._video_publications()
+            with self.lock, file_lock(store.root / "catalog.lock", "发布资料正在保存，请稍后重试。"):
+                self.production.job(identifier)
+                data = store.read()
+                record = self._standing_publication(store.entry(data, identifier), body.get("publication_id"))
+                if not record:
+                    raise VoiceError(409, "发布记录已变化，请刷新后再标记。")
+                if record.get("pin_cleared") is not body["pin_cleared"]:
+                    record["pin_cleared"] = body["pin_cleared"]
+                    record["pin_updated_at"] = now()
+                    store.write(data)
+                    self.state_cache = None
+                return {"publication_id": record["id"], "pin_cleared": body["pin_cleared"],
+                        "revision": store.revision(store.entry(data, identifier))}
+
     def _video_publish_copy(self, job):
         """Title-and-hashtag lines, Chinese text and English voice-over of the adopted script, for pasting at publish time."""
-        from variant_parse import parse_variants, publish_titles, same_lines, screen_copy, screen_options, variant_script
+        from variant_parse import parse_variants, publish_titles, same_lines, screen_copy, screen_options, swap_notes, variant_script
         from production_store import supplement_markdown
         try:
             script = self.creation.get_script(job["script_id"])
@@ -413,7 +546,8 @@ class VideoPublishMixin:
         if not markdown and (job.get("supplement") or candidate):
             markdown = supplement_markdown(job)
         screen_en, screen_zh = screen_copy(markdown)
-        return {"script_id": script.get("id"), "version": script.get("version"),
+        swap = swap_notes(job["fill_markdown"], 0) if job.get("fill_markdown") else swap_notes(candidate, index) if matching else None
+        return {"script_id": script.get("id"), "version": script.get("version"), "swap": swap, **self._campaign_copy(swap),
                 "titles": titles,
                 "screen_en": screen_en, "screen_zh": screen_zh, "screen_options": screen_options(markdown),
                 "zh": script.get("translation_zh") or ("\n".join(line["zh"] for line in job["lines"]) if all(line.get("zh") for line in job["lines"]) else ""),
@@ -616,6 +750,47 @@ class VideoPublishMixin:
                 standing = (timeline_records(entry, record_timeline(record)) or [None])[-1]
                 return record if standing is record or (standing and standing.get("id") == publication_id) else None
         return None
+
+    def edit_video_publication(self, identifier, body):
+        """Correct a registration in place: its post ID, account or day. The bound script, voiceover, timeline and file
+        stay as registered; each change is kept on the record, and the script's video link follows a changed post."""
+        if not isinstance(body, dict) or set(body) - {"publication_id", "revision", "post_id", "account", "published_on", "post_url"}:
+            raise VoiceError(400, "修改登记参数无效。")
+        with self._video_publication_job_guard(identifier):
+            store = self._video_publications()
+            with self.lock, self.production.catalog_transaction(), file_lock(store.root / "catalog.lock", "发布资料正在保存，请稍后重试。"):
+                job = self.production.job(identifier)
+                data = store.read()
+                entry = store.entry(data, identifier)
+                if body.get("revision") != store.revision(entry):
+                    raise VoiceError(409, "发布记录已变化，请刷新后再修改。")
+                record = self._standing_publication(entry, body.get("publication_id"))
+                if not record:
+                    raise VoiceError(409, "只能修改每条时间线当前的登记，请刷新后重试。")
+                fields = self._video_post_fields({"post_id": body.get("post_id"), "published_on": body.get("published_on"),
+                                                  "account": body.get("account", record.get("account", "")), "post_url": body.get("post_url", "")})
+                before = {key: record.get(key) for key in ("post_id", "account", "published_on")}
+                after = {key: fields[key] for key in ("post_id", "account", "published_on")}
+                if before == after and not fields["post_url"]:
+                    return {**copy.deepcopy(entry), "revision": store.revision(entry)}
+                if after["post_id"] != before["post_id"]:
+                    self._video_publication_links(data, job, after["post_id"], record_timeline(record))
+                script = self.creation.get_script(record["script_id"])
+                if script and script.get("video_id") == before["post_id"]:
+                    self.save_script_status(record["script_id"], {
+                        "request_id": "videopub-edit-" + uuid4().hex, "revision": self.creation.public()["revision"],
+                        "script_status": {"video_id": after["post_id"], "published_on": after["published_on"],
+                                          "note": f"修改视频发布登记；制作单 {identifier}，成片 {record['id']}：{before['post_id']} → {after['post_id']}"}},
+                        video_job_id=identifier)
+                if fields["post_url"]:
+                    record["post_url"] = fields["post_url"]
+                elif after["post_id"] != before["post_id"]:
+                    record["post_url"] = ""  # The old link points at the old post.
+                record.update(after)
+                record.setdefault("edits", []).append({"at": now(), "before": before, "after": after})
+                store.write(data)
+                self.state_cache = None
+                return {**copy.deepcopy(entry), "revision": store.revision(entry)}
 
     def set_video_calendar_status(self, identifier, body):
         """Flip the publish-calendar mark of the current registration in place; the registration itself stays as saved."""

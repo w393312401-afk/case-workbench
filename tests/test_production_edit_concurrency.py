@@ -76,7 +76,7 @@ class EditConcurrencyTests(unittest.TestCase):
         finally:
             self.bench.resolve.lock.release()
 
-    def test_same_project_selection_queues_but_editors_are_exclusive(self):
+    def test_same_project_selection_queues_and_editors_share_davinci(self):
         job = self.two_timelines()
         planning, plan_entered = [], threading.Event()
         finish_plan, writer_entered, finish_writer = threading.Event(), threading.Event(), threading.Event()
@@ -116,11 +116,17 @@ class EditConcurrencyTests(unittest.TestCase):
                 self.assertFalse(self.bench.resolve.busy())
                 finish_plan.set()
                 self.assertTrue(writer_entered.wait(5))
-                time.sleep(.15)
-                self.assertEqual(len(writers), 1)
+                deadline = time.monotonic() + 5
+                while len(writers) < 2 and time.monotonic() < deadline:
+                    time.sleep(.02)
+                # Same-project editors run side by side; their scripting calls take turns (resolve_share).
+                self.assertEqual(len(writers), 2)
+                # Everything else still finds DaVinci busy while they edit.
+                self.assertTrue(self.bench.resolve.busy())
                 finish_writer.set()
                 self.wait(job["id"])
-                self.assertEqual(counts["maximum"], 1)
+                self.assertEqual(counts["maximum"], 2)
+                self.assertFalse(self.bench.resolve.busy())
                 self.assertCountEqual(writers, [first["id"], second["id"]])
                 self.assertEqual(planning, [first["id"], second["id"]])
                 self.assertEqual([row["status"] for row in self.bench.production.job(job["id"])["edits"]], ["completed", "completed"])

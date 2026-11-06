@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import case_replica
 from case_replica import estimated_spans, handoff_section, line_records, parse_transcript, shot_targets
@@ -93,8 +94,24 @@ class HandoffTest(unittest.TestCase):
         self.assertIn("优先于技能的分类时长上限", text)
         self.assertLess(text.index("原片镜头表"), text.index("## 交付"))
 
+    def test_an_optimized_script_is_named_as_such_to_the_editor(self):
+        self.assertIn("口播已和原片逐句相同", self.handoff("replica"))
+        self.replica["wording"] = "aligned"
+        text = self.handoff("replica")
+        self.assertIn("逐句对应原片的优化稿", text)
+        self.assertNotIn("口播已和原片逐句相同", text)
+
     def test_other_modes_of_the_same_job_stay_as_they_were(self):
         self.assertNotIn("原片镜头表", self.handoff("explain"))
+
+    def test_other_modes_do_not_inherit_the_lines_copy_the_original_hint(self):
+        self.job["lines"][0]["proof"] = "照原片 镜头 1（0.00–2.00 秒）"
+        self.job["lines"][1]["proof"] = "Show the edge"
+        for mode in ("explain", "sync", "montage"):
+            text = self.handoff(mode)
+            self.assertNotIn("照原片 镜头", text)
+            self.assertIn("Show the edge", text)
+        self.assertIn("照原片 镜头 1", self.handoff("replica"))
 
     def test_the_mode_has_selection_rules(self):
         self.assertIn("replica", MODES)
@@ -180,6 +197,17 @@ class MediaTest(unittest.TestCase):
         result = case_replica.snapshot("PVR-000000000001", source, ["Changed words."])
         self.assertFalse(result["timed"])
         self.assertIn("按字数估算", result["notes"][0])
+
+    def test_an_optimized_script_line_for_line_keeps_the_original_times(self):
+        source = Bench(self.root, self.case)._replica_case("PVR-000000000001")[2]
+        result = case_replica.snapshot("PVR-000000000001", source, ["First, better.", "Second, better."], aligned=True)
+        self.assertTrue(result["timed"])
+        self.assertEqual("aligned", result["wording"])
+        self.assertEqual([{"start": 0.0, "end": 1.0}, {"start": 1.0, "end": 2.0}], result["spans"])
+        self.assertIn("逐句对应原稿的优化稿", result["notes"][0])
+        # An optimized script that lost or gained a line can no longer sit on the original's lines.
+        drifted = case_replica.snapshot("PVR-000000000001", source, ["All in one."], aligned=True)
+        self.assertEqual(("changed", False), (drifted["wording"], drifted["timed"]))
 
     def test_the_machine_transcript_is_flagged(self):
         source = Bench(self.root, self.case)._replica_case("PVR-000000000001")[2]
@@ -272,6 +300,57 @@ class CaseRequirementsTest(unittest.TestCase):
     def test_a_mismatched_translation_is_dropped_not_misaligned(self):
         current = {**CASE["current"], "assets": {"video": str(self.video)}, "translation_zh": {"text": "只有一行"}}
         self.assertEqual(case_replica.case_source({"current": current})["chinese"], [])
+
+
+class OptimizedOriginTest(unittest.TestCase):
+    """Scripts adopted from a 「照原片优化」 task replicate the task's case, line for line; others do not."""
+
+    def bench(self, tasks):
+        class AI:
+            def get(self, task_id):
+                if task_id not in tasks:
+                    raise KeyError(task_id)
+                return tasks[task_id]
+        bench = Bench(".", CASE)
+        bench.ai = AI()
+        return bench
+
+    def test_the_task_mode_decides(self):
+        bench = self.bench({"AIT-replica": {"case_id": "PVR-000000000001", "context": {"writing_mode": {"mode": "replica", "count": 2}}},
+                            "AIT-diverge": {"case_id": "PVR-000000000001", "context": {"writing_mode": {"mode": "diverge", "count": 2}}},
+                            "AIT-plain": {"case_id": "PVR-000000000001", "context": {}}})
+        self.assertEqual(("PVR-000000000001", True), bench._replica_origin({"source": {"task_id": "AIT-replica", "round_id": "r"}}))
+        self.assertEqual(("PVR-000000000002", False), bench._replica_origin({"source": {"kind": "case_replica", "case_id": "PVR-000000000002"}}))
+        for task_id in ("AIT-diverge", "AIT-plain", "AIT-gone"):
+            self.assertIsNone(bench._replica_origin({"source": {"task_id": task_id}}))
+        self.assertIsNone(bench._replica_origin({"source": {}}))
+
+    def test_an_adopted_optimized_script_becomes_an_aligned_replica_job(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        video = Path(folder.name) / "v.mp4"
+        video.write_bytes(b"x")
+        bench = self.bench({"AIT-replica": {"case_id": "PVR-000000000001", "context": {"writing_mode": {"mode": "replica", "count": 2}}}})
+        bench.store = StoreSource({**CASE, "current": {**CASE["current"], "assets": {"video": str(video)}}})
+
+        class Creation:
+            def get_script(self, identifier):
+                return {"id": identifier, "text": "Better one.\nBetter two.", "source": {"task_id": "AIT-replica", "round_id": "r"}}
+        bench.creation = Creation()
+        seen = []
+        with patch("workbench_replica.snapshot", lambda case_id, source, spoken, aligned=False: seen.append((case_id, spoken, aligned)) or
+                   {"notes": [], "wording": "aligned", "shots": [], "spans": []}):
+            reference, _ = bench._replica_snapshot("SCR-000000000001")
+        self.assertEqual([("PVR-000000000001", ["Better one.", "Better two."], True)], seen)
+        resolved = bench.apply_replica({}, ["Better one.", "Better two."], [], (
+            {"notes": [], "wording": "aligned", "shots": [], "spans": [{"start": 0, "end": 1}, {"start": 1, "end": 2}]}, {"caption": ""}))
+        self.assertEqual("1:1 复刻·优化稿", resolved["variant_label"])
+
+    def test_the_optimize_count_is_checked_before_anything_is_made(self):
+        bench = Bench(".", CASE)
+        for count in (-1, 6, "2", 1.5):
+            with self.assertRaises(VoiceError):
+                bench.start_case_replica("PVR-000000000001", {"new": True, "optimize": count})
 
 
 class ScriptSourceTest(unittest.TestCase):

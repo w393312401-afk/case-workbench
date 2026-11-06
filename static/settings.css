@@ -47,7 +47,7 @@
 .settings-data-transfer h3, .settings-backup-form h3 { font-size: var(--font-body); margin: 0; }
 .settings-data-file-label { display: block; margin: 12px 0 8px; color: var(--muted-soft); }
 .settings-data-transfer input[type="file"] { width: 100%; font-size: var(--font-meta); color: var(--ink); }
-.settings-data-transfer input[type="file"]::file-selector-button { padding: 8px 12px; margin-right: 10px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; cursor: pointer; }
+.settings-data-transfer input[type="file"]::file-selector-button { padding: 5px 12px; margin-right: 10px; color: var(--ink); background: var(--fill); border: 0; border-radius: var(--btn-radius); cursor: pointer; }
 .settings-data-import-preview { padding: 16px; margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-alt); }
 #settings-data-import-summary { white-space: pre-line; font-size: var(--font-meta); overflow-wrap: anywhere; line-height: 1.8; }
 .settings-data-warning { margin: 12px 0; padding: 11px 13px; border-radius: 8px; background: var(--surface-warm); color: var(--warm-ink); font-size: var(--font-meta); line-height: 1.8; overflow-wrap: anywhere; }

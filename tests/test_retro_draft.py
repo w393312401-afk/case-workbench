@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from creation_store import CreationStore
 from production_store import ProductionStore
-from retro_draft import DRAFT_FRAMEWORK, _sheet, _shot_list, draft_mode, draft_prompt, label_shots, parse_card, prepare
+from retro_draft import RETRO_RULES, _sheet, _shot_list, draft_mode, draft_prompt, label_shots, parse_card, prepare
 from workbench_video_publish import VideoPublishMixin
 
 JOB = "PRD-222222222222"
@@ -71,10 +71,13 @@ class DraftTests(unittest.TestCase):
         self.assertEqual("thin", draft_mode(None, None))
         report = {"duration": 31.0, "shots": [{}], "lines": [], "transcript": "x"}
         unsold = draft_prompt([], report, source="s", review_text="", figures={}, mode="unsold")
-        self.assertIn(DRAFT_FRAMEWORK, unsold)
-        # A video that did not sell gets no compliance pass and no kill list, only the funnel step it lost people at.
-        for gone in ("会不会被封", "合规层面", "被限流", "## 杀手清单", '列一张"杀手清单"'):
+        # The five retrospective rules replace the old adversarial framework and the S/A/B selling-point chain.
+        self.assertIn(RETRO_RULES, unsold)
+        for gone in ("对抗性审查", "只许挑毛病", "<审查框架>", "卖点串联", "人无我有", "会不会被封", "## 杀手清单"):
             self.assertNotIn(gone, unsold)
+        for rule in ("唤醒型还是选择型", "停留理由和购买理由是不是同一件事", "2–3 秒内出现", "照着做也能复现", "单/万播放"):
+            self.assertIn(rule, unsold)
+        self.assertIn("## 3. 停留理由和购买理由", unsold)
         self.assertIn("```retro-card", unsold)
         self.assertIn("## 一句话：这条卡在哪一步", unsold)
         self.assertIn("数据不支持的（那一步并不比同类差）不要写", unsold)
@@ -108,12 +111,12 @@ class DraftTests(unittest.TestCase):
         figures = {"每周（完播率 finish_rate_pct、点击率 ctr_pct、点击后转化 ctor_pct）": [{"finish_rate_pct": 5.19, "ctr_pct": 3.0}]}
         report = {"duration": 31.0, "shots": [{}], "lines": [], "transcript": "[0.0 秒] I sharpened every EDC knife"}
         text = draft_prompt([], report, source="从 TikTok 下载", review_text="", figures=figures)
-        self.assertNotIn(DRAFT_FRAMEWORK, text)
+        self.assertIn(RETRO_RULES, text)
         self.assertNotIn("只许挑毛病", text)
         self.assertIn("5.19", text)
         self.assertIn("[0.0 秒] I sharpened", text)
-        for heading in ("## 一句话：这条为什么出单", "## 1. 为什么停下来看", "## 2. 为什么点商品", "## 3. 为什么下单",
-                        "## 4. 可以复制的做法", "## 5. 拖后腿的地方", "## 下一轮", "建议动作："):
+        for heading in ("## 一句话：这条为什么出单", "## 1. 类型：唤醒型还是选择型", "## 2. 停留理由和购买理由", "## 3. 开头节奏",
+                        "## 4. 证明画面", "## 5. 中段与收口", "## 下一轮", "建议动作："):
             self.assertIn(heading, text)
         self.assertIn("不要读取或引用其他文件和案例", text)
         self.assertIn("看不清不等于没有", text)

@@ -5,12 +5,13 @@ needed by the workbench; the user follows the returned OAuth link once if needed
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import json
 from pathlib import Path
 import re
 import tempfile
 import threading
+import time
 from urllib.parse import urlsplit
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 from uuid import uuid4
@@ -23,9 +24,19 @@ from elevenlabs_client import VoiceError
 UPLOAD_LIMIT = 20 * 1024 * 1024
 
 
-def unpack(result):
+ACTION_LABELS = {"fetch": "读取页面", "query_data_sources": "查询发布日历", "create_pages": "新建排期页面",
+                 "update_page": "更新排期页面", "create_file_upload": "准备上传成片", "get_tool_access": "检查访问权限"}
+
+
+def unpack(result, action=""):
     if result.get("isError"):
-        raise VoiceError(502, "Notion 未完成这次操作，请检查页面权限和连接后重试。")
+        detail = " ".join(item.get("text", "") for item in result.get("content", []) if item.get("type") == "text")
+        if "usage_limit_reached" in detail or "used up its Query Data Source allowance" in detail:
+            raise VoiceError(429, "Notion 数据库查询额度暂时用完了，约 1 小时内恢复，到时再点上传即可；本地成片和文案都已保留。")
+        # Say which step failed and what Notion said, so the cause is visible instead of a generic retry hint.
+        step = ACTION_LABELS.get(action, action)
+        said = re.sub(r"\s+", " ", detail).strip()[:240]
+        raise VoiceError(502, f"Notion 未完成{'「' + step + '」' if step else '这次操作'}" + (f"：{said}" if said else "，请检查页面权限和连接后重试。"))
     if isinstance(result.get("structuredContent"), dict):
         return result["structuredContent"]
     texts = [item.get("text", "") for item in result.get("content", []) if item.get("type") == "text"]
@@ -107,17 +118,54 @@ class _Client:
             raise VoiceError(409, f"本机 Notion 连接尚不支持 {action}，请更新 Codex 的 Notion 连接后重试。")
         result = self.session.request("mcpServer/tool/call", {"threadId": self.session.thread_id,
             "server": self.server, "tool": names[0], "arguments": arguments}, startup=False)
-        value = unpack(result)
+        value = unpack(result, action)
         if value.get("warnings"):
             self.warnings.extend(str(item) for item in value["warnings"] if item)
         return value
 
 
+CONNECTED_FOR = 7 * 24 * 3600  # A confirmed connection is trusted this long; each upload re-proves it.
+TOOLS_WAIT = 30                  # A fresh Codex session lists the Notion tools only after the server finishes starting.
+
+
 class NotionBridge:
-    def __init__(self, executable=None):
+    def __init__(self, executable=None, cache_path=None):
         self.bridge = CodexStillsBridge(executable=executable, startup_timeout=45)
         self.login = None
         self.lock = threading.Lock()
+        # Remembered across dialog openings and restarts, so the upload window does not start a Codex session each time.
+        self.cache_path = Path(cache_path) if cache_path else None
+        self.known = None
+
+    def _cached(self):
+        if self.known is None and self.cache_path:
+            try:
+                self.known = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                self.known = {}
+        known = self.known or {}
+        if known.get("status") == "connected" and 0 <= time.time() - float(known.get("checked_at", 0)) < CONNECTED_FOR:
+            return known
+        return None
+
+    def _remember(self, status):
+        self.known = {"status": status, "checked_at": time.time()} if status == "connected" else {}
+        if self.cache_path:
+            try:
+                self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = self.cache_path.with_name(self.cache_path.name + ".tmp")
+                temporary.write_text(json.dumps(self.known), encoding="utf-8")
+                temporary.replace(self.cache_path)
+            except OSError:
+                pass
+
+    def _ready_state(self, session, server):
+        deadline = time.monotonic() + TOOLS_WAIT
+        while True:
+            state = self._state(session, server)
+            if state.get("tools") or time.monotonic() >= deadline or state.get("authStatus") not in {"oAuth", None}:
+                return state
+            time.sleep(1)
 
     @contextmanager
     def connection(self, *, thread=True, timeout=600):
@@ -167,20 +215,37 @@ class NotionBridge:
 
     @contextmanager
     def client(self):
-        with self.connection() as (session, server):
-            state = self._state(session, server)
+        with ExitStack() as stack:
+            # A Codex session that fails to start is retried once before the upload is reported as failed.
+            for attempt in (0, 1):
+                try:
+                    session, server = stack.enter_context(self.connection())
+                    break
+                except VoiceError:
+                    if attempt:
+                        raise
+            state = self._ready_state(session, server)
             if not state.get("tools"):
-                raise VoiceError(409, "请先连接 Notion，并授权访问「TK排期计划」及其发布日历。")
+                if state.get("authStatus") != "oAuth":
+                    self._remember("disconnected")
+                    raise VoiceError(409, "请先连接 Notion，并授权访问「TK排期计划」及其发布日历。")
+                raise VoiceError(503, "Notion 连接已授权，但这次没能加载完成，请稍后重试。")
+            self._remember("connected")
             yield _Client(session, server, state["tools"])
 
-    def status(self):
+    def status(self, refresh=False):
         with self.lock:
             if self.login and self.login.get("status") in {"waiting", "preparing"}:
                 return dict(self.login)
+            known = None if refresh else self._cached()
+        if known:
+            return {"status": "connected", "cached": True}
         try:
             with self.connection(thread=False, timeout=60) as (session, server):
                 state = self._state(session, server)
                 connected = bool(state.get("tools")) or state.get("authStatus") == "oAuth"
+                with self.lock:
+                    self._remember("connected" if connected else "disconnected")
                 return {"status": "connected" if connected else "disconnected"}
         except VoiceError as exc:
             return {"status": "unavailable", "error": str(exc)}
@@ -213,6 +278,7 @@ class NotionBridge:
                             session.pump()
                         with self.lock:
                             self.login = {"status": "connected" if complete.get("success") else "disconnected"}
+                            self._remember(self.login["status"])
                 except Exception:
                     with self.lock:
                         self.login = {"status": "disconnected", "error": "Notion 授权未完成，请重新连接。"}

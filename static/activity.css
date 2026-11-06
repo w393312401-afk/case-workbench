@@ -44,8 +44,6 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 
 .activity-controls { padding: 12px; display: grid; gap: 12px; border-bottom: 1px solid var(--line); }
 .activity-filters { display: flex; border: 1px solid var(--line); padding: 2px; border-radius: 8px; background: var(--surface-alt); }
-.activity-filters button { flex: 1; min-height: 30px; padding: 4px 8px; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; }
-.activity-filters button[aria-pressed="true"] { background: var(--surface); color: var(--accent-text); font-weight: 600; box-shadow: var(--shadow-segment); }
 .activity-refine { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 10px 8px; }
 .activity-product-field, .activity-kind-field { position: relative; display: grid; align-content: start; gap: 5px; min-width: 0; }
 .activity-field-label { font-size: 11px; font-weight: 500; line-height: 1.5; color: var(--muted-soft); }
@@ -131,8 +129,6 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 .activity-detail-actions button { gap: 4px}
 .activity-detail-actions svg { width: 14px; height: 14px; }
 .activity-log-tools { display: flex; align-items: center; gap: 2px; padding: 0 10px 6px 12px; border-bottom: 1px solid var(--line); }
-.activity-log-tools button { padding: 2px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px; }
-.activity-log-tools button[aria-pressed="true"] { border-color: var(--line); background: var(--surface-alt); color: var(--ink); font-weight: 550; }
 .activity-log-body { position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 0 10px; font-size: 12px; }
 .activity-log-body:focus-visible { outline-offset: -3px; }
 .activity-log-group + .activity-log-group { border-top: 1px solid var(--line); }
@@ -205,7 +201,7 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 @media (max-width: 700px) { .activity-trigger { gap: 3px; padding: 7px 8px; } .activity-count { font-size: 10px; padding: 2px 4px; } }
 /* On phones the task button joins the single header row as an icon; its counts become corner badges. */
 @media (max-width: 760px) {
-  .topbar-right > .activity-trigger { position: relative; width: 40px; height: 40px; min-height: 40px; padding: 0; justify-content: center; gap: 0; }
+  .topbar-right > .activity-trigger { position: relative; width: var(--btn-h-lg); height: var(--btn-h-lg); min-height: var(--btn-h-lg); padding: 0; justify-content: center; gap: 0; }
   .topbar-right > .activity-trigger > span:not([data-icon]):not(.activity-count) { display: none; }
   .topbar-right > .activity-trigger svg { width: 19px; height: 19px; }
   .activity-trigger .activity-count { position: absolute; right: -5px; min-width: 16px; padding: 0 4px; font-size: 10px; line-height: 16px; text-align: center; }
@@ -223,6 +219,8 @@ body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { over
 }
 
 /* Keep cross-product filtering while leaving more room for results and logs. */
-.activity-controls{padding:8px;gap:6px}.activity-refine{gap:6px}.activity-field-label{line-height:1.2}.activity-refine select,.activity-refine input,.activity-product-trigger,.activity-kind-trigger{height:32px}.activity-search-field>svg{top:8px}
+.activity-controls{padding:8px;gap:6px}.activity-refine{gap:6px}.activity-field-label{line-height:1.2}.activity-refine select,.activity-refine input,.activity-product-trigger,.activity-kind-trigger{height:var(--btn-h-lg)}.activity-search-field>svg{top:10px}
 
 .activity-log-single{display:flex;align-items:baseline;gap:6px}.activity-log-single .activity-log-lines{flex:1;min-width:0}.activity-single-phase{font-size:11px;color:var(--muted-soft);padding-left:8px;flex-shrink:0}
+
+.activity-filters>button { flex: 1; }

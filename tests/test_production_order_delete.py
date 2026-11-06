@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock
 from uuid import uuid4
 
 APP = Path(__file__).resolve().parents[1]
@@ -64,6 +65,20 @@ class OrderDeleteTests(unittest.TestCase):
         result = self.bench.delete_job_order(job["id"], {"request_id": uuid4().hex})
         self.assertEqual(result["deleted_job"], job["id"])
         self.assertFalse((self.root / "audio" / job["id"]).exists())
+
+    def test_preview_files_are_removed_with_the_job_and_running_previews_block_deletion(self):
+        job = self.video_job()
+        folder = self.root / "video-previews" / job["id"] / "timeline"
+        folder.mkdir(parents=True)
+        (folder / "preview.mp4").write_bytes(b"preview")
+        self.bench.video_previews = Mock()
+        self.bench.video_previews.busy.return_value = True
+        with self.assertRaisesRegex(VoiceError, "视频预览"):
+            self.bench.delete_job_order(job["id"], {"request_id": uuid4().hex})
+        self.assertTrue(folder.is_dir())
+        self.bench.video_previews.busy.return_value = False
+        self.bench.delete_job_order(job["id"], {"request_id": uuid4().hex})
+        self.assertFalse(folder.parent.exists())
 
     def test_archived_video_job_goes_with_its_audio_handoffs_and_finished_operation_records(self):
         job = self.video_job()

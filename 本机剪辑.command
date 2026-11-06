@@ -23,5 +23,5 @@ fi
 [ -z "$RESOLVE_MCP" ] && echo "提示：没有找到 ResolveMCP，AI 剪辑暂不可用；找到后用 RESOLVE_MCP 环境变量指向它。"
 
 echo "本机工作台已启动，浏览器会打开导入页。请保持这个窗口，关闭窗口就会停止。"
-.venv/bin/python -c 'import time, webbrowser; from app_config import load_config; time.sleep(4); webbrowser.open("http://127.0.0.1:{}/#production/import".format(load_config()["port"]))' &
+.venv/bin/python -c 'from app_config import open_edit_import; open_edit_import()' &
 .venv/bin/python server.py --no-open

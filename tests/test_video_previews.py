@@ -135,6 +135,14 @@ def test_preview_http_requires_page_token_and_supports_range(stations, preview_m
         assert not server.app.preview_exports._records(identifier)
         assert request('POST', base, body, {'Content-Type':'application/json', 'X-Workbench-Token':server.app.token})[0] == 202
         preview = wait_complete(server.app.preview_exports, identifier)['preview']
+        # Both versions of the workbench used the same status URL, with different response fields.
+        status, _, shared = request('GET', base + '?timeline=timeline-one')
+        assert status == 200
+        shared = json.loads(shared)
+        assert shared['preview']['id'] == preview['id'] and shared['task']['status'] == 'completed'
+        assert shared['video'] is None and shared['status'] == 'idle'
+        status, _, portable = request('GET', base + '/portable?timeline=timeline-one')
+        assert status == 200 and json.loads(portable)['preview'] == shared['preview']
         status, headers, content = request('GET', preview['url'], headers={'Range':'bytes=0-31'})
         assert status == 206 and len(content) == 32
         assert headers['Content-Type'].startswith('video/mp4')

@@ -606,6 +606,8 @@ function mountDetailWorkspace(item) {
   if (picker) bar.append(picker);
   bar.append(badges);
   const cases = filteredCases(), index = cases.findIndex(entry => entry.case_id === item.case_id);
+  const steps = document.createElement("div");
+  steps.className = "case-steps";
   for (const [offset, label] of [[-1, "上一条"], [1, "下一条"]]) {
     const next = index >= 0 ? cases[index + offset] : null;
     const link = document.createElement(next ? "a" : "span");
@@ -615,8 +617,9 @@ function mountDetailWorkspace(item) {
     link.setAttribute("aria-label", label);
     if (next) { link.href = `#case/${encodeURIComponent(next.case_id)}`; link.title = next.current?.title || next.title; }
     else link.setAttribute("aria-disabled", "true");
-    bar.append(link);
+    steps.append(link);
   }
+  bar.append(steps);
   dock.append(bar);
   // Tabs, case meta, AI entry points (mounted by ai.js) and case tools share one row.
   const actions = document.createElement("div");

@@ -9,7 +9,7 @@ window.VideoPreview = (() => {
     const root = host.querySelector('[data-video-preview]');if (!root) return;
     const token = Symbol('preview');root._previewBind = token;
     const current = () => root.isConnected && root._previewBind === token;
-    const base = `/api/production/jobs/${encodeURIComponent(job.id)}/preview`, key = `${job.id}:${uid}`;
+    const base = `/api/production/jobs/${encodeURIComponent(job.id)}/preview/portable`, key = `${job.id}:${uid}`;
     const button = root.querySelector('[data-preview-generate]'), status = root.querySelector('[data-preview-status]');
     const progress = root.querySelector('[data-preview-progress]'), player = root.querySelector('[data-preview-player]');
     const download = root.querySelector('[data-preview-download]'), version = root.querySelector('[data-preview-version]');
@@ -60,7 +60,12 @@ window.VideoPreview = (() => {
       } finally {posting = false;if (current()) {button.disabled = running() || Boolean(data?.blocked_reason);if (data && !failed) paint();schedule();}}
     };
     player.addEventListener('error',() => {status.className = 'ai-error';status.textContent = '视频读取失败，请刷新确认登录状态，或下载 MP4 查看。';});
-    await load();
+    const disclosure = root.closest('details.portable-preview');
+    if (!disclosure || disclosure.open) {
+      await load();
+    } else {
+      disclosure.addEventListener('toggle',() => { if (disclosure.open) void load(); },{once:true});
+    }
   }
   return {markup,bind};
 })();

@@ -56,25 +56,26 @@ class RetroFunnelTests(unittest.TestCase):
         self.assertEqual("卡在点击", draft["card"]["verdict"])
         self.assertIsNone(review_draft({"rounds": [{"status": "completed", "output": "结论：x\n建议动作：无结论"}]})["card"])
 
-    def test_draft_brief_lists_graded_points_for_the_audience_and_points_conclusion(self):
+    def test_draft_brief_lists_points_for_the_purchase_reason_and_the_new_conclusion(self):
         from retro_draft import draft_prompt
         brief = draft_prompt([], None, source="成片", review_text="", figures={}, mode="sold",
                              points=[{"code": "S1", "title": "定角不用猜"}, {"code": "B4", "title": "价格"}], audience="徒手磨石用户")
         self.assertIn("S1 定角不用猜\nB4 价格", brief)
         self.assertIn("方向登记的目标人群（只作对照）：徒手磨石用户", brief)
-        self.assertIn("结论：人群：……；S：……；A：……；B：……", brief)
-        self.assertIn("S、A、B 都写「未登记」", draft_prompt([], None, source="成片", review_text="", figures={}))
+        self.assertIn("结论：类型：……；停留理由：……；购买理由：……；对上：……", brief)
+        self.assertNotIn("结论：人群", brief)
+        self.assertIn("还没有登记卖点", draft_prompt([], None, source="成片", review_text="", figures={}))
 
     def test_thin_video_conclusion_adds_where_it_stuck_and_one_suspicion(self):
         from retro_draft import draft_prompt
         thin = draft_prompt([], None, source="成片", review_text="", figures={}, mode="thin")
-        self.assertIn("结论：人群：……；S：……；A：……；B：……；卡点：……；待验证：……", thin)
+        self.assertIn("结论：类型：……；停留理由：……；购买理由：……；对上：……；卡点：……；待验证：……", thin)
         self.assertIn("「参考价值：待定（数据未到）」", thin)
         for mode in ("sold", "unsold"):
             self.assertNotIn("卡点", draft_prompt([], None, source="成片", review_text="", figures={}, mode=mode))
         # A pending recommendation preselects nothing.
         draft = review_draft({"rounds": [{"status": "completed", "output":
-            "结论：人群：徒手磨石用户；S：S1 定角不用猜；A：无；B：无；卡点：数据未到（尚无销售数据）；待验证：无\n参考价值：待定（数据未到）"}]})
+            "结论：类型：选择型；停留理由：凭手感在赌角度（0–4 秒）；购买理由：S1 锁住角度；对上：是；卡点：数据未到（尚无销售数据）；待验证：无\n参考价值：待定（数据未到）"}]})
         self.assertIn("卡点：数据未到", draft["conclusion"])
         self.assertNotIn("reference_value", draft)
 

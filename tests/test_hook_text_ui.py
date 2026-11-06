@@ -100,5 +100,52 @@ class HookButtonBrowserTests(unittest.TestCase):
         expect(tools.locator('[data-add-hook]')).to_be_enabled()
 
 
+class CampaignCardBrowserTests(HookButtonBrowserTests):
+    """The end card and the pinned comment only show while a trusted campaign is on or about to start."""
+
+    RUNNING = {'name': 'Black Friday / Cyber Monday（黑五网一）', 'start': '2026-11-11', 'end': '2026-11-30', 'status': 'running'}
+
+    def campaign_post(self, route):
+        body = route.request.post_data_json
+        if not route.request.url.endswith('/campaign'):  # e.g. the titles' Chinese reading
+            route.fulfill(status=200, content_type='application/json', body='{}')
+            return
+        self.sent = body
+        timeline = next(item for item in self.payload['job']['timelines'] if item['unique_id'] == body['timeline_uid'])
+        timeline['campaign_overlay'] = ({'status': 'saved', 'message': '活动屏显已加', 'text': body['text'], 'at': '2026-11-12T09:00:00+00:00'}
+                                        if body['action'] == 'add' else {'status': 'removed', 'message': '活动屏显已去掉', 'text': '', 'at': '2026-12-01T09:00:00+00:00'})
+        self.payload['revision'] += 1
+        route.fulfill(status=200, content_type='application/json', body=json.dumps({'timeline': timeline}))
+
+    def panel(self, campaign):
+        self.payload.update(timeline_uid='uid-own', timelines=[{'unique_id': 'uid-own', 'name': 'Lab261011-202-2'}],
+                            copy={'screen_en': 'Hook', 'titles': ['🔴Title#tag'], 'en': 'Words.', 'campaign': campaign,
+                                  'card_text': 'Black Friday & Cyber Monday sale / Ends Nov 30',
+                                  'pin': {'en': 'Black Friday sale ends Nov 30. Tap the cart.', 'zh': ''}})
+        page = lifecycle.ProductionTimelineLifecycleBrowserTests.open_page(self, post=self.campaign_post)
+        page.locator('.production-steps [data-step="publish"]').click()
+        return page, page.locator('#video-publication-panel')
+
+    def test_running_campaign_adds_the_end_card_and_offers_the_pinned_comment(self):
+        page, panel = self.panel(self.RUNNING)
+        expect(panel.locator('[data-copy-pin]')).to_contain_text('Black Friday sale ends Nov 30')
+        expect(panel.locator('[data-copy-pin]')).to_contain_text('先确认本品已报名')
+        button = panel.locator('[data-campaign-card="add"]')
+        expect(button).to_be_enabled()
+        button.click()
+        expect(page.locator('#toast')).to_contain_text('活动屏显已加')
+        self.assertEqual((self.sent['action'], self.sent['text']), ('add', 'Black Friday & Cyber Monday sale / Ends Nov 30'))
+        panel.locator('[data-campaign-card="remove"]').click()
+        expect(panel.locator('[data-campaign-card="add"]')).to_be_visible()
+
+    def test_upcoming_campaign_waits_and_no_campaign_shows_nothing(self):
+        _, panel = self.panel({**self.RUNNING, 'status': 'upcoming'})
+        expect(panel.locator('[data-campaign-card="add"]')).to_be_disabled()
+        expect(panel.locator('[data-copy-pin]')).to_contain_text('活动期内发布再置顶')
+        _, panel = self.panel(None)
+        expect(panel.locator('.video-publication-campaign-card')).to_have_count(0)
+        expect(panel.locator('[data-copy-pin]')).to_have_count(0)
+
+
 if __name__ == "__main__":
     unittest.main()

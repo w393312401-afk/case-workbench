@@ -68,6 +68,37 @@ class ScriptProductionActionsBrowserTests(unittest.TestCase):
         page.locator('#script-editor-dialog [name="conclusion"]').wait_for()
         self.assertEqual(self.app.production.public()["jobs"], [])
 
+    def test_more_actions_fit_both_themes_and_close_without_leaving_the_script(self):
+        for width in (320, 390, 1280):
+            for theme in ("light", "dark"):
+                with self.subTest(width=width, theme=theme):
+                    page = self.detail_page(width=width)
+                    page.emulate_media(color_scheme=theme)
+                    trigger = page.locator("#script-more-actions > summary")
+                    primary = page.locator("#script-production-toggle")
+                    self.assertEqual(trigger.bounding_box()["height"], 26 if width > 720 else 38)
+                    self.assertEqual(trigger.bounding_box()["y"], primary.bounding_box()["y"])
+                    self.assertEqual(trigger.bounding_box()["height"], primary.bounding_box()["height"])
+                    trigger.click()
+                    panel = page.locator("#script-more-actions > div")
+                    page.wait_for_function("() => document.querySelector('#script-more-actions > div').style.getPropertyValue('--menu-shift-x') !== ''")
+                    bounds = panel.bounding_box()
+                    self.assertGreaterEqual(bounds["x"], 0)
+                    self.assertLessEqual(bounds["x"] + bounds["width"], width)
+                    for item in panel.locator("button").all():
+                        expect(item.locator("svg")).to_have_count(1)
+                        expect(item).to_have_css("justify-content", "flex-start")
+                    expect(panel.locator("hr + #script-archive")).to_have_count(1)
+                    before = page.url
+                    page.keyboard.press("Escape")
+                    expect(panel).to_be_hidden()
+                    expect(trigger).to_be_focused()
+                    self.assertEqual(page.url, before)
+                    trigger.click()
+                    page.locator("h1").click()
+                    expect(panel).to_be_hidden()
+                    page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

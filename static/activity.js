@@ -2,7 +2,7 @@
 
 // Activity has its own read model. It never modifies a task's business version.
 window.TaskActivity = (() => {
-  const keys = { browser: "workbench-activity-browser-v1", cursor: "workbench-activity-cursor-v1", desktop: "workbench-activity-desktop-v1", focus: "workbench-activity-focus-v1", expanded: "workbench-activity-expanded-v1" };
+  const keys = { browser: "workbench-activity-browser-v1", cursor: "workbench-activity-cursor-v1", desktop: "workbench-activity-desktop-v1", focus: "workbench-activity-focus-v1", expanded: "workbench-activity-expanded-v1", pinned: "workbench-activity-pinned-v1" };
   const activeStates = new Set(["queued", "running", "stopping", "cancelling", "cancel_requested", "saving", "recovering"]);
   const warningStates = new Set(["interrupted", "needs_attention", "awaiting_confirmation", "pending_review", "awaiting_review", "recovery_pending", "result_unpersisted"]);
   const labels = { queued: "排队", running: "进行中", stopping: "正在停止", cancelling: "取消中", cancel_requested: "取消中", saving: "保存中", recovering: "恢复中", completed: "已完成", failed: "失败", interrupted: "已中断", cancelled: "已取消", needs_attention: "待处理", awaiting_confirmation: "待确认", pending_review: "待人工审查", awaiting_review: "待人工审查", recovery_pending: "待恢复", result_unpersisted: "结果待保存" };
@@ -34,6 +34,7 @@ window.TaskActivity = (() => {
   const dockable = () => window.matchMedia("(min-width:1200px)").matches;
   const pad = value => String(value).padStart(2, "0");
   const storage = { get(key) { try { return localStorage.getItem(key); } catch { return null; } }, set(key, value) { try { localStorage.setItem(key, value); } catch { /* In-memory operation remains available. */ } }, remove(key) { try { localStorage.removeItem(key); } catch { /* Optional browser coordination. */ } } };
+  let pinned = storage.get(keys.pinned) === "1";
   // Remembered between visits: the list filters, the log view mode and which days / the finished block are folded.
   const prefsKey = "workbench-activity-prefs-v1";
   const prefs = loadPrefs();
@@ -344,15 +345,24 @@ window.TaskActivity = (() => {
       return { key, runs, lead, label: naming(runs[0]).label, at: runs[0].updated_at, open: runs.some(waiting), unread: runs.some(unread) };
     }).sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
   }
+  // An order with nothing left waiting reads as what it needs now; its settled failures become one line of history.
+  const ownerStates = new Map(), stateTones = { success: "done", warning: "warning", running: "active", neutral: "muted", muted: "muted" };
+  function orderNow(group) {
+    const state = ownerStates.get(group.key);
+    if (!state || !state.label || group.runs.some(waiting)) return null;
+    const failed = group.runs.filter(run => run.status === "failed" || run.status === "interrupted");
+    const latest = group.runs[0], note = failed.length ? `历史：${failed.length} 次失败已处理` : `${naming(latest).head}：${latest.message || phaseLabel(latest.phase)}`;
+    return { label: state.label, level: stateTones[state.tone] || "muted", note };
+  }
   function goMarkup(run, name) {
     const label = `查看结果：${name}`;
     return safeUrl(run.url) ? `<button type="button" class="activity-row-go" data-activity-result="${escape(run.run_id)}" aria-label="${escape(label)}" title="查看结果">${icons.go}</button>` : "";
   }
   // A failure something later settled says why, once, instead of repeating the original error.
   const settledNote = run => run.attention_resolved && !run.owner_archived ? String(run.attention_note || "") : "";
-  function rowMarkup(run, title = run.title || "工作台任务") {
-    const fresh = unread(run), selected = viewer?.runId === run.run_id, level = tone(run), spent = brief(seconds(run)), { head } = naming(run);
-    return `<article class="activity-row${fresh ? " is-unread" : ""}${selected ? " is-selected" : ""}" data-run-id="${escape(run.run_id)}"><button type="button" class="activity-row-main" data-activity-log="${escape(run.run_id)}"${selected ? ' aria-current="true"' : ""}><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-row-text"><span class="activity-row-title">${escape(title)}</span><span class="activity-row-meta"><span class="activity-status is-${level}">${escape(status(run))}</span><span>${escape(settledNote(run) || `${head}：${run.message || phaseLabel(run.phase)}`)}</span></span></span><span class="activity-row-side"><time datetime="${escape(run.updated_at || "")}">${escape(when(run.updated_at))}</time>${spent ? `<small>${escape(spent)}</small>` : ""}</span>${fresh ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, title)}</article>`;
+  function rowMarkup(run, title = run.title || "工作台任务", now = null) {
+    const fresh = unread(run), selected = viewer?.runId === run.run_id, level = now ? now.level : tone(run), spent = brief(seconds(run)), { head } = naming(run);
+    return `<article class="activity-row${fresh ? " is-unread" : ""}${selected ? " is-selected" : ""}" data-run-id="${escape(run.run_id)}"><button type="button" class="activity-row-main" data-activity-log="${escape(run.run_id)}"${selected ? ' aria-current="true"' : ""}><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-row-text"><span class="activity-row-title">${escape(title)}</span><span class="activity-row-meta"><span class="activity-status is-${level}">${escape(now ? now.label : status(run))}</span><span>${escape(now ? now.note : settledNote(run) || `${head}：${run.message || phaseLabel(run.phase)}`)}</span></span></span><span class="activity-row-side"><time datetime="${escape(run.updated_at || "")}">${escape(when(run.updated_at))}</time>${spent ? `<small>${escape(spent)}</small>` : ""}</span>${fresh ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, title)}</article>`;
   }
   // One line per run inside an order: the step, its status and its last message. Identical runs in a row share one line.
   function runMarkup(run, repeat = null) {
@@ -372,12 +382,13 @@ window.TaskActivity = (() => {
     return out.join("");
   }
   function groupMarkup(group) {
-    if (group.runs.length === 1) return rowMarkup(group.runs[0], group.label);
+    const now = orderNow(group);
+    if (group.runs.length === 1) return rowMarkup(group.runs[0], group.label, now);
     const run = group.lead;
     const summary = group.runs.find(item => activeStates.has(item.status)) || group.runs.find(waiting) || group.runs[0] || run;
-    const level = tone(summary), expanded = panel.open.has(group.key), { head } = naming(summary);
+    const level = now ? now.level : tone(summary), expanded = panel.open.has(group.key), { head } = naming(summary);
     const selected = !expanded && group.runs.some(item => item.run_id === viewer?.runId);
-    return `<article class="activity-row activity-group-row${group.unread ? " is-unread" : ""}${selected ? " is-selected" : ""}"><button type="button" class="activity-row-main" data-activity-group="${escape(group.key)}" aria-expanded="${expanded}"><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-row-text"><span class="activity-row-title">${escape(group.label)}</span><span class="activity-row-meta"><span class="activity-status is-${level}">${escape(status(summary))}</span><span>${escape(`${head}：${summary.message || phaseLabel(summary.phase)}`)}</span></span></span><span class="activity-row-side"><time datetime="${escape(group.at || "")}">${escape(when(group.at))}</time><small class="activity-group-count">${group.runs.length} 次${icons.chevron}</small></span>${group.unread ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, group.label)}</article>${expanded ? `<div class="activity-group-runs" role="group" aria-label="${escape(group.label)}">${runsMarkup(group)}</div>` : ""}`;
+    return `<article class="activity-row activity-group-row${group.unread ? " is-unread" : ""}${selected ? " is-selected" : ""}"><button type="button" class="activity-row-main" data-activity-group="${escape(group.key)}" aria-expanded="${expanded}"><span class="activity-dot is-${level}" aria-hidden="true"></span><span class="activity-row-text"><span class="activity-row-title">${escape(group.label)}</span><span class="activity-row-meta"><span class="activity-status is-${level}">${escape(now ? now.label : status(summary))}</span><span>${escape(now ? now.note : `${head}：${summary.message || phaseLabel(summary.phase)}`)}</span></span></span><span class="activity-row-side"><time datetime="${escape(group.at || "")}">${escape(when(group.at))}</time><small class="activity-group-count">${group.runs.length} 次${icons.chevron}</small></span>${group.unread ? '<span class="activity-unread-dot" aria-label="未读"></span>' : ""}</button>${goMarkup(run, group.label)}</article>${expanded ? `<div class="activity-group-runs" role="group" aria-label="${escape(group.label)}">${runsMarkup(group)}</div>` : ""}`;
   }
   // Folded days are remembered only within their own tab; a new day always starts open.
   function dayed(entries, at, render) {
@@ -451,6 +462,7 @@ window.TaskActivity = (() => {
       if (data?.available === false) throw new Error("运行日志暂时不可用；已有任务仍可继续执行。");
       const items = (data.items || []).map(normalizeRun);
       remember(items);
+      for (const [owner, state] of Object.entries(data.owner_states || {})) ownerStates.set(owner, state);
       // A background refresh keeps older pages already loaded by the reader.
       const keep = row => known.has(row.run_id) && listed(known.get(row.run_id));
       const old = append ? panel.items : quiet ? panel.items.filter(row => !items.some(next => next.run_id === row.run_id) && keep(row)) : [];
@@ -657,6 +669,17 @@ window.TaskActivity = (() => {
     document.documentElement.classList.toggle("activity-expanded", on);
     paintExpand();
   }
+  function paintPin() {
+    const button = dialog.querySelector("[data-activity-pin]");
+    button.setAttribute("aria-pressed", String(pinned));
+    button.setAttribute("aria-label", pinned ? "取消置顶任务面板" : "置顶任务面板");
+    button.title = pinned ? "取消置顶，恢复点击外部收起" : "置顶，点击外部不收起";
+  }
+  function togglePinned() {
+    pinned = !pinned;
+    storage.set(keys.pinned, pinned ? "1" : "0");
+    paintPin();
+  }
   function open(options = {}) {
     if (!enabled()) return;
     initialize();
@@ -770,7 +793,7 @@ window.TaskActivity = (() => {
   function onClick(event) {
     const target = event.target;
     // Backdrop clicks target the modal dialog itself, so check the panel bounds.
-    if (target === dialog && dialog.matches(":modal")) { const box = dialog.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) { dialog.close(); return; } }
+    if (!pinned && target === dialog && dialog.matches(":modal")) { const box = dialog.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) { dialog.close(); return; } }
     const filter = target.closest("[data-activity-filter]");
     if (filter) {
       savePrefs();
@@ -796,6 +819,7 @@ window.TaskActivity = (() => {
     if (result) { visit(known.get(result.dataset.activityResult) || { run_id: result.dataset.activityResult }); return; }
     if (target.closest("[data-activity-visit]") && viewer) { visit(known.get(viewer.runId) || viewer.run || { run_id: viewer.runId }); return; }
     if (target.closest("[data-activity-close]")) { dialog.close(); return; }
+    if (target.closest("[data-activity-pin]")) { togglePinned(); return; }
     if (target.closest("[data-activity-expand]")) { toggleExpanded(); return; }
     if (target.closest("[data-activity-unscope]")) { panel = blankPanel(); syncControls(); void loadPanel(); return; }
     if (!viewer) return;
@@ -817,10 +841,11 @@ window.TaskActivity = (() => {
     initialized = true;
     browserId = storage.get(keys.browser) || id(); storage.set(keys.browser, browserId);
     dialog = document.createElement("dialog"); dialog.id = "task-activity-dialog"; dialog.className = "activity-dialog"; dialog.setAttribute("aria-labelledby", "activity-title");
-    dialog.innerHTML = `<div class="activity-heading"><h2 id="activity-title">任务</h2><p id="activity-connection" class="activity-connection" role="status" hidden></p><div class="activity-heading-actions"><button type="button" class="subtle" id="activity-read-all">全部已读</button><button type="button" class="subtle activity-icon" data-activity-expand aria-pressed="false"></button><button type="button" class="subtle activity-icon" data-activity-close aria-label="关闭任务面板" title="关闭">${icons.close}</button></div></div><div class="activity-layout"><section class="activity-runs" aria-label="任务列表"><div class="activity-controls"><div class="activity-filters" role="group" aria-label="任务状态">${filters.map(([value, title, tip]) => `<button type="button" data-activity-filter="${value}" aria-pressed="${value === "current"}"${tip ? ` title="${tip}"` : ""}>${title}</button>`).join("")}</div><div class="activity-refine"><div class="activity-product-field"><span class="activity-field-label" id="activity-product-label">产品</span><select id="activity-product" aria-label="任务产品筛选" title="提醒覆盖全部产品；这里只筛选列表，不会清空未读"></select></div><div class="activity-kind-field"><span class="activity-field-label">任务类型</span><select id="activity-kind" aria-label="任务类型筛选"></select></div><div class="activity-search-field">${icons.search}<input type="search" id="activity-search" maxlength="100" placeholder="搜索任务标题" aria-label="搜索任务标题"></div></div><p class="activity-scope" id="activity-scope" hidden><span></span><button type="button" class="subtle" data-activity-unscope>显示全部任务</button></p></div><div class="activity-list" id="activity-list"></div><div class="activity-footer"><button type="button" class="subtle" id="activity-more" hidden>加载更多</button></div></section><section class="activity-detail" id="activity-detail" aria-label="运行日志"></section></div>`;
+    dialog.innerHTML = `<div class="activity-heading"><h2 id="activity-title">任务</h2><p id="activity-connection" class="activity-connection" role="status" hidden></p><div class="activity-heading-actions"><button type="button" class="subtle" id="activity-read-all">全部已读</button><button type="button" class="subtle activity-icon" data-activity-pin aria-pressed="false"><span aria-hidden="true">📌</span></button><button type="button" class="subtle activity-icon" data-activity-expand aria-pressed="false"></button><button type="button" class="subtle activity-icon" data-activity-close aria-label="关闭任务面板" title="关闭">${icons.close}</button></div></div><div class="activity-layout"><section class="activity-runs" aria-label="任务列表"><div class="activity-controls"><div class="activity-filters" role="group" aria-label="任务状态">${filters.map(([value, title, tip]) => `<button type="button" data-activity-filter="${value}" aria-pressed="${value === "current"}"${tip ? ` title="${tip}"` : ""}>${title}</button>`).join("")}</div><div class="activity-refine"><div class="activity-product-field"><span class="activity-field-label" id="activity-product-label">产品</span><select id="activity-product" aria-label="任务产品筛选" title="提醒覆盖全部产品；这里只筛选列表，不会清空未读"></select></div><div class="activity-kind-field"><span class="activity-field-label">任务类型</span><select id="activity-kind" aria-label="任务类型筛选"></select></div><div class="activity-search-field">${icons.search}<input type="search" id="activity-search" maxlength="100" placeholder="搜索任务标题" aria-label="搜索任务标题"></div></div><p class="activity-scope" id="activity-scope" hidden><span></span><button type="button" class="subtle" data-activity-unscope>显示全部任务</button></p></div><div class="activity-list" id="activity-list"></div><div class="activity-footer"><button type="button" class="subtle" id="activity-more" hidden>加载更多</button></div></section><section class="activity-detail" id="activity-detail" aria-label="运行日志"></section></div>`;
     notices = document.createElement("div"); notices.id = "task-activity-notices"; notices.className = "activity-notices"; notices.setAttribute("role", "region"); notices.setAttribute("aria-label", "任务提醒"); notices.setAttribute("aria-live", "polite");
     document.body.append(dialog, notices);
     paintExpand();
+    paintPin();
     dialog.addEventListener("close", () => {
       // An outside log launcher can reopen the panel before this queued event fires.
       if (dialog.open) return;
@@ -844,7 +869,7 @@ window.TaskActivity = (() => {
     dialog.querySelector("#activity-read-all").onclick = () => void markRead([], true);
     dialog.addEventListener("click", onClick);
     document.addEventListener("click", event => {
-      if (!dialog.open || dialog.matches(":modal") || dialog.contains(event.target) || event.target.closest("#task-activity-open, .activity-strip, .activity-notice-view")) return;
+      if (!dialog.open || pinned || dialog.matches(":modal") || dialog.contains(event.target) || event.target.closest("#task-activity-open, .activity-strip, .activity-notice-view")) return;
       // Keep focus on the page control the user just clicked.
       previousFocus = null;
       dialog.close();

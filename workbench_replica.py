@@ -6,6 +6,7 @@ import shutil
 from uuid import uuid4
 
 from case_replica import case_source, line_records, snapshot, write_frames, detect_shots
+from case_store import StoreError
 from creation_store import CreationError
 from direction_store import product_key
 from elevenlabs_client import VoiceError
@@ -13,6 +14,7 @@ from retro_draft import PrepareError
 from variant_parse import spoken_lines
 
 SOURCE_KIND = "case_replica"
+MAX_OPTIMIZED = 5
 
 
 class ReplicaWorkbenchMixin:
@@ -68,17 +70,46 @@ class ReplicaWorkbenchMixin:
         return result["script"]
 
     def start_case_replica(self, case_id, body):
-        """Create the job, or return the one already open for this case unless another was asked for."""
+        """Create the job (or return the one already open for this case unless another was asked for), and when
+        `optimize` asks for it, start a 写稿 task writing that many line-for-line optimized scripts of the same case."""
         if not isinstance(body, dict):
             raise VoiceError(400, "参数格式无效。")
+        count = body.get("optimize", 0)
+        if type(count) is not int or not 0 <= count <= MAX_OPTIMIZED:
+            raise VoiceError(400, f"优化稿条数须为 0–{MAX_OPTIMIZED}。")
         _, product, source = self._replica_case(case_id)
         with self.lock:
             existing = self._replica_jobs(case_id)
-            if existing and body.get("new") is not True:
-                return {"job": existing[-1], "reused": True}
-            script = self._replica_script(case_id, product, source)
-            revision = self.production.revision(self.production.records())
-        return self.create_production_job({"request_id": "replica-" + uuid4().hex, "revision": revision, "job": {"script_id": script["id"]}})
+            reused = bool(existing) and body.get("new") is not True
+            if not reused:
+                script = self._replica_script(case_id, product, source)
+                revision = self.production.revision(self.production.records())
+        result = ({"job": existing[-1], "reused": True} if reused else
+                  self.create_production_job({"request_id": "replica-" + uuid4().hex, "revision": revision, "job": {"script_id": script["id"]}}))
+        if count:
+            # The original's job stands on its own: a task that cannot start (AI unavailable) is reported, not raised.
+            try:
+                result["task"] = self.create_ai_task({"request_id": "replica-" + uuid4().hex, "case_id": case_id,
+                                                      "revision": self.detail(case_id)["revision"], "action": "variants",
+                                                      "instruction": "", "writing_mode": {"mode": "replica", "count": count}})
+            except (CreationError, StoreError) as exc:
+                result["task_error"] = str(exc)
+        return result
+
+    def _replica_origin(self, script):
+        """(case_id, aligned) when a script belongs to a case's 1:1 replica: the case's own words, or a script adopted
+        from that case's 「照原片优化」 task; None otherwise."""
+        origin = script.get("source") or {}
+        if origin.get("kind") == SOURCE_KIND and origin.get("case_id"):
+            return origin["case_id"], False
+        if not origin.get("task_id") or not hasattr(self, "ai"):
+            return None
+        try:
+            task = self.ai.get(origin["task_id"])
+        except Exception:
+            return None
+        mode = (task.get("context") or {}).get("writing_mode") or {}
+        return (task["case_id"], True) if mode.get("mode") == "replica" and task.get("case_id") else None
 
     def _replica_snapshot(self, script_id):
         """The reference for a job made from a replica script, read outside the lock since it decodes the video.
@@ -88,12 +119,13 @@ class ReplicaWorkbenchMixin:
             script = self.creation.get_script(script_id)
         except CreationError:
             return None
-        origin = script.get("source") or {}
-        if origin.get("kind") != SOURCE_KIND or not origin.get("case_id"):
+        found = self._replica_origin(script)
+        if not found:
             return None
+        case_id, aligned = found
         try:
-            source = self._replica_case(origin["case_id"])[2]
-            reference = snapshot(origin["case_id"], source, spoken_lines(script["text"]))
+            source = self._replica_case(case_id)[2]
+            reference = snapshot(case_id, source, spoken_lines(script["text"]), aligned=aligned)
         except (VoiceError, PrepareError):
             return None
         return reference, source
@@ -101,7 +133,7 @@ class ReplicaWorkbenchMixin:
     def apply_replica(self, resolved, spoken, chinese, found):
         """Turn a job about to be created into a replica job."""
         reference, source = found
-        resolved.update(variant_label="1:1 复刻", replica=reference, lines=line_records(spoken, chinese, reference),
+        resolved.update(variant_label="1:1 复刻" if reference.get("wording") == "original" else "1:1 复刻·优化稿", replica=reference, lines=line_records(spoken, chinese, reference),
                         problems=list(reference["notes"]), supplement={"captions": [source["caption"]] if source["caption"] else []})
         return resolved
 

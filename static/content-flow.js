@@ -1,9 +1,10 @@
 'use strict';
 
 window.ContentFlow = (() => {
-  // 待我处理: needs you; 待发布: finished, waiting to be posted; 全部: everything, archived included.
+  // 待我处理: needs you; 待发布: finished, waiting to be posted; 全部: everything, archived included,
+  // except 已完结 (posted 7+ days ago, or marked 不发了), folded under one link at the end of the list.
   const views = {attention:'待处理',running:'进行中',publish:'待发布',all:'全部'};
-  const statuses = {all:'全部状态',workflow_incomplete:'链路未完结',in_progress:'制作中',needs_attention:'需处理',awaiting_review:'待核对 / 审查',approved:'已完成待发布',published:'已登记发布',archived:'已归档'};
+  const statuses = {all:'全部状态',workflow_incomplete:'链路未完结',in_progress:'制作中',needs_attention:'需处理',awaiting_review:'待核对 / 审查',approved:'已完成待发布',published:'已登记发布',finished:'已完结',archived:'已归档'};
   const kinds = {all:'所有形式',task:'协作任务',script:'待制作采用稿',video:'视频'};
   const fields = {kind:{label:'内容类型',options:kinds},status:{label:'状态',options:statuses},view:{label:'工作阶段',options:views},
     review_calendar:{label:'审查后日历',options:{all:'全部',added:'已添加到日历',not_added:'未添加到日历'}}};
@@ -468,9 +469,9 @@ window.ContentFlow = (() => {
   // Finished orders (待发布, 已发布) answer only "which one, and is it on the calendar": one line in every view,
   // saved views included. The chain, note and timeline stay on hover; the title opens the publish panel.
   function publishRow(item,{target,title,select,menu,view}) {
-    const tip = esc([item.title,item.subtitle,item.timeline_name ? `时间线 ${item.timeline_name}` : '',item.summary_note].filter(Boolean).join('\n'));
+    const tip = esc([item.title,item.subtitle,item.timeline_name ? `时间线 ${item.timeline_name}` : '',item.stage === 'skipped' ? `不发原因：${item.skip_reason || '未填写'}` : item.summary_note].filter(Boolean).join('\n'));
     const calendar = !item.archived && typeof item.calendar_uploaded === 'boolean' ? `<span class="flow-cal" data-uploaded="${item.calendar_uploaded}">${item.calendar_uploaded ? '已上传日历' : '未上传日历'}</span>` : '';
-    const stage = view === 'publish' ? '' : `<span class="flow-stage is-${item.archived ? 'muted' : 'success'}">${esc(item.archived ? '已归档' : item.stage_label || '待发布')}</span>`;
+    const stage = view === 'publish' ? '' : `<span class="flow-stage is-${item.archived || item.stage === 'skipped' ? 'muted' : 'success'}">${esc(item.archived ? '已归档' : item.stage_label || '待发布')}</span>`;
     const timeline = item.timeline_name ? `<span class="flow-publish-timeline">${esc(item.timeline_name)}</span>` : '';
     return `<article class="flow-row is-publish${item.history || item.archived ? ' is-finished' : ''}" data-content-id="${esc(item.id)}">${select}<span class="flow-kind">${esc(tags[item.kind])}</span><span class="flow-publish-main"><a class="flow-title" href="${target}" title="${tip}">${title}</a>${item.subtitle ? `<span class="flow-hook-inline">${esc(item.subtitle)}</span>` : ''}${timeline}${tiktokLinks(item)}${calendar}</span><span class="flow-direction">${esc(item.direction_id || (page.product && page.product !== 'all' ? '' : item.product || ''))}</span>${stage}${['attention','running'].includes(view) ? '<span aria-hidden="true"></span>' : ''}<time datetime="${esc(item.updated_at || '')}">${esc(when(item.updated_at))}</time>${menu}</article>`;
   }
@@ -485,8 +486,11 @@ window.ContentFlow = (() => {
     const next = ['attention','running'].includes(view) ? `<a class="flow-next" href="${target}">${esc(item.next_label || '继续处理')}${icon('arrow')}</a>` : '';
     const archive = `<button type="button" role="menuitem" data-archive="${esc(item.id)}" ${item.busy ? 'disabled title="任务结束后可整理"' : ''}>${item.archived ? '恢复' : '归档'}</button>`;
     const remove = item.kind === 'video' ? `<button type="button" role="menuitem" data-delete-order="${esc(item.id)}" ${item.busy ? 'disabled' : ''}>永久删除</button>` : '';
-    const menu = `<details class="ai-menu flow-menu"><summary class="icon-button" aria-label="更多操作：${title}">${dots}</summary><div role="menu">${links.map(link => `<a role="menuitem" href="${esc(url(link.hash,item.product))}">${esc(link.label)}</a>`).join('')}${archive}${remove}</div></details>`;
-    if (production && ['awaiting_publication','published'].includes(item.stage)) return publishRow(item,{target,title,select,menu,view});
+    // 不发了 settles a finished video nobody will post; 已完结 lists it with 恢复待发布.
+    const skip = production && !item.archived && item.stage === 'awaiting_publication' ? `<button type="button" role="menuitem" data-skip="${esc(item.id)}">不发了…</button>`
+      : production && !item.archived && item.stage === 'skipped' ? `<button type="button" role="menuitem" data-unskip="${esc(item.id)}">恢复待发布</button>` : '';
+    const menu = `<details class="ai-menu flow-menu"><summary class="icon-button" aria-label="更多操作：${title}">${dots}</summary><div role="menu">${links.map(link => `<a role="menuitem" href="${esc(url(link.hash,item.product))}">${esc(link.label)}</a>`).join('')}${skip}${archive}${remove}</div></details>`;
+    if (production && ['awaiting_publication','uploaded','published','skipped'].includes(item.stage)) return publishRow(item,{target,title,select,menu,view});
     if (production) return productionRow(item,{target,title,select,menu,stage,next});
     const same = item.same_title_orders || [];
     const started = item.task_started_label ? `<small class="flow-task-started">${esc(item.task_started_label)}</small>`
@@ -618,6 +622,20 @@ window.ContentFlow = (() => {
     bar.innerHTML = `<span>${esc(queue.label)} <b>${index + 1} / ${queue.entries.length}</b></span><a class="secondary" ${go(previous)}>上一条</a><a class="${next ? 'primary' : 'secondary'}" ${go(next)}>${next ? '下一条' : '已是最后一条'}</a><button type="button" class="icon-button" data-queue-end aria-label="结束依次处理">${icon('close')}</button>`;
     $('[data-queue-end]',bar).onclick = () => {try {sessionStorage.removeItem(queueKey);} catch { /* The bar still goes away. */ }bar.remove();};
   }
+  // The order pages walk the list as it is on screen: this view, its filters, sort and page.
+  const orderKey = 'case-content-order-v1';
+  function rememberOrder(data) {
+    const entries = data.items.filter(item => item.kind === 'video' && item.production_ids?.[0]).map(item => {
+      const path = `#production/${encodeURIComponent(item.production_ids[0])}`;
+      return {path,hash:routePath(item.next_hash) === path ? item.next_hash : path,product:item.product,title:item.title || ''};
+    });
+    const named = page.filters.saved ? savedViews().find(row => row.id === page.filters.saved)?.name : '';
+    const label = named || (page.filters.filter ? '筛选结果' : views[page.filters.view] || '内容列表');
+    try {
+      if (entries.length > 1) sessionStorage.setItem(orderKey,JSON.stringify({label:page.filters.page > 1 ? `${label} · 第 ${page.filters.page} 页` : label,entries}));
+      else sessionStorage.removeItem(orderKey);
+    } catch { /* The order pages then show no 上一单 / 下一单. */ }
+  }
   window.addEventListener('hashchange',paintQueue);
   document.addEventListener('DOMContentLoaded',paintQueue);
   function paint() {
@@ -627,7 +645,9 @@ window.ContentFlow = (() => {
     node.dataset.view = page.filters.view;
     node.classList.toggle('is-selecting',page.selecting);
     paintGroups(data);
-    node.innerHTML = data.items.length ? grouped(data) ? groupedMarkup(data) : data.items.map(row).join('') : `<div class="empty"><h3>${data.counts.all ? '当前视图没有内容' : '还没有创作记录'}</h3><p>${data.counts.all ? '切换视图或调整搜索，查看其他内容。' : '开始写稿后，候选、脚本和制作记录会出现在这里。'}</p>${data.counts.all ? '<button type="button" class="secondary" data-flow-all>查看全部</button>' : '<button type="button" class="primary" data-flow-start>开始写稿</button>'}</div>`;
+    rememberOrder(data);
+    const finishedLine = data.finished_hidden && data.page === data.pages ? `<button type="button" class="flow-finished-fold" data-flow-finished>已完结 ${data.finished_hidden} 张<small>发布满 7 天或标记不发，点开查看</small></button>` : '';
+    node.innerHTML = (data.items.length ? grouped(data) ? groupedMarkup(data) : data.items.map(row).join('') : `<div class="empty"><h3>${data.counts.all ? '当前视图没有内容' : '还没有创作记录'}</h3><p>${data.counts.all ? '切换视图或调整搜索，查看其他内容。' : '开始写稿后，候选、脚本和制作记录会出现在这里。'}</p>${data.counts.all ? '<button type="button" class="secondary" data-flow-all>查看全部</button>' : '<button type="button" class="primary" data-flow-start>开始写稿</button>'}</div>`) + finishedLine;
     $$('.flow-menu',node).forEach(menu => {if (opened.has(menu.closest('[data-content-id]')?.dataset.contentId)) menu.open = true;});
     $$('.flow-group-toggle',node).forEach(button => button.onclick = () => {
       const key = button.closest('[data-flow-group]').dataset.flowGroup;
@@ -636,6 +656,9 @@ window.ContentFlow = (() => {
     });
     $$('[data-flow-queue]',node).forEach(button => button.onclick = () => startQueue(button.dataset.flowQueue));
     $('[data-flow-all]',node)?.addEventListener('click',() => chooseFilters({view:'all'}));
+    $('[data-flow-finished]',node)?.addEventListener('click',() => chooseFilters({view:'all',status:'finished'}));
+    $$('[data-skip]',node).forEach(button => button.onclick = () => {const item = data.items.find(entry => entry.id === button.dataset.skip);if (item) skipDialog(item);});
+    $$('[data-unskip]',node).forEach(button => button.onclick = () => void setSkip(button.dataset.unskip,false,''));
     $('[data-flow-start]',node)?.addEventListener('click',() => void window.CaseAI?.startBlank());
     $$('[data-archive]',node).forEach(button => button.onclick = () => {const item = data.items.find(entry => entry.id === button.dataset.archive);if (item) void archive([item.id],!item.archived);});
     $$('[data-delete-order]',node).forEach(button => button.onclick = () => {const item = data.items.find(entry => entry.id === button.dataset.deleteOrder);if (item) void deleteOrders([item]);});
@@ -718,6 +741,34 @@ window.ContentFlow = (() => {
     else toast(archived ? `已归档${ids.length > 1 ? ` ${done} 项` : ''}，可在「全部」里恢复。` : '已恢复。');
     page.selecting = !!failure;page.selected = new Set(failure ? ids.slice(done) : []);paint();
     void load(++page.sequence);
+  }
+  // 不发了: one short reason, kept on the row; the order itself is untouched and 恢复待发布 undoes it.
+  async function setSkip(id,skip,reason) {
+    if (page.archiving || !currentData()) return false;
+    page.archiving = true;clearTimeout(page.pollTimer);
+    try {
+      await api('/api/content/manage',{method:'POST',body:{request_id:crypto.randomUUID(),revision:page.data.revision,id,management:{skip_publish:skip,skip_reason:reason}}});
+      toast(skip ? '已标记不发，移到「已完结」。' : '已恢复到待发布。');
+      return true;
+    } catch (error) {toast(errorText(error),true);return false;}
+    finally {page.archiving = false;void load(++page.sequence);}
+  }
+  function skipDialog(item) {
+    const dialog = document.createElement('dialog');dialog.className = 'script-editor-dialog production-dialog flow-skip-dialog';
+    dialog.innerHTML = `<form><div class="dialog-heading"><h2>不发了</h2><button type="button" class="icon-button" data-close aria-label="关闭">${icon('close')}</button></div>
+      <div class="script-editor-body"><p class="context-note">「${esc(item.title || item.id)}」移到已完结，制作单和成片都保留，随时可以恢复待发布。</p>
+      <label class="field"><span>原因（可不填）</span><input name="reason" maxlength="200" placeholder="例如 开头不行、同方向已发过" autocomplete="off"></label></div>
+      <div class="dialog-footer"><span></span><div><button type="button" class="secondary" data-close>取消</button><button type="submit" class="primary">不发了</button></div></div></form>`;
+    document.body.append(dialog);
+    const close = () => {dialog.close();dialog.remove();};
+    $$('[data-close]',dialog).forEach(button => button.onclick = close);
+    dialog.addEventListener('cancel',event => {event.preventDefault();close();});
+    $('form',dialog).onsubmit = async event => {
+      event.preventDefault();
+      const submit = $('[type="submit"]',dialog);submit.disabled = true;
+      if (await setSkip(item.id,true,$('[name="reason"]',dialog).value.trim())) close();else submit.disabled = false;
+    };
+    dialog.showModal();$('[name="reason"]',dialog).focus();
   }
   // Deleting archived rows for good through each record's own delete. A script that an order, case,
   // posted video or plan still uses stays archived; the dialog says so and states exactly how many rows go.

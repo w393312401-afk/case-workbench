@@ -261,7 +261,7 @@ class ContentFlowBrowserTests(unittest.TestCase):
         expect(page.locator(".scripts-tabs")).to_have_count(0)
         self.assertEqual(page.locator("[data-flow-view]").all_text_contents(), ["待处理2", "待发布0", "全部2"])
         page.locator(".flow-main-menu > summary").click()
-        self.assertEqual(page.locator(".flow-main-menu [role=menuitem]").all_inner_texts(), ["协作记录", "制作设置", "批量管理"])
+        self.assertEqual(page.locator(".flow-main-menu [role=menuitem]").all_inner_texts(), ["协作记录", "制作设置", "导入剪辑包", "批量管理"])
         self.screenshot(page, "unified-content-desktop.png")
         page.locator(".flow-main-menu").get_by_role("menuitem", name="协作记录").click()
         page.locator("#ai-task-list").wait_for()
@@ -390,6 +390,31 @@ class ContentFlowBrowserTests(unittest.TestCase):
         expect(page.locator("#content-flow-batch")).to_be_hidden()
         archived = next(row for row in self.flow()["items"] if row["id"] == f"video:{first['id']}")
         self.assertTrue(archived["archived"])
+
+    def test_order_pages_walk_the_list_as_shown_with_previous_and_next(self):
+        first, second = self.finished_job("已完成待发布 A"), self.finished_job("已完成待发布 B")
+        page = self.content_page()
+        self.view(page, "publish")
+        expect(page.locator(".flow-row")).to_have_count(2)
+        shown = page.locator(".flow-row").evaluate_all("rows => rows.map(row => row.dataset.contentId)")
+        order = page.evaluate("JSON.parse(sessionStorage.getItem('case-content-order-v1'))")
+        self.assertEqual(order["label"], "待发布")
+        self.assertEqual([entry["path"] for entry in order["entries"]], [f"#production/{row.split(':', 1)[1]}" for row in shown])
+        page.locator(".flow-row").first.locator("a.flow-title").click()
+        nav = page.locator(".production-order-nav")
+        expect(nav).to_contain_text("1 / 2")
+        expect(nav.locator('[aria-disabled="true"]')).to_have_text("上一单")
+        nav.get_by_text("下一单", exact=True).click()
+        expect(nav).to_contain_text("2 / 2")
+        expect(nav.locator('[aria-disabled="true"]')).to_have_text("下一单")
+        self.assertIn(shown[1].split(":", 1)[1], page.url)
+        # A 依次处理 walk that lists this order keeps its own bar, so the heading shows no second pair.
+        page.evaluate("""() => sessionStorage.setItem('case-content-queue-v1', JSON.stringify({label:'待审查', entries:
+          JSON.parse(sessionStorage.getItem('case-content-order-v1')).entries}))""")
+        page.reload()
+        expect(page.locator(".flow-queue")).to_be_visible()
+        expect(page.locator(".production-order-nav")).to_have_count(0)
+        self.assertEqual({first["id"], second["id"]}, {row.split(":", 1)[1] for row in shown})
 
     def test_bulk_restore_and_permanent_delete_use_the_unified_list(self):
         app = self.server.app
