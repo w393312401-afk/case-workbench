@@ -1,4 +1,5 @@
 """Production routes over HTTP with isolated data, a fake AI bridge and a fake ElevenLabs transport."""
+import json
 import time
 import unittest
 from uuid import uuid4
@@ -118,6 +119,44 @@ class ProductionHTTPTests(unittest.TestCase):
         kept = settled(reworded["id"])["job"]
         self.assertEqual([line["spoken"] for line in kept["lines"]], ["One kit.", "Grab it below."])
         self.assertTrue(any("AI 补全时改写了第" in item for item in kept["problems"]), kept["problems"])
+
+    def test_market_follows_the_script_into_the_job_and_the_voice_request(self):
+        transport = FakeEleven()
+        sent = []
+        def recording(method, url, headers, data, timeout):
+            if "with-timestamps" in url:
+                sent.append(json.loads(data))
+            return transport(method, url, headers, data, timeout)
+        self.server.app.voices = ElevenLabsClient(key_provider=lambda: "sk_test", transport=recording)
+        bridge = FakeBridge(output=CANDIDATE)
+        self.server.app.ai.bridge = bridge
+        base = {"product": "202H", "action": "variants", "instruction": "写一条", "skill_selection": "none"}
+        for wrong in ("fr", ["de"]):
+            self.assertEqual(self.request("POST", "/api/ai/tasks", {**base, "request_id": uuid4().hex, "market": wrong})[0], 400)
+        task = self.ok("POST", "/api/ai/tasks", {**base, "request_id": uuid4().hex, "market": "de"})["task"]
+        deadline = time.monotonic() + 4
+        while task["busy"] and time.monotonic() < deadline:
+            time.sleep(.02)
+            task = self.server.app.ai.get(task["task_id"])
+        self.assertEqual((task["status"], task["context"]["market"]), ("completed", "de"))
+        self.assertIn("本轮目标市场：德国", bridge.calls[0]["prompt"])
+        self.assertIn("块内只放要念的德语", bridge.calls[0]["prompt"])
+        round_id = task["rounds"][0]["round_id"]
+        chosen = self.ok("GET", f"/api/production/variants?task_id={task['task_id']}&round_id={round_id}")["variants"][0]
+        script = self.ok("POST", "/api/scripts", {"revision": self.revision("/api/creation?product=202H"), "request_id": uuid4().hex,
+            "script": {"product": "202H", "title": chosen["label"], "text": "\n".join(line["spoken"] for line in chosen["lines"]),
+                       "translation_zh": "\n".join(line["zh"] for line in chosen["lines"]), "confirmed": True},
+            "source": {"task_id": task["task_id"], "round_id": round_id, "task_revision": task["revision"]}})["script"]
+        job = self.ok("POST", "/api/production/jobs", {"revision": self.revision("/api/production"), "request_id": uuid4().hex,
+                                                       "job": {"script_id": script["id"], "variant_index": 0}})["job"]
+        self.assertEqual(job["market"], "de")
+        self.assertEqual([item["id"] for item in self.ok("GET", f"/api/production/jobs/{job['id']}")["markets"]], ["us", "uk", "de", "es"])
+        voice = {"voice_id": "VOICE123456789", "model_id": "eleven_v4", "settings": {"stability": 0.5}}
+        self.assertEqual(self.request("POST", f"/api/production/jobs/{job['id']}/takes", {**voice, "request_id": uuid4().hex, "market": "fr"})[0], 400)
+        take = self.ok("POST", f"/api/production/jobs/{job['id']}/takes", {**voice, "request_id": uuid4().hex, "market": "de"})["take"]
+        self.assertEqual((take["market"], sent[-1]["language_code"]), ("de", "de"))
+        self.ok("POST", f"/api/production/jobs/{job['id']}/takes", {**voice, "request_id": uuid4().hex})
+        self.assertNotIn("language_code", sent[-1])
 
     def test_variant_to_job_to_timed_take_and_audio(self):
         self.server.app.voices = ElevenLabsClient(key_provider=lambda: "sk_test", transport=FakeEleven())

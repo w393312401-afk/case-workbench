@@ -107,3 +107,9 @@
 /* Compact locations keep all five reads and actions discoverable. */
 .settings-location{padding:10px 0;gap:12px}.settings-location-copy{min-width:0}.settings-location-copy h3{font-size:13px;margin:0}.settings-location-copy p{font-size:12px;margin:2px 0}.settings-location .settings-path{margin:3px 0;font-size:12px;overflow-wrap:anywhere}.settings-location .settings-actions{flex-wrap:wrap;gap:3px}.settings-location[data-state="failed"] code{color:var(--danger-ink)}.settings-location[data-state="loading"] code,.settings-location[data-state="unconfigured"] code{color:var(--muted-soft)}
 .settings-page .settings-group{margin-bottom:18px}.settings-page .settings-card{padding:16px}.settings-page .settings-status{font-size:14px}.settings-page .settings-note{font-size:12px;line-height:1.5}
+
+/* 密钥与令牌 */
+.settings-key{display:grid;gap:4px;padding:8px 0;border-top:1px solid var(--line)}.settings-key:first-child{border-top:0}
+.settings-key-head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.settings-key-state{color:var(--muted)}.settings-key-state[data-state="set"]{color:var(--green)}.settings-key-state[data-state="warn"]{color:var(--orange)}
+.settings-key-form{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.settings-key-form input{flex:1 1 220px;min-width:0}

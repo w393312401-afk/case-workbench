@@ -51,6 +51,53 @@ class VoiceRefreshBrowserTests(ProductionValidationBrowserTests):
         page.evaluate('() => new Promise(resolve => setTimeout(resolve,100))')
         self.assertEqual(page.locator('[data-next-state]').inner_text(),'已人工审查')
 
+    def test_voice_form_starts_on_the_scripts_market_and_sends_the_choice(self):
+        self.payload['markets'] = [{'id':'us','label':'美国 · 英语','voice_hint':''},{'id':'uk','label':'英国 · 英语','voice_hint':'请选英式音色。'},
+                                   {'id':'de','label':'德国 · 德语','voice_hint':'请选德语音色。'}]
+        self.payload['job']['market'] = 'de'
+        pending = []
+        page = self.open_page(post=lambda route: pending.append(route))
+        select, hint = page.locator('#take-form [name="market"]'), page.locator('#take-form [data-market-hint]')
+        self.assertEqual(select.input_value(),'de')
+        self.assertEqual(hint.inner_text(),'请选德语音色。')
+        select.select_option('us')
+        self.assertFalse(hint.is_visible())
+        select.select_option('uk')
+        self.assertEqual(hint.inner_text(),'请选英式音色。')
+        page.locator('#take-form button[type="submit"]').click()
+        page.locator('#voice-panel .production-runtime').wait_for()
+        self.assertEqual(pending[0].request.post_data_json['market'],'uk')
+        pending[0].fulfill(status=503,content_type='application/json',body=json.dumps({'error':'Fixture voice unavailable'}))
+
+    def test_uk_version_is_started_from_the_menu_and_checked_before_a_job_exists(self):
+        posts = []
+        def post(route):
+            posts.append(route.request.url)
+            route.fulfill(status=200,content_type='application/json',body=json.dumps({'job':{'id':'PRD-0123456789ab'}}))
+        page = self.open_page(post=post)
+        page.locator('.production-more-actions summary').click()
+        page.locator('#job-uk-start-menu').click()
+        page.wait_for_timeout(200)
+        self.assertTrue(posts[0].endswith('/uk-version'))
+        self.payload['job']['uk_version'] = {'task_id':'AIT-0123456789ab','status':'review','error':'','review':{'round_id':'r','variant_index':0,'problems':[],'titles':['🔴One Set#SHARPAL'],
+            'lines':[{'number':1,'before':'One kit.','spoken':'One set.','zh':'一套。'}]}}
+        page = self.open_page(post=post)
+        self.assertEqual(page.locator('#job-uk-start-menu').count(),0)
+        page.locator('#job-uk-review').click()
+        dialog = page.locator('dialog.production-dialog')
+        self.assertEqual(dialog.locator('tr.is-changed').count(),1)
+        self.assertIn('One set.',dialog.locator('.uk-review').inner_text())
+        self.assertIn('🔴One Set',dialog.inner_text())
+        dialog.locator('[data-submit]').click()
+        dialog.wait_for(state='detached')
+        self.assertTrue(posts[-1].endswith('/uk-version-confirm'))
+
+    def test_linked_jobs_show_the_way_to_each_other(self):
+        self.payload['job']['derived_from'] = {'job_id':'PRD-0123456789ab','market':'us'}
+        page = self.open_page()
+        self.assertIn('由美国版制作单改来',page.locator('.production-market-version').inner_text())
+        self.assertEqual(page.locator('#job-uk-start-menu').count(),0)
+
     def test_voice_submission_shows_elapsed_then_actual_backend_phase(self):
         pending = []
         page = self.open_page(post=lambda route: pending.append(route))

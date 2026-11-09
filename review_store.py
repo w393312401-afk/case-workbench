@@ -13,7 +13,9 @@ Platforms (the sub-folder name decides the parser):
   facebook      Apify "Facebook comments scraper" dataset
 
 Public reviewer names and handles are retained when the source supplies them.
-Private user IDs and avatars are not part of the normalized library.
+Private user IDs are not part of the normalized library. Avatars (2026-11-09, user's choice) are
+downloaded to reviews/avatars/ by review_avatars.py and shown on cards; links expire, so only the
+image file is kept.
 
 What people do to the library is not derived from the sources, so it lives in its
 own file (`reviews/state.json`, see ReviewState) and is applied again on every
@@ -34,6 +36,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import review_taxonomy
+from review_avatars import ReviewAvatars, author_key
 import plugin_comments
 from review_taxonomy import (BRAND_ACCOUNTS, BRAND_PROFILE, COMPETITOR, DEFECT, NATURE, OBJECTION, PLATFORM_LABELS, RESULT, ROLE_LABELS, TOPIC, TOPIC_RULES,
                              classify, competitors, excerpt, zh_groups)
@@ -383,6 +386,12 @@ class ReviewStore:
         self.state = ReviewState(self.root / "state.json")
         self.state_error = None  # why the hand-made records could not be read, if they could not
         self.lock = threading.Lock()
+        self.avatars = ReviewAvatars(self.root)
+        self.avatar_downloads = False  # the running workbench turns this on; tests and scripts never touch the network
+
+    def refresh_avatars(self):
+        if self.avatar_downloads:
+            self.avatars.refresh(self.sources, read_source, PARSERS)
 
     def connect(self):
         self.root.mkdir(parents=True, exist_ok=True)
@@ -601,6 +610,7 @@ class ReviewStore:
                 except Exception:
                     connection.execute("ROLLBACK")
                     raise
+                self.refresh_avatars()
                 if merged and (added or not self.state.exists()) and not self.state_error:
                     try:
                         self.state.save(state)
@@ -709,9 +719,12 @@ class ReviewStore:
                     f"SELECT parent_id, COUNT(*) AS n, SUM(role = 'brand_account') AS brand FROM reviews WHERE parent_id IN ({','.join('?' * len(chunk))}) GROUP BY parent_id", chunk):
                 replies[row["parent_id"]] = {"total": row["n"], "brand": row["brand"] or 0}
         top_ids = set(tops)
+        avatars = self.avatars.keys_with_files()
         result = []
         for r in rows:
             item = dict(r)
+            key = author_key(r["platform"], r["author_handle"], r["author_name"]) if "author_handle" in r.keys() else None
+            item["avatar"] = key if key in avatars else None
             item["tags"] = tags.get(r["id"], {kind: [] for kind in TAG_KINDS})
             item["replies"] = replies.get(r["id"], {"total": 0, "brand": 0}) if r["id"] in top_ids else None
             # tag -> True / False for the tags somebody added / removed by hand on this review

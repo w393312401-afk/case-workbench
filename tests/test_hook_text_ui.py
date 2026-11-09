@@ -48,12 +48,12 @@ class HookButtonBrowserTests(unittest.TestCase):
     def test_button_adds_the_hook_and_then_offers_to_update_it(self):
         page, tools = self.tools('Stop guessing / Check the bevel')
         button = tools.locator('[data-add-hook]')
-        expect(button).to_have_text('加屏显')
+        expect(button).to_have_text('加上')
         expect(button).to_have_attribute('title','在开头 3 秒加上：Stop guessing / Check the bevel')
         button.click()
         expect(page.locator('#toast')).to_contain_text('屏显已加')
-        expect(tools.locator('[data-hook-state="saved"]')).to_contain_text('Stop guessing / Check the bevel')
-        expect(tools.locator('[data-add-hook]')).to_have_text('更新屏显')
+        expect(tools.locator('[data-hook-state="saved"]')).to_contain_text('开头：Stop guessing / Check the bevel')
+        expect(tools.locator('[data-add-hook]')).to_have_text('更新')
         expect(tools.locator('[data-add-hook]')).to_be_enabled()
 
     def test_order_without_a_hook_can_still_use_own_words(self):
@@ -89,21 +89,21 @@ class HookButtonBrowserTests(unittest.TestCase):
         self.assertEqual(self.sent, 'Still not sharp? / Check your angle')
         # After the repaint the list shows what is on the timeline, not the recommended one.
         expect(tools.locator('[data-hook-choice]')).to_have_value('1')
-        expect(tools.locator('[data-add-hook]')).to_have_text('更新屏显')
+        expect(tools.locator('[data-add-hook]')).to_have_text('更新')
 
     def test_failure_shows_the_reason_and_lets_you_retry(self):
         page, tools = self.tools('One line')
         self.fail_with = '达芬奇没能插入 Text+，屏显没有加。'
         tools.locator('[data-add-hook]').click()
         expect(tools.locator('[data-timeline-tools-error]')).to_contain_text('没能插入 Text+')
-        expect(tools.locator('[data-add-hook]')).to_have_text('加屏显')
+        expect(tools.locator('[data-add-hook]')).to_have_text('加上')
         expect(tools.locator('[data-add-hook]')).to_be_enabled()
 
 
 class CampaignCardBrowserTests(HookButtonBrowserTests):
     """The end card and the pinned comment only show while a trusted campaign is on or about to start."""
 
-    RUNNING = {'name': 'Black Friday / Cyber Monday（黑五网一）', 'start': '2026-11-11', 'end': '2026-11-30', 'status': 'running'}
+    RUNNING = {'name': 'Black Friday / Cyber Monday（黑五网一）', 'start': '2026-11-11', 'end': '2026-11-30', 'status': 'running', 'card_from': '2026-11-04', 'card_open': True}
 
     def campaign_post(self, route):
         body = route.request.post_data_json
@@ -130,20 +130,28 @@ class CampaignCardBrowserTests(HookButtonBrowserTests):
         page, panel = self.panel(self.RUNNING)
         expect(panel.locator('[data-copy-pin]')).to_contain_text('Black Friday sale ends Nov 30')
         expect(panel.locator('[data-copy-pin]')).to_contain_text('先确认本品已报名')
-        button = panel.locator('[data-campaign-card="add"]')
-        expect(button).to_be_enabled()
+        expect(panel.locator('[data-campaign-text]')).to_be_hidden()
+        panel.locator('[data-hook-choice]').select_option('campaign')
+        expect(panel.locator('[data-campaign-text]')).to_be_visible()
+        button = panel.locator('[data-add-hook]')
+        expect(button).to_have_attribute('title','在结尾 3 秒加上：Black Friday & Cyber Monday sale / Ends Nov 30。口播不动，11/30 活动结束后记得去掉。')
         button.click()
         expect(page.locator('#toast')).to_contain_text('活动屏显已加')
         self.assertEqual((self.sent['action'], self.sent['text']), ('add', 'Black Friday & Cyber Monday sale / Ends Nov 30'))
-        panel.locator('[data-campaign-card="remove"]').click()
-        expect(panel.locator('[data-campaign-card="add"]')).to_be_visible()
+        expect(panel.locator('[data-campaign-state="saved"]')).to_contain_text('结尾：Black Friday')
+        panel.locator('[data-campaign-remove]').click()
+        expect(panel.locator('[data-campaign-state]')).to_have_count(0)
 
-    def test_upcoming_campaign_waits_and_no_campaign_shows_nothing(self):
+    def test_campaign_opens_a_week_early_and_no_campaign_shows_nothing(self):
         _, panel = self.panel({**self.RUNNING, 'status': 'upcoming'})
-        expect(panel.locator('[data-campaign-card="add"]')).to_be_disabled()
+        expect(panel.locator('[data-hook-choice] option[value="campaign"]')).to_be_enabled()
         expect(panel.locator('[data-copy-pin]')).to_contain_text('活动期内发布再置顶')
+        _, panel = self.panel({**self.RUNNING, 'status': 'upcoming', 'card_open': False})
+        option = panel.locator('[data-hook-choice] option[value="campaign"]')
+        expect(option).to_be_disabled()
+        expect(option).to_contain_text('起可加')
         _, panel = self.panel(None)
-        expect(panel.locator('.video-publication-campaign-card')).to_have_count(0)
+        expect(panel.locator('[data-hook-choice] option[value="campaign"]')).to_have_count(0)
         expect(panel.locator('[data-copy-pin]')).to_have_count(0)
 
 

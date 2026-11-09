@@ -119,7 +119,7 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(done["video"]["kind"], "成片预览")
         self.assertNotEqual(done["video"]["version"], original)
         # The fresh capture replaces the older preview instead of piling up beside it.
-        self.assertEqual(len(list(self.previews._folder(JOB, "one").glob("runs/*/preview.mp4"))), 1)
+        self.assertEqual(len(list(self.previews._folder(JOB, "one").glob("runs/*/First.mp4"))), 1)
 
     def test_revoked_confirmation_is_not_exported_after_waiting_for_resolve(self):
         result = self.confirmation()
@@ -210,6 +210,22 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(video["kind"], "已导出视频")
         self.assertEqual(self.previews.video_file(JOB, "one", video["version"]).read_bytes(), b"existing-video")
 
+    def test_open_location_selects_the_previews_hd_file_in_explorer(self):
+        import server
+        workbench = type("Bench", (), {"allow_open": True, "video_previews": self.previews})()
+        with patch.object(server.os, "name", "nt"), patch.object(server.subprocess, "Popen") as popen:
+            with self.assertRaises(server.ApiError):
+                server.Workbench.open_location(workbench, {"target": "preview", "job_id": JOB, "timeline_uid": "one"})
+            _, done = self.start()
+            server.Workbench.open_location(workbench, {"target": "preview", "job_id": JOB, "timeline_uid": "one"})
+            with self.assertRaises(server.ApiError):
+                server.Workbench.open_location(workbench, {"target": "preview", "job_id": "../x", "timeline_uid": "one"})
+        self.assertEqual(done["status"], "done")
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:2], ["explorer.exe", "/select,"])
+        self.assertEqual(Path(command[2]), self.previews.export_file(JOB, "one"))
+        self.assertEqual(popen.call_count, 1)
+
     def test_unknown_or_archived_binding_and_unexpected_input_are_rejected(self):
         for body in ({"timeline_uid": "missing"}, {"timeline_uid": "one", "textless": True}):
             with self.assertRaises(Exception):
@@ -233,6 +249,39 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(upgraded.video_file(JOB, "one", current["video"]["version"]).read_bytes(), b"small-playback")
         self.assertEqual(upgraded.video_file(JOB, "one", old["video"]["version"]).read_bytes(), b"preview-video")
         self.assertEqual(len(self.calls), 1)
+
+    def test_hd_capture_is_named_after_its_timeline_and_playback_sits_in_its_own_folder(self):
+        def optimize(source, output, progress):
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"small-playback")
+            return output
+        self.previews.optimizer = optimize
+        self.job["timelines"][0]["name"] = 'Lab261105:202/4'
+        _, done = self.start()
+        hd = self.previews.export_file(JOB, "one")
+        self.assertEqual(hd.name, "Lab261105_202_4.mp4")
+        self.assertEqual(hd.read_bytes(), b"preview-video")
+        playback = self.previews.video_file(JOB, "one", done["video"]["version"])
+        self.assertEqual((playback.parent.name, playback.parent.parent), ("在线播放", hd.parent))
+        self.assertEqual(sorted(p.name for p in hd.parent.glob("*.mp4")), ["Lab261105_202_4.mp4"])
+
+    def test_startup_renames_earlier_previews_without_breaking_their_urls(self):
+        run = self.previews._folder(JOB, "one") / "runs" / "old"
+        run.mkdir(parents=True)
+        (run / "preview.mp4").write_bytes(b"hd")
+        (run / "playback-web1.mp4").write_bytes(b"small")
+        record = {"status": "done", "job_id": JOB, "timeline_uid": "one", "run_id": "old", "video": {
+            "file": r"runs\old\playback-web1.mp4", "source_file": r"runs\old\preview.mp4", "version": "old-web1",
+            "source_version": "old", "profile": "web1", "name": "First.mp4", "kind": "成片预览", "generated_at": "2026-11-06T00:00:00Z"}}
+        (run.parent.parent / "preview.json").write_text(json.dumps(record), encoding="utf-8")
+        for _ in range(2):
+            restarted = TimelinePreviews(self.app, optimizer=lambda source, output, progress: source)
+            self.assertEqual(restarted.video_file(JOB, "one", "old-web1").read_bytes(), b"small")
+            self.assertEqual(restarted.video_file(JOB, "one", "old").read_bytes(), b"hd")
+        self.assertEqual(restarted.export_file(JOB, "one"), (run / "First.mp4").resolve())
+        self.assertTrue((run / "在线播放" / "playback-web1.mp4").is_file())
+        self.assertEqual(sorted(p.name for p in run.glob("*.mp4")), ["First.mp4"])
+        self.assertFalse(self.calls)
 
     def test_playback_encoding_releases_resolve_and_failure_keeps_a_playable_capture(self):
         def optimize(source, output, progress):

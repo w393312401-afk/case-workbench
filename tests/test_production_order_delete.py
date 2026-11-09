@@ -13,12 +13,94 @@ sys.path.insert(0, str(APP))
 
 from elevenlabs_client import VoiceError
 from test_production import Bench, CANDIDATE as VIDEO_CANDIDATE, FakeEleven
+from workbench_content import ContentWorkbenchMixin
+from workbench_creation import CreationWorkbenchMixin
 from workbench_editing import EditingWorkbenchMixin
 from workbench_order_delete import OrderDeleteMixin
 
 
 class OrderBench(Bench, EditingWorkbenchMixin, OrderDeleteMixin):
     pass
+
+
+class CandidateBench(OrderBench, CreationWorkbenchMixin, ContentWorkbenchMixin):
+    pass
+
+
+class CandidateOrderDeleteTests(unittest.TestCase):
+    """Deleting an order from the candidate desk also puts its draft back, unless the script is used elsewhere."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="candidate-order-delete-")
+        self.addCleanup(temp.cleanup)
+        self.bench = CandidateBench(temp.name, FakeEleven())
+        self.bench.ai = Mock()
+        self.bench.ai.settle_variant_choices.return_value = {"task_id": "AIT-0123456789ab"}
+        self.script = self.bench.creation.mutate("script", {
+            "request_id": uuid4().hex, "revision": self.bench.creation.public()["revision"],
+            "script": {"product": "202H", "direction_id": "202H-S2", "title": "变体 #1", "text": "One kit, replacing this jig.\nFull 202H kit's below.", "confirmed": True}},
+            {"task_id": "AIT-0123456789ab", "round_id": "AIR-0123456789ab", "task_revision": 1, "product": "202H", "case_id": None,
+             "candidate_text": VIDEO_CANDIDATE, "candidate_sha256": "x", "snapshot": {}})["script"]
+
+    def order(self):
+        return self.bench.create_production_job({"request_id": uuid4().hex, "revision": self.bench.production.public()["revision"],
+                                                 "job": {"script_id": self.script["id"]}})["job"]["id"]
+
+    def archived(self):
+        return self.bench.creation.get_script(self.script["id"])["archived"]
+
+    def made(self):
+        return self.bench.ai.settle_variant_choices.call_args.args[1]
+
+    def test_only_order_returns_the_draft_and_the_script_can_be_restored(self):
+        job = self.order()
+        preview = self.bench.delete_candidate_order(job, {"preview": True})
+        self.assertEqual((preview["draft_returned"], preview["draft_kept"]), (True, ""))
+        self.assertFalse(self.archived())
+        self.assertTrue(self.bench.production.job(job))
+        result = self.bench.delete_candidate_order(job, {"request_id": uuid4().hex})
+        self.assertEqual((result["deleted_job"], result["draft_returned"], result["warnings"]), (job, True, []))
+        with self.assertRaises(VoiceError):
+            self.bench.production.job(job)
+        self.assertTrue(self.archived())
+        self.assertEqual(self.made(), {})
+        self.bench.ai.release_adoption.assert_called_once_with("AIT-0123456789ab")
+        self.assertEqual(result["task"], {"task_id": "AIT-0123456789ab"})
+
+    def test_retrying_the_same_request_changes_nothing_more(self):
+        job, body = self.order(), {"request_id": uuid4().hex}
+        first = self.bench.delete_candidate_order(job, body)
+        again = self.bench.delete_candidate_order(job, body)
+        self.assertEqual((first["deleted_job"], again["deleted_job"], again["draft_returned"]), (job, job, True))
+        self.assertTrue(self.archived())
+
+    def test_script_stays_while_another_order_uses_it(self):
+        first, second = self.order(), self.order()
+        preview = self.bench.delete_candidate_order(first, {"preview": True})
+        self.assertFalse(preview["draft_returned"])
+        self.assertIn("别的制作单", preview["draft_kept"])
+        self.assertFalse(self.bench.delete_candidate_order(first, {"request_id": uuid4().hex})["draft_returned"])
+        self.assertFalse(self.archived())
+        self.bench.ai.release_adoption.assert_not_called()
+        self.assertEqual(self.made(), {("AIT-0123456789ab", "AIR-0123456789ab"): {0}})
+        self.assertTrue(self.bench.delete_candidate_order(second, {"request_id": uuid4().hex})["draft_returned"])
+        self.assertTrue(self.archived())
+
+    def test_published_script_is_never_archived_by_the_delete(self):
+        job = self.order()
+        self.bench.creation.mutate("script_status", {"request_id": uuid4().hex, "revision": self.bench.creation.current_revision(),
+                                                     "script_status": {"script_id": self.script["id"], "status": "published",
+                                                                       "video_id": "1234567", "published_on": "2026-11-01"}})
+        self.assertFalse(self.bench.delete_candidate_order(job, {"request_id": uuid4().hex})["draft_returned"])
+        self.assertFalse(self.archived())
+
+    def test_order_with_running_work_is_refused_and_nothing_moves(self):
+        job = self.order()
+        self.bench._job_blockers = lambda record: "这张制作单正在生成配音，请等它结束。"
+        with self.assertRaises(VoiceError):
+            self.bench.delete_candidate_order(job, {"request_id": uuid4().hex})
+        self.assertTrue(self.bench.production.job(job))
+        self.assertFalse(self.archived())
 
 
 class OrderDeleteTests(unittest.TestCase):

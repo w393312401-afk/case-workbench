@@ -9,6 +9,7 @@ version is copied to <project>/图文成品/<case>-<date>-<version>/ and never c
 from __future__ import annotations
 
 import copy
+import functools
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -24,6 +25,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
 
 import carousel_render as render
 from resolve_bridge import render_recovery_message
+from task_activity import activity_label, record_activity
 
 FPS = 5
 THUMB = (180, 320)
@@ -318,6 +320,15 @@ def migrate(data):
     return data
 
 
+def _open_only(method):
+    """A finished carousel keeps its files and can be looked at, but changes wait until it is reopened."""
+    @functools.wraps(method)
+    def guarded(self, set_id, *args, **kwargs):
+        self.ensure_open(set_id)
+        return method(self, set_id, *args, **kwargs)
+    return guarded
+
+
 class PhotoCarousels:
     def __init__(self, app, root=None, export_root=None):
         self.app = app
@@ -327,6 +338,28 @@ class PhotoCarousels:
         self._cancel = {}
         self.root.mkdir(parents=True, exist_ok=True)
         self._interrupt_stale()
+
+    # ---------- task panel ----------
+    def _track(self, step, head, job, set_id, message):
+        """Each background step also shows in the 任务 panel, under the order it belongs to. Recording never blocks the work."""
+        run_id = f"photo:{step}:{uuid4().hex[:12]}"
+        job = job or {}
+        try:
+            label = activity_label(job, job.get("id", ""))
+        except Exception:
+            label = str(job.get("title") or job.get("id") or "")
+        record_activity(self.app, run_id, kind="photo", owner_id=str(job.get("id") or ""), source_id=set_id or "",
+                        product=job.get("product", ""), case_id=(job.get("replica") or {}).get("case_id") or job.get("case_id") or "",
+                        title=f"{head} · {label}", step="publish", status="running", phase=head, message=message)
+        return run_id
+
+    def _settle(self, run_id, status, message):
+        if run_id:
+            record_activity(self.app, run_id, status=status, phase="finished", message=str(message or "")[:400])
+
+    def _note(self, run_id, message):
+        if run_id and message:
+            record_activity(self.app, run_id, message=str(message)[:400])
 
     # ---------- storage ----------
     def _folder(self, set_id):
@@ -370,6 +403,209 @@ class PhotoCarousels:
         found = [d for d in self._all() if d.get("job_id") == job_id and d.get("timeline_uid") == timeline_uid and not d.get("discarded")]
         return max(found, key=lambda d: d.get("created_at", ""), default=None)
 
+    # ---------- 要不要做: one decision per timeline, for the 图文 overview ----------
+    # A timeline's state comes from what exists: an exported version → exported, a set → doing. Only 要做 / 不做,
+    # which have no set.json to live in, are stored here.
+    @property
+    def _decision_path(self):
+        return self.root / "decisions.json"
+
+    def _decisions(self):
+        try:
+            data = json.loads(self._decision_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            raise PhotoSetError(500, "图文决定记录无法读取，请保留原文件并核对备份。") from exc
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _decision_key(job_id, timeline_uid):
+        return f"{job_id}|{timeline_uid}"
+
+    def states(self, pairs):
+        """{(job_id, timeline_uid): {"state", "set_id", "decided_at", "reason"}} for each pair, from one pass over the sets."""
+        with self.lock:
+            sets = {}
+            for data in self._all():
+                if data.get("discarded"):
+                    continue
+                key = (data.get("job_id"), data.get("timeline_uid"))
+                if key not in sets or data.get("created_at", "") > sets[key].get("created_at", ""):
+                    sets[key] = data
+            try:
+                decided = self._decisions()
+            except PhotoSetError:
+                decided = {}
+            out = {}
+            for job_id, uid in pairs:
+                data, choice = sets.get((job_id, uid)), decided.get(self._decision_key(job_id, uid)) or {}
+                if choice.get("finished_at"):
+                    state = "finished"
+                elif data and any(w.get("exports") for w in data.get("works") or []):
+                    state = "exported"
+                elif data:
+                    state = "doing"
+                elif choice.get("decision") == "skip":
+                    state = "skip"
+                elif choice.get("decision") == "want":
+                    state = "want"
+                else:
+                    state = "pending"
+                out[(job_id, uid)] = {"state": state, "set_id": (data or {}).get("id"),
+                                      "decided_at": choice.get("at"), "reason": choice.get("reason", ""),
+                                      "finished_at": choice.get("finished_at", "")}
+            return out
+
+    def failures(self):
+        """Sets whose last frame extraction or AI step failed: [{job_id, timeline_uid, step, error, at}], for the needs-you list."""
+        labels = {"frames_job": "抽帧", "ai": "写逐张表", "slide_ai": "改写单张"}
+        with self.lock:
+            try:
+                decided = self._decisions()
+            except PhotoSetError:
+                decided = {}
+            finished = {key for key, choice in decided.items() if isinstance(choice, dict) and choice.get("finished_at")}
+            return [{"job_id": data.get("job_id"), "timeline_uid": data.get("timeline_uid"), "step": labels[key],
+                     "error": str((data.get(key) or {}).get("error") or ""), "at": (data.get(key) or {}).get("finished_at") or data.get("updated_at") or ""}
+                    for data in self._all() if not data.get("discarded") and self._decision_key(data.get("job_id"), data.get("timeline_uid")) not in finished for key in labels if (data.get(key) or {}).get("status") == "failed"]
+
+    def decide(self, job_id, timeline_uid, body):
+        """Record 要做 / 不做, 待决定 again (clear), or 完结 / 撤销完结. Before a set exists the choice is the state; once one
+        exists only 完结 can still be stored, because the work itself says everything else."""
+        if not isinstance(body, dict) or set(body) - {"decision", "reason"} or body.get("decision") not in {"want", "skip", "clear", "finish", "reopen"}:
+            raise PhotoSetError(400, "图文决定参数无效。")
+        reason = body.get("reason", "")
+        if not isinstance(reason, str) or len(reason) > 100 or any(ord(char) < 32 for char in reason):
+            raise PhotoSetError(400, "不做的原因不能超过 100 个字。")
+        with self.lock:
+            if body["decision"] in {"finish", "reopen"}:
+                return self._set_finished(job_id, timeline_uid, body["decision"] == "finish")
+            if self.find(job_id, timeline_uid):
+                raise PhotoSetError(409, "这条已经开始做图文了，不能再改成不做。")
+            data = self._decisions()
+            key = self._decision_key(job_id, timeline_uid)
+            if body["decision"] == "clear":
+                data.pop(key, None)
+            else:
+                data[key] = {"decision": body["decision"], "at": _now(), **({"reason": reason.strip()} if reason.strip() else {})}
+            _write_json(self._decision_path, data)
+            return self.states([(job_id, timeline_uid)])[(job_id, timeline_uid)]
+
+    def _choice(self, job_id, timeline_uid):
+        try:
+            return self._decisions().get(self._decision_key(job_id, timeline_uid)) or {}
+        except PhotoSetError:
+            return {}
+
+    def _running(self, job_id, timeline_uid, data):
+        return (self._resolve_import(job_id, timeline_uid) or {}).get("status") == "running" or any(
+            ((data or {}).get(key) or {}).get("status") == "running" for key in ("frames_job", "ai", "slide_ai"))
+
+    def _set_finished(self, job_id, timeline_uid, finished):
+        """完结 only stops the reminders and locks editing; the set, its exports and any Notion pages stay as they are."""
+        data = self._decisions()
+        key = self._decision_key(job_id, timeline_uid)
+        choice = dict(data.get(key) or {})
+        if finished and not choice.get("finished_at"):
+            found = self.find(job_id, timeline_uid)
+            if not found and choice.get("decision") != "want":
+                raise PhotoSetError(409, "这条还没开始做图文，不想做请点「不做」。")
+            if self._running(job_id, timeline_uid, found):
+                raise PhotoSetError(409, "图文还在处理，等它跑完或先停止，再完结。")
+            choice["finished_at"] = _now()
+        elif not finished:
+            choice.pop("finished_at", None)
+        if choice:
+            data[key] = choice
+        else:
+            data.pop(key, None)
+        _write_json(self._decision_path, data)
+        return self.states([(job_id, timeline_uid)])[(job_id, timeline_uid)]
+
+    def _finish_view(self, job_id, timeline_uid, data):
+        choice = self._choice(job_id, timeline_uid)
+        finished = choice.get("finished_at", "")
+        return {"finished_at": finished,
+                "can_finish": not finished and bool(data or choice.get("decision") == "want") and not self._running(job_id, timeline_uid, data),
+                "can_delete": bool(data) and not self._running(job_id, timeline_uid, data)}
+
+    def _delete_footprint(self, job_id, timeline_uid):
+        """Every set this timeline ever had (replaced videos included), their export folders and the Resolve import folder.
+        A folder is only listed when it sits directly inside its own root, whatever path a record claims."""
+        from workbench_order_delete import _safe_folder
+        sets = [data for data in self._all() if data.get("job_id") == job_id and data.get("timeline_uid") == timeline_uid]
+        folders = [self.root / data["id"] for data in sets if _safe_folder(self.root / data["id"], self.root)]
+        exports = []
+        for data in sets:
+            for export in [item for work in data.get("works") or [] for item in work.get("exports") or []] + list(data.get("exports") or []):
+                folder = Path(str(export.get("folder") or "")) if isinstance(export, dict) and export.get("folder") else None
+                if folder and folder not in exports and _safe_folder(folder, self.export_root):
+                    exports.append(folder)
+        imported = self._import_folder(job_id, timeline_uid)
+        return sets, folders, exports, [imported] if _safe_folder(imported, self.root / "resolve-imports") else []
+
+    def delete(self, job_id, timeline_uid, body):
+        """Permanently remove one timeline's 图文 and everything kept for it on this computer. Pages already on Notion stay
+        there. preview=true only reports what would go. Records go first, then files; whatever cannot be removed is reported."""
+        if not isinstance(body, dict) or set(body) - {"preview"} or not isinstance(body.get("preview", False), bool):
+            raise PhotoSetError(400, "图文删除参数无效。")
+        from workbench_order_delete import _tree
+        notion = getattr(self.app, "notion_uploads", None)
+        with self.lock:
+            decided = self._decisions()
+            key = self._decision_key(job_id, timeline_uid)
+            sets, folders, exports, imported = self._delete_footprint(job_id, timeline_uid)
+            if not sets and key not in decided and not imported:
+                raise PhotoSetError(404, "这条没有可删除的图文数据。")
+            if self._running(job_id, timeline_uid, None) or any(self._running(job_id, timeline_uid, data) for data in sets):
+                raise PhotoSetError(409, "图文还在处理，等它跑完或先停止，再删除。")
+            ids = {data["id"] for data in sets}
+            if notion is not None and notion.photo_busy(ids):
+                raise PhotoSetError(409, "这条图文正在上传 Notion，请等它结束再删除。")
+            everything = folders + exports + imported
+            if body.get("preview"):
+                trees = [_tree(folder) for folder in everything]
+                pages = {row.get("page_id") for row in notion.photo_receipts(ids) if row.get("page_id")} if notion is not None else set()
+                return {"versions": sum(len(data.get("works") or []) for data in sets if not data.get("discarded")), "exports": len(exports),
+                        "files": sum(count for _, count in trees), "bytes": sum(size for size, _ in trees), "notion_pages": len(pages)}
+            if notion is not None:
+                notion.forget_photo(ids)
+            if key in decided:
+                decided.pop(key)
+                _write_json(self._decision_path, decided)
+            warnings = []
+
+            def unlock(function, path, _):
+                os.chmod(path, 0o700)
+                function(path)
+            # set.json goes first so a file Windows still holds open can't bring the deleted 图文 back into the lists.
+            for folder in folders:
+                try:
+                    (folder / "set.json").unlink(missing_ok=True)
+                except OSError as exc:
+                    warnings.append(f"图文记录没有清理干净：{exc}")
+            for folder in everything:
+                try:
+                    shutil.rmtree(folder, onerror=unlock)
+                except OSError:
+                    pass
+                if folder.exists():
+                    warnings.append(f"有文件还没删掉，可能正被占用，可手动删除：{folder}")
+            activity = getattr(self.app, "activity", None)
+            if activity is not None:
+                for source in (*ids, timeline_uid):
+                    try:
+                        activity.delete_source(job_id, source)
+                    except Exception:
+                        pass
+            return {"deleted": True, "warnings": warnings}
+
+    def ensure_open(self, set_id):
+        data = self._read(set_id)
+        if self._choice(data.get("job_id"), data.get("timeline_uid")).get("finished_at"):
+            raise PhotoSetError(409, "这条图文已完结，撤销完结后才能继续编辑。")
+
     # ---------- public view ----------
     def public(self, data):
         if not data:
@@ -377,6 +613,7 @@ class PhotoCarousels:
         out = {key: data.get(key) for key in ("id", "job_id", "timeline_uid", "timeline_name", "case_id", "product", "created_at",
                                               "updated_at", "video", "frames_job", "ai", "slide_ai", "versions", "gaps", "current")}
         out["exists"] = True
+        out.update(self._finish_view(data.get("job_id"), data.get("timeline_uid"), data))
         out["slide_ai"] = {k: v for k, v in data["slide_ai"].items() if k != "snapshot"} if data.get("slide_ai") else None
         out["works"] = [{"key": w["key"], "name_zh": w.get("name_zh", ""), "status": w["status"], "exports": len(w.get("exports") or []),
                          "openable": self._openable(data, w["key"])} for w in data.get("works") or []]
@@ -398,7 +635,10 @@ class PhotoCarousels:
 
     def detail(self, job_id, timeline_uid):
         with self.lock:
-            out = self.public(self.find(job_id, timeline_uid))
+            found = self.find(job_id, timeline_uid)
+            out = self.public(found)
+            if not found:
+                out.update(self._finish_view(job_id, timeline_uid, None))
             task = self._resolve_import(job_id, timeline_uid)
             if task:
                 out["resolve_import"] = {key: task.get(key) for key in ("status", "message", "error", "started_at", "finished_at")}
@@ -439,6 +679,8 @@ class PhotoCarousels:
                        for path in (self.root / "resolve-imports").glob("*/job.json"))
 
     def _check_video_change(self, job_id, uid, *, importing=False):
+        if self._choice(job_id, uid).get("finished_at"):
+            raise PhotoSetError(409, "这条图文已完结，撤销完结后才能换视频。")
         if not importing and (self._resolve_import(job_id, uid) or {}).get("status") == "running":
             raise PhotoSetError(409, "正在从达芬奇导入无字版，请完成后再换视频。")
         old = self.find(job_id, uid)
@@ -470,7 +712,9 @@ class PhotoCarousels:
                 "case_id": (job.get("replica") or {}).get("case_id") or "", "product": job.get("product") or "",
                 "created_at": _now(), "video": {"name": str(name)[:200], "file": target.name,
                                                  "bytes": target.stat().st_size},
-                "frames_job": {"status": "running", "started_at": _now()}, "ai": {"status": "idle"},
+                "frames_job": {"status": "running", "started_at": _now(),
+                               "run": self._track("frames", "图文抽帧", job, set_id, f"正在从「{timeline.get('name') or '成片'}」抽画面")},
+                "ai": {"status": "idle"},
                 "versions": [], "gaps": [], "chosen": None, "style": "bar", "slides": [], "history": [], "exports": [],
             }
             if resolve_source:
@@ -486,7 +730,7 @@ class PhotoCarousels:
         if set(body) != {"timeline_uid"}:
             raise PhotoSetError(400, "请选择要导入的时间线。")
         uid = str(body.get("timeline_uid") or "")
-        _, timeline = self._timeline(job_id, uid)
+        job, timeline = self._timeline(job_id, uid)
         if not timeline.get("project"):
             raise PhotoSetError(409, "这条成片没有达芬奇工程关联，请先在制作单关联原时间线。")
         with self.lock:
@@ -498,7 +742,8 @@ class PhotoCarousels:
             folder.mkdir(parents=True, exist_ok=True)
             task = {"job_id": job_id, "timeline_uid": uid, "run_id": uuid4().hex[:12], "status": "running",
                     "started_at": _now(), "message": "正在连接达芬奇…", "error": "",
-                    "pending_recovery": (previous.get("pending_recovery") or previous["run_id"]) if previous else None}
+                    "pending_recovery": (previous.get("pending_recovery") or previous["run_id"]) if previous else None,
+                    "activity": self._track("textless", "导入无字版", job, uid, f"正在从达芬奇导出「{timeline.get('name') or '成片'}」的无字版")}
             _write_json(folder / "job.json", task)
             reply = self.detail(job_id, uid)
             threading.Thread(target=self._import_resolve, args=(job_id, uid, task),
@@ -514,6 +759,12 @@ class PhotoCarousels:
             with self.lock:
                 task.update(values)
                 _write_json(folder / "job.json", task)
+            if values.get("status") == "done":
+                self._settle(task.get("activity"), "completed", values.get("message"))
+            elif values.get("status") == "failed":
+                self._settle(task.get("activity"), "failed", values.get("error"))
+            else:
+                self._note(task.get("activity"), values.get("message"))
         try:
             scratch.mkdir(parents=True, exist_ok=True)
             with self.app.resolve.access(on_wait=lambda: update(message="正在等待达芬奇空闲…")):
@@ -577,14 +828,18 @@ class PhotoCarousels:
             with self.lock:
                 data = self._read(set_id)
                 data["video"]["duration"] = round(len(files) / FPS, 1)
-                data["frames_job"] = {"status": "done", "count": len(files), "finished_at": _now()}
+                run = (data.get("frames_job") or {}).get("run")
+                data["frames_job"] = {"status": "done", "count": len(files), "finished_at": _now(), "run": run}
                 self._save(data)
+            self._settle(run, "completed", f"抽出 {len(files)} 张画面，可以出逐张表了")
         except Exception as exc:  # reported on the panel; the set stays usable for another upload
             with self.lock:
                 data = self._read(set_id)
+                run = (data.get("frames_job") or {}).get("run")
                 data["frames_job"] = {"status": "failed", "error": str(exc) if isinstance(exc, PhotoSetError) else f"抽帧失败：{exc}",
-                                      "finished_at": _now()}
+                                      "finished_at": _now(), "run": run}
                 self._save(data)
+            self._settle(run, "failed", data["frames_job"]["error"])
 
     @staticmethod
     def _sheets(folder, files, items):
@@ -609,6 +864,7 @@ class PhotoCarousels:
             canvas.save(folder / "sheets" / f"sheet{sheet + 1:02d}.jpg", quality=85)
 
     # ---------- step 2: AI writes three versions ----------
+    @_open_only
     def plan(self, set_id, body=None):
         with self.lock:
             data = self._read(set_id)
@@ -618,7 +874,12 @@ class PhotoCarousels:
                 raise PhotoSetError(409, "画面还没抽完，稍等一下。")
             if (data.get("ai") or {}).get("status") == "running":
                 return self.public(data)
-            data["ai"] = {"status": "running", "started_at": _now(), "progress": "正在准备脚本、产品资料和画面…"}
+            try:
+                job = self.app.production.job(data["job_id"])
+            except Exception:
+                job = {"id": data["job_id"], "product": data.get("product", "")}
+            data["ai"] = {"status": "running", "started_at": _now(), "progress": "正在准备脚本、产品资料和画面…",
+                          "run": self._track("plan", "图文逐张表", job, set_id, f"AI 正在给「{data.get('timeline_name') or '成片'}」写 3 版逐张表")}
             self._save(data)
             event = threading.Event()
             self._cancel[set_id] = event
@@ -638,6 +899,7 @@ class PhotoCarousels:
             if (data.get("ai") or {}).get("status") == "running":
                 data["ai"]["progress"] = str(text)[:200]
                 self._save(data)
+                self._note(data["ai"].get("run"), text)
 
     def _references(self, folder, product):
         refs = folder / "refs"
@@ -754,15 +1016,19 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             with self.lock:
                 data = self._read(set_id)
                 data.update(versions=versions, gaps=gaps)
-                data["ai"] = {"status": "done", "finished_at": _now()}
+                run = (data.get("ai") or {}).get("run")
+                data["ai"] = {"status": "done", "finished_at": _now(), "run": run}
                 self._save(data)
+            self._settle(run, "completed", f"{len(versions)} 版逐张表已写好，去选一版")
         except Exception as exc:
             cancelled = event.is_set()
             with self.lock:
                 data = self._read(set_id)
-                data["ai"] = {"status": "cancelled" if cancelled else "failed", "finished_at": _now(),
+                run = (data.get("ai") or {}).get("run")
+                data["ai"] = {"status": "cancelled" if cancelled else "failed", "finished_at": _now(), "run": run,
                               "error": "已停止。" if cancelled else (str(exc) or "AI 没有完成，请再点一次。")[:400]}
                 self._save(data)
+            self._settle(run, "cancelled" if cancelled else "failed", data["ai"]["error"])
         finally:
             self._cancel.pop(set_id, None)
 
@@ -827,6 +1093,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
 只输出一个 JSON 对象，不要别的文字：
 {{"options":[{{"title_lines":["I FOUND THE *NEXT LEVEL*","FOR MY STONE."],"body_lines":["One stone gets it sharp, just not the finish I'm after."],"title_zh":"我找到了磨石的进阶方案","body_zh":"一块磨石能磨利，但磨不出我想要的刃面","change_zh":"一句话说这种写法的特点"}}]}}"""
 
+    @_open_only
     def rewrite(self, set_id, number, body=None):
         """AI offers three ways to word one slide (from the user's Chinese meaning, or the current words). Nothing is
         replaced until the user picks one; pictures, crops and layout never change. Runs in the background."""
@@ -840,7 +1107,12 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                 raise PhotoSetError(404, "这一张不存在。")
             if (data.get("slide_ai") or {}).get("status") == "running":
                 raise PhotoSetError(409, f"AI 正在给第 {data['slide_ai']['number']} 张出说法，等它写完或先停止。")
-            data["slide_ai"] = {"status": "running", "key": work["key"], "number": number, "slide_id": slide_id(slides[number - 1]),
+            try:
+                job = self.app.production.job(data["job_id"])
+            except Exception:
+                job = {"id": data["job_id"], "product": data.get("product", "")}
+            run = self._track("slide", f"改写第 {number} 张", job, set_id, f"AI 正在给第 {number} 张出 3 种说法")
+            data["slide_ai"] = {"status": "running", "key": work["key"], "number": number, "slide_id": slide_id(slides[number - 1]), "run": run,
                                 "note": note, "zh": zh, "started_at": _now(),
                                 "progress": f"AI 正在给第 {number} 张出 3 种说法…", "snapshot": copy.deepcopy(slides[number - 1])}
             self._save(data)
@@ -875,6 +1147,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                     if (current.get("slide_ai") or {}).get("status") == "running":
                         current["slide_ai"]["progress"] = str(text)[:200]
                         self._save(current)
+                        self._note(current["slide_ai"].get("run"), text)
             output = self.app.ai.bridge.run(self.rewrite_prompt(data, job, work, number, refs, len(pictures), task.get("note", ""), task.get("zh", "")),
                                             cwd=str(folder), cancel_event=event, on_progress=progress,
                                             model=settings.get("model"), reasoning_effort=settings.get("reasoning_effort"),
@@ -891,18 +1164,21 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                 data["slide_ai"].update(status="done", options=options, picked=None, finished_at=_now())
                 data["slide_ai"].pop("progress", None)
                 self._save(data)
+            self._settle(data["slide_ai"].get("run"), "completed", f"第 {number} 张的 {len(options)} 种说法已出，去选一种")
         except Exception as exc:
             cancelled = event.is_set()
             with self.lock:
                 data = self._read(set_id)
                 task = data.get("slide_ai") or {}
                 data["slide_ai"] = {"status": "cancelled" if cancelled else "failed", "key": task.get("key"), "number": task.get("number"),
-                                    "zh": task.get("zh", ""), "note": task.get("note", ""), "finished_at": _now(),
+                                    "zh": task.get("zh", ""), "note": task.get("note", ""), "finished_at": _now(), "run": task.get("run"),
                                     "error": "已停止。" if cancelled else (str(exc) or "AI 没有完成，请再点一次。")[:400]}
                 self._save(data)
+            self._settle(task.get("run"), "cancelled" if cancelled else "failed", data["slide_ai"]["error"])
         finally:
             self._cancel.pop(f"{set_id}:slide", None)
 
+    @_open_only
     def pick_option(self, set_id, number, body):
         """Put one of the offered wordings on the slide they were written for, wherever it sits now. Only the words
         change: a picture, crop or layout changed after the options were written stays. Picking is the user's own
@@ -966,6 +1242,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             work["status"] = "doing"
         data["current"] = key
 
+    @_open_only
     def choose(self, set_id, body):
         """Add versions to the queue in the order given. Versions already in the queue keep their edits."""
         keys = body.get("versions")
@@ -998,9 +1275,13 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                 raise PhotoSetError(404, "这一版不在制作队列里。")
             if not self._openable(data, key):
                 raise PhotoSetError(409, "按顺序做：先把前面的版本定稿，再做这一版。")
+            # Looking at a finished version is fine on a closed carousel; starting a new one is editing.
+            if self._work(data, key)["status"] != "done":
+                self.ensure_open(set_id)
             self._start(data, key)
             return self.public(self._save(data))
 
+    @_open_only
     def remove_work(self, set_id, body):
         with self.lock:
             data = self._read(set_id)
@@ -1017,6 +1298,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                     data["current"] = data["works"][-1]["key"]
             return self.public(self._save(data))
 
+    @_open_only
     def set_style(self, set_id, body):
         if body.get("style") not in render.STYLES:
             raise PhotoSetError(400, "排版风格无效。")
@@ -1046,6 +1328,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
         work["history"] = work["history"][-MAX_HISTORY:]
         work["future"] = []
 
+    @_open_only
     def edit_slide(self, set_id, number, body):
         with self.lock:
             data = self._read(set_id)
@@ -1135,6 +1418,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             slides[number - 1] = slide
             return self.public(self._save(data))
 
+    @_open_only
     def arrange(self, set_id, number, body):
         """Copy a slide (the copy goes right after it), delete one, or move one to another position. Page numbers and the
         closing line on the last slide follow automatically; every change can be undone."""
@@ -1173,6 +1457,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             work["slides"] = slides
             return self.public(self._save(data))
 
+    @_open_only
     def edit_set(self, set_id, body):
         with self.lock:
             data = self._read(set_id)
@@ -1192,6 +1477,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                 work["titles_zh"] = [str(t or "")[:200] for t in (body["titles_zh"] or [])[:3]]
             return self.public(self._save(data))
 
+    @_open_only
     def undo(self, set_id):
         with self.lock:
             data = self._read(set_id)
@@ -1204,6 +1490,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             self._restore(work, last)
             return self.public(self._save(data))
 
+    @_open_only
     def redo(self, set_id):
         with self.lock:
             data = self._read(set_id)
@@ -1283,6 +1570,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
         return path
 
     # ---------- freeze ----------
+    @_open_only
     def export(self, set_id):
         with self.lock:
             data = self._read(set_id)

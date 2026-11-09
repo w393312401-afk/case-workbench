@@ -197,6 +197,179 @@ class ParseTests(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+class DecisionTests(unittest.TestCase):
+    """要不要做: the 图文 overview's per-timeline state and the stored 要做 / 不做 decisions."""
+    JOB = "PRD-0123456789ab"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.sets = PhotoCarousels(App(self.tmp, "{}"), export_root=self.tmp / "图文成品")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def state(self, uid):
+        return self.sets.states([(self.JOB, uid)])[(self.JOB, uid)]
+
+    def write_set(self, set_id, uid, exports=0, **extra):
+        folder = self.sets.root / set_id
+        folder.mkdir()
+        data = {"id": set_id, "job_id": self.JOB, "timeline_uid": uid, "created_at": "2026-11-06T00:00:00+00:00",
+                "works": [{"key": "A", "status": "done" if exports else "doing", "exports": [{}] * exports}], "current": "A", **extra}
+        (folder / "set.json").write_text(json.dumps(data), encoding="utf-8")
+
+    def test_new_timeline_is_pending_and_decisions_round_trip(self):
+        self.assertEqual(self.state("u1")["state"], "pending")
+        self.assertEqual(self.sets.decide(self.JOB, "u1", {"decision": "skip", "reason": "  没有实拍  "})["state"], "skip")
+        self.assertEqual(self.state("u1")["reason"], "没有实拍")
+        self.assertEqual(self.state("u2")["state"], "pending")  # another timeline is untouched
+        self.assertEqual(self.sets.decide(self.JOB, "u1", {"decision": "want"})["state"], "want")
+        self.assertEqual(self.sets.decide(self.JOB, "u1", {"decision": "clear"})["state"], "pending")
+        self.assertEqual(json.loads((self.sets.root / "decisions.json").read_text(encoding="utf-8")), {})
+
+    def test_existing_set_decides_the_state(self):
+        self.write_set("PHS-000000000001", "u1")
+        self.write_set("PHS-000000000002", "u2", exports=1)
+        self.assertEqual((self.state("u1")["state"], self.state("u1")["set_id"]), ("doing", "PHS-000000000001"))
+        self.assertEqual(self.state("u2")["state"], "exported")
+        self.write_set("PHS-000000000003", "u3", discarded=True)
+        self.assertEqual(self.state("u3")["state"], "pending")
+
+    def test_work_wins_over_a_stored_decision_and_skipping_started_work_is_refused(self):
+        self.sets.decide(self.JOB, "u1", {"decision": "skip"})
+        self.write_set("PHS-000000000001", "u1")
+        self.assertEqual(self.state("u1")["state"], "doing")
+        with self.assertRaises(PhotoSetError) as caught:
+            self.sets.decide(self.JOB, "u1", {"decision": "skip"})
+        self.assertEqual(caught.exception.status, 409)
+
+    def test_finish_locks_the_set_keeps_its_files_and_can_be_undone(self):
+        self.write_set("PHS-000000000001", "u1", exports=1)
+        before = (self.sets.root / "PHS-000000000001" / "set.json").read_text(encoding="utf-8")
+        self.assertEqual(self.sets.decide(self.JOB, "u1", {"decision": "finish"})["state"], "finished")
+        self.assertEqual((self.sets.root / "PHS-000000000001" / "set.json").read_text(encoding="utf-8"), before)
+        self.assertTrue(self.state("u1")["finished_at"])
+        for attempt in (lambda: self.sets.undo("PHS-000000000001"), lambda: self.sets.edit_set("PHS-000000000001", {"cta": "x"}), lambda: self.sets.export("PHS-000000000001")):
+            with self.assertRaises(PhotoSetError) as caught:
+                attempt()
+            self.assertEqual(caught.exception.status, 409)
+        with self.assertRaises(PhotoSetError):
+            self.sets._check_video_change(self.JOB, "u1")
+        self.assertEqual(self.sets.decide(self.JOB, "u1", {"decision": "reopen"})["state"], "exported")
+        self.assertEqual(json.loads((self.sets.root / "decisions.json").read_text(encoding="utf-8")), {})
+        self.sets.ensure_open("PHS-000000000001")
+
+    def test_finish_applies_to_one_timeline_only_and_silences_its_failures(self):
+        self.write_set("PHS-000000000001", "u1", ai={"status": "failed", "error": "超时"})
+        self.write_set("PHS-000000000002", "u2", ai={"status": "failed", "error": "超时"})
+        self.sets.decide(self.JOB, "u1", {"decision": "finish"})
+        self.assertEqual(self.state("u2")["state"], "doing")
+        self.assertEqual([row["timeline_uid"] for row in self.sets.failures()], ["u2"])
+
+    def test_finish_is_refused_while_running_or_before_anything_started(self):
+        self.write_set("PHS-000000000001", "u1", ai={"status": "running"})
+        for uid in ("u1", "u2"):
+            with self.assertRaises(PhotoSetError) as caught:
+                self.sets.decide(self.JOB, uid, {"decision": "finish"})
+            self.assertEqual(caught.exception.status, 409)
+
+    def test_a_wanted_timeline_finishes_and_reopens_as_wanted(self):
+        self.sets.decide(self.JOB, "u1", {"decision": "want"})
+        self.assertTrue(self.sets.detail(self.JOB, "u1")["can_finish"])
+        self.assertEqual(self.sets.decide(self.JOB, "u1", {"decision": "finish"})["state"], "finished")
+        self.assertFalse(self.sets.detail(self.JOB, "u1")["can_finish"])
+        self.assertEqual(self.sets.decide(self.JOB, "u1", {"decision": "reopen"})["state"], "want")
+
+    def footprint(self):
+        """One timeline with a current set, a replaced set, an export, a Resolve import and a stored decision."""
+        self.sets.export_root.mkdir(parents=True)
+        export = self.sets.export_root / "PRD-20261108-A"
+        (export / "发布JPG").mkdir(parents=True)
+        (export / "发布JPG" / "01.jpg").write_bytes(b"x" * 10)
+        self.write_set("PHS-000000000001", "u1", works=[{"key": "A", "status": "done", "exports": [{"folder": str(export), "name": export.name}]}], created_at="2026-11-07T00:00:00+00:00")
+        self.write_set("PHS-000000000002", "u1", discarded=True)
+        self.write_set("PHS-000000000003", "u2")
+        (self.sets.root / "PHS-000000000001" / "video.mp4").write_bytes(b"v" * 5)
+        imported = self.sets._import_folder(self.JOB, "u1")
+        imported.mkdir(parents=True)
+        (imported / "job.json").write_text(json.dumps({"status": "done"}), encoding="utf-8")
+        self.sets.decide(self.JOB, "u1", {"decision": "finish"})
+        return export, imported
+
+    def test_preview_reports_what_would_go_and_changes_nothing(self):
+        export, imported = self.footprint()
+        info = self.sets.delete(self.JOB, "u1", {"preview": True})
+        self.assertEqual((info["versions"], info["exports"]), (1, 1))
+        self.assertGreaterEqual(info["files"], 5)
+        self.assertTrue(export.is_dir() and imported.is_dir() and (self.sets.root / "PHS-000000000002").is_dir())
+        self.assertEqual(self.state("u1")["state"], "finished")
+
+    def test_delete_removes_everything_local_for_that_timeline_only(self):
+        export, imported = self.footprint()
+        activity = type("Activity", (), {"gone": [], "delete_source": lambda me, owner, source: me.gone.append(source)})()
+        self.sets.app.activity = activity
+        notion = type("Notion", (), {"forgot": [], "photo_busy": lambda me, ids: False, "photo_receipts": lambda me, ids: [],
+                                     "forget_photo": lambda me, ids: me.forgot.append(set(ids))})()
+        self.sets.app.notion_uploads = notion
+        self.assertEqual(self.sets.delete(self.JOB, "u1", {}), {"deleted": True, "warnings": []})
+        for gone in (export, imported, self.sets.root / "PHS-000000000001", self.sets.root / "PHS-000000000002"):
+            self.assertFalse(gone.exists(), gone)
+        self.assertEqual(json.loads((self.sets.root / "decisions.json").read_text(encoding="utf-8")), {})
+        self.assertEqual(self.state("u1")["state"], "pending")
+        self.assertEqual(self.state("u2")["state"], "doing")
+        self.assertTrue((self.sets.root / "PHS-000000000003").is_dir())
+        self.assertEqual(notion.forgot, [{"PHS-000000000001", "PHS-000000000002"}])
+        self.assertEqual(set(activity.gone), {"PHS-000000000001", "PHS-000000000002", "u1"})
+
+    def test_delete_never_follows_a_record_outside_the_export_folder(self):
+        outside = self.tmp / "别的资料"
+        outside.mkdir()
+        nested = self.sets.export_root / "a" / "b"
+        nested.mkdir(parents=True)
+        self.write_set("PHS-000000000001", "u1", works=[{"key": "A", "status": "done", "exports": [{"folder": str(outside)}, {"folder": str(nested)}, {"folder": str(self.sets.root)}]}])
+        self.sets.delete(self.JOB, "u1", {})
+        self.assertTrue(outside.is_dir() and nested.is_dir() and self.sets.root.is_dir())
+        self.assertFalse((self.sets.root / "PHS-000000000001").exists())
+
+    def test_delete_is_refused_while_work_runs_or_uploads_and_when_there_is_nothing(self):
+        self.write_set("PHS-000000000001", "u1", ai={"status": "running"})
+        self.write_set("PHS-000000000002", "u2")
+        with self.assertRaises(PhotoSetError) as caught:
+            self.sets.delete(self.JOB, "u1", {})
+        self.assertEqual(caught.exception.status, 409)
+        self.sets.app.notion_uploads = type("Notion", (), {"photo_busy": lambda me, ids: True})()
+        with self.assertRaises(PhotoSetError) as caught:
+            self.sets.delete(self.JOB, "u2", {})
+        self.assertIn("Notion", str(caught.exception))
+        self.assertTrue((self.sets.root / "PHS-000000000002").is_dir())
+        with self.assertRaises(PhotoSetError) as caught:
+            self.sets.delete(self.JOB, "u9", {})
+        self.assertEqual(caught.exception.status, 404)
+        for bad in ({"preview": "yes"}, {"extra": 1}, []):
+            with self.assertRaises(PhotoSetError):
+                self.sets.delete(self.JOB, "u2", bad)
+
+    def test_failed_steps_are_listed_for_the_needs_you_view(self):
+        self.write_set("PHS-000000000001", "u1", ai={"status": "failed", "error": "超时", "finished_at": "t1"})
+        self.write_set("PHS-000000000002", "u2", frames_job={"status": "done"}, slide_ai={"status": "running"})
+        self.write_set("PHS-000000000003", "u3", frames_job={"status": "failed", "error": "ffmpeg"}, discarded=True)
+        self.assertEqual(self.sets.failures(), [{"job_id": self.JOB, "timeline_uid": "u1", "step": "写逐张表", "error": "超时", "at": "t1"}])
+
+    def test_bad_decisions_are_refused(self):
+        for body in ({}, {"decision": "maybe"}, {"decision": "skip", "extra": 1}, {"decision": "skip", "reason": "x" * 101}, {"decision": "skip", "reason": "a\tb"}, []):
+            with self.assertRaises(PhotoSetError, msg=body) as caught:
+                self.sets.decide(self.JOB, "u1", body)
+            self.assertEqual(caught.exception.status, 400)
+
+    def test_unreadable_decision_file_is_reported_on_write_and_ignored_on_read(self):
+        (self.sets.root / "decisions.json").write_text("{broken", encoding="utf-8")
+        self.assertEqual(self.state("u1")["state"], "pending")
+        with self.assertRaises(PhotoSetError) as caught:
+            self.sets.decide(self.JOB, "u1", {"decision": "skip"})
+        self.assertEqual(caught.exception.status, 500)
+        self.assertEqual((self.sets.root / "decisions.json").read_text(encoding="utf-8"), "{broken")
+
+
 class FlowTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -281,6 +454,25 @@ class FlowTests(unittest.TestCase):
             self.sets.remove_work(set_id, {"key": "A"})  # already exported
         state = self.sets.remove_work(set_id, {"key": "B"})
         self.assertEqual([w["key"] for w in state["works"]], ["A"])
+
+    def test_background_steps_show_in_the_task_panel_under_their_order(self):
+        from task_activity import ActivityStore
+        self.app.activity = ActivityStore(self.tmp / "activity")
+        set_id = self.ready()
+        self.sets.plan(set_id)
+        wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["ai"]["status"] != "running")
+        self.sets.choose(set_id, {"versions": ["A"]})
+        self.sets.rewrite(set_id, 1, {})
+        wait(lambda: (self.sets.detail("PRD-0123456789ab", "uid-1").get("slide_ai") or {}).get("status") != "running")
+        runs = sorted(self.app.activity.feed(kind="photo", limit=10)["items"], key=lambda run: run["started_at"])
+        self.assertEqual([run["title"].split(" · ")[0] for run in runs], ["图文抽帧", "图文逐张表", "改写第 1 张"])
+        self.assertEqual({run["owner_id"] for run in runs}, {"PRD-0123456789ab"})
+        self.assertEqual({run["source_id"] for run in runs}, {set_id})
+        # The fake AI answers the rewrite with a plan, so that step fails and says why.
+        self.assertEqual([run["status"] for run in runs], ["completed", "completed", "failed"], [run["message"] for run in runs])
+        self.assertIn("step=publish", runs[0]["url"])
+        self.assertEqual(runs[1]["message"], "2 版逐张表已写好，去选一版")
+        self.assertIn("没有标题", runs[2]["message"])
 
     def test_slides_can_be_copied_deleted_and_reordered_with_undo(self):
         set_id = self.ready()

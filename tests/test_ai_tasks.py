@@ -118,6 +118,29 @@ class TaskTests(unittest.TestCase):
     def path(self, task_id):
         return self.store.folder(self.identifier) / "collaboration" / task_id / "task.json"
 
+    def test_finished_result_callback_blocks_service_update_until_it_returns(self):
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def callback(task_id):
+            entered.set()
+            try:
+                self.assertTrue(release.wait(3))
+            finally:
+                finished.set()
+
+        self.manager.on_finished = callback
+        task = self.manager.create(self.identifier, self.body())
+        self.assertTrue(entered.wait(3))
+        self.assertEqual(self.wait(task["task_id"])["status"], "completed")
+        self.assertTrue(self.manager.background_busy(), "The final answer is saved but its business callback is still running")
+        release.set()
+        self.assertTrue(finished.wait(3))
+        deadline = time.monotonic() + 3
+        while self.manager.background_busy() and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertFalse(self.manager.background_busy())
+
     def records(self):
         return {str(path): path.read_bytes() for path in self.store.folder(self.identifier).rglob("*.json")
                 if "collaboration" not in path.parts}
@@ -243,6 +266,36 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(len(self.bridges[0].calls), 2)
         draft_prompt, review_prompt = (call["prompt"] for call in self.bridges[0].calls)
         self.assertIn("按已加载写作参考“成稿后的独立复核”逐条执行", review_prompt)
+        for prompt in (draft_prompt, review_prompt):
+            self.assertIn("AI 三段骨架是可调整的选题建议", prompt)
+            self.assertIn("不能先作承诺再让发布前核对", prompt)
+            self.assertIn("不向评论者断言其拥有某物或经历过某事", prompt)
+            self.assertIn("保留并回答原评论的顾虑，不强制逐字引用", prompt)
+            self.assertIn("以其原文为写作参考", prompt)
+            self.assertIn("不要只保留参考的事实摘要", prompt)
+            self.assertIn("不要求每条稿都加入适用和不适用的对照", prompt)
+        self.assertIn("评论顾虑是否真的接到具体使用价值", review_prompt)
+        self.assertIn("是否保留并回答原顾虑，不必强制直引", review_prompt)
+        self.assertIn("既无证据也无用户指定时", review_prompt)
+        self.assertIn("每一句接住前一句或回答已经出现的疑问", draft_prompt)
+        self.assertIn("优先保留最能让目标观众想象自身使用的一处具体情境", draft_prompt)
+        self.assertIn("购物入口可以自然接在已有理由后", draft_prompt)
+        self.assertIn("用户明确指定独立时点句、结尾、句数或逐句对应时按其要求", draft_prompt)
+        self.assertIn("在真实可成立的使用动作或具体选择中说明它的作用", draft_prompt)
+        self.assertIn("不是禁止介绍产品或数字", draft_prompt)
+        self.assertIn("不机械把陈述称作提问", draft_prompt)
+        self.assertIn("即使隔了几句换一种说法", draft_prompt)
+        self.assertIn("怎样接上前句", review_prompt)
+        self.assertIn("有没有把陈述机械改作提问", review_prompt)
+        self.assertIn("同一配置换词复述却没有新增用途", review_prompt)
+        self.assertIn("让部件随动作或选择出现", review_prompt)
+        self.assertIn("保留入口、可换句和具体使用细节", review_prompt)
+        self.assertIn("对照原文实际说话方式、已被要求沿用的判断", review_prompt)
+        self.assertIn("不能为避免广告腔机械删除必要推荐、证据或用户指定结尾", review_prompt)
+        self.assertIn("用户指定开箱明细、锁定原话或画面对应时按其要求", review_prompt)
+        self.assertIn("不要机械删掉确有强调、承接、解释证据作用", review_prompt)
+        self.assertIn("不以更短作为达标标准", review_prompt)
+        self.assertIn("不删除用户要求的开箱明细", review_prompt)
         self.assertNotIn("再直接修订初稿", review_prompt)
         # The delivering review keeps the writing rules and never loads the diagnostic review guide.
         self.assertIn("不是审稿诊断", review_prompt)
@@ -251,6 +304,45 @@ class TaskTests(unittest.TestCase):
         self.assertNotIn("不是审稿诊断", draft_prompt)
         self.assertEqual(raw["rounds"][-1]["output"], raw["rounds"][-1]["stages"]["review"]["output"])
         self.assertEqual(self.records(), before)
+
+    def test_automatic_direction_is_reference_but_explicit_variant_remains_selected(self):
+        install_review_fixture(self.skill)
+        done = self.wait(self.manager.create(self.identifier, self.body("variants", "回应观众的评论"))["task_id"])
+        task = json.loads(self.path(done["task_id"]).read_text(encoding="utf-8"))
+        automatic = copy.deepcopy(task)
+        automatic["snapshot"].setdefault("creation_context", {})["available_directions"] = [{"direction_id": "TEST"}]
+        automatic["snapshot"]["creation_context"].pop("writing_plan", None)
+        automatic_prompt = self.manager._prompt(automatic)
+        self.assertIn("自行选用的方向和变体是参考，不等于用户手动锁定", automatic_prompt)
+        self.assertIn("不冒用已登记变体", automatic_prompt)
+
+        manual = copy.deepcopy(task)
+        context = manual["snapshot"].setdefault("creation_context", {})
+        context.pop("available_directions", None)
+        context["writing_plan"] = {"variants": [{"number": 1}]}
+        manual_prompt = self.manager._prompt(manual)
+        self.assertIn("用户发起时勾选的已登记变体", manual_prompt)
+        self.assertIn("沿用该变体的推进结构 progression、顾虑链 concern", manual_prompt)
+        self.assertNotIn("自行选用的方向和变体是参考", manual_prompt)
+
+    def test_blank_writing_preserves_user_reference_for_draft_and_review(self):
+        install_review_fixture(self.skill)
+        sample = ("I understand why the price gives you pause.\n"
+                  "If you only need the basic function, you might not need the whole kit.\n"
+                  "If you need the extra control, this is what it gives you.")
+        instruction = "以这段原文作为说话方式参考，按当前产品和评论写稿：\n" + sample
+        body = {"request_id": uuid4().hex, "action": "variants", "instruction": instruction,
+                "skill_selection": "auto"}
+        context = {"kind": "blank", "product": "测试产品", "title": "评论回应", "materials": []}
+        done = self.wait(self.manager.create(None, body, context)["task_id"])
+        self.assertEqual(done["status"], "completed")
+        stored = json.loads((self.runtime / "ai-tasks" / done["task_id"] / "task.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["rounds"][0]["instruction"], instruction)
+        self.assertEqual(len(self.bridges[0].calls), 2)
+        for call in self.bridges[0].calls:
+            self.assertIn("当前用户要求：\n" + instruction, call["prompt"])
+            self.assertIn("以其原文为写作参考", call["prompt"])
+            self.assertIn("不要求每条稿都加入适用和不适用的对照", call["prompt"])
 
     def test_original_reference_keeps_overlapping_entries_and_channel_metadata_separate(self):
         snapshot = {"case_id": self.identifier, "current": {"native_reference": {
@@ -1071,6 +1163,42 @@ class TaskTests(unittest.TestCase):
         ]})["deleted"], [second["task_id"]])
         self.assertEqual(self.manager.list_tasks(), [])
         self.assertEqual(self.records(), before)
+
+    def test_marking_drafts_finishes_the_task_and_clearing_one_reopens_it(self):
+        task = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        path = self.path(task["task_id"])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        block = lambda number: "".join([f"## 变体 #{number}", chr(10), "**口播（配音用）**", chr(10), "```", chr(10), f"Line {number}.", chr(10), "```", chr(10)])
+        raw["rounds"][-1]["output"] = block(1) + block(2)
+        path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        round_id = raw["rounds"][-1]["round_id"]
+        mark = lambda index, choice: self.manager.set_variant_choice(task["task_id"], {"round_id": round_id, "variant_index": index, "choice": choice})
+        settle = lambda made=None: self.manager.settle_variant_choices(task["task_id"], made or {})
+        self.assertEqual(mark(0, "skip")["revision"], raw["revision"])
+        self.assertEqual(settle()["management_state"], "pending_selection")
+        mark(1, "do")
+        self.assertEqual(settle()["management_state"], "pending_selection")
+        # A 要做 draft settles only once it has become a script.
+        self.assertEqual(settle({(task["task_id"], round_id): {1}})["management_state"], "finished")
+        mark(0, "")
+        self.assertEqual(settle({(task["task_id"], round_id): {1}})["management_state"], "adopted")
+        with self.assertRaises(ai_tasks.AITaskError):
+            mark(5, "skip")
+        with self.assertRaises(ai_tasks.AITaskError):
+            mark(0, "maybe")
+
+    def test_losing_the_last_script_takes_back_only_the_adopted_label(self):
+        task = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        self.manager.note_adoption(task["task_id"])
+        self.assertEqual(self.manager.get(task["task_id"])["management_state"], "adopted")
+        self.manager.release_adoption(task["task_id"])
+        self.assertEqual(self.manager.get(task["task_id"])["management_state"], "pending_selection")
+        path = self.path(task["task_id"])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["management_state"] = "abandoned"
+        path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        self.manager.release_adoption(task["task_id"])
+        self.assertEqual(self.manager.get(task["task_id"])["management_state"], "abandoned")
 
     def test_task_management_preserves_execution_text_and_case_with_durable_retry(self):
         task = self.wait(self.manager.create(self.identifier, self.body())["task_id"])

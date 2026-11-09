@@ -366,7 +366,7 @@ def variant_script(text, index):
 
 # ---- format check and re-layout verification ----
 
-WORD = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)*")
+WORD = re.compile(r"[a-z0-9ßà-öø-ÿ]+(?:'[a-z0-9ßà-öø-ÿ]+)*")
 
 
 def _words(text):
@@ -418,11 +418,12 @@ def reformat_problems(original, formatted):
 
 LOOSE_VARIANT = re.compile(r"(?:版本|变体|发散|稿|Version|Variant)\s*[#＃]?\s*(?:[A-Za-z](?![A-Za-z])|\d+|[一二三四五六七八九十]+)"
                            r"|第\s*(?:\d+|[一二三四五六七八九十]+)\s*(?:条|版|稿)", re.I)
-LOOSE_SPOKEN = re.compile(r"(?:English|英文|口播|配音|Voice\s*-?\s*over|VO|Script|Spoken)"
+LOOSE_SPOKEN = re.compile(r"(?:English|英文|Deutsch|German|德语|德文|Español|Espanol|Spanish|西语|西班牙语|西文|口播|配音|Voice\s*-?\s*over|VO|Script|Spoken)"
                           r"(?:\s*(?:口播|稿|文案|正文|版|script|version|text))?(?:\s*[（(][^）)]{0,20}[）)])?", re.I)
 LOOSE_CHINESE = re.compile(r"(?:对应)?中文(?:对应|翻译|版|稿)?(?:\s*[（(][^）)]{0,20}[）)])?|Chinese|译文|翻译")
 CJK = re.compile(r"[一-鿿]")
-ABBREVIATIONS = {"mr.", "mrs.", "ms.", "dr.", "st.", "vs.", "e.g.", "i.e.", "etc.", "approx.", "no."}
+ABBREVIATIONS = {"mr.", "mrs.", "ms.", "dr.", "st.", "vs.", "e.g.", "i.e.", "etc.", "approx.", "no.",
+                 "z.b.", "bzw.", "ca.", "usw.", "sr.", "sra.", "aprox."}
 
 
 def _clean(line):
@@ -508,8 +509,8 @@ def _sentences(paragraph):
     for position, word in enumerate(words):
         current.append(word)
         following = words[position + 1] if position + 1 < len(words) else ""
-        ends = re.search(r"[.!?…][\"'”’)\]]*$", word) and word.lower() not in ABBREVIATIONS
-        if ends and re.match(r"[\"'“‘(\[]?[A-Z0-9]", following):
+        ends = re.search(r"[.!?…][\"'”’»)\]]*$", word) and word.lower() not in ABBREVIATIONS
+        if ends and re.match(r"[\"'“‘„«(\[¿¡]?[A-Z0-9À-ÖØ-Þ]", following):
             sentences.append(" ".join(current))
             current = []
     if current:

@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from creation_store import CreationStore
 from elevenlabs_client import VoiceError
 from production_store import ProductionStore, public_job
-from workbench_video_publish import VideoPublicationStore, VideoPublishMixin, remap_publication_document, reviewed_source
+from workbench_video_publish import VideoPublicationStore, VideoPublishMixin, campaign_card_text, remap_publication_document, reviewed_source
 
 JOB = "PRD-111111111111"
 TAKE = "TAK-111111111111"
@@ -362,9 +362,11 @@ class VideoPublicationTests(unittest.TestCase):
                 "pin": {"en": "Black Friday sale—tap the cart.", "zh": "黑五，点购物车"}}
         copy = self.bench._campaign_copy(swap)
         self.assertEqual((copy["pin"]["en"], copy["written"]["en"]), ("Black Friday sale—tap the cart.", "It's in the Black Friday sale."))
-        self.assertEqual((copy["campaign"]["status"], copy["card_text"]), ("running", "Black Friday & Cyber Monday sale / Ends Nov 30"))
+        self.assertEqual((copy["campaign"]["status"], copy["card_text"]), ("running", "On sale for Black Friday / Until Nov 30"))
+        self.assertEqual(campaign_card_text({"name": "February Restock（2 月补货季）", "end": "2026-03-02"}), "On sale right now / Until Mar 2")
+        self.assertEqual(campaign_card_text({"name": "Year-end / Holiday（年末大促）", "end": "2026-12-31"}), "On sale for the holidays / Until Dec 31")
         made = self.bench._campaign_copy(None)
-        self.assertIn("ends Nov 30 (Pacific)", made["pin"]["en"])
+        self.assertEqual(made["pin"]["en"], "It's on sale for Black Friday until Nov 30. Just tap the cart below.")
         self.bench._campaign_now = lambda: {"running": None, "upcoming": None}
         self.assertEqual(self.bench._campaign_copy(None), {"campaign": None, "card_text": "", "pin": None, "written": None})
 
@@ -660,3 +662,147 @@ class OrderStatesTests(unittest.TestCase):
         data["jobs"][0]["edits"] = [{"id": "EDT-1", "status": "running", "timeline_uid": "home"}]
         self.bench.production.write(data)
         self.assertEqual(self.bench.order_states([JOB])[JOB]["label"], "剪辑中")
+
+
+class CarouselOverviewTests(unittest.TestCase):
+    """The 图文 overview lists only videos already up (Notion upload or registered), for the asked product, newest first."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.bench = Bench(Path(temporary.name))
+        line = lambda uid: {"unique_id": uid, "name": uid, "take_id": TAKE, "saved": True}
+        job = {"id": JOB, "product": "051A", "script_id": SCRIPT, "title": "Test", "lines": [], "selected_take": TAKE,
+               "takes": [{"id": TAKE}], "edits": [], "archived": False, "history": [],
+               "timelines": [line("home"), line("lab"), line("raw")]}
+        data = self.bench.production.empty()
+        data["jobs"] = [job]
+        self.bench.production.write(data)
+        rows = {"NUP-000000000001": {"job_id": JOB, "timeline_uid": "home", "status": "completed", "updated_at": "2026-11-05T10:00"},
+                "NUP-000000000002": {"job_id": JOB, "timeline_uid": "lab", "status": "completed", "updated_at": "2026-11-06T10:00"},
+                "NUP-000000000003": {"job_id": JOB, "timeline_uid": "raw", "status": "failed", "updated_at": "2026-11-06T11:00"}}
+        store = type("Store", (), {"read": lambda _: {"uploads": rows}})()
+        self.bench.notion_uploads = type("Uploads", (), {"store": store})()
+        decided = {"home": {"state": "skip", "set_id": None, "reason": "不适合"}, "lab": {"state": "doing", "set_id": "PHS-1"}}
+        self.bench.photo_sets = type("Sets", (), {"states": lambda _, pairs: {pair: decided.get(pair[1], {"state": "pending"}) for pair in pairs}})()
+
+    def test_lists_uploaded_timelines_newest_first_with_counts(self):
+        out = self.bench.carousel_overview("051A")
+        self.assertEqual([(row["timeline_uid"], row["state"]) for row in out["items"]], [("lab", "doing"), ("home", "skip")])
+        self.assertEqual(out["counts"], {"pending": 0, "want": 0, "doing": 1, "exported": 0, "uploaded": 0, "finished": 0, "skip": 1})
+        self.assertEqual((out["items"][0]["job_title"], out["items"][1]["reason"]), ("Test", "不适合"))
+
+    def test_an_exported_carousel_on_notion_counts_as_uploaded(self):
+        decided = {"home": {"state": "exported", "set_id": "PHS-1"}, "lab": {"state": "exported", "set_id": "PHS-2"}}
+        self.bench.photo_sets = type("Sets", (), {"states": lambda _, pairs: {pair: decided.get(pair[1], {"state": "pending"}) for pair in pairs}})()
+        summary = {"PHS-1": {"A": "completed", "B": "failed"}, "PHS-2": {"A": "failed"}}
+        self.bench.notion_uploads.photo_summary = lambda: summary
+        out = self.bench.carousel_overview("051A")
+        self.assertEqual([(row["timeline_uid"], row["state"], row["notion_works"]) for row in out["items"]],
+                         [("lab", "exported", []), ("home", "uploaded", ["A"])])
+        self.assertEqual((out["counts"]["exported"], out["counts"]["uploaded"]), (1, 1))
+
+    def test_other_products_archived_orders_and_all(self):
+        self.assertEqual(self.bench.carousel_overview("999Z")["items"], [])
+        self.assertEqual(len(self.bench.carousel_overview("all")["items"]), 2)
+        data = self.bench.production.read()
+        data["jobs"][0]["archived"] = True
+        self.bench.production.write(data)
+        self.assertEqual(self.bench.carousel_overview("")["items"], [])
+
+    def test_order_row_counts_uploaded_videos_whose_picture_carousel_is_undecided(self):
+        rows = {"NUP-000000000001": {"job_id": JOB, "timeline_uid": "home", "status": "completed", "updated_at": "1"}}
+        store = type("Store", (), {"read": lambda _: {"uploads": rows}})()
+        self.bench.notion_uploads = type("Uploads", (), {"store": store})()
+        self.bench.photo_sets = type("Sets", (), {"states": lambda _, pairs: {pair: {"state": "pending"} for pair in pairs}})()
+        self.assertEqual(self.bench.order_states([JOB])[JOB]["carousel_pending"], 1)
+        self.bench.photo_sets = type("Sets", (), {"states": lambda _, pairs: {pair: {"state": "skip"} for pair in pairs}})()
+        self.assertNotIn("carousel_pending", self.bench.order_states([JOB])[JOB])
+
+    def test_order_rows_scan_photo_sets_once_for_all_completed_timelines(self):
+        other = "PRD-222222222222"
+        archived = "PRD-333333333333"
+        data = self.bench.production.read()
+        for identifier in (other, archived):
+            job = copy.deepcopy(data["jobs"][0])
+            job.update(id=identifier, archived=identifier == archived)
+            data["jobs"].append(job)
+        self.bench.production.write(data)
+        rows = {str(index): {"job_id": identifier, "timeline_uid": uid, "status": "completed", "updated_at": "1"}
+                for index, (identifier, uid) in enumerate((identifier, uid) for identifier in (JOB, other, archived) for uid in ("home", "lab"))}
+        self.bench.notion_uploads.store.read = lambda: {"uploads": rows}
+        photo_states = {(identifier, uid): {"state": "pending" if identifier == JOB or uid == "home" else "skip"}
+                        for identifier in (JOB, other) for uid in ("home", "lab")}
+        def scan_photos(pairs):
+            available = threading.Event()
+
+            def read_production():
+                if self.bench.lock.acquire(timeout=1):
+                    available.set()
+                    self.bench.lock.release()
+
+            reader = threading.Thread(target=read_production)
+            reader.start()
+            reader.join(2)
+            self.assertTrue(available.is_set(), "Photo reads must not hold the production lock")
+            return photo_states
+
+        with patch.object(self.bench.photo_sets, "states", side_effect=scan_photos) as scan:
+            states = self.bench.order_states([JOB, other, archived], skip_busy=True)
+        self.assertEqual(scan.call_count, 1)
+        self.assertEqual(set(scan.call_args.args[0]), set(photo_states))
+        self.assertEqual(states[JOB]["carousel_pending"], 2)
+        self.assertEqual(states[other]["carousel_pending"], 1)
+        self.assertEqual(states[archived], {"label": "已归档", "tone": "muted"})
+
+
+class NeedsYouTests(unittest.TestCase):
+    """需要你出手: failed Notion uploads, failed preview exports and failed picture-carousel steps of timelines still open."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.tmp = Path(temporary.name)
+        self.bench = Bench(self.tmp)
+        line = lambda uid: {"unique_id": uid, "name": "时间线 " + uid, "take_id": TAKE, "saved": True}
+        job = {"id": JOB, "product": "051A", "script_id": SCRIPT, "title": "Test", "lines": [], "selected_take": TAKE,
+               "takes": [{"id": TAKE}], "edits": [], "archived": False, "history": [],
+               "timelines": [line("a"), line("b"), line("c"), line("d")]}
+        data = self.bench.production.empty()
+        data["jobs"] = [job]
+        self.bench.production.write(data)
+        self.rows = {"N1": {"job_id": JOB, "timeline_uid": "a", "status": "failed", "error": "连接中断", "updated_at": "2026-11-06T09:00"},
+                     "N2": {"job_id": JOB, "timeline_uid": "b", "status": "interrupted", "error": "重启", "updated_at": "2026-11-06T08:00"},
+                     "N3": {"job_id": JOB, "timeline_uid": "c", "status": "failed", "error": "x", "updated_at": "2026-11-05T08:00"},
+                     "N4": {"job_id": JOB, "timeline_uid": "c", "status": "completed", "error": "", "updated_at": "2026-11-05T09:00"}}
+        store = type("Store", (), {"read": lambda _: {"uploads": self.rows}})()
+        self.bench.notion_uploads = type("Uploads", (), {"store": store})()
+        folder = self.tmp / "previews" / JOB / "x1"
+        folder.mkdir(parents=True)
+        (folder / "preview.json").write_text(json.dumps({"job_id": JOB, "timeline_uid": "d", "status": "failed", "error": "达芬奇没开", "finished_at": "2026-11-06T10:00"}), encoding="utf-8")
+        self.bench.video_previews = type("Previews", (), {"root": self.tmp / "previews"})()
+        self.bench.photo_sets = type("Sets", (), {"failures": lambda _: [{"job_id": JOB, "timeline_uid": "a", "step": "抽帧", "error": "ffmpeg", "at": "2026-11-06T07:00"}]})()
+
+    def test_lists_each_failure_newest_first_and_skips_timelines_that_are_done_since(self):
+        out = self.bench.needs_you("051A")
+        self.assertEqual([(row["kind"], row["timeline_uid"]) for row in out["items"]],
+                         [("preview", "d"), ("notion", "a"), ("notion", "b"), ("carousel", "a")])
+        self.assertEqual(out["counts"], {"preview": 1, "notion": 2, "carousel": 1})
+        first = out["items"][1]
+        self.assertEqual((first["kind_label"], first["message"], first["hash"], first["timeline_name"]),
+                         ("Notion 上传失败", "连接中断", f"#production/{JOB}?step=publish", "时间线 a"))
+        self.assertEqual(out["items"][2]["kind_label"], "Notion 上传被打断")
+
+    def test_other_products_and_archived_orders_are_left_out(self):
+        self.assertEqual(self.bench.needs_you("999Z")["items"], [])
+        self.assertEqual(len(self.bench.needs_you("all")["items"]), 4)
+        data = self.bench.production.read()
+        data["jobs"][0]["archived"] = True
+        self.bench.production.write(data)
+        self.assertEqual(self.bench.needs_you("")["items"], [])
+
+    def test_nothing_failed_means_an_empty_list(self):
+        self.rows.clear()
+        self.bench.photo_sets = type("Sets", (), {"failures": lambda _: []})()
+        (self.tmp / "previews" / JOB / "x1" / "preview.json").unlink()
+        self.assertEqual(self.bench.needs_you("051A"), {"product": "051A", "items": [], "counts": {}})

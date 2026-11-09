@@ -6,7 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 APP = Path(__file__).resolve().parents[1]
@@ -100,6 +100,8 @@ class FakeEleven:
             if voice not in self.voices:
                 return 404, {}, json.dumps({"detail": {"status": "voice_not_found", "message": "missing"}}).encode()
             return 200, {}, json.dumps({"name": self.voices[voice], "category": "cloned", "labels": {"accent": "american"}}).encode()
+        if path == "/v1/shared-voices":
+            return 200, {}, b'{"voices": [], "has_more": false}'
         if path == "/v1/user/subscription":
             return 200, {}, json.dumps({"tier": "creator", "character_count": 1200, "character_limit": 100000}).encode()
         if path.endswith("/with-timestamps"):
@@ -114,6 +116,58 @@ class FakeEleven:
                                         zip(raw["characters"], raw["character_start_times_seconds"], raw["character_end_times_seconds"])],
                                         "words": [], "loss": 0.1}).encode()
         return 500, {}, b"{}"
+
+
+class SharedVoiceEleven(FakeEleven):
+    """An official library voice becomes visible to the account only after it is added."""
+
+    voice_id = "goT3UYdM9bhm0n2lmKQx"
+    owner = "sharedOwner123"
+    metadata = {"name": "Edward - British", "category": "professional", "labels": {"accent": "british", "language": "en"},
+                "preview_url": "https://example.invalid/edward.mp3"}
+
+    def __init__(self, *, pages=None, lookup_error=None, shared_error=None, add_error=None,
+                 added_id=None, visible_after_add=True):
+        super().__init__()
+        self.entry = {"voice_id": self.voice_id, "public_owner_id": self.owner, "name": self.metadata["name"],
+                      "is_added_by_user": False, "rate": 1.0}
+        self.pages = pages if pages is not None else [[self.entry]]
+        self.lookup_error, self.shared_error, self.add_error = lookup_error, shared_error, add_error
+        self.added_id, self.visible_after_add = added_id or self.voice_id, visible_after_add
+        self.added, self.shared_queries, self.add_payloads = False, [], []
+
+    @staticmethod
+    def response(status, body):
+        return status, {}, json.dumps(body).encode()
+
+    def __call__(self, method, url, headers, data, timeout):
+        parsed = urlparse(url)
+        path = parsed.path
+        if path in {f"/v1/voices/{self.voice_id}", f"/v1/voices/{self.added_id}"}:
+            self.calls.append((method, path, headers.get("xi-api-key")))
+            if self.added and self.visible_after_add and path == f"/v1/voices/{self.added_id}":
+                return self.response(200, self.metadata)
+            status, code = self.lookup_error or (400, "voice_not_found")
+            return self.response(status, {"detail": {"status": code, "message": "voice unavailable"}})
+        if path == "/v1/shared-voices":
+            self.calls.append((method, path, headers.get("xi-api-key")))
+            query = parse_qs(parsed.query)
+            self.shared_queries.append(query)
+            if self.shared_error:
+                status, code = self.shared_error
+                return self.response(status, {"detail": {"status": code, "message": "library unavailable"}})
+            page = int(query.get("page", ["0"])[0])
+            return self.response(200, {"voices": self.pages[page] if page < len(self.pages) else [],
+                                       "has_more": page + 1 < len(self.pages)})
+        if path == f"/v1/voices/add/{self.owner}/{self.voice_id}":
+            self.calls.append((method, path, headers.get("xi-api-key")))
+            self.add_payloads.append(json.loads(data))
+            if self.add_error:
+                status, code = self.add_error
+                return self.response(status, {"detail": {"status": code, "message": "cannot add voice"}})
+            self.added = True
+            return self.response(200, {"voice_id": self.added_id})
+        return super().__call__(method, url, headers, data, timeout)
 
 
 class Bench(ProductionWorkbenchMixin):
@@ -197,6 +251,106 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 409)
 
 
+class VoiceLookupTests(unittest.TestCase):
+    def client(self, fake):
+        return ElevenLabsClient(key_provider=lambda: "sk_test", transport=fake)
+
+    def test_account_voice_does_not_search_or_add_library_voice(self):
+        fake = FakeEleven()
+        self.assertEqual(self.client(fake).voice("VOICE123456789")["name"], "Zack")
+        self.assertEqual([(method, path) for method, path, _ in fake.calls], [("GET", "/v1/voices/VOICE123456789")])
+
+    def test_library_search_uses_exact_id_across_pages_before_adding(self):
+        fake = SharedVoiceEleven()
+        near = {**fake.entry, "voice_id": fake.voice_id + "0", "name": fake.metadata["name"]}
+        fake.pages = [[near], [fake.entry]]
+        voice = self.client(fake).voice(fake.voice_id)
+        self.assertEqual((voice["voice_id"], voice["name"], voice["labels"]),
+                         (fake.voice_id, fake.metadata["name"], fake.metadata["labels"]))
+        self.assertEqual([query["page"] for query in fake.shared_queries], [["0"], ["1"]])
+        for query in fake.shared_queries:
+            self.assertEqual(query["search"], [fake.voice_id])
+            self.assertEqual(query["page_size"], ["100"])
+            self.assertEqual(query["include_custom_rates"], ["true"])
+            self.assertEqual(query["include_live_moderated"], ["true"])
+        self.assertEqual(fake.add_payloads, [{"new_name": fake.metadata["name"]}])
+        self.assertEqual(fake.calls[-1][1], f"/v1/voices/{fake.voice_id}")
+
+    def test_similar_name_or_id_is_not_accepted_as_the_requested_voice(self):
+        fake = SharedVoiceEleven()
+        fake.pages = [[{**fake.entry, "voice_id": fake.voice_id + "0"}]]
+        with self.assertRaises(VoiceError) as caught:
+            self.client(fake).voice(fake.voice_id)
+        self.assertEqual(caught.exception.status, 404)
+        self.assertTrue(any(word in str(caught.exception) for word in ("未加入", "下架", "账号")))
+        self.assertEqual(fake.add_payloads, [])
+
+    def test_search_failure_is_not_relabelled_as_an_invalid_voice_id(self):
+        fake = SharedVoiceEleven(shared_error=(500, "internal_error"))
+        with self.assertRaises(VoiceError) as caught:
+            self.client(fake).voice(fake.voice_id)
+        self.assertEqual(caught.exception.provider_status, 500)
+        self.assertNotIn("找不到这个音色", str(caught.exception))
+        self.assertEqual(fake.add_payloads, [])
+
+    def test_unfinished_search_is_not_reported_as_no_matching_voice(self):
+        fake = SharedVoiceEleven(pages=[[] for _ in range(11)])
+        with self.assertRaises(VoiceError) as caught:
+            self.client(fake).voice(fake.voice_id)
+        self.assertEqual(caught.exception.status, 502)
+        self.assertEqual(len(fake.shared_queries), 10)
+        self.assertEqual(fake.add_payloads, [])
+
+    def test_account_access_failures_do_not_search_or_add_shared_voices(self):
+        for status, code, expected, word in ((401, "invalid_api_key", 503, "密钥"),
+                                             (403, "missing_permissions", 403, "权限")):
+            with self.subTest(status=status):
+                fake = SharedVoiceEleven(lookup_error=(status, code))
+                with self.assertRaises(VoiceError) as caught:
+                    self.client(fake).voice(fake.voice_id)
+                self.assertEqual(caught.exception.status, expected)
+                self.assertIn(word, str(caught.exception))
+                self.assertEqual(fake.shared_queries, [])
+                self.assertEqual(fake.add_payloads, [])
+
+    def test_voice_slots_and_add_permissions_have_actionable_errors(self):
+        for status, code, expected, word in ((400, "maximum_voice_limit_reached", 409, "音色名额"),
+                                             (400, "voice_limit_reached", 409, "音色名额"),
+                                             (403, "missing_permissions", 403, "权限")):
+            with self.subTest(code=code):
+                fake = SharedVoiceEleven(add_error=(status, code))
+                with self.assertRaises(VoiceError) as caught:
+                    self.client(fake).voice(fake.voice_id)
+                self.assertEqual(caught.exception.status, expected)
+                self.assertIn(word, str(caught.exception))
+                self.assertEqual(len(fake.add_payloads), 1)
+                self.assertFalse(fake.added)
+
+    def test_different_account_id_is_verified_and_reported_without_silent_substitution(self):
+        fake = SharedVoiceEleven(added_id="differentVoice123456")
+        with self.assertRaises(VoiceError) as caught:
+            self.client(fake).voice(fake.voice_id)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn(fake.added_id, str(caught.exception))
+        self.assertEqual(fake.calls[-1][1], f"/v1/voices/{fake.added_id}")
+        self.assertEqual(len(fake.add_payloads), 1)
+
+    def test_already_added_but_inaccessible_voice_is_not_added_again(self):
+        fake = SharedVoiceEleven()
+        fake.pages = [[{**fake.entry, "is_added_by_user": True}]]
+        with self.assertRaises(VoiceError) as caught:
+            self.client(fake).voice(fake.voice_id)
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(fake.add_payloads, [])
+
+    def test_other_resource_404_does_not_claim_the_voice_id_is_wrong(self):
+        client = self.client(lambda *args: (404, {}, b'{"detail": "not found"}'))
+        with self.assertRaises(VoiceError) as caught:
+            client.subscription()
+        self.assertEqual(caught.exception.provider_status, 404)
+        self.assertNotIn("音色 ID", str(caught.exception))
+
+
 class WorkbenchTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix="production-bench-")
@@ -270,6 +424,31 @@ class WorkbenchTests(unittest.TestCase):
             self.bench.generate_take(job["id"], {"request_id": uuid4().hex, "voice_id": "UNKNOWN1234567"})
         self.assertEqual(caught.exception.status, 404)
         self.assertFalse(any(call[1].endswith("/with-timestamps") for call in self.fake.calls))
+        self.assertEqual(self.bench.production.job(job["id"])["takes"], [])
+
+    def test_shared_british_voice_is_added_saved_and_reused_for_a_take(self):
+        fake = SharedVoiceEleven()
+        self.bench.voices = ElevenLabsClient(key_provider=lambda: "sk_test", transport=fake)
+        saved = self.bench.save_voice({"request_id": uuid4().hex, "revision": self.bench.production.public()["revision"],
+                                       "voice": {"voice_id": fake.voice_id, "note": "英国男声"}})["voice"]
+        self.assertEqual((saved["voice_id"], saved["name"], saved["labels"], saved["preview_url"]),
+                         (fake.voice_id, fake.metadata["name"], fake.metadata["labels"], fake.metadata["preview_url"]))
+        self.assertEqual(saved["note"], "英国男声")
+        job = self.job(self.adopt("One line."))
+        take = self.bench.generate_take(job["id"], {"request_id": uuid4().hex, "voice_id": fake.voice_id, "market": "uk"})["take"]
+        self.assertEqual((take["voice_id"], take["market"]), (fake.voice_id, "uk"))
+        self.assertEqual(len(fake.add_payloads), 1)
+        self.assertEqual(len(fake.shared_queries), 1)
+        self.assertEqual(sum(path.endswith("/with-timestamps") for _, path, _ in fake.calls), 1)
+
+    def test_added_voice_must_be_accessible_before_spending_characters(self):
+        fake = SharedVoiceEleven(visible_after_add=False)
+        self.bench.voices = ElevenLabsClient(key_provider=lambda: "sk_test", transport=fake)
+        job = self.job(self.adopt("One line."))
+        with self.assertRaises(VoiceError):
+            self.bench.generate_take(job["id"], {"request_id": uuid4().hex, "voice_id": fake.voice_id})
+        self.assertEqual(len(fake.add_payloads), 1)
+        self.assertFalse(any(path.endswith("/with-timestamps") for _, path, _ in fake.calls))
         self.assertEqual(self.bench.production.job(job["id"])["takes"], [])
 
 

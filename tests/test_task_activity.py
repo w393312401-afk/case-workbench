@@ -191,6 +191,27 @@ class ActivityStoreTests(unittest.TestCase):
             with self.assertRaises(ActivityError):
                 self.store.feed(**kwargs)
 
+    def test_range_filter_lists_runs_going_at_any_point_inside_the_window(self):
+        for run in ("ai:task:before","ai:task:inside","ai:task:across","ai:task:after","ai:task:open"):
+            self.start(run)
+        for run in ("ai:task:before","ai:task:inside","ai:task:across","ai:task:after"):
+            self.store.record(run,status="completed",phase="finished",message="结束。")
+        stamps={"before":("2026-10-01T08:00:00.000+00:00","2026-10-01T09:00:00.000+00:00"),
+                "inside":("2026-10-02T08:00:00.000+00:00","2026-10-02T08:10:00.000+00:00"),
+                "across":("2026-10-01T23:50:00.000+00:00","2026-10-02T00:20:00.000+00:00"),
+                "after":("2026-10-03T08:00:00.000+00:00","2026-10-03T09:00:00.000+00:00")}
+        with self.store._connect() as db:
+            for name,(start,end) in stamps.items():
+                db.execute("UPDATE runs SET started_at=?,finished_at=?,updated_at=? WHERE run_id=?",(start,end,end,f"ai:task:{name}"))
+            db.execute("UPDATE runs SET started_at='2026-09-30T00:00:00.000+00:00' WHERE run_id='ai:task:open'")
+        ids=lambda **kwargs:{item["run_id"] for item in self.store.feed(**kwargs)["items"]}
+        # A still-running run belongs to every day since it started.
+        self.assertEqual(ids(filter="range",since="2026-10-02T00:00:00Z",until="2026-10-03T00:00:00Z"),{"ai:task:inside","ai:task:across","ai:task:open"})
+        self.assertEqual(ids(filter="range",since="2026-10-02T08:00:00+08:00",until="2026-10-02T09:00:00+08:00"),{"ai:task:across","ai:task:open"})
+        for kwargs in ({"filter":"range"},{"filter":"range","since":"2026-10-02T00:00:00Z"},{"filter":"range","since":"2026-10-02T00:00:00Z","until":"2026-10-01T00:00:00Z"}):
+            with self.assertRaises(ActivityError):
+                self.store.feed(**kwargs)
+
     def test_generic_variant_titles_carry_their_opening_line(self):
         self.assertEqual(activity_label({"title":"202H-S2 变体 #4 · 身份认同","text":"不用"}),"202H-S2 变体 #4 · 身份认同")
         self.assertEqual(activity_label({"title":"第 2 条","direction_id":"202H-S2","lines":[{"spoken":"If you're into knives, you'll get it.","zh":""}]}),

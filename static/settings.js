@@ -151,6 +151,103 @@
     }
   }
 
+  // 密钥与令牌: every third-party key in one card. Values only go in; the page sees whether a key is set and its last 4 characters.
+  // 评论贴纸模板: DaVinci's Power Bins cannot be scripted, so the sticker's look is copied from one named timeline.
+  function renderCommentTemplate() {
+    return `<section class="section-card settings-card" aria-labelledby="settings-sticker-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("layers")}</span><h2 id="settings-sticker-heading">评论贴纸模板</h2></div><p class="settings-status" id="settings-sticker-status" role="status">正在读取…</p><p class="settings-note" id="settings-sticker-how"></p><div class="settings-actions"><button type="button" class="secondary compact" id="settings-sticker-sync">${icon("refresh")}从达芬奇同步</button></div><p class="settings-note settings-claude-error" id="settings-sticker-error" role="alert" hidden></p></section>`;
+  }
+
+  async function bindCommentTemplate(panel, sequence) {
+    const status = $("#settings-sticker-status", panel), how = $("#settings-sticker-how", panel), sync = $("#settings-sticker-sync", panel), error = $("#settings-sticker-error", panel);
+    const show = data => {
+      status.textContent = data.synced ? `正在用 ${new Date(data.synced_at).toLocaleString("zh-CN", { hour12: false })} 从达芬奇同步的样式` : "正在用内置样式";
+      how.textContent = `在达芬奇改好样式后，打开放贴纸的工程，把贴纸放到名为「${data.timeline}」的时间线上，再点同步。之后新加的贴纸都用新样式，已经加好的不变。节点名称不要改。`;
+    };
+    sync.onclick = async () => {
+      sync.disabled = true;error.hidden = true;
+      try {
+        const data = await api("/api/production/comment-template/sync", { method: "POST", body: {} });
+        show(data);
+        toast(`已同步工程 ${data.project} 里的贴纸样式。`);
+      } catch (failure) {
+        error.textContent = failure.message || "这次没有同步成功，请重试。";error.hidden = false;
+      } finally {sync.disabled = false;}
+    };
+    try {
+      const data = await api("/api/production/comment-template");
+      if (panel.isConnected && sequence === renderSequence) show(data);
+    } catch (failure) {
+      if (panel.isConnected && sequence === renderSequence) status.textContent = failure.message || "暂时读不到模板状态。";
+    }
+  }
+
+  function renderKeys() {
+    const heading = `<div class="settings-card-heading"><span class="settings-symbol">${icon("lock")}</span><h2 id="settings-keys-heading">密钥与令牌</h2></div>`;
+    if (!localAccountSetup()) return `<section class="section-card settings-card" aria-labelledby="settings-keys-heading">${heading}<p class="settings-note">密钥只能在运行工作台的电脑上查看和设置。</p></section>`;
+    return `<section class="section-card settings-card" aria-labelledby="settings-keys-heading">${heading}<p class="settings-note">第三方服务的密钥都在这里管理，保存为本机 Windows 用户环境变量，保存后立即生效，不用重启。页面只显示是否已设置和末 4 位。</p><div id="settings-keys" aria-live="polite"><p class="settings-note">正在读取…</p></div></section>`;
+  }
+
+  function keyRow(row) {
+    const state = row.set ? (row.looks_right ? `已设置 ····${esc(row.tail)}` : `已设置，但不是以 ${esc(row.prefix)} 开头，可能填错了`) : "未设置";
+    return `<div class="settings-key" data-key="${esc(row.name)}"><div class="settings-key-head"><strong>${esc(row.label)}</strong><span class="settings-key-state" data-state="${row.set ? (row.looks_right ? "set" : "warn") : "empty"}">${state}</span></div>
+      <p class="settings-note">用于${esc(row.used_for)}。在 <a href="${esc(row.url)}" target="_blank" rel="noopener noreferrer">${esc(row.where)}</a> 获取，以 ${esc(row.prefix)} 开头；环境变量 <code>${esc(row.name)}</code>。</p>
+      <form class="settings-key-form"><input type="password" autocomplete="off" spellcheck="false" placeholder="${row.set ? "粘贴新密钥以替换" : "粘贴密钥"}" aria-label="${esc(row.label)} 密钥"><button type="submit" class="primary compact">保存</button>${row.set ? '<button type="button" class="secondary compact" data-key-check>检查</button><button type="button" class="subtle" data-key-remove>删除</button>' : ""}</form>
+      <p class="settings-note" data-key-note role="status"></p></div>`;
+  }
+
+  async function loadKeys(panel, sequence, notes = {}) {
+    const box = $("#settings-keys", panel);
+    if (!box) return;
+    try {
+      const data = await api("/api/keys");
+      if (!panel.isConnected || sequence !== renderSequence) return;
+      box.innerHTML = data.keys.map(keyRow).join("");
+      Object.entries(notes).forEach(([name, text]) => { const el = box.querySelector(`[data-key="${name}"] [data-key-note]`); if (el) el.textContent = text; });
+    } catch (error) {
+      if (panel.isConnected && sequence === renderSequence) box.innerHTML = `<p class="settings-note settings-claude-error">${esc(error.message)}</p>`;
+    }
+  }
+
+  function bindKeys(panel, sequence) {
+    const box = $("#settings-keys", panel);
+    if (!box) return;
+    const note = (row, text) => { row.querySelector("[data-key-note]").textContent = text; };
+    box.addEventListener("submit", async event => {
+      event.preventDefault();
+      const row = event.target.closest("[data-key]"), input = row.querySelector("input"), value = input.value.trim();
+      if (!value) { note(row, "先粘贴密钥。"); return; }
+      row.querySelector("button[type=submit]").disabled = true;
+      try {
+        await api("/api/keys", { method: "POST", body: { name: row.dataset.key, value } });
+        input.value = "";
+        await loadKeys(panel, sequence, { [row.dataset.key]: "已保存，可以点「检查」确认能用。" });
+      } catch (error) {
+        input.value = "";
+        note(row, error.message);
+        row.querySelector("button[type=submit]").disabled = false;
+      }
+    });
+    box.addEventListener("click", async event => {
+      const row = event.target.closest("[data-key]");
+      if (!row) return;
+      if (event.target.closest("[data-key-check]")) {
+        note(row, "正在检查…");
+        try {
+          const result = await api("/api/keys/check", { method: "POST", body: { name: row.dataset.key } });
+          note(row, result.ok ? `能用：${result.detail}` : `不能用：${result.detail}`);
+        } catch (error) { note(row, error.message); }
+      }
+      if (event.target.closest("[data-key-remove]")) {
+        if (!confirm("删除后用到这个密钥的功能会停用，确定删除？")) return;
+        try {
+          await api("/api/keys/remove", { method: "POST", body: { name: row.dataset.key } });
+          await loadKeys(panel, sequence, { [row.dataset.key]: "已删除。" });
+        } catch (error) { note(row, error.message); }
+      }
+    });
+    void loadKeys(panel, sequence);
+  }
+
   function bindRemoteAccount(panel) {
     if (!localAccountSetup()) return;
     remoteStates.set(panel, { loading: false, saving: false, metadata: null, notice: "", error: "" });
@@ -925,7 +1022,9 @@
   const settingsSections = [
     ["settings-group-ai", "模型与连接", () => true],
     ["settings-group-remote", "公网账号", () => true],
+    ["settings-group-keys", "密钥与令牌", () => true],
     ["settings-group-alerts", "任务提醒", () => Boolean(window.TaskActivity?.settingsMarkup?.())],
+    ["settings-group-sticker", "评论贴纸", () => localAccountSetup()],
     ["settings-group-data", "数据与备份", () => true],
     ["settings-group-files", "本地文件", () => true],
     ["settings-group-views", "保存的视图", () => true],
@@ -936,14 +1035,16 @@
     stopDataPolling();
     const sequence = ++renderSequence;
     $("#breadcrumb").innerHTML = "设置";
-    $("#content").innerHTML = `<div class="settings-page"><div class="page-heading"><div><span class="eyebrow">WORKSPACE SETTINGS</span><h1>设置</h1><p>设置全局默认模型，管理协作连接、保存的视图与本地文件。</p></div></div>
+    $("#content").innerHTML = `<div class="settings-page"><div class="page-heading"><div><span class="eyebrow">WORKSPACE SETTINGS</span><h1>设置</h1><p>设置全局默认模型，管理协作连接、第三方密钥、保存的视图与本地文件。</p></div></div>
       <nav class="settings-sections" aria-label="设置分区">${settingsSections.filter(([, , shown]) => shown()).map(([id, label]) => `<button type="button" data-settings-jump="${id}">${label}</button>`).join("")}</nav>
       <div class="settings-group" id="settings-group-ai">${renderModelSettings()}<div class="settings-overview">
           <section class="section-card settings-card" aria-labelledby="settings-ai-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("bot")}</span><h2 id="settings-ai-heading">AI 协作</h2></div><p id="settings-codex-status" class="settings-status" data-status="loading" role="status">正在检查…</p><p id="settings-codex-detail" class="settings-note"></p><p class="settings-note">写稿、审稿和复盘沿用全局默认模型。使用本机 Codex 的登录与额度。</p><div class="settings-actions"><button type="button" class="secondary compact" id="settings-check-codex">${icon("refresh")}重新检查</button><a class="subtle settings-link" href="#ai">查看协作记录 ${icon("arrow")}</a></div></section>
           <section class="section-card settings-card" id="settings-claude-card" aria-labelledby="settings-claude-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("spark")}</span><h2 id="settings-claude-heading">Claude 写稿</h2></div><p id="settings-claude-status" class="settings-status" data-status="loading" role="status">正在检查…</p><p id="settings-claude-detail" class="settings-note"></p><p class="settings-note">使用 Claude 桌面版自带的调用程序与同一账号的客户端额度，无需填写 key。首次使用点「连接 Claude 订阅」完成一次浏览器授权；桌面聊天登录与调用授权分别保存。在上方「全局默认模型」中选择 Claude；选用客户端默认时，默认沿用本机调用设置。</p><div class="settings-actions"><button type="button" class="primary compact" id="settings-claude-login" disabled>连接 Claude 订阅</button><button type="button" class="secondary compact" id="settings-claude-check">${icon("refresh")}检查 Claude</button></div><div id="settings-claude-recovery" class="settings-claude-recovery" hidden><p class="settings-note" id="settings-claude-url-note"></p><div class="settings-actions"><button type="button" class="secondary compact" id="settings-claude-copy" disabled>${icon("copy")}复制授权链接</button><a class="secondary compact settings-link" id="settings-claude-reopen" target="_blank" rel="noopener noreferrer" hidden>重新打开授权页 ${icon("arrow")}</a></div><form id="settings-claude-callback-form" class="settings-claude-callback-form"><label for="settings-claude-callback">填写回调链接或授权码</label><p class="settings-note" id="settings-claude-callback-help">完整回调链接，或完整授权码（包含 # 后的内容）</p><textarea id="settings-claude-callback" rows="3" autocomplete="off" spellcheck="false" aria-describedby="settings-claude-callback-help" placeholder="完整回调链接或授权码" disabled></textarea><div class="settings-actions"><button type="submit" class="primary compact" id="settings-claude-submit" disabled>提交回调</button><button type="button" class="subtle" id="settings-claude-cancel" disabled>取消本次授权</button></div></form></div><p id="settings-claude-login-error" class="settings-note settings-claude-error" role="alert" hidden></p></section>
       </div></div>
       <div class="settings-group" id="settings-group-remote">${renderRemoteAccount()}</div>
+      <div class="settings-group" id="settings-group-keys">${renderKeys()}</div>
       <div class="settings-group" id="settings-group-alerts">${window.TaskActivity?.settingsMarkup?.() || ""}</div>
+      ${localAccountSetup() ? `<div class="settings-group" id="settings-group-sticker">${renderCommentTemplate()}</div>` : ""}
       <div class="settings-group" id="settings-group-data">${renderDataSettings()}</div>
       <div class="settings-group" id="settings-group-files">
         <section class="section-card settings-card" aria-labelledby="settings-files-heading"><div class="settings-card-heading"><span class="settings-symbol">${icon("folder")}</span><h2 id="settings-files-heading">本地文件</h2></div><p class="settings-note"><a href="#settings-group-data" data-settings-backup-link>总数据备份</a>包含以下业务资料；仅保留阅读目录不能完整恢复。</p><div class="settings-locations">${locations.map(renderLocation).join("")}</div><p class="settings-note settings-claude-error" data-location-error role="alert" hidden><span></span> <button type="button" class="subtle">重新读取路径</button></p></section>
@@ -971,6 +1072,7 @@
     };
     $("#settings-check-codex", panel).onclick = () => checkCodex(panel);
     void checkCodex(panel);
+    if (localAccountSetup()) void bindCommentTemplate(panel, sequence);
     $("#settings-claude-check", panel).onclick = () => checkCodex(panel);
     $("#settings-claude-login", panel).onclick = () => connectClaude(panel);
     $("#settings-claude-copy", panel).onclick = () => {
@@ -990,6 +1092,7 @@
     bindDataSettings(panel);
     bindModelSettings(panel);
     bindRemoteAccount(panel);
+    bindKeys(panel, sequence);
     window.TaskActivity?.mountSettings?.(panel);
   }
 

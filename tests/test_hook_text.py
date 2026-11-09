@@ -13,6 +13,8 @@ sys.path.insert(0, str(APP))
 sys.path.insert(0, str(APP / "scripts"))
 
 import resolve_worker as worker
+from datetime import timedelta
+from campaign_store import pacific_today
 from elevenlabs_client import VoiceError
 from resolve_bridge import ResolveBridge
 from test_production import Bench, FakeEleven
@@ -79,10 +81,11 @@ class Title(Clip):
 class Timeline:
     """Inserting a title behaves as Resolve does: at the playhead on the lowest unlocked video track, cutting and pushing every unlocked track."""
 
-    def __init__(self, clips=None, *, moves=True, locks_hold=True, inserts=True):
+    def __init__(self, clips=None, *, moves=True, locks_hold=True, inserts=True, aimed=True):
         self.tracks = {"video": [clips if clips is not None else [Clip(0, 60), Clip(60, 120)]], "audio": [[Clip(0, 120, "voice")]], "subtitle": [[]]}
         self.names, self.timecode, self.locked = {1: "V1"}, "00:00:01:00", set()
         self.moves, self.movements, self.locks_hold, self.inserts = moves, [], locks_hold, inserts
+        self.aimed, self.appends = aimed, []  # Resolve's destination track: inserts fail while it is on a locked track.
 
     GetUniqueId = lambda self: "TL-1"
     GetName = lambda self: "Lab-1"
@@ -131,7 +134,7 @@ class Timeline:
         return True
 
     def InsertFusionTitleIntoTimeline(self, name):
-        if not self.inserts:
+        if not self.inserts or not self.aimed:
             return None
         hours, minutes, seconds, frames = (int(part) for part in self.timecode.split(":"))
         at, length = (hours * 3600 + minutes * 60 + seconds) * 30 + frames, 150
@@ -177,9 +180,25 @@ class Timeline:
         return True
 
 
+class MediaPool:
+    def __init__(self, timeline):
+        self.timeline = timeline
+
+    def AppendToTimeline(self, infos):
+        info = infos[0]
+        clip = Clip(info["recordFrame"], info["recordFrame"] + info["endFrame"])
+        self.timeline.tracks["video"][info["trackIndex"] - 1].append(clip)
+        self.timeline.appends.append(info)
+        self.timeline.aimed = True
+        return [clip]
+
+
 class Project:
     def __init__(self, timeline, current=None):
         self.timeline, self.current = timeline, current or timeline
+
+    def GetMediaPool(self):
+        return MediaPool(self.timeline)
 
     def GetName(self):
         return "202H"
@@ -246,6 +265,32 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual((title.tool.inputs["Enabled4"], title.tool.inputs["ElementShape4"], title.tool.inputs["Level4"]), (1, 2, 1))
         self.assertEqual(title.tool.inputs["Center"], {1: 0.5, 2: 0.809})
         self.assertEqual(resolve.manager.saves, 1)
+
+    def test_a_destination_track_stuck_elsewhere_is_aimed_and_leaves_nothing_behind(self):
+        resolve, _, timeline = self.world(aimed=False)
+        self.assertEqual(self.add(resolve), {"created": True, "start": 0, "end": 90, "saved": True})
+        self.assertEqual(timeline.appends[0]["trackIndex"], 2)
+        self.assertEqual(timeline.appends[0]["recordFrame"], 120)
+        self.assertEqual([type(item).__name__ for item in timeline.tracks["video"][1]], ["Title"])
+        self.assertEqual([(item.start, item.end) for item in timeline.tracks["video"][0]], [(0, 60), (60, 120)])
+        self.assertEqual(timeline.locked, set())
+
+    def test_no_aiming_when_the_first_insert_works(self):
+        resolve, _, timeline = self.world()
+        self.add(resolve)
+        self.assertEqual(timeline.appends, [])
+
+    def test_without_any_footage_to_aim_with_it_stops_cleanly(self):
+        resolve, _, timeline = self.world(clips=[Clip(0, 120, media=False)], aimed=False)
+        with self.assertRaisesRegex(worker.WorkerError, "没能插入"):
+            self.add(resolve)
+        self.assertEqual((timeline.appends, timeline.GetTrackCount("video"), resolve.manager.saves), ([], 1, 0))
+
+    def test_campaign_card_can_be_aimed_too(self):
+        resolve, _, timeline = self.world(aimed=False)
+        result = worker.add_campaign_card(resolve, {"project": "202H", "unique_id": "TL-1", "text": "Sale"})
+        self.assertEqual((result["start"], result["end"]), (30, 120))
+        self.assertEqual(timeline.GetEndFrame(), 120)
 
     def test_campaign_card_sits_at_the_end_on_its_own_track(self):
         resolve, _, timeline = self.world()
@@ -525,16 +570,26 @@ class CampaignFlowTests(unittest.TestCase):
     def calls(self):
         return [call for call in self.runner.calls if call["command"] in {"add_campaign_card", "remove_campaign_card"}]
 
-    def test_no_running_campaign_no_card(self):
-        self.bench._campaign_now = lambda: {"running": None, "upcoming": dict(self.RUNNING, status="upcoming")}
-        with self.assertRaisesRegex(VoiceError, "没有进行中的活动"):
+    def test_no_card_earlier_than_a_week_before_the_start(self):
+        far = dict(self.RUNNING, status="upcoming", start=(pacific_today() + timedelta(days=8)).isoformat())
+        self.bench._campaign_now = lambda: {"running": None, "upcoming": far}
+        with self.assertRaisesRegex(VoiceError, "开始前 7 天"):
+            self.click()
+        self.bench._campaign_now = lambda: {"running": None, "upcoming": None}
+        with self.assertRaisesRegex(VoiceError, "开始前 7 天"):
             self.click()
         self.assertEqual(self.calls(), [])
+
+    def test_card_can_go_on_a_week_before_the_start(self):
+        near = dict(self.RUNNING, status="upcoming", start=(pacific_today() + timedelta(days=7)).isoformat())
+        self.bench._campaign_now = lambda: {"running": None, "upcoming": near}
+        self.assertEqual(self.click()["timeline"]["campaign_overlay"]["status"], "saved")
+        self.assertEqual(len(self.calls()), 1)
 
     def test_card_is_made_from_the_calendar_and_taken_off_later(self):
         self.bench._campaign_now = lambda: {"running": self.RUNNING, "upcoming": None}
         card = self.click()["timeline"]["campaign_overlay"]
-        self.assertEqual(self.calls()[0]["text"], "Black Friday & Cyber Monday sale\nEnds Nov 30")
+        self.assertEqual(self.calls()[0]["text"], "On sale for Black Friday\nUntil Nov 30")
         self.assertEqual((card["status"], card["campaign"]["end"], card["message"]), ("saved", "2026-11-30", "活动屏显已加"))
         spoken = [line["spoken"] for line in self.bench.production.job(self.job["id"])["lines"]]
         self.assertEqual(spoken, [line["spoken"] for line in self.job["lines"]])

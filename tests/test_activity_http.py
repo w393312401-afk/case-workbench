@@ -59,6 +59,8 @@ class ActivityHTTPTests(unittest.TestCase):
     def test_poll_answers_while_the_workbench_lock_is_held(self):
         app=self.server.app
         app.activity.record("ai:task:round",kind="ai",owner_id="AIT-000000000000",source_id="round",product="202H",title="任务",status="failed",message="失败。")
+        # Production owners also need the optional order-state projection, which reads the shared stores.
+        app.activity.record("edit:job:round",kind="edit",owner_id="PRD-000000000000",source_id="round",product="202H",title="剪辑",status="failed",message="失败。")
         release,held=threading.Event(),threading.Event()
         def hold():
             with app.lock:
@@ -81,6 +83,8 @@ class ActivityHTTPTests(unittest.TestCase):
                 began=time.monotonic()
                 status,feed=self.request("GET","/api/activity")
                 self.assertEqual((status,feed["counts"]["active"]),(200,0))
+                self.assertEqual({row["owner_id"] for row in feed["items"]}, {"AIT-000000000000", "PRD-000000000000"})
+                self.assertEqual(feed["owner_states"], {})
                 self.assertLess(time.monotonic()-began,5)
                 self.assertTrue(started.wait(5))
                 # The stuck projection stays the only one: later polls neither wait for it nor start another.

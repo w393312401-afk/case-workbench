@@ -7,6 +7,7 @@ The server uses a temporary case library and an ephemeral port.
 from __future__ import annotations
 
 import time
+import json
 import unittest
 from uuid import uuid4
 
@@ -141,6 +142,22 @@ class AISelectionBrowserTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/ai/tasks")[2]["tasks"], [])
         self.assertEqual(self.store.read_case(self.identifier), before_case)
 
+    def test_marking_every_draft_over_http_finishes_the_task(self):
+        task = self.create_task("逐条决定临时任务")
+        path = self.store.folder(self.identifier) / "collaboration" / task["task_id"] / "task.json"
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        block = lambda number: chr(10).join([f"## 变体 #{number}", "**口播（配音用）**", "```", f"Line {number}.", "```", ""])
+        raw["rounds"][-1]["output"] = block(1) + block(2)
+        path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        round_id, url = raw["rounds"][-1]["round_id"], f"/api/ai/tasks/{task['task_id']}/variant-choice"
+        first = self.request("POST", url, {"round_id": round_id, "variant_index": 0, "choice": "skip"})
+        self.assertEqual((first[0], first[2]["task"]["management_state"]), (200, "pending_selection"))
+        second = self.request("POST", url, {"round_id": round_id, "variant_index": 1, "choice": "skip"})
+        self.assertEqual(second[2]["task"]["management_state"], "finished")
+        self.assertEqual(second[2]["task"]["revision"], raw["revision"])
+        reopened = self.request("POST", url, {"round_id": round_id, "variant_index": 1, "choice": ""})
+        self.assertEqual(reopened[2]["task"]["management_state"], "pending_selection")
+
     def test_management_state_archive_history_and_restore_keep_answers(self):
         before_case = self.store.read_case(self.identifier)
         task = self.create_task("长期管理临时任务")
@@ -150,13 +167,9 @@ class AISelectionBrowserTests(unittest.TestCase):
         entry.wait_for()
         self.assertEqual(page.locator("#ai-list-view").input_value(), "active")
         entry.locator("a").click()
-        page.locator(".ai-task-management-fold > summary").click()
         page.locator("#ai-management-state").wait_for()
         page.locator("#ai-management-state").select_option("abandoned")
-        # Refreshes must preserve an unsaved management choice.
-        page.wait_for_timeout(2700)
-        self.assertEqual(page.locator("#ai-management-state").input_value(), "abandoned")
-        page.locator("#ai-save-management").click()
+        # Choosing a state saves it; there is no separate save step.
         page.wait_for_function("() => document.querySelector('#ai-management-state').dataset.persistedState === 'abandoned'")
         current = self.server.app.ai.get(task["task_id"])
         self.assertEqual(current["management_state"], "abandoned")

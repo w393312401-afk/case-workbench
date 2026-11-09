@@ -208,9 +208,19 @@ class AutoBreakdown:
         self.downloader = downloader or (lambda url, folder, video_id: download_tiktok(url, folder, video_id, proxy=download_proxy))
         self.lock = threading.Lock()
         self.threads = {}
+        self.resume_timer = None
         self.download_slots = threading.Semaphore(PARALLEL_DOWNLOADS)
         self.analysis_slots = threading.Semaphore(PARALLEL_ANALYSES)
         self.tags = CaseTags(app.runtime)
+
+    def busy(self):
+        with self.lock:
+            if any(thread.is_alive() for thread in self.threads.values()):
+                return True
+            # A startup scan can publish a worker after an idle probe. Keep that whole timer
+            # (including the scan itself) busy until its workers have been registered.
+            return bool(self.analyzer is not pending_analyzer and self.resume_timer
+                        and self.resume_timer.is_alive() and next(self.root.glob("*.json"), None))
 
     # ---- what the breakdown is given ---------------------------------
     def _videos(self):

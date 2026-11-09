@@ -50,6 +50,27 @@ class ReviewOpportunityBrowserTests(unittest.TestCase):
         self.page.evaluate("data=>window.fixture=data",self.data)
         self.page.evaluate("ReviewOpportunities.route()")
 
+    def test_skeleton_shows_three_parts_gaps_and_batch_button(self):
+        self.item["skeleton"]={"status":"done","state":"gaps","stale":True,
+            "opening":[{"pain_zh":"<b>夹不住短刀</b>","line_en":"My short knife kept slipping.","line_zh":"短刀老打滑","audience_zh":"有小刀的人","quotes":["abc"]}],
+            "middle":[{"code":"S9","point_id":"p9","title":"短刀能夹住","status":"candidate","answer_zh":"夹具能夹短刀","shot_zh":"夹上后用手晃","quotes":[]}],
+            "closing":None,"gaps":[{"kind":"no_closing","label":"缺收口理由","text":"没有合适的 B 类理由"}],"notes":["别说所有刀都能夹"],
+            "verdict":{"kind":"new","label":"新开方向","direction_id":"","reason_zh":"现有方向不讲短刀"}}
+        pending={**self.item,"id":"topic:price","title":"价格","skeleton":{"status":"none","state":"none"}}
+        self.data["items"]=[self.item,pending]
+        self.render()
+        block=self.page.locator(".opportunity-skeleton").first
+        self.assertIn("<b>夹不住短刀</b>",block.inner_text())
+        self.assertIn("要拍：夹上后用手晃",block.inner_text())
+        self.assertIn("缺收口理由",block.inner_text())
+        self.assertIn("别说所有刀都能夹",block.locator(".skeleton-note").inner_text())
+        self.assertIn("评论有变化",block.inner_text())
+        self.assertEqual(block.get_by_role("button",name="按骨架新建方向").count(),1)
+        self.assertEqual(self.page.get_by_role("button",name="给本页 1 个主题出三段骨架").count(),1)
+        self.assertEqual(self.page.get_by_role("button",name="AI 出三段骨架").count(),1)
+        self.assertLessEqual(self.page.evaluate("document.documentElement.scrollWidth"),390)
+        self.assertEqual(self.page.evaluate("window.starts"),[])
+
     def test_evidence_is_literal_mobile_fits_and_read_does_not_start_ai(self):
         self.render()
         self.assertEqual(self.page.evaluate("window.starts"),[])

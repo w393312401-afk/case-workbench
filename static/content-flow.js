@@ -19,6 +19,18 @@ window.ContentFlow = (() => {
   const validSort = value => typeof value === 'string' && Object.hasOwn(sortFields,value.split('_')[0]) && Object.hasOwn(sortDirections,value.split('_')[1] || '') && value.split('_').length === 2;
   const tags = {task:'候选',script:'采用稿',video:'视频'};
   const page = {sequence:0,product:'',filters:null,selecting:false,selected:new Set(),archiving:false,deleting:false};
+  const reads = new Map();
+  // Route and visibility updates can ask for the same read before its first response arrives.
+  // Explicit refreshes and completed edits start a new read and invalidate an older auxiliary response.
+  function sharedRead(path,fresh = false) {
+    const previous = reads.get(path);
+    if (!fresh && previous) return previous;
+    if (previous) previous.valid = false;
+    const request = {valid:true};
+    request.promise = api(path,fresh ? {cache:'no-store'} : {}).finally(() => {if (reads.get(path) === request) reads.delete(path);});
+    reads.set(path,request);
+    return request;
+  }
   const url = (hash,product) => window.WorkbenchShell?.url(hash,product) || hash;
   const product = () => window.WorkbenchShell?.product() || '';
   const hash = () => window.WorkbenchShell?.legacyHash() || location.hash;
@@ -33,7 +45,7 @@ window.ContentFlow = (() => {
     const params = new URLSearchParams(hash().split('?')[1] || '');
     let filter = null;
     try {const value = JSON.parse(params.get('filter'));if (validFilter(value)) filter = value;} catch { /* Legacy links remain usable. */ }
-    return {filter,saved:params.get('saved') || '',view:filter ? 'all' : Object.hasOwn(views,params.get('view')) ? params.get('view') : 'attention',
+    return {filter,saved:params.get('saved') || '',view:filter ? 'all' : Object.hasOwn(views,params.get('view')) || params.get('view') === 'carousel' ? params.get('view') : 'attention',
       kind:!filter && Object.hasOwn(kinds,params.get('kind')) ? params.get('kind') : 'all',status:!filter && Object.hasOwn(statuses,params.get('status')) ? params.get('status') : 'all',q:(params.get('q') || '').slice(0,200),
       sort:validSort(params.get('sort')) ? params.get('sort') : 'updated_desc',page:Math.max(1,Number.parseInt(params.get('page'),10) || 1)};
   }
@@ -121,7 +133,7 @@ window.ContentFlow = (() => {
     if ($('#content-flow-save-view')) $('#content-flow-save-view').disabled = !viewCatalog().ready || viewCatalog().busy || viewCatalog().migrating;
   }
   function chooseFilters(filters) {
-    closeQuickFilter();clearTimeout(page.filterTimer);
+    closeQuickFilter();clearTimeout(page.filterTimer);clearTimeout(page.pollTimer);clearTimeout(page.revalidateTimer);
     clearTimeout(page.searchTimer);page.selected.clear();page.filters = {view:'all',kind:'all',status:'all',q:'',page:1,filter:null,saved:'',sort:page.filters?.sort || 'updated_desc',...filters};
     $('#content-flow-query').value = page.filters.q;
     closeFilterEditor();paintFilterControls();void load(++page.sequence,false,true);
@@ -132,6 +144,10 @@ window.ContentFlow = (() => {
     const changed = active && (JSON.stringify(active.filter) !== JSON.stringify(filter) || active.q !== page.filters.q);
     // 进行中 shows only while something runs or while it is the open view.
     const shown = Object.entries(views).filter(([key]) => key !== 'running' || page.data?.counts.running || page.filters.view === key);
+    // 图文 is not a content filter: it lists finished videos by whether their picture carousel is decided, so it stays out of `views`.
+    shown.splice(shown.findIndex(([key]) => key === 'publish') + 1,0,['carousel','图文']);
+    const tabCount = key => key === 'carousel' ? (page.carouselOwner === page.product ? page.carousel?.counts.pending || 0 : 0) : page.data?.counts[key] || 0;
+    $('#content')?.classList.toggle('is-carousel',page.filters.view === 'carousel');
     // Saved views sit in one menu after the presets; its button names the open one.
     const counted = row => page.data?.view_counts?.[row.id];
     const countMarkup = row => counted(row) == null ? '' : `<small>${counted(row)}</small>`;
@@ -139,7 +155,7 @@ window.ContentFlow = (() => {
     // Pinned views sit as tabs after the presets; the menu names the open view only when it is not already a tab.
     const named = active && !active.pinned;
     // Presets and pinned views share one row in the order the user dragged them into; new tabs join at the end.
-    const tabs = [...shown.map(([key,label]) => ({key,markup:`<button type="button" data-tab-key="${key}" draggable="true" data-flow-view="${key}" aria-pressed="${!active && !page.filters.filter && page.filters.view === key}" title="预设视图：${label}（可拖动调整位置）">${label}<small>${page.data?.counts[key] || 0}</small></button>`})),
+    const tabs = [...shown.map(([key,label]) => ({key,markup:`<button type="button" data-tab-key="${key}" draggable="true" data-flow-view="${key}" aria-pressed="${!active && !page.filters.filter && page.filters.view === key}" title="预设视图：${label}（可拖动调整位置）">${label}<small>${tabCount(key)}</small></button>`})),
       ...saved.filter(row => row.pinned).map(row => ({key:'view:' + row.id,markup:`<button type="button" class="flow-pinned-view" data-tab-key="view:${esc(row.id)}" draggable="true" data-flow-saved-view="${esc(row.id)}" aria-pressed="${row.id === active?.id}" title="${esc(row.name)}（可拖动调整位置）">${esc(row.name)}${row.id === active?.id && changed ? '<em>已修改</em>' : ''}${countMarkup(row)}</button>`}))];
     const order = viewCatalog().tabOrder || [], place = key => {const at = order.indexOf(key);return at < 0 ? order.length + tabs.findIndex(tab => tab.key === key) : at;};
     tabs.sort((a,b) => place(a.key) - place(b.key));
@@ -162,7 +178,7 @@ window.ContentFlow = (() => {
     const saveLabel = active ? '管理视图' : '保存视图';
     $('#content-flow-save-view').setAttribute('aria-label',saveLabel);$('#content-flow-save-view').title = saveLabel;
     const catalog = viewCatalog();
-    $('#content-flow-save-view').disabled = !catalog.ready || catalog.busy || catalog.migrating || !$('#content-flow-filter-editor').hidden;
+    $('#content-flow-save-view').disabled = !catalog.ready || catalog.busy || catalog.migrating || !$('#content-flow-filter-editor').hidden || page.filters.view === 'carousel';
     const viewError = $('#content-flow-views-error');
     if (viewError) {viewError.hidden = !catalog.error;viewError.textContent = catalog.error;}
     const summary = $('#content-flow-filter-summary');
@@ -512,10 +528,11 @@ window.ContentFlow = (() => {
       $('#content-flow-query').value = page.filters.q;
       $('.flow-filter-add-quick').onclick = event => openQuickFilter(event.currentTarget);
       $('#content-flow-query').oninput = () => {
+        clearTimeout(page.pollTimer);clearTimeout(page.revalidateTimer);
         page.filters.q = $('#content-flow-query').value;page.filters.page = 1;page.selected.clear();page.sequence++;paintFilterControls();
         clearTimeout(page.searchTimer);page.searchTimer = setTimeout(() => void load(++page.sequence,false,true),150);
       };
-      $('#content-flow-refresh').onclick = () => {clearTimeout(page.filterTimer);clearTimeout(page.searchTimer);void load(++page.sequence,true);};
+      $('#content-flow-refresh').onclick = () => {clearTimeout(page.filterTimer);clearTimeout(page.searchTimer);void load(++page.sequence,true,false,true);};
       $('#content-flow-filter-toggle').onclick = () => {if ($('#content-flow-filter-editor').hidden) openFilterEditor();else closeFilterEditor();};
       $('#content-flow-save-view').onclick = saveViewDialog;
       paintFilterControls();
@@ -559,7 +576,7 @@ window.ContentFlow = (() => {
       onComplete:async result => {
         const failed = new Set((result.results || []).filter(entry => !entry.ok).map(entry => entry.id));
         page.selected = new Set(page.data.items.filter(item => item.production_ids.some(id => failed.has(id))).map(item => item.id));
-        page.selecting = page.selected.size > 0;paint();await load(++page.sequence);
+        page.selecting = page.selected.size > 0;paint();await load(++page.sequence,false,false,true);
       }
     });
   }
@@ -667,9 +684,72 @@ window.ContentFlow = (() => {
   }
   function status(text) {const node = $('#content-flow-status');if (node) {node.textContent = text;node.hidden = !text;}}
   // reuse: the data did not change (filter, search, page changes within the open list), so the server may answer from its recent snapshot.
-  async function load(seq,refreshSaved = false,reuse = false) {
+  // 图文 tab: the overview of every uploaded video's picture-carousel decision, drawn by photo-overview.js.
+  function paintCarousel(node,data) {
+    const signature = JSON.stringify(data);
+    $('#content-flow-result-count').textContent = `共 ${data.items.length} 条已上传视频 · ${data.counts.pending} 条待决定图文`;
+    // Preserve selection, focus and open groups when a poll confirms the same overview.
+    if (page.carouselNode === node && page.carouselSignature === signature && node.querySelector('.po-strip') && node.onclick && node.onchange) return;
+    page.carouselNode = node;page.carouselSignature = signature;
+    window.PhotoOverview.paint(node,data,{reload:() => void load(++page.sequence,false,false,true)});
+  }
+  async function loadCarousel(seq,node,fresh = false) {
+    const owner = page.product;
+    if (page.carouselOwner === owner && page.carousel && Date.now() - (page.carouselAt || 0) < 20000) paintCarousel(node,page.carousel);
+    status(!page.carousel || !node.querySelector('.po-strip') ? '正在读取图文状态…' : '');
+    $('#content-flow-error').hidden = true;$('#content-flow-pages').innerHTML = '';
+    try {
+      const request = sharedRead('/api/photo-overview?' + new URLSearchParams({product:owner}),fresh);
+      const data = await request.promise;
+      if (!request.valid || seq !== page.sequence || !node.isConnected || owner !== product()) return;
+      status('');node.setAttribute('aria-busy','false');
+      page.carousel = data;page.carouselOwner = owner;page.carouselAt = Date.now();history.replaceState(null,'',filterHash());paintFilterControls();
+      paintCarousel(node,data);void refreshNeeds(owner,fresh);
+      page.pollTimer = setTimeout(refreshVisible,30000);
+    } catch (error) {
+      if (seq !== page.sequence || !node.isConnected) return;
+      status('');node.setAttribute('aria-busy','false');
+      $('#content-flow-error').textContent = errorText(error);$('#content-flow-error').hidden = false;
+    } finally {if (page.loading === seq) page.loading = null;}
+  }
+  // 需要你出手 sits above every view of the list; it hides itself when nothing is stuck.
+  function paintNeeds(owner,data) {
+    if (owner !== page.product || owner !== product() || !$('#content-flow-list')) return;
+    let host = $('#content-flow-needs');
+    if (!host) {
+      const anchor = $('#content-flow-groups');if (!anchor) return;
+      host = document.createElement('section');host.id = 'content-flow-needs';host.className = 'flow-needs';host.setAttribute('aria-label','需要你出手');
+      anchor.before(host);
+    }
+    const signature = JSON.stringify(data);
+    if (page.needsNode === host && page.needsSignature === signature) return;
+    page.needsNode = host;page.needsSignature = signature;
+    window.NeedsYou?.paint(host,data,{url});
+  }
+  async function refreshNeeds(owner,fresh = false) {
+    if (!fresh && page.needsOwner === owner && Date.now() - (page.needsAt || 0) < 20000) {paintNeeds(owner,page.needsData);return;}
+    try {
+      const request = sharedRead('/api/needs-you?' + new URLSearchParams({product:owner}),fresh);
+      const data = await request.promise;
+      if (!request.valid || owner !== page.product || owner !== product()) return;
+      page.needsOwner = owner;page.needsAt = Date.now();page.needsData = data;
+      paintNeeds(owner,data);
+    } catch { /* The strip then keeps what it showed. */ }
+  }
+  // The 图文 tab's count rides along with every list load, at most every 20 seconds.
+  async function refreshCarouselCount(owner,fresh = false) {
+    if (!fresh && page.carouselOwner === owner && Date.now() - (page.carouselAt || 0) < 20000) return;
+    try {
+      const request = sharedRead('/api/photo-overview?' + new URLSearchParams({product:owner}),fresh);
+      const data = await request.promise;
+      if (request.valid && owner === page.product && owner === product()) {page.carousel = data;page.carouselOwner = owner;page.carouselAt = Date.now();paintFilterControls();}
+    } catch { /* The tab then shows no count. */ }
+  }
+  async function load(seq,refreshSaved = false,reuse = false,fresh = false) {
     const node = $('#content-flow-list');if (!node) return;
-    clearTimeout(page.revalidateTimer);
+    clearTimeout(page.pollTimer);clearTimeout(page.revalidateTimer);page.loading = seq;
+    if (page.filters.view === 'carousel') {node.setAttribute('aria-busy','true');return loadCarousel(seq,node,fresh);}
+    node.onclick = node.onchange = null;  // the 图文 overview binds its own handlers on this node
     node.setAttribute('aria-busy','true');
     const chosenProduct = page.product;
     const {filter,saved,...query} = page.filters;
@@ -681,14 +761,15 @@ window.ContentFlow = (() => {
     try {
       // A slow saved-view read must not hold up content results. Filter changes reuse recent view metadata.
       void refreshViews(chosenProduct,refreshSaved);
-      const {stale,...data} = await api('/api/content?' + params);
+      const {stale,...data} = await sharedRead('/api/content?' + params,fresh).promise;
       if (seq !== page.sequence || !node.isConnected || chosenProduct !== product()) return;
       node.setAttribute('aria-busy','false');
       status('');
       // An older snapshot answered at once; read afresh once the clicking pauses and repaint only if that differs.
-      const revalidate = () => {if (stale) page.revalidateTimer = setTimeout(() => {if (node.isConnected) void load(++page.sequence);},600);};
+      const revalidate = () => {if (stale) page.revalidateTimer = setTimeout(() => {if (node.isConnected) refreshVisible();},600);};
+      void refreshCarouselCount(chosenProduct,fresh);void refreshNeeds(chosenProduct,fresh);
       const signature = JSON.stringify([page.filters,data]);
-      if (node === page.resultNode && page.resultSignature === signature) {schedulePoll(node,data);revalidate();return;}
+      if (node === page.resultNode && page.resultSignature === signature && !node.querySelector('.po-strip')) {schedulePoll(node,data);revalidate();return;}
       const focusedId = document.activeElement?.id;
       page.resultNode = node;page.resultSignature = signature;
       page.data = data;page.dataAt = Date.now();page.filters.page = data.page;
@@ -710,7 +791,7 @@ window.ContentFlow = (() => {
       status('');
       $('#content-flow-error').textContent = errorText(error);$('#content-flow-error').hidden = false;
       if (!page.data || page.data.product !== chosenProduct) node.innerHTML = '<div class="empty"><h3>内容进程暂未读取</h3><p>点击刷新重试。</p></div>';
-    }
+    } finally {if (page.loading === seq) page.loading = null;}
   }
   function paintPages(data) {
     $('#content-flow-pages').innerHTML = data.pages > 1 ? `<button type="button" class="secondary" data-flow-page="${data.page - 1}" ${data.page === 1 ? 'disabled' : ''}>上一页</button><span>第 ${data.page} / ${data.pages} 页</span><button type="button" class="secondary" data-flow-page="${data.page + 1}" ${data.page === data.pages ? 'disabled' : ''}>下一页</button>` : '';
@@ -718,10 +799,16 @@ window.ContentFlow = (() => {
   }
   function schedulePoll(node,data) {
     clearTimeout(page.pollTimer);
-    page.pollTimer = setTimeout(() => {if (node.isConnected && !page.archiving && !page.deleting && !document.hidden) void load(++page.sequence,true);},data.items.some(item => item.busy) ? 5000 : 30000);
+    page.pollTimer = setTimeout(() => {if (node.isConnected) refreshVisible();},data.items.some(item => item.busy) ? 5000 : 30000);
+  }
+  function refreshVisible() {
+    if (!page.loading && $('#content-flow-list') && !page.archiving && !page.deleting && !document.hidden) void load(++page.sequence);
   }
   function leaveList() {
-    clearTimeout(page.pollTimer);clearTimeout(page.searchTimer);clearTimeout(page.filterTimer);closeQuickFilter();page.sequence++;
+    clearTimeout(page.pollTimer);clearTimeout(page.revalidateTimer);clearTimeout(page.searchTimer);clearTimeout(page.filterTimer);closeQuickFilter();page.sequence++;page.loading = null;
+    // Returning from an edited record must not join a request started before that edit.
+    for (const [key,request] of reads) {request.valid = false;reads.delete(key);}
+    page.needsAt = 0;page.carouselAt = 0;
     $$('.flow-view-dialog').forEach(dialog => {dialog.close();dialog.remove();});
   }
   // Archiving only moves a row out of the working views; 全部 lists it with 恢复, so it needs no confirmation.
@@ -740,7 +827,7 @@ window.ContentFlow = (() => {
     if (failure) toast(`${done ? `已${verb} ${done} 项；` : ''}${ids.length - done} 项未${verb}：${errorText(failure)}`,true);
     else toast(archived ? `已归档${ids.length > 1 ? ` ${done} 项` : ''}，可在「全部」里恢复。` : '已恢复。');
     page.selecting = !!failure;page.selected = new Set(failure ? ids.slice(done) : []);paint();
-    void load(++page.sequence);
+    void load(++page.sequence,false,false,true);
   }
   // 不发了: one short reason, kept on the row; the order itself is untouched and 恢复待发布 undoes it.
   async function setSkip(id,skip,reason) {
@@ -751,7 +838,7 @@ window.ContentFlow = (() => {
       toast(skip ? '已标记不发，移到「已完结」。' : '已恢复到待发布。');
       return true;
     } catch (error) {toast(errorText(error),true);return false;}
-    finally {page.archiving = false;void load(++page.sequence);}
+    finally {page.archiving = false;void load(++page.sequence,false,false,true);}
   }
   function skipDialog(item) {
     const dialog = document.createElement('dialog');dialog.className = 'script-editor-dialog production-dialog flow-skip-dialog';
@@ -824,11 +911,16 @@ window.ContentFlow = (() => {
       } finally {
         page.deleting = false;
         if (dialog.isConnected) updateControls();
-        void load(++page.sequence);
+        void load(++page.sequence,false,false,true);
       }
     };
     updateControls();dialog.showModal();
   }
-  document.addEventListener('visibilitychange',() => {if (!document.hidden && $('#content-flow-list') && !page.archiving && !page.deleting) void load(++page.sequence);});
-  return {route,tabs,captureListState,leaveList};
+  document.addEventListener('visibilitychange',refreshVisible);
+  // A change made elsewhere (a finished Notion upload) shows in an open list at once, not at the next 30-second poll.
+  function refreshNow() {
+    if (!$('#content-flow-list') || page.archiving || page.deleting) return;
+    void load(++page.sequence,false,false,true);
+  }
+  return {route,tabs,captureListState,leaveList,refreshNow};
 })();

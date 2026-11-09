@@ -1469,7 +1469,7 @@ setInterval(() => {
 // The pages are read from disk on every load but the backend only at start-up: after an update the new pages
 // can ask for features the running process does not have. Say so instead of showing a cryptic error.
 let staleNoticeDismissed = false;
-const staleDismissedPids = new Set();
+const staleDismissedNotices = new Set();
 async function checkServiceFresh() {
   if (document.hidden) return;
   try {
@@ -1477,50 +1477,66 @@ async function checkServiceFresh() {
     if (!response.ok) return;
     const status = await response.json();
     let banner = document.getElementById("code-stale-banner");
-    if (!status.code_stale) {
+    if (banner?.dataset.restarting === "1") return;
+    const keepsTasks = status.restart_keeps_tasks === true;
+    const engineStale = keepsTasks && status.task_host_code_stale === true;
+    const webStale = status.code_stale === true;
+    if (!webStale && !engineStale) {
       if (banner) keepReadingPlace(() => banner.remove());
       return;
     }
-    if (banner && banner.dataset.servicePid !== String(status.pid)) { keepReadingPlace(() => banner.remove()); banner = null; }
+    const noticeKey = webStale ? `web:${status.pid}` : `engine:${status.task_host_pid ?? status.pid}`;
+    const presentationKey = `${noticeKey}:${keepsTasks}:${engineStale}`;
+    if (banner && banner.dataset.noticeKey !== presentationKey) { keepReadingPlace(() => banner.remove()); banner = null; }
     if (banner) return;
-    const dismissalKey = `workbench:stale-later:${status.pid}`;
-    if (staleDismissedPids.has(status.pid)) return;
+    const dismissalKey = `workbench:stale-later:${noticeKey}`;
+    if (staleDismissedNotices.has(noticeKey)) return;
     try { if (sessionStorage.getItem(dismissalKey) === '1') return; } catch {}
     banner = document.createElement("div");
     banner.id = "code-stale-banner";
     banner.dataset.servicePid = String(status.pid);
-    banner.setAttribute("role", "alert");
+    banner.dataset.noticeKey = presentationKey;
+    banner.setAttribute("role", webStale ? "alert" : "status");
+    const engineNote = "任务引擎将在空闲后更新，当前任务按原版本继续。";
+    const heading = !webStale ? engineNote : keepsTasks
+      ? `网页服务已更新，重启后生效；后台任务会继续运行。${engineStale ? engineNote : ""}`
+      : "程序已更新，重启后生效。";
+    const explanation = keepsTasks
+      ? "重启网页服务不会停止写稿、剪辑等后台任务，完成后页面会自动刷新。"
+      : "有AI任务、剪辑、配音或出图运行时不会重启。若重启暂不可用，可以稍后通过桌面入口重启工作台。";
+    const restartLabel = keepsTasks ? "重启网页服务" : "重启工作台";
     banner.innerHTML =
-      '<span data-stale-text>程序已更新，重启后生效。</span>' +
-      '<details class="stale-explanation"><summary aria-label="更新与重启说明">说明</summary><p>有AI任务、剪辑、配音或出图运行时不会重启。若重启暂不可用，可以稍后通过桌面入口重启工作台。</p></details>' +
-      '<button type="button" data-stale-restart>重启工作台</button><button type="button" data-stale-later>稍后</button>';
+      `<span data-stale-text>${heading}</span>` +
+      (webStale ? `<details class="stale-explanation"><summary aria-label="更新与重启说明">说明</summary><p>${explanation}</p></details><button type="button" data-stale-restart>${restartLabel}</button>` : "") +
+      `<button type="button" data-stale-later>${webStale ? "稍后" : "知道了"}</button>`;
     const text = banner.querySelector("[data-stale-text]"), restart = banner.querySelector("[data-stale-restart]");
     banner.querySelector("[data-stale-later]").onclick = () => {
       staleNoticeDismissed = true;
-      staleDismissedPids.add(status.pid);
+      staleDismissedNotices.add(noticeKey);
       try { sessionStorage.setItem(dismissalKey, '1'); } catch {}
       banner.remove();
     };
-    restart.onclick = async () => {
+    if (restart) restart.onclick = async () => {
       restart.disabled = true;
       restart.textContent = "正在重启…";
       try {
         await api("/api/service/restart", { method: "POST", body: {} });
       } catch (error) {
         restart.disabled = false;
-        restart.textContent = "重启工作台";
+        restart.textContent = restartLabel;
         text.textContent = error?.status === 403 && /local workbench/i.test(error?.message || "")
           ? "从公网地址打开时不能重启工作台。请在工作台电脑上双击桌面「TK工作台」，或在那台电脑上打开 http://127.0.0.1:8767 再点重启。"
           : `暂时不能重启：${error?.message || "请稍后重试"}`;
         return;
       }
-      text.textContent = "正在重启工作台，完成后页面会自动刷新…";
+      banner.dataset.restarting = "1";
+      text.textContent = keepsTasks ? "正在重启网页服务，后台任务继续运行；完成后页面会自动刷新…" : "正在重启工作台，完成后页面会自动刷新…";
       const started = Date.now();
       const wait = setInterval(async () => {
         try {
           const response = await fetch("/api/service/status", { cache: "no-store" });
           const next = response.ok ? await response.json() : null;
-          if (next && next.pid !== status.pid && !next.shutting_down && !next.code_stale) {
+          if (next && Number.isSafeInteger(next.pid) && next.pid !== status.pid && !next.shutting_down && !next.code_stale) {
             clearInterval(wait);
             location.reload();
             return;
@@ -1528,9 +1544,10 @@ async function checkServiceFresh() {
         } catch {}
         if (Date.now() - started > 60000) {
           clearInterval(wait);
+          delete banner.dataset.restarting;
           restart.disabled = false;
-          restart.textContent = "重启工作台";
-          text.textContent = "没有等到新服务就绪，请用桌面快捷方式重启工作台。";
+          restart.textContent = restartLabel;
+          text.textContent = keepsTasks ? "尚未等到网页服务就绪，请稍后重试。" : "没有等到新服务就绪，请用桌面快捷方式重启工作台。";
         }
       }, 1500);
     };

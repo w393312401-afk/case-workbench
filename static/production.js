@@ -13,6 +13,8 @@ window.CaseProduction = (() => {
   const editProvider = model => String(model || '').startsWith('claude-') ? 'claude' : 'codex';
   const editClient = provider => provider === 'codex' ? 'Codex 客户端' : 'Claude Code 客户端';
   const editModelLabel = model => editModelNames.get(model || 'codex-default') || model;
+  // Anything above medium gets a reminder at the moment an edit starts.
+  const highEditEfforts = new Set(['high','xhigh','max','ultra']);
   const editLabels = {running:'运行中',completed:'已完成',awaiting_review:'待人工审查',approved:'已完成',needs_material:'待补素材',needs_verification:'素材待核实',needs_repair:'待修正',verification_failed:'核验未完成',unverified:'旧记录待核验',failed:'失败',cancelled:'已停止',interrupted:'已中断'};
   const timelineTaskLabels = {pending:'待剪辑',in_progress:'剪辑中',completed:'已完成'};
   const activeTimelines = job => (job.timelines || []).filter(item => !item.archived);
@@ -350,6 +352,31 @@ window.CaseProduction = (() => {
     if (scriptGaps(job,data)) return `<div class="take-actions">${failed}<button type="button" class="primary" id="job-ai-fill" ${job.archived ? 'disabled' : ''} title="让 AI 按写稿技能补上开头画面、屏显、读法、对应中文、意群表的画面要求/素材标签/证据、补拍清单和发布文案；口播不改">${icon('edit')}AI 补全脚本信息</button><button type="button" class="subtle" id="job-lines-edit">手动填写</button></div>`;
     return `<div class="take-actions">${failed}<button type="button" class="subtle" id="job-lines-edit">${icon('edit')}${manualScript(data) ? '编辑脚本信息' : '编辑画面要求'}</button></div>`;
   }
+  // 「做英国版」 on an American job, and the link between the two jobs once it exists.
+  const versionLink = (job,id,text) => `<a class="secondary compact" href="${esc(url(`#production/${encodeURIComponent(id)}`,job.product))}">${text}</a>`;
+  const canMakeUk = job => (job.market || 'us') === 'us' && !job.uk_version && !job.derived_from && !job.archived;
+  function marketVersionMarkup(job) {
+    const version = job.uk_version, row = content => `<div class="production-market-version">${content}</div>`;
+    if (job.derived_from) return row(`<span>英国版 · 由美国版制作单改来</span>${versionLink(job,job.derived_from.job_id,'打开美国版')}`);
+    if (!version) return '';
+    const task = `<a class="subtle" href="${esc(aiTaskHash(version.task_id,job.product))}">查看写稿</a>`;
+    if (version.status === 'running') return row(`<span class="production-busy">AI 正在改英国版，改完等你核对…</span>${task}`);
+    if (version.status === 'failed') return row(`<span class="ai-error" role="alert">${esc(version.error)}</span><button type="button" class="secondary compact" id="job-uk-start">重新改一版</button>${task}`);
+    if (version.status === 'review') return row(`<span>英国版改好了，核对后生成新制作单</span><button type="button" class="primary compact" id="job-uk-review">核对英国版</button>`);
+    return row(`<span>英国版已生成</span>${versionLink(job,version.job_id,'打开英国版')}`);
+  }
+  function openUkReview(job,seq,restart) {
+    const review = job.uk_version.review, changed = review.lines.filter(line => line.before !== line.spoken).length;
+    const rows = review.lines.map(line => `<tr class="${line.before === line.spoken ? '' : 'is-changed'}"><td>${esc(line.number)}</td><td>${esc(line.before)}</td><td>${esc(line.spoken)}${line.zh ? `<small>${esc(line.zh)}</small>` : ''}</td></tr>`).join('');
+    const titles = (review.titles || []).length ? `<h3>发布文案</h3><ul class="uk-review-titles">${review.titles.map(title => `<li>${esc(title)}</li>`).join('')}</ul>` : '';
+    const problems = (review.problems || []).length ? `<p class="ai-error">${review.problems.map(esc).join(' ')}</p>` : '';
+    const modal = openModal('核对英国版',`${problems}<div class="take-actions"><span>${changed ? `${review.lines.length} 行里改了 ${changed} 行，改动行已标出` : '口播不用改，只改了发布文案等内容'}</span><a class="subtle" href="${esc(aiTaskHash(job.uk_version.task_id,job.product))}">查看写稿</a><button type="button" class="subtle" data-uk-redo>重新改一版</button></div><div class="uk-review-scroll"><table class="uk-review"><thead><tr><th>#</th><th>美国稿</th><th>英国稿</th></tr></thead><tbody>${rows}</tbody></table></div>${titles}`,'确认并生成制作单',async current => {
+      const result = await once(current,'confirm',`/api/production/jobs/${encodeURIComponent(job.id)}/uk-version-confirm`,async () => ({}));
+      closeModal(true);toast('英国版制作单已生成，记得选英式音色配音。');
+      if (seq === view.sequence) window.location.hash = url(`#production/${encodeURIComponent(result.job.id)}`,job.product);
+    });
+    $('[data-uk-redo]',modal.dialog).onclick = () => {closeModal(true);void restart();};
+  }
   function recoverySection(job) {
     const operations = job.recovery_operations || [], busy = job.voicing || job.timeline_building || (job.edits || []).some(edit => edit.status === 'running');
     return operations.length ? `<section class="production-recovery" id="production-recovery"><h2>异常恢复</h2><p class="context-note">沿用原请求恢复已保存的结果。配音结果仍未知时，请先核对服务商记录；恢复不会自动重发未知配音。</p>${operations.map(operation => {
@@ -589,9 +616,14 @@ window.CaseProduction = (() => {
       if (!node.isConnected) return;
       node.classList.toggle('problem',!status.ok);
       showWarning(status.ok ? '' : status.error || '连接暂不可用');
+      const limit = Number(status.character_limit), used = Number(status.character_count || 0), metered = Number.isFinite(status.character_limit) && limit > 0, percent = metered ? Math.min(100,Math.round(used / limit * 100)) : 0;
+      const usage = Number.isFinite(status.character_limit) ? `<span class="eleven-usage">本期已用 ${used.toLocaleString()} / ${limit.toLocaleString()} 字符</span>` : '';
+      const meter = metered ? `<span class="eleven-meter ${percent >= 90 ? 'high' : ''}" role="progressbar" aria-label="本期字符用量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><i></i></span>` : '';
       node.innerHTML = status.ok
-        ? `<span>ElevenLabs 已连接${status.tier ? ` · ${esc(status.tier)}` : ''}${Number.isFinite(status.character_limit) ? ` · 本期已用 ${Number(status.character_count || 0).toLocaleString()} / ${Number(status.character_limit).toLocaleString()} 字符` : ''}</span><button type="button" class="subtle" data-recheck>重新检查</button>`
+        ? `<span class="eleven-dot" aria-hidden="true"></span><span class="eleven-state">ElevenLabs 已连接${status.tier ? ` · ${esc(status.tier)}` : ''}</span>${usage}<button type="button" class="subtle compact" data-recheck>重新检查</button>${meter}`
         : `<span>${esc(status.error)}</span><p>在 ElevenLabs 后台复制以 sk_ 开头的完整密钥，在 PowerShell 运行：<code>[Environment]::SetEnvironmentVariable('ELEVENLABS_API_KEY','你的密钥','User')</code>，然后点「重新检查」，不用重启工作台。</p><button type="button" class="subtle" data-recheck>重新检查</button>`;
+      // style-src 'self' blocks style attributes in markup, so the width is set through the DOM.
+      const fill = $('.eleven-meter i',node);if (fill) fill.style.width = `${percent}%`;
     } catch (error) {if (!node.isConnected) return;showWarning(fail(error));node.classList.add('problem');node.innerHTML = `<span>暂时无法检查 ElevenLabs：${esc(fail(error))}</span><button type="button" class="subtle" data-recheck>重新检查</button>`;}
     const again = $('[data-recheck]',node);if (again) again.onclick = () => elevenStatus(node,true);
   }
@@ -836,23 +868,51 @@ window.CaseProduction = (() => {
     $('[data-discard]',dialog).onclick = () => {finish();discard();};$('[data-keep]',dialog).onclick = finish;
     dialog.addEventListener('cancel',event => {event.preventDefault();finish();});
   }
+  // A draft may sit on another tab or in a folded row; show it before asking what to do with it.
+  function revealSettingsDraft(session) {
+    const form = $$('form',session.dialog).find(item => session.initial?.get(item.id) !== JSON.stringify(formValues(item)));
+    if (!form) return;
+    session.tab = form.closest('[data-settings-pane]')?.dataset.settingsPane || session.tab;
+    if (form.dataset.voiceNote) session.voiceOpen = form.dataset.voiceNote;
+    if (form.id === 'voice-add') session.voiceAdd = true;
+    applySettingsState(session);
+  }
   function closeSettings(force = false) {
     const session = view.settings;if (!session || session.busy) return;
-    if (!force && settingsDirty(session)) {askSettingsDiscard(() => closeSettings(true));return;}
+    if (!force && settingsDirty(session)) {revealSettingsDraft(session);askSettingsDiscard(() => closeSettings(true));return;}
     session.dialog.close();session.dialog.remove();view.settings = null;
   }
   function beforeNavigate(hash) {
     const session = view.settings;if (!session || hash === session.hash) return true;
     if (session.busy || settingsDirty(session)) {
       history.replaceState(null,'',session.hash);
-      if (!session.busy) askSettingsDiscard(() => {closeSettings(true);location.hash = hash;});
+      if (!session.busy) {revealSettingsDraft(session);askSettingsDiscard(() => {closeSettings(true);location.hash = hash;});}
       return false;
     }
     closeSettings(true);return true;
   }
+  function settingsVoiceRow(voice,data,product) {
+    const isDefault = product && data.defaults?.[window.WorkbenchShell.normalizeProduct(product)] === voice.voice_id;
+    const title = voice.name || voice.note || voice.voice_id, note = voice.note && voice.note !== title ? voice.note : '';
+    const usage = voice.last_used_at ? `${voice.use_count || 0} 次 · ${readableDate(voice.last_used_at).replace(/^\d{4}\//,'')}` : `${voice.use_count || 0} 次`;
+    return `<li class="voice-row ${voice.disabled ? 'disabled' : ''}"><div class="voice-main"><div class="voice-title"><strong title="${esc(title)}">${esc(title)}</strong>${isDefault ? '<span class="script-status published">默认</span>' : ''}${voice.disabled ? '<span class="script-status">已停用</span>' : ''}</div><span class="voice-use">${esc(usage)}</span><div class="voice-actions">${product && !voice.disabled && !isDefault ? `<button type="button" class="subtle compact" data-voice-default="${esc(voice.voice_id)}">设为默认</button>` : ''}<button type="button" class="subtle compact voice-more" data-voice-edit="${esc(voice.voice_id)}" aria-expanded="false" aria-controls="voice-note-${esc(voice.voice_id)}" aria-label="编辑 ${esc(title)}">⋯</button></div>${note ? `<small class="voice-note" title="${esc(note)}">${esc(note)}</small>` : ''}</div><form id="voice-note-${esc(voice.voice_id)}" class="settings-subform voice-edit" data-voice-note="${esc(voice.voice_id)}" hidden><label class="field"><span>备注</span><input name="note" maxlength="500" value="${esc(voice.note || '')}" placeholder="例如：Zack 男声，适合测评稿"></label><div class="voice-edit-foot"><code>${esc(voice.voice_id)}</code><button type="button" class="subtle compact" data-voice-toggle="${esc(voice.voice_id)}">${voice.disabled ? '启用' : '停用'}</button><button type="submit" class="secondary compact">保存备注</button></div><p class="ai-error" data-error role="alert" hidden></p></form></li>`;
+  }
+  function settingsPane(id,content) {return `<section class="settings-pane" id="settings-pane-${id}" role="tabpanel" aria-labelledby="settings-tab-${id}" data-settings-pane="${id}" hidden>${content}</section>`;}
   function drawerSettingsMarkup(data,product) {
-    const voices = data.voices || [];
-    return `<section class="production-setting"><h2>配音服务</h2><div class="production-eleven" id="production-eleven"></div></section><section class="production-setting"><h2>音色库</h2><p class="context-note">生成过的音色会自动留在这里；备注写清是谁的声音、适合什么稿。</p><ul class="voice-list">${voices.length ? voices.map(voice => `<li class="voice-row ${voice.disabled ? 'disabled' : ''}"><div><strong>${esc(voiceLabel(voice))}</strong>${product && data.defaults?.[window.WorkbenchShell.normalizeProduct(product)] === voice.voice_id ? '<span class="script-status published">默认</span>' : ''}${voice.disabled ? '<span class="script-status">已停用</span>' : ''}<code>${esc(voice.voice_id)}</code><small>使用 ${voice.use_count || 0} 次${voice.last_used_at ? ` · 最近 ${esc(readableDate(voice.last_used_at))}` : ''}</small></div><div class="voice-actions"><button type="button" class="subtle" data-voice-note="${esc(voice.voice_id)}">备注</button>${product && !voice.disabled ? `<button type="button" class="subtle" data-voice-default="${esc(voice.voice_id)}">设为默认</button>` : ''}<button type="button" class="subtle" data-voice-toggle="${esc(voice.voice_id)}">${voice.disabled ? '启用' : '停用'}</button></div></li>`).join('') : '<li class="context-note">还没有音色。</li>'}</ul><form id="voice-add" class="inline-form"><label class="field"><span>音色 ID</span><input name="voice_id" required pattern="[A-Za-z0-9]{10,64}" autocomplete="off"></label><label class="field"><span>备注</span><input name="note" maxlength="500" placeholder="例如：Zack 男声，适合测评稿"></label><button type="submit" class="secondary">核对并加入</button><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="production-setting"><h2>读法表${product ? ` · ${esc(product)}` : ''}</h2>${product ? `<p class="context-note">只改送去配音的文字，稿件原文不变。按整词、区分大小写替换。</p><ul class="reading-list">${(data.readings || []).map(item => `<li><span><code>${esc(item.written)}</code> 读作 <strong>${esc(item.spoken)}</strong></span><button type="button" class="subtle" data-reading-remove="${esc(item.id)}">删除</button></li>`).join('') || '<li class="context-note">还没有登记读法。</li>'}</ul><form id="reading-add" class="inline-form"><label class="field"><span>稿中写法</span><input name="written" required maxlength="100" placeholder="例如 202H"></label><label class="field"><span>配音读法</span><input name="spoken" required maxlength="200" placeholder="例如 two oh two H"></label><button type="submit" class="secondary">添加读法</button><p class="ai-error" data-error role="alert" hidden></p></form>` : '<p class="context-note">选择具体产品后维护读法。</p>'}</section>${resolveSettings(data,product)}`;
+    const voices = data.voices || [], readings = data.readings || [];
+    const tabs = [['voices',`音色 ${voices.length}`],['readings',product ? `读法 ${readings.length}` : '读法'],['resolve','达芬奇']];
+    const voicePane = `<ul class="voice-list">${voices.length ? voices.map(voice => settingsVoiceRow(voice,data,product)).join('') : '<li class="context-note">还没有音色。生成过的音色会自动留在这里。</li>'}</ul><button type="button" class="subtle compact settings-add-open" data-voice-add-open>+ 添加音色</button><form id="voice-add" class="settings-subform" hidden><div class="settings-fields"><label class="field"><span>音色 ID</span><input name="voice_id" required pattern="[A-Za-z0-9]{10,64}" autocomplete="off"></label><label class="field"><span>备注</span><input name="note" maxlength="500" placeholder="例如：Zack 男声，适合测评稿"></label></div><div class="settings-actions"><button type="button" class="subtle compact" data-voice-add-cancel>取消</button><button type="submit" class="secondary compact">核对并加入</button></div><p class="ai-error" data-error role="alert" hidden></p></form>`;
+    const readingPane = product ? `<p class="context-note">只改送去配音的文字，稿件原文不变。按整词、区分大小写替换。</p><ul class="reading-list">${readings.map(item => `<li><span><code>${esc(item.written)}</code> 读作 <strong>${esc(item.spoken)}</strong></span><button type="button" class="subtle compact" data-reading-remove="${esc(item.id)}">删除</button></li>`).join('') || '<li class="context-note">还没有登记读法。</li>'}</ul><form id="reading-add" class="settings-subform"><div class="settings-fields reading-fields"><label class="field"><span>稿中写法</span><input name="written" required maxlength="100" placeholder="例如 202H"></label><label class="field"><span>配音读法</span><input name="spoken" required maxlength="200" placeholder="例如 two oh two H"></label><button type="submit" class="secondary compact">添加读法</button></div><p class="ai-error" data-error role="alert" hidden></p></form>` : '<p class="context-note">选择具体产品后维护读法。</p>';
+    return `<div class="production-eleven" id="production-eleven"></div><div class="settings-tabs" role="tablist" aria-label="制作设置分类">${tabs.map(([id,label]) => `<button type="button" class="settings-tab" role="tab" id="settings-tab-${id}" aria-controls="settings-pane-${id}" data-settings-tab="${id}">${label}</button>`).join('')}</div>${settingsPane('voices',voicePane)}${settingsPane('readings',readingPane)}${settingsPane('resolve',resolveSettings(data,product))}`;
+  }
+  function applySettingsState(session) {
+    const root = session.dialog;
+    $$('[data-settings-tab]',root).forEach(tab => {const active = tab.dataset.settingsTab === session.tab;tab.setAttribute('aria-selected',String(active));tab.tabIndex = active ? 0 : -1;});
+    $$('[data-settings-pane]',root).forEach(pane => {pane.hidden = pane.dataset.settingsPane !== session.tab;});
+    $$('[data-voice-note]',root).forEach(form => {form.hidden = form.dataset.voiceNote !== session.voiceOpen;});
+    $$('[data-voice-edit]',root).forEach(button => button.setAttribute('aria-expanded',String(button.dataset.voiceEdit === session.voiceOpen)));
+    const add = $('#voice-add',root), open = $('[data-voice-add-open]',root);
+    if (add && open) {add.hidden = !session.voiceAdd;open.hidden = !!session.voiceAdd;}
   }
   async function reloadSettings(session,savedForm = '') {
     const request = session.request = (session.request || 0) + 1;
@@ -862,22 +922,24 @@ window.CaseProduction = (() => {
     $('.rev-drawer-body',session.dialog).innerHTML = drawerSettingsMarkup(data,session.product);
     session.initial = new Map($$('form',session.dialog).map(form => [form.id,JSON.stringify(formValues(form))]));
     for (const [id,values] of drafts) {
-      const form = $(`#${id}`,session.dialog);if (!form) continue;
+      const form = $(`#${CSS.escape(id)}`,session.dialog);if (!form) continue;
       for (const [name,value] of values) {const input = form.elements.namedItem(name);if (input) input.value = value;}
     }
     bindSettings(data,session);
+    applySettingsState(session);
     void elevenStatus($('#production-eleven',session.dialog));
   }
   async function openSettings() {
     if (view.settings) {if (settingsCurrent(view.settings)) return;closeSettings();if (view.settings) return;}
     const dialog = document.createElement('dialog');dialog.id = 'production-settings';dialog.className = 'rev-drawer production-drawer';dialog.setAttribute('aria-labelledby','production-settings-title');
-    dialog.innerHTML = `<div class="rev-drawer-head"><h2 id="production-settings-title">制作设置</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭制作设置">${icon('close')}</button></div><div class="rev-drawer-body"><p class="context-note">正在读取制作设置…</p></div>`;
-    const session = {dialog,hash:location.hash,product:currentProduct(),busy:false};view.settings = session;
+    const settingsProduct = currentProduct();
+    dialog.innerHTML = `<div class="rev-drawer-head"><h2 id="production-settings-title">制作设置${settingsProduct ? `<small>${esc(settingsProduct)}</small>` : ''}</h2><button type="button" class="icon-button" data-drawer-close aria-label="关闭制作设置">${icon('close')}</button></div><div class="rev-drawer-body"><div class="settings-pane"><p class="context-note">正在读取制作设置…</p></div></div>`;
+    const session = {dialog,hash:location.hash,product:settingsProduct,busy:false,tab:'voices',voiceOpen:'',voiceAdd:false};view.settings = session;
     document.body.append(dialog);dialog.showModal();
     dialog.addEventListener('click',event => {if (event.target === dialog || event.target.closest('[data-drawer-close]')) closeSettings();});
     dialog.addEventListener('cancel',event => {event.preventDefault();closeSettings();});
     try {await reloadSettings(session);}
-    catch (error) {if (settingsCurrent(session)) {const body = $('.rev-drawer-body',dialog);body.innerHTML = `<p class="ai-error" role="alert">${esc(fail(error))}</p><button type="button" class="secondary" data-settings-retry>重新读取</button>`;$('[data-settings-retry]',body).onclick = () => {closeSettings(true);void openSettings();};}}
+    catch (error) {if (settingsCurrent(session)) {const body = $('.rev-drawer-body',dialog);body.innerHTML = `<div class="settings-pane"><p class="ai-error" role="alert">${esc(fail(error))}</p><button type="button" class="secondary" data-settings-retry>重新读取</button></div>`;$('[data-settings-retry]',body).onclick = () => {closeSettings(true);void openSettings();};}}
   }
   async function saveSetting(session,form,operation) {
     if (session.busy || !settingsCurrent(session)) return;
@@ -897,18 +959,23 @@ window.CaseProduction = (() => {
     voiceForm.onsubmit = event => {
       event.preventDefault();const values = Object.fromEntries(new FormData(voiceForm));
       void saveSetting(session,voiceForm,async () => {
-        await send('voice-add','/api/production/voices',{revision:data.revision,operation:'save',voice:{voice_id:values.voice_id.trim(),note:values.note.trim()}});toast('音色已核对并加入音色库。');
+        await send('voice-add','/api/production/voices',{revision:data.revision,operation:'save',voice:{voice_id:values.voice_id.trim(),note:values.note.trim()}});session.voiceAdd = false;toast('音色已核对并加入音色库。');
       });
     };
-    $$('[data-voice-note]',root).forEach(button => button.onclick = () => {
-      const voice = voices.find(item => item.voice_id === button.dataset.voiceNote);
-      openModal('音色备注',`<p class="context-note">${esc(voice.name || '未取得名称')} · <code>${esc(voice.voice_id)}</code></p><label class="field"><span>备注</span><input name="note" maxlength="500" value="${esc(voice.note || '')}"></label>`,'保存备注',async modal => {
-        const note = new FormData(modal.form).get('note').trim();
-        session.busy = true;
-        try {
-          await once(modal,'note','/api/production/voices',async () => ({revision:(await api(`/api/production?product=${encodeURIComponent(product)}`)).revision,operation:'save',voice:{voice_id:voice.voice_id,note,model_id:voice.model_id,settings:voice.settings}}));
-          closeModal(true);toast('备注已保存。');await reloadSettings(session);
-        } finally {session.busy = false;}
+    $('[data-voice-add-open]',root).onclick = () => {session.voiceAdd = true;applySettingsState(session);$('[name="voice_id"]',voiceForm).focus();};
+    $('[data-voice-add-cancel]',root).onclick = () => {voiceForm.reset();setError(voiceForm,'');session.voiceAdd = false;applySettingsState(session);};
+    const tabs = $$('[data-settings-tab]',root);
+    const selectTab = (tab,focus) => {session.tab = tab.dataset.settingsTab;applySettingsState(session);if (focus) tab.focus();};
+    tabs.forEach((tab,index) => {
+      tab.onclick = () => selectTab(tab);
+      tab.onkeydown = event => {const step = {ArrowRight:1,ArrowLeft:-1}[event.key];if (!step) return;event.preventDefault();selectTab(tabs[(index + step + tabs.length) % tabs.length],true);};
+    });
+    $$('[data-voice-edit]',root).forEach(button => button.onclick = () => {session.voiceOpen = session.voiceOpen === button.dataset.voiceEdit ? '' : button.dataset.voiceEdit;applySettingsState(session);});
+    $$('[data-voice-note]',root).forEach(form => form.onsubmit = event => {
+      event.preventDefault();
+      const voice = voices.find(item => item.voice_id === form.dataset.voiceNote), note = new FormData(form).get('note').trim();
+      void saveSetting(session,form,async () => {
+        await send(`voice-note-${voice.voice_id}`,'/api/production/voices',{revision:data.revision,operation:'save',voice:{voice_id:voice.voice_id,note,model_id:voice.model_id,settings:voice.settings}});session.voiceOpen = '';toast('备注已保存。');
       });
     });
     const voiceAction = (operation,voiceId,message) => saveSetting(session,null,async () => {
@@ -934,7 +1001,7 @@ window.CaseProduction = (() => {
 
   function resolveSettings(data,product) {
     const settings = data.settings || {creators:[]}, config = data.product_settings;
-    return `<section class="production-setting"><h2>达芬奇设置${product ? ` · ${esc(product)}` : ''}</h2><form id="resolve-settings" class="inline-form"><label class="field"><span>达人名（逗号分隔，作为时间线名开头）</span><input name="creators" value="${esc((settings.creators || []).join(', '))}" placeholder="例如 Zack, Lab" autocomplete="off"></label>${config ? `<label class="field"><span>达芬奇项目</span><input name="project" required maxlength="200" value="${esc(config.project)}"></label><div class="form-row"><label class="field"><span>时间线编号</span><input name="code" required maxlength="20" pattern="[A-Za-z0-9]+" value="${esc(config.code)}"></label><label class="field"><span>帧率</span><select name="fps">${frameRates.map(value => `<option ${value === config.fps ? 'selected' : ''}>${value}</option>`).join('')}</select></label></div><div class="form-row"><label class="field"><span>宽</span><input name="width" type="number" min="16" max="8192" required value="${esc(config.width)}"></label><label class="field"><span>高</span><input name="height" type="number" min="16" max="8192" required value="${esc(config.height)}"></label></div><p class="context-note">新时间线命名如 <code>${esc((settings.creators || [])[0] || '达人')}${today()}-${esc(config.code)}-序号</code>；配音放「${esc(config.audio_bin)}」素材夹，时间线放「${esc(config.timeline_bin)}」素材夹。建线时会在达芬奇里找名称含达人名的文件夹（如「B跨境店渠道号-zack」），到里面的对应项目建；支持原项目名或「达人名-项目名」（如 Zack-202H、Lab-202H），此处仍可填 202H。已有项目会按身份核对，改名后仍可继续使用。需要切换时先保存并关闭当前项目。</p>` : '<p class="context-note">选择具体产品后设置达芬奇项目和时间线编号。</p>'}<button type="submit" class="secondary">保存设置</button><p class="ai-error" data-error role="alert" hidden></p></form></section>`;
+    return `<form id="resolve-settings" class="settings-form"><label class="field"><span>达人名（逗号分隔，作为时间线名开头）</span><input name="creators" value="${esc((settings.creators || []).join(', '))}" placeholder="例如 Zack, Lab" autocomplete="off"></label>${config ? `<div class="settings-fields"><label class="field"><span>达芬奇项目</span><input name="project" required maxlength="200" value="${esc(config.project)}"></label><label class="field"><span>时间线编号</span><input name="code" required maxlength="20" pattern="[A-Za-z0-9]+" value="${esc(config.code)}"></label></div><div class="settings-fields three"><label class="field"><span>帧率</span><select name="fps">${frameRates.map(value => `<option ${value === config.fps ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label class="field"><span>宽</span><input name="width" type="number" min="16" max="8192" required value="${esc(config.width)}"></label><label class="field"><span>高</span><input name="height" type="number" min="16" max="8192" required value="${esc(config.height)}"></label></div><p class="context-note">新时间线：<code>${esc((settings.creators || [])[0] || '达人')}${today()}-${esc(config.code)}-序号</code></p><details class="settings-more"><summary>素材夹和建线规则</summary><p class="context-note">配音放「${esc(config.audio_bin)}」素材夹，时间线放「${esc(config.timeline_bin)}」素材夹。建线时会在达芬奇里找名称含达人名的文件夹（如「B跨境店渠道号-zack」），到里面的对应项目建；支持原项目名或「达人名-项目名」（如 Zack-202H、Lab-202H），此处仍可填 202H。已有项目会按身份核对，改名后仍可继续使用。需要切换时先保存并关闭当前项目。</p></details>` : '<p class="context-note">选择具体产品后设置达芬奇项目和时间线编号。</p>'}<div class="settings-actions"><button type="submit" class="primary compact">保存设置</button></div><p class="ai-error" data-error role="alert" hidden></p></form>`;
   }
   function bindResolveSettings(data,product,session) {
     const form = $('#resolve-settings',session.dialog), config = data.product_settings;
@@ -1244,7 +1311,7 @@ window.CaseProduction = (() => {
     const running = edits.some(edit => edit.status === 'running');
     const olderIds = edits.slice(1).filter(edit => edit.status !== 'running').map(edit => edit.id);
     const form = !timelines.length && !pendingTimelineId(choice.edit_timeline) ? '<p class="context-note">先建时间线，再让 AI 按意群标记去素材里选画面、拼成视频。</p>'
-      : `<form id="edit-form"><div class="form-row"><label class="field" data-edit-target-field><span>目标时间线</span><select name="timeline">${editTargetOptions(job,choice)}</select></label><label class="field"><span>选画面模式</span><select name="mode">${jobEditModes(job).map(([key,label]) => `<option value="${key}" ${key === (choice.edit_mode || defaultEditMode(job)) ? 'selected' : ''}>${label}</option>`).join('')}</select></label></div><p class="context-note" data-pending-edit-note ${pendingTimelineId(choice.edit_timeline) ? '' : 'hidden'}>可以先提交剪辑；本次时间线建好后自动接着剪，关闭页面也会继续。</p><label class="timeline-options-check" data-recut-row hidden><input type="checkbox" name="recut" checked>另建一条时间线来剪，这条已有的剪辑不动，方便对比</label><fieldset class="material-picker"><legend>素材时间线</legend><div data-materials>正在读取达芬奇里的时间线…</div></fieldset><label class="field"><span>本次额外要求（可选）</span><textarea name="instruction" rows="3" maxlength="4000" placeholder="例如：开头用切纸结果；只剪前 4 个意群">${esc(choice.edit_instruction || '')}</textarea></label><p class="context-note"><span data-edit-default role="status">正在读取全局默认模型…</span> <a href="${esc(url('#settings'))}" data-edit-settings>修改全局设置</a> · <button type="button" class="subtle" data-edit-default-refresh>重新读取</button></p><div data-edit-override hidden><p class="context-note">当前全局默认暂不能用于 AI 剪辑，请为本次选择兼容模型，或修改全局设置。</p><div class="form-row"><label class="field"><span>本次剪辑模型</span><select name="model"><option value="">请选择兼容模型</option></select></label><label class="field"><span>本次思考强度</span><select name="effort"><option value="">客户端默认</option></select></label></div></div><p class="production-resolve" data-edit-provider-status role="status">正在检查剪辑客户端…</p><div class="take-actions"><button type="submit" class="primary" disabled>开始 AI 剪辑</button><button type="button" class="secondary" data-copy-handoff>复制剪辑指令</button><button type="button" class="secondary" data-open-target-timeline>在达芬奇打开时间线</button>${infoTip('<p data-edit-usage>AI 剪辑默认沿用全局模型与思考强度，支持 Codex 和 Claude。</p>','AI 剪辑说明')}${running ? '<span>已有剪辑任务，可选择其他时间线继续准备。</span>' : ''}</div><p class="ai-error" data-error role="alert" hidden></p></form>`;
+      : `<form id="edit-form"><div class="form-row"><label class="field" data-edit-target-field><span>目标时间线</span><select name="timeline">${editTargetOptions(job,choice)}</select></label><label class="field"><span>选画面模式</span><select name="mode">${jobEditModes(job).map(([key,label]) => `<option value="${key}" ${key === (choice.edit_mode || defaultEditMode(job)) ? 'selected' : ''}>${label}</option>`).join('')}</select></label></div><p class="context-note" data-pending-edit-note ${pendingTimelineId(choice.edit_timeline) ? '' : 'hidden'}>可以先提交剪辑；本次时间线建好后自动接着剪，关闭页面也会继续。</p><label class="timeline-options-check" data-recut-row hidden><input type="checkbox" name="recut" checked>另建一条时间线来剪，这条已有的剪辑不动，方便对比</label><fieldset class="material-picker"><legend>素材时间线</legend><div data-materials>正在读取达芬奇里的时间线…</div></fieldset><label class="field"><span>本次额外要求（可选）</span><textarea name="instruction" rows="3" maxlength="4000" placeholder="例如：开头用切纸结果；只剪前 4 个意群">${esc(choice.edit_instruction || '')}</textarea></label><div data-edit-override hidden><p class="context-note" data-edit-override-note hidden>当前全局默认暂不能用于 AI 剪辑，请为本次选择兼容模型，或修改全局设置。</p><div class="form-row"><label class="field"><span>本次剪辑模型</span><select name="model"><option value="">请选择兼容模型</option></select></label><label class="field"><span>本次思考强度</span><select name="effort"><option value="">客户端默认</option></select></label></div></div><p class="context-note"><span data-edit-default role="status">正在读取全局默认模型…</span> <a href="${esc(url('#settings'))}" data-edit-settings>修改全局设置</a> · <button type="button" class="subtle" data-edit-default-refresh>重新读取</button></p><p class="production-resolve" data-edit-provider-status role="status">正在检查剪辑客户端…</p><div class="take-actions"><button type="submit" class="primary" disabled>开始 AI 剪辑</button><button type="button" class="secondary" data-copy-handoff>复制剪辑指令</button><button type="button" class="secondary" data-open-target-timeline>在达芬奇打开时间线</button>${infoTip('<p data-edit-usage>AI 剪辑默认沿用全局模型与思考强度，支持 Codex 和 Claude。</p>','AI 剪辑说明')}${running ? '<span>已有剪辑任务，可选择其他时间线继续准备。</span>' : ''}</div><div class="edit-effort-confirm" data-effort-confirm role="alert" hidden><span data-effort-confirm-text></span><span class="edit-effort-actions"><button type="button" class="primary" data-effort-lower>改 medium 开始</button><button type="button" class="secondary" data-effort-keep>仍用这个强度开始</button><button type="button" class="secondary" data-effort-cancel>取消</button></span></div><p class="ai-error" data-error role="alert" hidden></p></form>`;
     return `<section class="section-card" id="edit-panel"><h2>AI 剪辑与人工审查 <small>AI 剪辑 ${edits.length} 次</small></h2><div id="production-completion-host">${completionSection(job,choice)}</div><div id="edit-runs">${editRunsMarkup(data)}</div>${form}</section>`;
   }
   function editRunsMarkup(data) {
@@ -1441,7 +1508,7 @@ window.CaseProduction = (() => {
       setTimeout(poll,5000);
     }
     if (!form) return;
-    let catalog = null, clients = null, defaults = null, defaultsError = '', clientsError = '', loadingDefaults = false, starting = false, defaultsSequence = 0, defaultsFingerprint = '';
+    let catalog = null, clients = null, defaults = null, defaultsError = '', clientsError = '', loadingDefaults = false, starting = false, defaultsSequence = 0, defaultsFingerprint = '', overriding = false, effortConfirmed = false;
     const isCurrentForm = () => form.isConnected && seq === view.sequence;
     const modelInfo = model => (catalog?.models || []).find(entry => entry.id === model) || (model === 'codex-default' ? {id:model,name:editModelLabel(model),provider:'codex',reasoning_efforts:[]} : null);
     const providerFor = model => modelInfo(model)?.provider || editProvider(model);
@@ -1459,8 +1526,18 @@ window.CaseProduction = (() => {
       const entry = modelInfo(model);
       return Boolean(supported(model,effort) && entry && entry.available !== false);
     };
-    const usesDefault = () => Boolean(defaults && supported(defaultModel(),defaults.reasoning_effort));
+    const defaultUsable = () => Boolean(defaults && supported(defaultModel(),defaults.reasoning_effort));
+    // The two selects always show what this edit will use; a pick that differs from the global default applies to this edit only.
+    const usesDefault = () => defaultUsable() && !overriding;
     const localSettings = () => ({model:form.model.value,effort:form.effort.value || null});
+    const noteOverride = () => {
+      overriding = defaultUsable() && !(form.model.value === defaultModel() && (form.effort.value || null) === (defaults.reasoning_effort || null));
+      choice.edit_override = (overriding || !defaultUsable()) && form.model.value ? localSettings() : null;
+    };
+    const chosenEffort = () => {
+      const model = selectedModel(), effort = usesDefault() ? defaults.reasoning_effort : form.effort.value;
+      return effort || modelInfo(model)?.default_reasoning_effort || '';
+    };
     const selectedModel = () => usesDefault() ? defaultModel() : form.model.value;
     const selectedTimelineRunning = () => runningEdits.some(edit => edit.status === 'running' && (edit.timeline_uid === form.timeline.value ||
       pendingTimelineId(form.timeline.value) && edit.timeline_request_id === pendingTimelineId(form.timeline.value)));
@@ -1476,20 +1553,29 @@ window.CaseProduction = (() => {
       form.effort.value = allowed.includes(previous) ? previous : '';
       form.effort.disabled = !form.model.value || loadingDefaults;
     };
+    const followDefault = () => {
+      form.model.value = defaultModel();
+      syncEfforts();
+      const effort = defaults.reasoning_effort || '';
+      // A failed catalog read leaves no effort list, but the saved default still has to show.
+      if (effort && ![...form.effort.options].some(option => option.value === effort)) form.effort.add(new Option(effort,effort));
+      form.effort.value = effort;
+    };
     const updateEditControls = () => {
       if (!isCurrentForm()) return;
-      const ready = modelReady(), inherited = usesDefault(), modelName = defaults ? modelInfo(defaultModel())?.name || editModelLabel(defaultModel()) : '';
+      const ready = modelReady(), inherited = usesDefault(), usable = defaultUsable(), modelName = defaults ? modelInfo(defaultModel())?.name || editModelLabel(defaultModel()) : '';
       const model = selectedModel(), provider = providerFor(model), client = editClient(provider), state = clients?.providers?.[provider];
       $('[data-edit-default]',form).textContent = loadingDefaults ? '正在读取全局默认模型…' : defaultsError ? `全局默认配置暂时不可用：${defaultsError}` :
-        defaults ? `${inherited ? '使用全局默认' : '全局默认'}：${modelName}${defaults.reasoning_effort ? ` · ${defaults.reasoning_effort}` : ' · 客户端默认思考强度'}${inherited ? (compatible(defaultModel(),defaults.reasoning_effort) ? '' : '（暂不可用，请在设置中检查连接）') : '（与剪辑不兼容）'}` : '全局默认配置尚未就绪。';
+        defaults ? `${inherited ? '使用全局默认' : '全局默认'}：${modelName}${defaults.reasoning_effort ? ` · ${defaults.reasoning_effort}` : ' · 客户端默认思考强度'}${usable ? overriding ? '（本次已单独选择）' : compatible(defaultModel(),defaults.reasoning_effort) ? '' : '（暂不可用，请在设置中检查连接）' : '（与剪辑不兼容）'}` : '全局默认配置尚未就绪。';
       const status = $('[data-edit-provider-status]',form);
       status.classList.toggle('problem',Boolean(!loadingDefaults && model && (!state?.available || !compatible(model,usesDefault() ? defaults?.reasoning_effort : localSettings().effort))));
       status.textContent = loadingDefaults || !defaults ? '正在检查剪辑客户端…' : clientsError ? `剪辑客户端检查失败：${clientsError}` : !model ? '请选择本次剪辑使用的兼容模型。' : !state?.available ? `${client}暂不可用：${state?.error || state?.label || '请在设置中检查客户端连接。'}` : !compatible(model,usesDefault() ? defaults.reasoning_effort : localSettings().effort) ? `${client}已连接；${catalog?.models_error || '模型或思考强度尚未确认，请在设置中检查。'}` : selectedTimelineRunning() && !recutting() ? '当前目标时间线已有剪辑任务，请选择其他时间线。' : clients.busy ? `${client}可用；可同时准备多条剪辑，需要操作达芬奇时会自动等待。` : `${client}可用于 AI 剪辑。`;
       // A ready client needs no line of its own; only waiting, busy or broken states are shown.
       status.hidden = !status.classList.contains('problem') && status.textContent === `${client}可用于 AI 剪辑。`;
       $('[data-edit-usage]',form).textContent = `AI 剪辑默认沿用全局模型与思考强度，支持 Codex 和 Claude，${model ? provider === 'codex' ? '使用 Codex 客户端当前登录账户的额度' : '使用已连接 Claude 账户的订阅额度' : '使用所选客户端当前账户的额度'}。不同时间线可同时准备，操作达芬奇的阶段会自动等待。任务在后台运行，操作达芬奇期间请不要手动改动工程；按技能保存后显示剪辑说明和缺素材项，再交你人工审查，默认不做剪后工程核验。也可以「复制剪辑指令」，粘到 Codex 或 Claude Code 对话里边看边剪。`;
-      $('[data-edit-override]',form).hidden = loadingDefaults || Boolean(defaultsError) || !defaults || inherited;
-      form.model.disabled = loadingDefaults || Boolean(defaultsError) || inherited;
+      $('[data-edit-override]',form).hidden = Boolean(defaultsError) || !defaults;
+      $('[data-edit-override-note]',form).hidden = usable;
+      form.model.disabled = loadingDefaults || Boolean(defaultsError);
       form.effort.disabled = form.model.disabled || !form.model.value;
       $('[data-edit-default-refresh]',form).disabled = loadingDefaults || starting;
       const pending = Boolean(pendingTimelineId(form.timeline.value)), submit = $('button[type="submit"]',form);
@@ -1519,25 +1605,45 @@ window.CaseProduction = (() => {
         catalog = next;defaults = next.default_settings;
         const models = new Map([...Object.entries(editModels).map(([id,name]) => [id,{id,name,provider:'claude',available:false}]),['codex-default',modelInfo('codex-default')]]);
         next.models.forEach(entry => {if (entry && typeof entry.id === 'string' && entry.id && ['claude','codex'].includes(entry.provider || editProvider(entry.id))) {models.set(entry.id,entry);editModelNames.set(entry.id,entry.name || entry.id);}});
+        if (defaultUsable() && !models.has(defaultModel())) models.set(defaultModel(),{id:defaultModel(),name:editModelLabel(defaultModel()),provider:providerFor(defaultModel())});
         const fingerprint = JSON.stringify([defaults,[...models.values()].map(entry => [entry.id,entry.available,entry.reasoning_efforts])]);
-        const previous = fingerprint === defaultsFingerprint && !usesDefault() ? form.model.value : '';
+        // A pick made before the form was redrawn comes back with it; a changed global default drops it.
+        const saved = !defaultsFingerprint && models.has(choice.edit_override?.model) ? choice.edit_override : null;
+        const previous = saved?.model || (fingerprint === defaultsFingerprint && !usesDefault() ? form.model.value : '');
         defaultsFingerprint = fingerprint;
         form.model.innerHTML = '<option value="">请选择兼容模型</option>' + [...models.values()].map(entry => {
           const ready = entry.available !== false && clients?.providers?.[providerFor(entry.id)]?.available;
           return `<option value="${esc(entry.id)}" ${ready ? '' : 'disabled'}>${esc(entry.name || entry.id)}${ready ? '' : ' · 未就绪'}</option>`;
         }).join('');
         form.model.value = previous;
-        if (!previous) form.effort.value = '';
+        if (!previous) {form.effort.value = '';overriding = false;choice.edit_override = null;}
         syncEfforts();
+        if (saved) {form.effort.value = saved.effort || '';noteOverride();}
+        if (!overriding && defaultUsable()) followDefault();
       } catch (error) {
         if (!isCurrentForm() || reading !== defaultsSequence) return;
-        defaultsError = fail(error);form.model.value = '';form.effort.value = '';defaultsFingerprint = '';
+        defaultsError = fail(error);form.model.value = '';form.effort.value = '';defaultsFingerprint = '';overriding = false;
       } finally {
         if (isCurrentForm() && reading === defaultsSequence) {loadingDefaults = false;updateEditControls();}
       }
     };
-    form.model.onchange = () => {form.effort.value = '';syncEfforts();updateEditControls();};
-    form.effort.onchange = updateEditControls;
+    const effortBar = $('[data-effort-confirm]',form), editActions = $('.take-actions',form);
+    const closeEffortConfirm = () => {effortBar.hidden = true;editActions.hidden = false;};
+    const showEffortConfirm = effort => {
+      const lower = $('[data-effort-lower]',effortBar), keep = $('[data-effort-keep]',effortBar);
+      $('[data-effort-confirm-text]',effortBar).textContent = `思考强度 ${effort} 高于 medium，这条可能明显变慢。`;
+      keep.textContent = `仍用 ${effort} 开始`;
+      lower.hidden = !(modelInfo(selectedModel())?.reasoning_efforts || []).includes('medium');
+      editActions.hidden = true;effortBar.hidden = false;
+      (lower.hidden ? keep : lower).focus();
+    };
+    $('[data-effort-lower]',effortBar).onclick = () => {form.effort.value = 'medium';noteOverride();updateEditControls();closeEffortConfirm();form.requestSubmit();};
+    $('[data-effort-keep]',effortBar).onclick = () => {effortConfirmed = true;closeEffortConfirm();form.requestSubmit();};
+    $('[data-effort-cancel]',effortBar).onclick = closeEffortConfirm;
+    form.addEventListener('input',closeEffortConfirm);
+    form.addEventListener('change',closeEffortConfirm);
+    form.model.onchange = () => {syncEfforts();noteOverride();updateEditControls();};
+    form.effort.onchange = () => {noteOverride();updateEditControls();};
     form.timeline.onchange = () => {form.recut.checked = true;updateEditControls();};
     form.recut.onchange = updateEditControls;
     $('[data-edit-default-refresh]',form).onclick = loadEditDefaults;
@@ -1598,6 +1704,7 @@ window.CaseProduction = (() => {
     };
     form.onsubmit = async event => {
       event.preventDefault();setError(form,'');
+      const confirmed = effortConfirmed;effortConfirmed = false;
       if (starting || job.archived) return;
       if (selectedTimelineUnavailable()) {setError(form,'原建线未完成，请重新建线或选择目标时间线。');return;}
       if (selectedTimelineRunning() && !recutting()) {setError(form,'当前目标时间线已有剪辑任务，请选择其他时间线。');return;}
@@ -1606,11 +1713,13 @@ window.CaseProduction = (() => {
       const problem = materialProblem(body.materials);
       if (problem) {setError(form,problem);return;}
       if (!modelReady()) {setError(form,defaultsError || (loadingDefaults ? '正在读取全局默认配置，请稍候。' : '请选择本次剪辑使用的兼容模型，或修改全局设置。'));return;}
+      const effort = chosenEffort();
+      if (highEditEfforts.has(effort) && !confirmed) {showEffortConfirm(effort);return;}
       const submit = $('button[type="submit"]',form);submit.disabled = true;submit.textContent = '正在加入剪辑任务…';
       starting = true;updateEditControls();
       try {await send(`edit-${job.id}`,`/api/production/jobs/${encodeURIComponent(job.id)}/edit`,body);toast(body.recut_from ? '已另建时间线并加入剪辑任务，原来的剪辑没有改动。' : body.timeline_request_id ? '已提交剪辑，本次时间线建好后自动接着剪，关闭页面也会继续。' : '已加入剪辑任务，需要操作达芬奇时会自动等待，完成后这里会显示结果。');}
       catch (error) {setError(form,fail(error));starting = false;submit.textContent = '开始 AI 剪辑';updateEditControls();return;}
-      choice.edit_draft = false;
+      choice.edit_draft = false;choice.edit_override = null;
       if (seq === view.sequence) await route(true);
     };
   }
@@ -1862,7 +1971,7 @@ window.CaseProduction = (() => {
         const code = node.textContent.replace(/\s+$/,''), marked = code.split('\n').filter(line => line.includes('🔴'));
         if (marked.length) boxed(node,copyButton(marked.length > 1 ? '复制这一套发布文案' : '复制发布文案',marked.join('\n'),'发布文案已复制'));
         else if (/中文/.test(label)) boxed(node,copyButton('复制中文',code,'中文已复制'));
-        else if (/口播|英文|English/i.test(label)) boxed(node,copyButton('复制英文口播',code,'英文口播已复制'));
+        else if (/口播|英文|English/i.test(label)) boxed(node,copyButton('复制口播',code,'口播已复制'));
         else boxed(node,copyButton('复制',code,'已复制'));
         return;
       }
@@ -1995,7 +2104,10 @@ window.CaseProduction = (() => {
     const modelId = choice.model_id || voices.find(voice => voice.voice_id === voiceId)?.model_id || data.default_model;
     const voiceName = id => {const voice = (data.voices || []).find(item => item.voice_id === id);return voice ? voiceLabel(voice) : id;};
     const modelName = id => models.find(item => item.id === id)?.name || id;
-    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#content',job.product))}">${icon('back')}返回内容</a><div class="page-heading"><div><span class="eyebrow">PRODUCTION JOB</span><h1 data-production-title>${esc(productionTitle(job))}</h1><p>${esc(job.product)} · ${esc(job.direction_id || '未指定方向')}${variantSubtitle(productionTitle(job),job.variant_label) ? ` · ${esc(variantSubtitle(productionTitle(job),job.variant_label))}` : ''} · <span class="script-status ${['voiced','timeline','approved'].includes(job.status) ? 'published' : ''}">${esc(job.archived ? '已归档' : statusLabels[job.status] || job.status)}</span>${data.script ? ` · 采用稿 · 第 ${esc(data.script.version || 1)} 版` : ' · 采用稿已不可读'}${job.replica ? ` · 照原片 <a href="${esc(url(`#case/${encodeURIComponent(job.replica.case_id)}`,job.product))}">${esc(job.replica.case_id)}</a>（${job.replica.shots.length} 个镜头）` : ''}</p></div><div class="production-heading-tools">${orderNavMarkup(job)}<details class="script-more-actions production-more-actions"><summary class="secondary compact menu-trigger">更多操作</summary><div><button type="button" id="job-archive">${icon(job.archived ? 'restore' : 'archive')}${job.archived ? '恢复制作单' : '归档制作单'}</button><hr class="menu-sep"><button type="button" class="production-delete" id="job-delete">${icon('trash')}永久删除</button></div></details></div></div>${recoverySection(job)}<section class="section-card" id="job-script-panel"><div class="section-title-row"><h2>脚本 <small>${esc(job.variant_label || data.variant?.label || '')}${job.variant_label || data.variant?.label ? ' · ' : ''}${job.lines.length} 个意群</small></h2>${fillControls(job,data)}</div>${problemsMarkup(job.problems,scriptGaps(job,data) && !fillRunning(job))}<div id="job-adopted-script"></div><div class="script-lines"><h3>意群表 <small>含画面要求${selected ? '与配音时间' : ''}</small></h3>${linesTable(job.lines,selected ? selected.groups : null)}</div><details class="script-original" id="job-script-original" ${choice.script_original_open ? 'open' : ''}><summary>原稿全文 <small>开头画面、屏显、口播与中文、发布文案等，可逐段复制</small></summary><div class="script-variant markdown-body" id="job-script-body"></div></details></section><section class="section-card" id="voice-panel"><h2>配音</h2>${job.voicing ? '<p class="production-busy">正在生成配音，完成后自动刷新…</p>' : ''}<form id="take-form" class="take-form"><div class="form-row"><label class="field"><span>音色</span><select name="voice">${voices.map(voice => `<option value="${esc(voice.voice_id)}" ${voice.voice_id === voiceId ? 'selected' : ''}>${esc(voiceLabel(voice))}${data.defaults?.[job.product] === voice.voice_id ? '（默认）' : ''}</option>`).join('')}<option value="__new" ${voiceId === '__new' ? 'selected' : ''}>新音色 ID…</option></select></label><label class="field"><span>模型</span><select name="model_id">${models.map(model => `<option value="${esc(model.id)}" ${model.id === modelId ? 'selected' : ''}>${esc(model.name)}</option>`).join('')}</select></label></div><div class="form-row" data-new-voice ${voiceId === '__new' ? '' : 'hidden'}><label class="field"><span>新音色 ID</span><input name="new_voice_id" pattern="[A-Za-z0-9]{10,64}" autocomplete="off" value="${esc(choice.new_voice_id || '')}"></label><label class="field"><span>备注（存入音色库）</span><input name="new_note" maxlength="500" value="${esc(choice.new_note || '')}"></label></div><div class="take-settings" data-settings></div><details class="take-text"><summary>送去配音的文字（${data.tts.characters} 字符${data.tts.substitutions ? `，已套用读法 ${data.tts.substitutions} 处` : ''}）</summary><pre>${esc(data.tts.text)}</pre></details><div class="take-actions"><button class="primary" type="submit" ${job.voicing || job.archived ? 'disabled' : ''}>生成配音</button><span>约消耗 ${data.tts.characters} 字符额度</span></div><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="section-card" id="take-panel"><h2>配音版本 <small>${takes.length} 版</small></h2>${takes.length ? takes.map(take => `<article class="take-card ${take.id === job.selected_take ? 'selected' : ''}" data-take-id="${esc(take.id)}" data-activity-source="${esc(take.id)}"><div class="take-head"><div><strong>${esc(voiceName(take.voice_id))}</strong><small>${esc(modelName(take.model_id))} · ${Object.keys(settingLabels).filter(key => key in (take.settings || {})).map(key => `${settingLabels[key]} ${take.settings[key]}`).join(' · ')} · ${esc(seconds(take.duration))} · ${esc(readableDate(take.created_at))}</small></div>${takeSelectionMarkup(data,take)}</div>${takeAudioPlayer(job.id,take)}${voiceSegments(take,job.lines)}${(take.warnings || []).length ? `<ul class="take-warnings">${take.warnings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}<details><summary>意群时间（${esc(sourceLabels[take.alignment_source] || take.alignment_source)}）</summary><table class="production-table compact"><thead><tr><th>#</th><th>开始</th><th>结束</th><th>对上的字</th></tr></thead><tbody>${voiceTimingRows(take)}</tbody></table></details><div class="take-links" title="${esc(take.id)}">${takeAudioDownloads(job.id,take)}</div></article>`).join('') : '<p class="context-note">还没有配音。</p>'}</section>${timelineSection(data,choice,selected)}${editSection(data,choice)}`;
+    const markets = data.markets || [];
+    const marketOf = id => markets.find(item => item.id === id);
+    const marketId = choice.market || job.takes?.[job.takes.length - 1]?.market || job.market || 'us';
+    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#content',job.product))}">${icon('back')}返回内容</a><div class="page-heading"><div><span class="eyebrow">PRODUCTION JOB</span><h1 data-production-title>${esc(productionTitle(job))}</h1><p>${esc(job.product)} · ${esc(job.direction_id || '未指定方向')}${variantSubtitle(productionTitle(job),job.variant_label) ? ` · ${esc(variantSubtitle(productionTitle(job),job.variant_label))}` : ''} · <span class="script-status ${['voiced','timeline','approved'].includes(job.status) ? 'published' : ''}">${esc(job.archived ? '已归档' : statusLabels[job.status] || job.status)}</span>${data.script ? ` · 采用稿 · 第 ${esc(data.script.version || 1)} 版` : ' · 采用稿已不可读'}${job.replica ? ` · 照原片 <a href="${esc(url(`#case/${encodeURIComponent(job.replica.case_id)}`,job.product))}">${esc(job.replica.case_id)}</a>（${job.replica.shots.length} 个镜头）` : ''}</p></div><div class="production-heading-tools">${orderNavMarkup(job)}<details class="script-more-actions production-more-actions"><summary class="secondary compact menu-trigger">更多操作</summary><div>${canMakeUk(job) ? `<button type="button" id="job-uk-start-menu">做英国版</button>` : ''}<button type="button" id="job-archive">${icon(job.archived ? 'restore' : 'archive')}${job.archived ? '恢复制作单' : '归档制作单'}</button><hr class="menu-sep"><button type="button" class="production-delete" id="job-delete">${icon('trash')}永久删除</button></div></details></div></div>${recoverySection(job)}${marketVersionMarkup(job)}<section class="section-card" id="job-script-panel"><div class="section-title-row"><h2>脚本 <small>${esc(job.variant_label || data.variant?.label || '')}${job.variant_label || data.variant?.label ? ' · ' : ''}${job.lines.length} 个意群</small></h2>${fillControls(job,data)}</div>${problemsMarkup(job.problems,scriptGaps(job,data) && !fillRunning(job))}<div id="job-adopted-script"></div><div class="script-lines"><h3>意群表 <small>含画面要求${selected ? '与配音时间' : ''}</small></h3>${linesTable(job.lines,selected ? selected.groups : null)}</div><details class="script-original" id="job-script-original" ${choice.script_original_open ? 'open' : ''}><summary>原稿全文 <small>开头画面、屏显、口播与中文、发布文案等，可逐段复制</small></summary><div class="script-variant markdown-body" id="job-script-body"></div></details></section><section class="section-card" id="voice-panel"><h2>配音</h2>${job.voicing ? '<p class="production-busy">正在生成配音，完成后自动刷新…</p>' : ''}<form id="take-form" class="take-form"><div class="form-row"><label class="field"><span>音色</span><select name="voice">${voices.map(voice => `<option value="${esc(voice.voice_id)}" ${voice.voice_id === voiceId ? 'selected' : ''}>${esc(voiceLabel(voice))}${data.defaults?.[job.product] === voice.voice_id ? '（默认）' : ''}</option>`).join('')}<option value="__new" ${voiceId === '__new' ? 'selected' : ''}>新音色 ID…</option></select></label>${markets.length ? `<label class="field"><span>配音语言</span><select name="market">${markets.map(item => `<option value="${esc(item.id)}" ${item.id === marketId ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></label>` : ''}<label class="field"><span>模型</span><select name="model_id">${models.map(model => `<option value="${esc(model.id)}" ${model.id === modelId ? 'selected' : ''}>${esc(model.name)}</option>`).join('')}</select></label></div><div class="form-row" data-new-voice ${voiceId === '__new' ? '' : 'hidden'}><label class="field"><span>新音色 ID</span><input name="new_voice_id" pattern="[A-Za-z0-9]{10,64}" autocomplete="off" value="${esc(choice.new_voice_id || '')}"></label><label class="field"><span>备注（存入音色库）</span><input name="new_note" maxlength="500" value="${esc(choice.new_note || '')}"></label></div><p class="take-market-hint" data-market-hint ${marketOf(marketId)?.voice_hint ? '' : 'hidden'}>${esc(marketOf(marketId)?.voice_hint || '')}</p><div class="take-settings" data-settings></div><details class="take-text"><summary>送去配音的文字（${data.tts.characters} 字符${data.tts.substitutions ? `，已套用读法 ${data.tts.substitutions} 处` : ''}）</summary><pre>${esc(data.tts.text)}</pre></details><div class="take-actions"><button class="primary" type="submit" ${job.voicing || job.archived ? 'disabled' : ''}>生成配音</button><span>约消耗 ${data.tts.characters} 字符额度</span></div><p class="ai-error" data-error role="alert" hidden></p></form></section><section class="section-card" id="take-panel"><h2>配音版本 <small>${takes.length} 版</small></h2>${takes.length ? takes.map(take => `<article class="take-card ${take.id === job.selected_take ? 'selected' : ''}" data-take-id="${esc(take.id)}" data-activity-source="${esc(take.id)}"><div class="take-head"><div><strong>${esc(voiceName(take.voice_id))}</strong><small>${take.market && take.market !== 'us' ? `${esc(marketOf(take.market)?.label || take.market)} · ` : ''}${esc(modelName(take.model_id))} · ${Object.keys(settingLabels).filter(key => key in (take.settings || {})).map(key => `${settingLabels[key]} ${take.settings[key]}`).join(' · ')} · ${esc(seconds(take.duration))} · ${esc(readableDate(take.created_at))}</small></div>${takeSelectionMarkup(data,take)}</div>${takeAudioPlayer(job.id,take)}${voiceSegments(take,job.lines)}${(take.warnings || []).length ? `<ul class="take-warnings">${take.warnings.map(item => `<li>${esc(item)}</li>`).join('')}</ul>` : ''}<details><summary>意群时间（${esc(sourceLabels[take.alignment_source] || take.alignment_source)}）</summary><table class="production-table compact"><thead><tr><th>#</th><th>开始</th><th>结束</th><th>对上的字</th></tr></thead><tbody>${voiceTimingRows(take)}</tbody></table></details><div class="take-links" title="${esc(take.id)}">${takeAudioDownloads(job.id,take)}</div></article>`).join('') : '<p class="context-note">还没有配音。</p>'}</section>${timelineSection(data,choice,selected)}${editSection(data,choice)}`;
     window.CaseScripts?.mountAdopted?.($('#job-adopted-script'),data.script,{productionId:job.id,kind:'video'});
     window.WorkbenchLinks?.mount({kind:'video',record:job,script:data.script});
     mountProductionNeeds(data,'video');
@@ -2029,11 +2141,12 @@ window.CaseProduction = (() => {
     };
     const remember = () => {
       const model = form.model_id.value, settings = Object.fromEntries($$('input[type="range"]',form).map(input => [input.name.replace('setting-',''),Number(input.value)]));
-      Object.assign(choice,{voice_id:form.voice.value,model_id:model,new_voice_id:form.new_voice_id.value.trim(),new_note:form.new_note.value.trim()});
+      Object.assign(choice,{voice_id:form.voice.value,model_id:model,market:form.market?.value || 'us',new_voice_id:form.new_voice_id.value.trim(),new_note:form.new_note.value.trim()});
       (choice.settings ||= {})[model] = settings;keepVoiceSettings(model,settings);return settings;
     };
     form.voice.onchange = () => {const voice = voices.find(item => item.voice_id === form.voice.value);if (voice?.model_id) form.model_id.value = voice.model_id;syncSettings();};
     form.model_id.onchange = syncSettings;syncSettings();
+    if (form.market) form.market.onchange = () => {const hint = $('[data-market-hint]',form), text = marketOf(form.market.value)?.voice_hint || '';hint.textContent = text;hint.hidden = !text;choice.market = form.market.value;};
     form.onsubmit = async event => {
       event.preventDefault();setError(form,'');
       const settings = remember(), submit = $('button[type="submit"]',form);
@@ -2058,7 +2171,7 @@ window.CaseProduction = (() => {
           await send(`voice-add-${voice}`,'/api/production/voices',{revision:data.revision,operation:'save',voice:{voice_id:voice,note:choice.new_note,model_id:form.model_id.value,settings}});
           choice.voice_id = voice;
         }
-        await send(`take-${job.id}`,`/api/production/jobs/${encodeURIComponent(job.id)}/takes`,{voice_id:voice,model_id:form.model_id.value,settings});
+        await send(`take-${job.id}`,`/api/production/jobs/${encodeURIComponent(job.id)}/takes`,{voice_id:voice,model_id:form.model_id.value,settings,...(form.market && form.market.value !== 'us' ? {market:form.market.value} : {})});
         toast('配音已生成，试听后可以选用。');
       } catch (error) {
         awaitingVoice = false;job.voicing = false;delete job.voicing_live;$('.production-runtime',$('#voice-panel'))?.remove();refreshProductionProgress(data,'video');
@@ -2078,7 +2191,7 @@ window.CaseProduction = (() => {
     const openScriptFill = () => {
       // Spoken lines and Chinese belong to the adopted script version; only what the writing skill would have added is filled here.
       const extra = job.supplement || {}, manual = manualScript(data), captions = [...(extra.captions || []),'','',''].slice(0,3);
-      const head = manual ? `<fieldset class="line-edit"><legend>开头</legend><label class="field"><span>开头画面</span><textarea name="hook_visual" rows="2" maxlength="1000" placeholder="前 1–3 秒镜头里看得见的事件，和首句口播说同一件事">${esc(extra.hook_visual || '')}</textarea></label><div class="form-row"><label class="field"><span>开头屏显（英文，/ 表示断行）</span><input name="hook_text" maxlength="300" value="${esc(extra.hook_text || '')}" placeholder="不放可留空"></label><label class="field"><span>屏显中文</span><input name="hook_text_zh" maxlength="300" value="${esc(extra.hook_text_zh || '')}"></label></div></fieldset>` : '';
+      const head = manual ? `<fieldset class="line-edit"><legend>开头</legend><label class="field"><span>开头画面</span><textarea name="hook_visual" rows="2" maxlength="1000" placeholder="前 1–3 秒镜头里看得见的事件，和首句口播说同一件事">${esc(extra.hook_visual || '')}</textarea></label><div class="form-row"><label class="field"><span>开头屏显（外文，/ 表示断行）</span><input name="hook_text" maxlength="300" value="${esc(extra.hook_text || '')}" placeholder="不放可留空"></label><label class="field"><span>屏显中文</span><input name="hook_text_zh" maxlength="300" value="${esc(extra.hook_text_zh || '')}"></label></div></fieldset>` : '';
       const tail = manual ? `<fieldset class="line-edit"><legend>收尾</legend><label class="field"><span>补拍清单</span><textarea name="pickups" rows="3" maxlength="4000" placeholder="本稿必须有、但还没有已核素材的镜头，写清拍到什么才算数">${esc(extra.pickups || '')}</textarea></label>${captions.map((caption,index) => `<label class="field"><span>发布文案 ${index + 1}</span><input name="caption-${index}" maxlength="600" value="${esc(caption)}" placeholder="🔴标题#SHARPAL202H #knifesharpening …"></label>`).join('')}</fieldset>` : '';
       openModal(scriptGaps(job,data) ? '补全脚本信息' : manual ? '编辑脚本信息' : '编辑画面要求',`<p class="context-note">口播与中文属于采用稿，这里不改；只补每个意群的画面要求${manual ? '，以及开头画面、开头屏显、补拍清单和发布文案（按写稿技能的交付格式）' : ''}，供剪辑选材和发布使用。证据填类型：结果证据（须实拍）／动作演示／展示。</p>${head}${job.lines.map(line => `<fieldset class="line-edit"><legend>#${line.number} ${esc(line.spoken)}</legend><label class="field"><span>画面要证明什么</span><textarea name="proof-${line.number}" rows="2" maxlength="2000">${esc(line.proof)}</textarea></label><div class="form-row"><label class="field"><span>素材标签</span><input name="tags-${line.number}" maxlength="2000" value="${esc(line.tags)}"></label><label class="field"><span>证据</span><input name="evidence-${line.number}" maxlength="2000" value="${esc(line.evidence)}" list="job-evidence-types"></label></div></fieldset>`).join('')}<datalist id="job-evidence-types"><option value="结果证据（须实拍）"><option value="动作演示"><option value="展示"></datalist>${tail}`,'保存',async modal => {
         const values = new FormData(modal.form), value = name => String(values.get(name) || '').trim();
@@ -2096,6 +2209,29 @@ window.CaseProduction = (() => {
         toast('已交给 AI 按写稿技能补全，写完自动填进制作单。');await route(true);
       } catch (error) {button.disabled = false;toast(fail(error));}
     };
+    const startUk = async () => {
+      try {
+        await api(`/api/production/jobs/${encodeURIComponent(job.id)}/uk-version`,{method:'POST',body:{request_id:crypto.randomUUID()}});
+        toast('已交给 AI 改英国版，改完在这里核对。');await route(true);
+      } catch (error) {toast(fail(error));}
+    };
+    $('#job-uk-start')?.addEventListener('click',startUk);
+    $('#job-uk-start-menu')?.addEventListener('click',startUk);
+    $('#job-uk-review')?.addEventListener('click',() => openUkReview(job,seq,startUk));
+    if (job.uk_version?.status === 'running') {
+      const isHere = () => seq === view.sequence && pageHash().split('?')[0] === `#production/${encodeURIComponent(job.id)}`;
+      const pollUk = async () => {
+        if (!isHere()) return;
+        if (document.hidden || view.modal) {setTimeout(pollUk,4000);return;}
+        try {
+          const fresh = await api(`/api/production/jobs/${encodeURIComponent(job.id)}`);
+          if (!isHere()) return;
+          if (fresh.job.uk_version?.status !== 'running') {await route(true);return;}
+        } catch {}
+        setTimeout(pollUk,4000);
+      };
+      setTimeout(pollUk,4000);
+    }
     $('#job-lines-edit')?.addEventListener('click',openScriptFill);
     $('#job-ai-fill')?.addEventListener('click',startFill);
     document.querySelector('[data-script-fill]')?.addEventListener('click',startFill);
@@ -2177,7 +2313,7 @@ window.CaseProduction = (() => {
     return '';
   }
   function manualSplit(task,round,product,direction,reason) {
-    const modal = openModal('手动指定要配音的口播',`<p class="context-note">${esc(reason)}</p><div class="production-format-choice"><p>可以让 AI 只整理排版：新开一轮，完成后逐字核对口播和中文，对不上就不采用。也可以直接把要制作的英文口播粘贴到下面，一行一个意群。</p><button type="button" class="secondary" data-format-round>一键整理格式</button></div><details class="production-candidate-source"><summary>查看本轮候选原文</summary><pre class="carousel-preview">${esc(round.output || '')}</pre></details><label class="field"><span>脚本标题</span><input name="title" required maxlength="500" value="${esc(`${direction ? direction + ' ' : ''}手动拆分`)}"></label><label class="field"><span>口播（一行一个意群）</span><textarea name="spoken" rows="8" spellcheck="false"></textarea></label><label class="field"><span>对应中文（可选，与口播逐行对应）</span><textarea name="chinese" rows="6"></textarea></label><p class="context-note">画面要求在制作单里补填。</p>`,'采纳并创建制作单',async modal => {
+    const modal = openModal('手动指定要配音的口播',`<p class="context-note">${esc(reason)}</p><div class="production-format-choice"><p>可以让 AI 只整理排版：新开一轮，完成后逐字核对口播和中文，对不上就不采用。也可以直接把要制作的口播粘贴到下面，一行一个意群。</p><button type="button" class="secondary" data-format-round>一键整理格式</button></div><details class="production-candidate-source"><summary>查看本轮候选原文</summary><pre class="carousel-preview">${esc(round.output || '')}</pre></details><label class="field"><span>脚本标题</span><input name="title" required maxlength="500" value="${esc(`${direction ? direction + ' ' : ''}手动拆分`)}"></label><label class="field"><span>口播（一行一个意群）</span><textarea name="spoken" rows="8" spellcheck="false"></textarea></label><label class="field"><span>对应中文（可选，与口播逐行对应）</span><textarea name="chinese" rows="6"></textarea></label><p class="context-note">画面要求在制作单里补填。</p>`,'采纳并创建制作单',async modal => {
       const values = new FormData(modal.form), spoken = splitLines(values.get('spoken')), chinese = splitLines(values.get('chinese'));
       const issue = linesIssue(spoken,chinese);if (issue) {setError(modal.dialog,issue);return;}
       await adoptAndProduce(modal,{task,round,taskRevision:task.revision,product,direction,title:values.get('title').trim(),spoken,chinese,variantIndex:null});
@@ -2185,7 +2321,8 @@ window.CaseProduction = (() => {
     bindFormatRound(modal,task,round);
   }
 
-  async function fromCandidate(task,round) {
+  // With `pick` the person already chose the variant on the page, so the dialog only confirms that one.
+  async function fromCandidate(task,round,pick = null) {
     const product = task.product || task.context?.product || currentProduct(), direction = task.context?.direction_id || '';
     if (!product) {toast('请先选择一个具体产品。',true);return;}
     let data;
@@ -2195,14 +2332,16 @@ window.CaseProduction = (() => {
       toast(`暂时无法拆分变体：${fail(error)}`,true);return;
     }
     const variants = data.variants, defaultTitle = variant => `${direction ? direction + ' ' : ''}${variant.label}`;
+    const picked = pick && variants.length === pick.variantCount ? variants.find(item => item.index === pick.variantIndex) || null : null;
     // A round with no direction names the one the writer picked for each variant; the person confirms it here.
     const directions = direction ? [] : await api(`/api/direction-catalog?product=${encodeURIComponent(product)}`).then(result => (result.directions || []).filter(item => item.status !== 'archived')).catch(() => []);
     const suggested = variant => directions.some(item => item.direction_id === variant.suggested_direction) ? variant.suggested_direction : '';
-    const directionField = directions.length ? `<label class="field"><span>关联方向</span><select name="direction_id"><option value="">暂不指定</option>${directions.map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === suggested(variants[0]) ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>` : '';
+    const directionField = directions.length ? `<label class="field"><span>关联方向</span><select name="direction_id"><option value="">暂不指定</option>${directions.map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === suggested(picked || variants[0]) ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>` : '';
     const loose = variants.some(variant => variant.loose);
     const options = variants.map((variant,position) => `<label class="variant-option"><input type="radio" name="variant" value="${variant.index}" ${position === 0 ? 'checked' : ''}><span><strong>${esc(variant.label)}</strong><small>${variant.lines.length} 个意群${variant.problems.length ? ` · ${variant.problems.length} 处需核对` : ''}</small></span></label>`).join('');
-    const content = `<label class="field"><span>脚本标题</span><input name="title" required maxlength="500" value="${esc(defaultTitle(variants[0]))}"></label>${directionField}<div data-variant-preview></div><details class="production-line-editor" data-line-editor><summary>调整意群（拆分、合并或修正断行）</summary><p class="context-note">一行一个意群。不改动时会带入意群表；改动后画面要求需在制作单里补填。</p><label class="field"><span>口播</span><textarea name="spoken" rows="8" spellcheck="false"></textarea></label><label class="field"><span>对应中文（可选，与口播逐行对应）</span><textarea name="chinese" rows="6"></textarea></label></details>`;
-    const modal = openModal('选择要制作的变体',`<p class="context-note">选择变体即可查看对应脚本。口播每行是一个意群；采用后自动保留这次正文，修改时保留历史。</p>${loose ? '<div class="production-format-choice"><p>这一轮没有按「口播（配音用）」代码块交付，下面是宽松识别的结果：意群按句拆分，请逐行核对。也可以让 AI 只整理排版（新开一轮，逐字核对后才采用）。</p><button type="button" class="secondary" data-format-round>一键整理格式</button></div>' : ''}${variantPickerBody(options,content)}`,'采纳并创建制作单',async modal => {
+    const content = `<label class="field"><span>脚本标题</span><input name="title" required maxlength="500" value="${esc(defaultTitle(picked || variants[0]))}"></label>${directionField}<div data-variant-preview></div><details class="production-line-editor" data-line-editor><summary>调整意群（拆分、合并或修正断行）</summary><p class="context-note">一行一个意群。不改动时会带入意群表；改动后画面要求需在制作单里补填。</p><label class="field"><span>口播</span><textarea name="spoken" rows="8" spellcheck="false"></textarea></label><label class="field"><span>对应中文（可选，与口播逐行对应）</span><textarea name="chinese" rows="6"></textarea></label></details>`;
+    const body = picked ? `<input type="hidden" name="variant" value="${picked.index}"><div class="variant-picker-layout is-confirm"><section class="variant-picker-content" data-variant-content aria-label="脚本内容" tabindex="0"><p class="variant-picker-label" data-variant-label aria-live="polite"></p>${content}</section></div>` : variantPickerBody(options,content);
+    const modal = openModal(picked ? '开始制作这条稿件' : '选择要制作的变体',`<p class="context-note">${picked ? '' : '选择变体即可查看对应脚本。'}口播每行是一个意群；采用后自动保留这次正文，修改时保留历史。</p>${loose ? '<div class="production-format-choice"><p>这一轮没有按「口播（配音用）」代码块交付，下面是宽松识别的结果：意群按句拆分，请逐行核对。也可以让 AI 只整理排版（新开一轮，逐字核对后才采用）。</p><button type="button" class="secondary" data-format-round>一键整理格式</button></div>' : ''}${body}`,'采纳并创建制作单',async modal => {
       const values = new FormData(modal.form), chosen = variants.find(item => String(item.index) === values.get('variant'));
       const spoken = edited ? splitLines(values.get('spoken')) : chosen.lines.map(line => line.spoken);
       const chinese = edited ? splitLines(values.get('chinese')) : chosen.lines.every(line => line.zh) ? chosen.lines.map(line => line.zh) : [];
@@ -2271,20 +2410,21 @@ window.CaseProduction = (() => {
     });
   }
   // Permanent removal of an archived order with its local files; DaVinci timelines and script versions stay.
-  async function deleteOrder(item) {
+  async function deleteOrder(item,{action = 'delete',onDone = null} = {}) {
     const base = `/api/production/jobs/${encodeURIComponent(item.id)}`;
     let preview;
-    try {preview = await api(`${base}/delete`,{method:'POST',body:{preview:true}});}
+    try {preview = await api(`${base}/${action}`,{method:'POST',body:{preview:true}});}
     catch (error) {toast(fail(error),true);return;}
     const bytes = preview.bytes || 0;
     const size = bytes >= 1073741824 ? `${(bytes / 1073741824).toFixed(1)} GB` : `${Math.max(1,Math.round(bytes / 1048576))} MB`;
     const parts = [`${preview.takes} 条配音`,`${preview.edits} 次 AI 剪辑记录`];
     if (preview.publications) parts.push(`${preview.publications} 次发布登记及托管成片`);
-    openModal('永久删除制作单',`<p class="context-note">将永久删除「${esc(preview.title || item.title || item.id)}」：${esc(parts.join('、'))}，以及它们在本地保存的全部文件（${preview.files} 个，共约 ${esc(size)}）。此操作不能撤销。</p><ul class="context-list"><li>不会改动达芬奇里的时间线和工程${preview.timelines ? `（已建的 ${preview.timelines} 条时间线需要的话请自行在达芬奇里处理）` : ''}。</li><li>采用稿、修改历史和案例库保留，可以重新创建制作单。</li>${preview.published ? '<li class="ai-error">这张制作单已登记发布；发布登记和托管成品会一并删除，脚本里的发布状态不会自动改回。</li>' : ''}</ul><label class="field"><span><input type="checkbox" name="sure" required> 我已确认永久删除，不需要找回</span></label>`,'永久删除',async modal => {
-      const result = await send(`order-delete-${item.id}`,`${base}/delete`,{});
+    openModal('永久删除制作单',`<p class="context-note">将永久删除「${esc(preview.title || item.title || item.id)}」：${esc(parts.join('、'))}，以及它们在本地保存的全部文件（${preview.files} 个，共约 ${esc(size)}）。此操作不能撤销。</p><ul class="context-list"><li>不会改动达芬奇里的时间线和工程${preview.timelines ? `（已建的 ${preview.timelines} 条时间线需要的话请自行在达芬奇里处理）` : ''}。</li><li>${action === 'delete' ? '采用稿、修改历史和案例库保留，可以重新创建制作单。' : preview.draft_returned ? '这条稿的采用稿转入归档，可在内容进程的归档里恢复；候选稿回到未开始制作的状态。' : `采用稿保留（${esc(preview.draft_kept)}）。`}</li>${preview.published ? '<li class="ai-error">这张制作单已登记发布；发布登记和托管成品会一并删除，脚本里的发布状态不会自动改回。</li>' : ''}</ul><label class="field"><span><input type="checkbox" name="sure" required> 我已确认永久删除，不需要找回</span></label>`,'永久删除',async modal => {
+      const result = await send(`order-delete-${item.id}`,`${base}/${action}`,{});
       closeModal(true);
       const warnings = result.warnings || [];
       toast(warnings.length ? warnings[0] : '制作单及本地文件已永久删除。',warnings.length > 0);
+      if (onDone) {onDone(result);return;}
       const back = $('.back-link');
       if (back) back.click();else location.hash = url('#content',item.product);
     });
@@ -2303,5 +2443,8 @@ window.CaseProduction = (() => {
   window.addEventListener('focus',() => {if (!document.hidden) void view.refreshEditDefaults?.();});
   document.addEventListener('visibilitychange',() => {if (!document.hidden) void view.refreshEditDefaults?.();});
   window.addEventListener('hashchange',() => {if (!pageHash().startsWith('#production/')) view.activityTarget = null;if (view.modal?.detachable && view.modal.hash !== location.hash) closeModal();});
-  return {route,openSettings,deleteContentOrders,hasUnsavedInput,beforeNavigate,fromCandidate,fromScript,modalOpen,captureListState};
+  // The candidate desk lists each draft's orders; it has no job records of its own to name them from.
+  const orderSummary = use => ({href:jobLink(use),status:statusLabels[use.status] || use.status || '制作中'});
+  const deleteCandidateOrder = (item,onDone) => deleteOrder(item,{action:'candidate-delete',onDone});
+  return {route,openSettings,deleteContentOrders,orderSummary,deleteCandidateOrder,hasUnsavedInput,beforeNavigate,fromCandidate,fromScript,modalOpen,captureListState};
 })();

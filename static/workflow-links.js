@@ -10,7 +10,7 @@ window.WorkbenchLinks = (() => {
     const step = item.current_publication?.post_id ? 'publish' : item.edits?.length ? 'edit' : item.timelines?.length ? 'timeline' : item.takes?.length ? 'voice' : '';
     return pageURL(`#production/${encodeURIComponent(item.id)}${step ? '?step='+step : ''}`,item.product || product);
   }
-  function mount({kind,record,script = null}) {
+  function mount({kind,record,script = null,onAttention = null}) {
     const heading = document.querySelector('#content .page-heading');
     if (!heading) return;
     const host = document.createElement('section');host.id = 'workflow-links';host.className = 'section-card workflow-links';host.setAttribute('aria-label','关联任务与输出');
@@ -42,6 +42,7 @@ window.WorkbenchLinks = (() => {
         host.classList.add('workflow-links-folded');
         host.querySelector('details').addEventListener('toggle',event => {try {localStorage.setItem(foldKey,event.currentTarget.open ? '1' : '0');} catch {}});
       }
+      onAttention?.(reason || (alerts.length ? '需核对' : ''));
       host.querySelector('[data-workflow-retry]').onclick = () => void load();
       host.querySelector('[data-workflow-copy]')?.addEventListener('click',() => copyText(groups.flatMap(group => group.links.map(link => `${group.title} · ${link.title}\n${link.note || ''}\n${link.href}`)).join('\n\n'),'关联信息已复制'));
     };

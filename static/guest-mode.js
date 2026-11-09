@@ -98,7 +98,7 @@
     "[data-settings-open]", "[data-open-path]", "[data-inline-edit]", "[data-upload]", "input[type='file']",
     "#edit-dialog", "#discard-dialog", "#delete-dialog", "#bulk-dialog", "#ai-create-dialog", "#ai-delete-dialog",
     "#script-editor-dialog", "#script-discard-dialog", "#direction-plan-dialog", "#selling-point-dialog",
-    "[data-home-tab='tasks']", "#home-tasks-title-panel", "[data-home-review]", "[data-home-batch]", "[data-home-start-writing]",
+    "[data-home-review]", "[data-home-batch]",
     "[data-followup-chain]", "[data-followup-edit]", "[data-followup-show-waiting]",
     ".home-menu", ".detail-menu", ".ai-menu", "button[aria-label='更多操作']", "summary[aria-label='更多操作']",
     ".ai-case-heading", ".detail-product-panel", ".video-copy-state", ".video-panel .missing-media > span:last-child",
@@ -231,14 +231,6 @@
       if (node.getAttribute("aria-disabled") !== "true") node.setAttribute("aria-disabled", "true");
       if (node.title !== "所属产品") node.title = "所属产品";
       if (node.parentElement.open) node.parentElement.open = false;
-    });
-    // The task feed has no guest endpoint. Keep the other overview panels and
-    // their read links usable when the normal home renderer selects it first.
-    if (document.querySelector("[data-home-tab='tasks'][aria-selected='true']")) {
-      document.querySelector("[data-home-tab='due']")?.click();
-    }
-    document.querySelectorAll("#home-page > .data-warning").forEach(node => {
-      if (/^待处理内容暂时无法读取。/.test(node.textContent.trim())) hide(node);
     });
   }
   function block(event) { event.preventDefault(); event.stopImmediatePropagation(); }

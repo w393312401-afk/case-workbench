@@ -149,6 +149,23 @@ class AIVariantEntryBrowserTests(unittest.TestCase):
         self.assertEqual(self.posts[0]["case_id"], self.identifier)
         self.assertNotIn("variants", self.posts[0])
 
+    def test_writing_dialog_sends_only_a_non_default_market(self):
+        page = self.open_page()
+        self.open_entry(page, index=2)
+        self.assertEqual(page.locator("#ai-create-market").input_value(), "us")
+        self.assertEqual(page.locator("#ai-create-market option").count(), 4)
+        page.locator("#ai-create-market").select_option("es")
+        page.locator("#submit-ai-create").click()
+        page.locator("#ai-create-dialog").wait_for(state="hidden")
+        self.assertEqual(self.posts[0]["market"], "es")
+
+    def test_default_market_is_not_sent(self):
+        page = self.open_page()
+        self.open_entry(page, index=2)
+        page.locator("#submit-ai-create").click()
+        page.locator("#ai-create-dialog").wait_for(state="hidden")
+        self.assertNotIn("market", self.posts[0])
+
     def test_case_entry_default_mode_sends_no_writing_mode(self):
         page = self.open_page()
         self.assertTrue(page.evaluate("id => CaseAI.startWriting(id)", self.identifier))

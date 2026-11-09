@@ -24,9 +24,9 @@ SKILL_PATHS = ("cases", "sources", "references/products", "deleted_case_sources.
 APP_PATHS = ("图文素材",)
 RUNTIME_EXCLUDED = frozenset({"auth", "credentials", "thumbnail-cache", "cache", "__pycache__",
     "staging", "split-staging", "text-public-sync", "data-transfer"})
-# Public access keeps this machine's tunnel token, login hashes and guest site here. Never exported, never
-# replaced by an import; older archives that carried it stay importable and only skip it.
-RUNTIME_PRIVATE = frozenset({"remote-access"})
+# Public access and the persistent task host keep machine-local credentials here. Never exported, never
+# replaced by an import; older archives that carried them stay importable and only skip them.
+RUNTIME_PRIVATE = frozenset({"remote-access", "service"})
 TEXT_SUFFIXES = {".json", ".jsonl", ".md", ".txt", ".csv", ".tsv", ".yaml", ".yml", ".xml", ".srt", ".vtt", ".html"}
 # These formats already compress their payload. Deflating gigabytes of finished
 # videos wastes daily-backup time and rarely makes the archive any smaller.
@@ -36,7 +36,7 @@ COMPRESSED_SUFFIXES = frozenset({".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"
     ".xlsx", ".xlsm", ".docx", ".pptx", ".ods", ".odt", ".odp", ".pdf"})
 CREDENTIAL_NAMES = frozenset({"auth.json", "credentials.json", ".credentials.json", ".netrc", "_netrc",
     ".npmrc", ".pypirc", ".git-credentials", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "identity",
-    "id_ecdsa_sk", "id_ed25519_sk"})
+    "id_ecdsa_sk", "id_ed25519_sk", "task-host.json"})
 PRIVATE_KEY_NAMES = frozenset({"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "identity", "id_ecdsa_sk", "id_ed25519_sk"})
 CREDENTIAL_DIRECTORIES = frozenset({".ssh", ".aws", ".azure", ".kube", ".gnupg"})
 CREDENTIAL_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".pkcs12", ".jks", ".keystore", ".ppk"})
@@ -620,7 +620,7 @@ class BackupManager:
 
     @staticmethod
     def _without_private(manifest):
-        """What an import restores: an older archive's remote-access entries are verified but never extracted."""
+        """What an import restores: machine-local control files are verified but never extracted."""
         def private(name):
             parts = PurePosixPath(name).parts
             return len(parts) > 1 and parts[0] == "runtime" and parts[1].casefold() in RUNTIME_PRIVATE

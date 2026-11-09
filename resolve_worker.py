@@ -650,6 +650,9 @@ def inspect(resolve, request):
             # The hook is lettering on top of the cut: it covers no picture and no checks should count it as a shot.
             if kind == "video" and timeline.GetTrackName(kind, index) in (HOOK_TRACK, CAMPAIGN_TRACK) and all(is_title(item) for item in items):
                 continue
+            # The comment card likewise: its clip is only the commenter's avatar.
+            if kind == "video" and timeline.GetTrackName(kind, index) == COMMENT_TRACK and all(is_comment_card(item) for item in items):
+                continue
             # Speed is read here only: build checkpoints compare inspect_item() replies across workbench versions.
             tracks[kind].append({"index": index, "name": timeline.GetTrackName(kind, index),
                                  "enabled": optional(timeline, "GetIsTrackEnabled", kind, index),
@@ -866,11 +869,26 @@ def style_hook(tool, style, text):
         tool.SetInput(name, value)
 
 
-def insert_hook(timeline, track, text, style, start, end, at_end=False):
+def aim_inserts_at(media_pool, timeline, track, end):
+    """Script inserts land only on Resolve's destination track and fail if it is locked; no call reads or sets it, but appending a
+    clip moves it to that clip's track (reproduced in Resolve 21.2, 2026-11-08). A two-frame clip past the last cut, taken straight off, aims it."""
+    source = next((clip for index in range(1, timeline.GetTrackCount("video") + 1) for clip in
+                   (optional(item, "GetMediaPoolItem") for item in timeline.GetItemListInTrack("video", index) or []) if clip), None)
+    placed = source and media_pool.AppendToTimeline([{"mediaPoolItem": source, "startFrame": 0, "endFrame": 2, "trackIndex": track, "recordFrame": end, "mediaType": 1}])
+    if not placed:
+        return False
+    if not timeline.DeleteClips(placed, False):
+        raise WorkerError("达芬奇没能删掉定位用的临时片段，屏显没有加，请到达芬奇删掉屏显轨末尾的短片段。")
+    return True
+
+
+def insert_hook(media_pool, timeline, track, text, style, start, end, at_end=False):
     """Text+ at the start of the hook track (or, `at_end`, ending where the timeline ends), with everything else locked.
     Returns the title, or raises with it taken back out."""
     fps, before = timeline.GetSetting("timelineFrameRate"), cut_layout(timeline, track)
     item = timeline.InsertFusionTitleIntoTimeline("Text+")
+    if not item and aim_inserts_at(media_pool, timeline, track, end):
+        item = timeline.InsertFusionTitleIntoTimeline("Text+")
     def discard(message):
         if item:
             timeline.DeleteClips([item], False)
@@ -898,7 +916,7 @@ def insert_hook(timeline, track, text, style, start, end, at_end=False):
     return item
 
 
-def place_hook(timeline, track, text, style, name=HOOK_TRACK, at_end=False):
+def place_hook(media_pool, timeline, track, text, style, name=HOOK_TRACK, at_end=False):
     """Add the hook as Text+. An insert cuts and pushes every unlocked track at the playhead, and the playhead reads back
     correct even when the insert then uses an older one, so all other tracks are locked first and the playhead does not matter.
 
@@ -917,7 +935,7 @@ def place_hook(timeline, track, text, style, name=HOOK_TRACK, at_end=False):
             timeline.SetTrackLock(kind, index, (kind, index) != ("video", track))
         if not all(timeline.GetIsTrackLocked(kind, index) == ((kind, index) != ("video", track)) for kind, index in locks):
             raise WorkerError("达芬奇没能锁住其他轨道，屏显没有加。")
-        return insert_hook(timeline, track, text, style, start, end, at_end)
+        return insert_hook(media_pool, timeline, track, text, style, start, end, at_end)
     except WorkerError:
         if made_track:
             timeline.DeleteTrack("video", track)
@@ -953,7 +971,7 @@ def add_hook(resolve, request, name=HOOK_TRACK, at_end=False):
             raise WorkerError("Text+ 的文字读回不一致，屏显没有改。")
         if items and request.get("style"):
             style_hook(tool, style, request["text"])
-        item = items[0] if items else place_hook(timeline, track, request["text"], style, name, at_end)
+        item = items[0] if items else place_hook(project.GetMediaPool(), timeline, track, request["text"], style, name, at_end)
     finally:
         if previous:
             project.SetCurrentTimeline(previous)
@@ -980,6 +998,210 @@ def remove_campaign_card(resolve, request):
     if items and not timeline.DeleteClips(items, False):
         raise WorkerError("达芬奇没能删掉活动屏显。")
     return {"removed": len(items), "saved": bool(resolve.GetProjectManager().SaveProject())}
+
+
+COMMENT_TRACK = "评论贴纸"
+COMMENT_BIN = "评论贴纸头像"
+COMMENT_TEMPLATE = Path(__file__).resolve().parent / "templates" / "comment-sticker.comp"
+COMMENT_LINE_PITCH = 30 / 1920  # Height of one more line of the card's text at COMMENT_TEXT_SIZE, as a share of the frame (measured in Resolve 21.2).
+COMMENT_TEXT_SIZE = 0.034
+COMMENT_SECONDS = (2, 3, 6)  # Shortest, without subtitles to time it, longest.
+
+
+def is_comment_card(item):
+    return bool(optional(item, "GetFusionCompCount"))
+
+
+def comp_block(text, name):
+    """Where one tool's block starts and ends in a .comp file."""
+    found = re.search(r"\n\t\t" + name + r" = \w+ \{", text)
+    if not found:
+        raise WorkerError(f"合成文件里没有 {name}，评论贴纸没有加。")
+    position, depth = found.end(), 1
+    while depth:
+        depth += (text[position] == "{") - (text[position] == "}")
+        position += 1
+    return found.start(), position + (text[position] == ",")
+
+
+def comment_comp(clip_comp, frames, template):
+    """The template with this clip's own MediaIn spliced in, so the avatar needs no file path of its own, and timed to the clip."""
+    start, end = comp_block(clip_comp, "MediaIn1")
+    at = template.index("\n\t\tCardShape = ")
+    text = template[:at] + clip_comp[start:end] + template[at:]
+    text = re.sub(r"GlobalOut = Input \{ Value = \d+, \}", f"GlobalOut = Input {{ Value = {frames - 1}, }}", text)
+    return re.sub(r"(RenderRange|GlobalRange) = \{ 0, \d+ \}", rf"\1 = {{ 0, {frames - 1} }}", text)
+
+
+def fill_comment_card(comp, name, lines):
+    """Write the name and comment; each extra line grows the card downward from where the template puts it, and carries the bubble's tail along."""
+    tools = {key: comp.FindTool(key) for key in ("CardShape", "Username", "Comment")}
+    if not all(tools.values()):
+        raise WorkerError("评论贴纸模板缺少节点，评论贴纸没有加。")
+    if len(lines) > 1:
+        shift = (len(lines) - 1) * COMMENT_LINE_PITCH * tools["Comment"].GetInput("Size") / COMMENT_TEXT_SIZE
+        down = lambda tool, name, amount: tool.SetInput(name, {1: tool.GetInput(name)[1], 2: tool.GetInput(name)[2] - amount})
+        tools["CardShape"].SetInput("Height", tools["CardShape"].GetInput("Height") + shift)
+        down(tools["CardShape"], "Center", shift / 2)
+        down(tools["Comment"], "Center", shift / 2)
+        tail = comp.FindTool("MessageTailShape")
+        for point in ("Point1", "Point2", "Point3") if tail else ():
+            down(tail, point, shift)
+    text = "\n".join(lines)
+    tools["Username"].SetInput("StyledText", name)
+    tools["Comment"].SetInput("StyledText", text)
+    if tools["Username"].GetInput("StyledText") != name or tools["Comment"].GetInput("StyledText") != text:
+        raise WorkerError("评论贴纸的文字读回不一致，评论贴纸没有加。")
+
+
+def comment_media(media_pool, path):
+    """The avatar picture in its own bin; a comment used before is not imported twice."""
+    root = media_pool.GetRootFolder()
+    folder = next((sub for sub in root.GetSubFolderList() or [] if sub.GetName() == COMMENT_BIN), None) or media_pool.AddSubFolder(root, COMMENT_BIN)
+    if not folder:
+        raise WorkerError("达芬奇没能新建评论贴纸头像媒体夹，评论贴纸没有加。")
+    same = lambda clip: os.path.normcase(os.path.normpath(clip.GetClipProperty("File Path") or "")) == os.path.normcase(os.path.normpath(path))
+    known = next((clip for clip in folder.GetClipList() or [] if same(clip)), None)
+    if known:
+        return known
+    current = media_pool.GetCurrentFolder()
+    media_pool.SetCurrentFolder(folder)
+    try:
+        imported = media_pool.ImportMedia([path])
+    finally:
+        media_pool.SetCurrentFolder(current)
+    if not imported:
+        raise WorkerError("达芬奇没能导入评论者头像，评论贴纸没有加。")
+    return imported[0]
+
+
+def comment_frames(timeline, spoken, start, end):
+    """Until the first spoken line has been said, by counting its words through the subtitles."""
+    fps = float(timeline.GetSetting("timelineFrameRate"))
+    shortest, usual, longest = (round(fps * seconds) for seconds in COMMENT_SECONDS)
+    try:
+        rows = subtitle_rows(timeline, subtitle_track(timeline))
+    except WorkerError:
+        rows = []
+    words, seen, frames = len(str(spoken or "").split()), 0, usual
+    for row in rows if words else []:
+        seen += len(row["text"].split())
+        if seen >= words:
+            frames = row["end"] - start
+            break
+    return min(max(shortest, min(frames, longest)), end - start)
+
+
+def place_comment_card(project, timeline, track, old, request):
+    """The avatar picture is appended straight onto the card's track, which needs no playhead or destination track and pushes
+    nothing, and the template becomes that clip's composition."""
+    start, end = timeline.GetStartFrame(), timeline.GetEndFrame()
+    media_pool = project.GetMediaPool()
+    made_track = not track
+    if made_track:
+        if not timeline.AddTrack("video"):
+            raise WorkerError("达芬奇没能新建评论贴纸轨，评论贴纸没有加。")
+        track = timeline.GetTrackCount("video")
+        timeline.SetTrackName("video", track, COMMENT_TRACK)
+    before = cut_layout(timeline, track)
+    locks = {(kind, index): timeline.GetIsTrackLocked(kind, index) for kind in ("video", "audio", "subtitle")
+             for index in range(1, timeline.GetTrackCount(kind) + 1)}
+    item = None
+    def discard(message):
+        if item:
+            timeline.DeleteClips([item], False)
+        raise WorkerError(message if cut_layout(timeline, track) == before else f"{message}时间线可能已经变动，请到达芬奇核对。")
+    try:
+        for (kind, index) in locks:
+            timeline.SetTrackLock(kind, index, (kind, index) != ("video", track))
+        if not all(timeline.GetIsTrackLocked(kind, index) == ((kind, index) != ("video", track)) for kind, index in locks):
+            raise WorkerError("达芬奇没能锁住其他轨道，评论贴纸没有加。")
+        if old and not timeline.DeleteClips(old, False):
+            raise WorkerError("达芬奇没能换掉原来的评论贴纸。")
+        frames = comment_frames(timeline, request.get("first_line"), start, end)
+        clip = comment_media(media_pool, request["avatar"])
+        placed = media_pool.AppendToTimeline([{"mediaPoolItem": clip, "trackIndex": track, "recordFrame": start, "mediaType": 1}])
+        item = placed[0] if placed else None
+        if not item:
+            discard("达芬奇没能把评论者头像放上时间线，评论贴纸没有加。")
+        if item.GetTrackTypeAndIndex() != ["video", track] or item.GetStart() != start:
+            discard("评论贴纸没有落在开头的贴纸轨上，评论贴纸没有加。")
+        if not item.SetRightOffset(item.GetRightOffset() + item.GetDuration() - frames, False, False) or item.GetDuration() != frames:
+            discard("达芬奇没能裁短评论贴纸，评论贴纸没有加。")
+        if not item.AddFusionComp():
+            discard("达芬奇没能新建合成，评论贴纸没有加。")
+        with tempfile.TemporaryDirectory(prefix="comment-sticker-") as folder:
+            default, built = str(Path(folder, "clip.comp")), Path(folder, "built.comp")
+            if not item.ExportFusionComp(default, 1):
+                discard("达芬奇没能读出片段的合成，评论贴纸没有加。")
+            template = Path(request.get("template") or COMMENT_TEMPLATE).read_text(encoding="utf-8")
+            built.write_text(comment_comp(Path(default).read_text(encoding="utf-8"), frames, template), encoding="utf-8", newline="\n")
+            if not item.ImportFusionComp(str(built)):
+                discard("达芬奇没能导入评论贴纸模板，评论贴纸没有加。")
+        try:
+            fill_comment_card(item.GetFusionCompByIndex(1), request["username"], request["lines"])
+        except WorkerError as problem:
+            discard(str(problem))
+        if cut_layout(timeline, track) != before or timeline.GetEndFrame() != end:
+            discard("加评论贴纸时其他片段动了，评论贴纸没有加。")
+        return item
+    except WorkerError:
+        if made_track:
+            timeline.DeleteTrack("video", track)
+            locks.pop(("video", track), None)
+        raise
+    finally:
+        for (kind, index), locked in locks.items():
+            timeline.SetTrackLock(kind, index, locked)
+
+
+def read_comment_template(resolve, request):
+    """The sticker's composition from the named timeline in the open project. Power Bins have no scripting API, so the user puts it on this timeline."""
+    project = resolve.GetProjectManager().GetCurrentProject()
+    if not project:
+        raise WorkerError("达芬奇没有打开工程，请先打开放着贴纸模板的工程。")
+    timeline = next((item for item in timelines(project) if item.GetName() == request["name"]), None)
+    if not timeline:
+        raise WorkerError(f"工程「{project.GetName()}」里没有名为「{request['name']}」的时间线。新建一条叫这个名字的时间线，把共享媒体夹里的贴纸拖上去，再同步。")
+    for index in range(1, timeline.GetTrackCount("video") + 1):
+        for item in timeline.GetItemListInTrack("video", index) or []:
+            for number in range(1, (optional(item, "GetFusionCompCount") or 0) + 1):
+                if item.GetFusionCompByIndex(number).FindTool("Username"):
+                    with tempfile.TemporaryDirectory(prefix="comment-template-") as folder:
+                        path = Path(folder, "template.comp")
+                        if not item.ExportFusionComp(str(path), number):
+                            raise WorkerError("达芬奇没能导出贴纸的合成。")
+                        return {"comp": path.read_text(encoding="utf-8"), "project": project.GetName()}
+    raise WorkerError(f"时间线「{request['name']}」上没有贴纸：找不到带 Username 节点的片段。")
+
+
+def add_comment_sticker(resolve, request):
+    """Put the opening comment card on its own track from the first frame; clicking again replaces it."""
+    if not Path(request["avatar"]).is_file():
+        raise WorkerError("找不到评论者头像图片，评论贴纸没有加。")
+    project = request_project(resolve, request)
+    timeline = find_timeline(project, request)
+    track = hook_track(timeline, COMMENT_TRACK)
+    old = (timeline.GetItemListInTrack("video", track) or []) if track else []
+    if not all(is_comment_card(item) for item in old):
+        raise WorkerError("评论贴纸轨上有别的片段，请清理后再加。")
+    previous, page = project.GetCurrentTimeline(), optional(resolve, "GetCurrentPage")
+    timecode_before = previous.GetCurrentTimecode() if previous else None
+    if not project.SetCurrentTimeline(timeline):
+        raise WorkerError("达芬奇没能切换到这条时间线。")
+    try:
+        if page != "edit":
+            resolve.OpenPage("edit")
+        item = place_comment_card(project, timeline, track, old, request)
+        placed = {"start": item.GetStart(), "end": item.GetEnd()}
+    finally:
+        if previous:
+            project.SetCurrentTimeline(previous)
+            if timecode_before:
+                previous.SetCurrentTimecode(timecode_before)
+        if page and page != "edit":
+            resolve.OpenPage(page)
+    return {"created": not old, **placed, "saved": bool(resolve.GetProjectManager().SaveProject())}
 
 
 SKIPPED_TIMELINES = re.compile(r"备份|草稿|backup|draft|__WB_", re.I)
@@ -1929,7 +2151,7 @@ def _export_current_timeline(resolve, request, project, timeline, previous, prev
             if type(enabled) is not bool:
                 raise WorkerError("无法读取轨道开关状态，没有开始导出。")
             filled = bool(timeline.GetItemListInTrack(kind, index))
-            if textless and kind != "audio" and (kind == "subtitle" or name in (HOOK_TRACK, CAMPAIGN_TRACK, "字幕")):
+            if textless and kind != "audio" and (kind == "subtitle" or name in (HOOK_TRACK, CAMPAIGN_TRACK, COMMENT_TRACK, "字幕")):
                 tracks.append({"kind": kind, "index": index, "name": name, "enabled": enabled, "switch_to": False})
             else:
                 if not textless and not enabled and filled:
@@ -2200,7 +2422,7 @@ def export_drt(resolve, request):
 COMMANDS = {"ping": lambda resolve, request: {}, "status": status, "build": build, "open": open_timeline, "inspect": inspect, "restore": restore,
             "import_timeline": import_timeline, "export_drt": export_drt,
             "candidates": candidates, "frames": frames, "reveal": reveal, "mark_usage": mark_usage,
-            "read_subtitles": read_subtitles, "replace_subtitles": replace_subtitles, "add_hook": add_hook, "add_campaign_card": add_campaign_card, "remove_campaign_card": remove_campaign_card,
+            "read_subtitles": read_subtitles, "replace_subtitles": replace_subtitles, "add_hook": add_hook, "add_campaign_card": add_campaign_card, "remove_campaign_card": remove_campaign_card, "add_comment_sticker": add_comment_sticker, "read_comment_template": read_comment_template,
             "edit_audio_baseline": edit_audio_baseline, "inherit_edit_audio": inherit_edit_audio,
             "export_textless": export_textless, "restore_textless": restore_textless, "export_preview": export_preview,
             "render_preview": render_preview}

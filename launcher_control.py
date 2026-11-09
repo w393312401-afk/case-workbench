@@ -88,7 +88,8 @@ def matches_workbench(process, root, config):
     index = 1
     while index < len(args) and args[index] in {"-u", "-B", "-E", "-I", "-s", "-S", "-O", "-OO"}:
         index += 1
-    if index >= len(args) or not Path(args[index]).is_absolute() or not same_path(args[index], root / "server.py"):
+    if index >= len(args) or not Path(args[index]).is_absolute() or not any(
+            same_path(args[index], root / name) for name in ("server.py", "service_gateway.py")):
         return False
     options = {"--port": str(config["port"]), "--skill-root": config["skill_root"], "--runtime-root": config["runtime_root"]}
     seen = set()
@@ -447,11 +448,180 @@ def prepare_start(root, config):
             log_housekeeping(root, f"{label}失败（不影响启动）：{error}")
 
 
+def task_host_manifest(root, config):
+    """A local control file is never a source of arbitrary hosts, paths or commands."""
+    runtime = Path(config["runtime_root"]).resolve()
+    path = runtime / "service" / "task-host.json"
+    if (path.is_symlink() or path.parent.is_symlink() or
+            (path.parent.exists() and bool(getattr(path.parent.lstat(), "st_file_attributes", 0) & 0x400)) or
+            not path.resolve().is_relative_to(runtime)):
+        raise RuntimeError("后台任务服务登记位置无效，未操作任何进程。")
+    if not path.exists():
+        return None
+    if path.stat().st_nlink > 1:
+        raise RuntimeError("后台任务服务登记不能使用文件链接。")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        paths = value["paths"]
+        if (value.get("app") != "video-case-workbench" or value.get("role") != "task-host" or
+                value.get("protocol_version") != 1 or type(value.get("pid")) is not int or value["pid"] <= 0 or
+                type(value.get("port")) is not int or not 1 <= value["port"] <= 65535 or
+                value["port"] == config["port"] or
+                value.get("public_port") != config["port"] or
+                not isinstance(value.get("launch_id"), str) or len(value["launch_id"]) < 16 or
+                not isinstance(value.get("proxy_secret"), str) or len(value["proxy_secret"]) < 32 or
+                not same_path(paths["records"], Path(config["skill_root"]) / "cases") or
+                not same_path(paths["library"], runtime / "library") or
+                not same_path(paths["runtime"], runtime) or not same_path(paths["code_root"], root)):
+            raise ValueError()
+        return value
+    except (ValueError, KeyError, TypeError) as error:
+        raise RuntimeError("后台任务服务登记无法核对，未操作任何进程。") from error
+
+
+def task_host_request(host, path, *, token=None, body=None, timeout=5):
+    headers = {"X-Workbench-Gateway": host["proxy_secret"]}
+    if token:
+        headers["X-Workbench-Token"] = token
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(f"http://127.0.0.1:{host['port']}" + path,
+        data=json.dumps(body).encode("utf-8") if body is not None else None, headers=headers)
+    return read_json(request, timeout=timeout)
+
+
+def task_host_status(root, config, host):
+    status = task_host_request(host, "/api/service/status")
+    if (not correct_service(status, config) or status.get("role") != "task-host" or
+            status.get("protocol_version") != 1 or status.get("pid") != host["pid"] or
+            status.get("launch_id") != host["launch_id"]):
+        raise RuntimeError("后台任务服务身份已变化，未操作任何进程。")
+    return status
+
+
+def prepare_stopped_engine(root, config):
+    """Only a stopped data owner can be copied into a coherent startup backup."""
+    from data_lease import ServerLease
+    lease = ServerLease(config["runtime_root"])
+    if not lease.acquire():
+        raise RuntimeError("后台任务服务仍占用数据，尚未启动第二个实例；请稍后再试。")
+    try:
+        prepare_start(root, config)
+    finally:
+        lease.close()
+
+
+def ensure_task_host(root, config, *, locked=False):
+    """Keep the live task owner; only a missing/dead host starts another lease holder."""
+    host = task_host_manifest(root, config)
+    if host:
+        try:
+            task_host_status(root, config, host)
+            return host
+        except urllib.error.HTTPError:
+            raise  # A responding but unauthenticated service is not a dead host.
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            pass
+    if not locked:
+        with launch_lock(root, f"task-host:{config['port']}") as acquired:
+            if acquired:
+                return ensure_task_host(root, config, locked=True)
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                current = task_host_manifest(root, config)
+                if current:
+                    try:
+                        task_host_status(root, config, current)
+                        return current
+                    except (urllib.error.URLError, TimeoutError, ConnectionError):
+                        pass
+                time.sleep(.2)
+            raise RuntimeError("后台任务服务仍在更新，请稍后再打开网页。")
+    # Never back up a live writer just because its HTTP port is unresponsive.
+    prepare_stopped_engine(root, config)
+    with (root / "server.log").open("ab") as log:
+        child = subprocess.Popen([sys.executable, "-u", str(root / "server.py"), "--task-host", "--port", "0",
+            "--public-port", str(config["port"]), "--skill-root", config["skill_root"],
+            "--runtime-root", config["runtime_root"]], cwd=str(root), stdout=log, stderr=log,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        if child.poll() is not None:
+            raise RuntimeError("后台任务服务启动失败，请查看 server.log。")
+        current = task_host_manifest(root, config)
+        if current and current["pid"] == child.pid:
+            try:
+                task_host_status(root, config, current)
+                return current
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
+                pass
+        time.sleep(.1)
+    raise RuntimeError("后台任务服务尚未就绪；未启动第二个实例，请查看 server.log。")
+
+
+def refresh_task_host_on_idle(root, config):
+    """A gateway restart never touches tasks. Update their code only after atomic idle admission."""
+    with launch_lock(root, f"task-host:{config['port']}") as acquired:
+        if not acquired:
+            return
+        host = task_host_manifest(root, config)
+        if not host:
+            return
+        while True:
+            current = task_host_manifest(root, config)
+            if not current or current["launch_id"] != host["launch_id"]:
+                return  # Another host already took over; never stop its new work.
+            status = task_host_status(root, config, host)
+            if not status.get("code_stale"):
+                return
+            ready = task_host_request(host, "/api/service/ready")
+            if ready.get("launch_id") != host["launch_id"] or ready.get("role") != "task-host":
+                raise RuntimeError("后台任务服务身份已变化，已停止更新。")
+            if ready.get("ready"):
+                try:
+                    result = task_host_request(host, "/api/service/shutdown", token=status.get("token"), body={})
+                    if not result.get("ok") or result.get("pid") != host["pid"]:
+                        raise RuntimeError("后台任务服务未确认关闭，未启动新实例。")
+                    break
+                except urllib.error.HTTPError as error:
+                    if error.code != 409:
+                        raise
+                    # A new job arrived after the read-only probe. The host keeps it and we wait.
+            time.sleep(2)
+        wait_for_port_release(host["port"], timeout=30)
+        wait_for_task_host_release(config)
+        ensure_task_host(root, config, locked=True)
+
+
+def wait_for_task_host_release(config, timeout=30):
+    """Closing the listening socket can precede cleanup and release of the business-data lease."""
+    from data_lease import ServerLease
+    deadline = time.monotonic() + timeout
+    while True:
+        lease = ServerLease(config["runtime_root"])
+        if lease.acquire():
+            lease.close()
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("原任务引擎仍在结束保存，尚未启动新实例；请稍后重试。")
+        time.sleep(.1)
+
+
 def restart(root, config, no_browser=False):
     url = f"http://127.0.0.1:{config['port']}"
     processes = matching_processes(root, config)
     if processes:
-        ensure_no_active_tasks(config)
+        # Only the public gateway may restart while its independent task owner is busy.
+        gateway = all(any(same_path(argument, root / "service_gateway.py")
+                          for argument in windows_argv(process["CommandLine"])[1:]) for process in processes)
+        if gateway and not config.get("task_host_enabled"):
+            raise RuntimeError("当前工作台使用独立任务引擎，请保持 task_host_enabled 开启后重启。")
+        if not gateway:
+            ensure_no_active_tasks(config)
+        elif config.get("task_host_enabled"):
+            # A dead host makes the gateway status return 503. Repair it under the data lease first;
+            # the gateway then supplies its own verified PID and token for the normal shutdown handshake.
+            ensure_task_host(root, config)
         try:
             status = read_existing_service(url + "/api/service/status", "检查旧服务", timeout=5)
         except urllib.error.HTTPError as error:
@@ -502,10 +672,17 @@ def restart(root, config, no_browser=False):
     elif port_open(config["port"]):
         raise RuntimeError("工作台端口被其他程序占用，未结束该程序。")
     wait_for_port_release(config["port"])
-    prepare_start(root, config)
-    with (root / "server.log").open("ab") as log:
-        child = subprocess.Popen([sys.executable, "-u", str(root / "server.py")], cwd=str(root),
-                                 stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW)
+    if config.get("task_host_enabled"):
+        ensure_task_host(root, config)
+        command = [sys.executable, "-u", str(root / "service_gateway.py"), "--port", str(config["port"]),
+                   "--skill-root", config["skill_root"], "--runtime-root", config["runtime_root"]]
+        log_name = "gateway.log"
+    else:
+        prepare_stopped_engine(root, config)
+        command, log_name = [sys.executable, "-u", str(root / "server.py")], "server.log"
+    with (root / log_name).open("ab") as log:
+        child = subprocess.Popen(command, cwd=str(root), stdout=log, stderr=log,
+                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         if child.poll() is not None:
@@ -525,6 +702,9 @@ def restart(root, config, no_browser=False):
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     config = load_config(ROOT)
+    if "--refresh-task-host-on-idle" in args:
+        refresh_task_host_on_idle(ROOT, config)
+        return 0
     if "--inspect" in args:
         print(json.dumps(matching_processes(ROOT, config), ensure_ascii=True))
         return 0

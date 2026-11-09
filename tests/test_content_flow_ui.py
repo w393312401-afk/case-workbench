@@ -66,6 +66,166 @@ class ContentFlowBrowserTests(unittest.TestCase):
         page.evaluate("ContentFlow.route(true)")
         expect(page.locator(".flow-row")).to_have_count(0)
 
+    def trace_reads(self, page):
+        page.evaluate("""() => {
+          const original = window.fetch;
+          window.flowReadStarts = [];
+          window.fetch = (...args) => {
+            const url = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href);
+            if (['/api/content', '/api/content/views', '/api/photo-overview', '/api/needs-you'].includes(url.pathname))
+              flowReadStarts.push(url.pathname + url.search);
+            return original(...args);
+          };
+        }""")
+
+    def test_same_scope_routes_and_visibility_share_one_slow_content_read(self):
+        self.script()
+        page = self.content_page()
+        page.wait_for_function("!!document.querySelector('#content-flow-needs')")
+        page.clock.install()
+        self.trace_reads(page)
+        held = []
+        snapshot = self.flow("product=202H&view=attention&page_size=30")
+        page.route("**/api/content?**", lambda route: held.append(route))
+        page.evaluate("() => {void ContentFlow.route(true);void ContentFlow.route(true);for(let n=0;n<8;n++) document.dispatchEvent(new Event('visibilitychange'));}")
+        page.wait_for_function("() => flowReadStarts.filter(path=>path.startsWith('/api/content?')).length === 1")
+        page.clock.run_for(30001)
+        self.assertEqual(len(held), 1)
+        self.assertEqual(page.evaluate("flowReadStarts.filter(path=>path.startsWith('/api/content?')).length"), 1)
+        held[0].fulfill(json=snapshot)
+        expect(page.locator("#content-flow-list")).to_have_attribute("aria-busy", "false")
+        expect(page.locator(".flow-row")).to_have_count(1)
+
+    def test_unchanged_background_list_refreshes_auxiliary_state_without_reloading_views(self):
+        self.script()
+        page = self.content_page()
+        page.wait_for_function("!!document.querySelector('#content-flow-needs')")
+        page.clock.install()
+        self.trace_reads(page)
+        snapshot = self.flow("product=202H&view=attention&page_size=30")
+        page.route("**/api/content?**", lambda route: route.fulfill(json=snapshot))
+        page.route("**/api/photo-overview?**", lambda route: route.fulfill(json={"items": [], "counts": {"pending": 7}}))
+        page.route("**/api/needs-you?**", lambda route: route.fulfill(json={"counts": {"preview": 1}, "items": [
+            {"kind": "preview", "kind_label": "预览导出失败", "job_title": "新增待处理", "message": "等待重新导出", "hash": "#production/fixture", "product": "202H"}]}))
+        page.evaluate("window.retainedFlowRow=document.querySelector('.flow-row')")
+        page.clock.run_for(20001)
+        page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+        expect(page.locator('[data-flow-view="carousel"]')).to_have_text("图文7")
+        expect(page.locator("#content-flow-needs")).to_contain_text("需要你出手 1")
+        self.assertTrue(page.evaluate("retainedFlowRow===document.querySelector('.flow-row')"))
+        self.assertFalse(any(path.startswith("/api/content/views?") for path in page.evaluate("flowReadStarts")))
+
+    def test_running_content_poll_does_not_reload_saved_views_every_five_seconds(self):
+        self.script()
+        snapshot = self.flow("product=202H&view=attention&page_size=30")
+        snapshot["items"][0]["busy"] = True
+        page = self.open_page("#/202H/library")
+        page.clock.install()
+        page.route("**/api/content?**", lambda route: route.fulfill(json=snapshot))
+        page.evaluate("location.hash='#/202H/content'")
+        expect(page.locator(".flow-row")).to_have_count(1)
+        expect(page.locator("#content-flow-save-view")).to_be_enabled()
+        self.trace_reads(page)
+        for _ in range(3):
+            with page.expect_response(lambda response: "/api/content?" in response.url):
+                page.clock.run_for(5001)
+            expect(page.locator("#content-flow-list")).to_have_attribute("aria-busy", "false")
+        paths = page.evaluate("flowReadStarts")
+        self.assertEqual(sum(path.startswith("/api/content?") for path in paths), 3)
+        self.assertFalse(any(path.startswith("/api/content/views?") for path in paths))
+
+    def test_carousel_tab_shares_pending_count_read_and_explicit_refresh_ignores_its_old_response(self):
+        self.script()
+        page = self.content_page()
+        page.wait_for_function("!!document.querySelector('#content-flow-needs')")
+        self.trace_reads(page)
+        held = []
+        latest = {"items": [{"job_id": "fixture", "timeline_uid": "new", "timeline_name": "最新图文", "state": "pending"}], "counts": {"pending": 1}}
+
+        def overview(route):
+            if not held:
+                held.append(route)
+            else:
+                route.fulfill(json=latest)
+
+        page.route("**/api/photo-overview?**", overview)
+        page.locator("#content-flow-refresh").click()
+        page.wait_for_function("() => flowReadStarts.filter(path=>path.startsWith('/api/photo-overview?')).length === 1")
+        page.locator('[data-flow-view="carousel"]').click()
+        expect(page.locator("#content-flow-list")).to_have_attribute("aria-busy", "true")
+        self.assertEqual(page.evaluate("flowReadStarts.filter(path=>path.startsWith('/api/photo-overview?')).length"), 1)
+        page.locator("#content-flow-refresh").click()
+        expect(page.locator(".po-row")).to_contain_text("最新图文")
+        self.assertEqual(page.evaluate("flowReadStarts.filter(path=>path.startsWith('/api/photo-overview?')).length"), 2)
+        held[0].fulfill(json={"items": [], "counts": {"pending": 0}})
+        expect(page.locator("#content-flow-list")).to_have_attribute("aria-busy", "false")
+        expect(page.locator('[data-flow-view="carousel"]')).to_have_text("图文1")
+        expect(page.locator(".po-row")).to_contain_text("最新图文")
+
+    def test_switching_product_reads_new_auxiliary_state_while_previous_product_is_pending(self):
+        self.script()
+        page = self.content_page()
+        page.wait_for_function("!!document.querySelector('#content-flow-needs')")
+        self.trace_reads(page)
+        held = []
+
+        def auxiliary(route):
+            if "product=202H" in route.request.url:
+                held.append(route)
+            elif "/api/photo-overview?" in route.request.url:
+                route.fulfill(json={"items": [], "counts": {"pending": 9}})
+            else:
+                route.fulfill(json={"counts": {"preview": 1}, "items": [{"kind": "preview", "kind_label": "新产品导出失败", "product": "129N", "hash": "#production/new"}]})
+
+        page.route("**/api/photo-overview?**", auxiliary)
+        page.route("**/api/needs-you?**", auxiliary)
+        page.locator("#content-flow-refresh").click()
+        page.wait_for_function("() => flowReadStarts.filter(path=>path.startsWith('/api/photo-overview?') || path.startsWith('/api/needs-you?')).length === 2")
+        page.evaluate("location.hash='#/129N/content'")
+        expect(page.locator('[data-flow-view="carousel"]')).to_have_text("图文9")
+        expect(page.locator("#content-flow-needs")).to_contain_text("需要你出手 1")
+        for route in held:
+            route.fulfill(json={"items": [], "counts": {"pending": 0}})
+        expect(page.locator('[data-flow-view="carousel"]')).to_have_text("图文9")
+        expect(page.locator("#content-flow-needs")).to_contain_text("需要你出手 1")
+
+    def test_unchanged_carousel_keeps_focus_and_switching_back_restores_handlers(self):
+        self.script()
+        page = self.content_page()
+        page.wait_for_function("!!document.querySelector('#content-flow-needs')")
+        page.route("**/api/photo-overview?**", lambda route: route.fulfill(json={"items": [
+            {"job_id": "fixture", "timeline_uid": "one", "timeline_name": "图文焦点", "state": "pending"}], "counts": {"pending": 1}}))
+        page.locator('[data-flow-view="carousel"]').click()
+        expect(page.locator(".po-row")).to_have_count(1)
+        page.locator('[data-po-only="pending"]').focus()
+        page.evaluate("window.retainedPhotoRow=document.querySelector('.po-row')")
+        page.evaluate("ContentFlow.route(true)")
+        self.assertTrue(page.evaluate("retainedPhotoRow===document.querySelector('.po-row')"))
+        self.assertEqual(page.evaluate("document.activeElement.dataset.poOnly"), "pending")
+        page.locator('[data-flow-view="attention"]').click()
+        expect(page.locator("#content-flow-list .po-strip")).to_have_count(0)
+        expect(page.locator("#content-flow-list .flow-row")).to_have_count(1)
+        page.locator('[data-flow-view="carousel"]').click()
+        page.locator('[data-po-only="pending"]').click()
+        expect(page.locator('[data-po-only="pending"]')).to_have_attribute("aria-pressed", "true")
+
+    def test_returning_from_a_record_refreshes_auxiliary_state_within_its_cache_window(self):
+        self.script()
+        page = self.content_page()
+        page.wait_for_function("!!document.querySelector('#content-flow-needs')")
+        self.trace_reads(page)
+        page.route("**/api/photo-overview?**", lambda route: route.fulfill(json={"items": [], "counts": {"pending": 4}}))
+        page.route("**/api/needs-you?**", lambda route: route.fulfill(json={"counts": {"preview": 1}, "items": [
+            {"kind": "preview", "kind_label": "刚保存的待处理事项", "product": "202H", "hash": "#production/new"}]}))
+        page.locator(".flow-row .flow-title").click()
+        page.locator("#script-production-toggle").wait_for()
+        page.locator("#navigate-up").click()
+        expect(page.locator('[data-flow-view="carousel"]')).to_have_text("图文4")
+        expect(page.locator("#content-flow-needs")).to_contain_text("需要你出手 1")
+        paths = page.evaluate("flowReadStarts")
+        self.assertTrue(any(path.startswith("/api/photo-overview?") for path in paths))
+        self.assertTrue(any(path.startswith("/api/needs-you?") for path in paths))
+
     def test_archived_rows_are_deleted_for_good_after_confirming_their_count(self):
         job = self.finished_job("归档后删除的制作单")
         unused = self.script("归档后删除的脚本", text="Unused script.")
@@ -248,6 +408,26 @@ class ContentFlowBrowserTests(unittest.TestCase):
             close.click()
         page.screenshot(path=str(ARTIFACTS / name), full_page=True)
 
+    def test_needs_you_strip_stays_hidden_when_nothing_is_stuck(self):
+        self.script("磨刀器 · 新开头待制作")
+        page = self.open_page("#/202H/content")
+        expect(page.locator("#content-flow-list .flow-row")).to_have_count(1)
+        page.wait_for_function("() => document.querySelector('#content-flow-needs')")
+        expect(page.locator("#content-flow-needs")).to_be_hidden()
+
+    def test_carousel_tab_lists_uploaded_videos_and_leaving_it_restores_the_content_list(self):
+        self.script("磨刀器 · 新开头待制作")
+        page = self.open_page("#/202H/content")
+        expect(page.locator("#content-flow-list .flow-row")).to_have_count(1)
+        page.locator('[data-flow-view="carousel"]').click()
+        expect(page.locator("#content-flow-list .po-strip")).to_be_visible()
+        expect(page.locator("#content-flow-list .empty")).to_contain_text("登记发布后")
+        self.assertEqual(page.evaluate("location.hash"), "#/202H/content?view=carousel")
+        expect(page.locator("#content-flow-save-view")).to_be_disabled()
+        page.locator('[data-flow-view="attention"]').click()
+        expect(page.locator("#content-flow-list .flow-row")).to_have_count(1)
+        expect(page.locator("#content-flow-list .po-strip")).to_have_count(0)
+
     def test_one_list_keeps_secondary_records_in_more_and_sidebar_always_returns_to_content(self):
         self.script("磨刀器 · 新开头待制作")
         produced = self.script("磨刀器 · 操作演示", text="Another script.")
@@ -259,7 +439,7 @@ class ContentFlowBrowserTests(unittest.TestCase):
         page.locator("#ai-nav").click()
         expect(page.locator("#content-flow-list .flow-row")).to_have_count(2)
         expect(page.locator(".scripts-tabs")).to_have_count(0)
-        self.assertEqual(page.locator("[data-flow-view]").all_text_contents(), ["待处理2", "待发布0", "全部2"])
+        self.assertEqual(page.locator("[data-flow-view]").all_text_contents(), ["待处理2", "待发布0", "图文0", "全部2"])
         page.locator(".flow-main-menu > summary").click()
         self.assertEqual(page.locator(".flow-main-menu [role=menuitem]").all_inner_texts(), ["协作记录", "制作设置", "导入剪辑包", "批量管理"])
         self.screenshot(page, "unified-content-desktop.png")
@@ -370,7 +550,7 @@ class ContentFlowBrowserTests(unittest.TestCase):
         first, second = self.finished_job("已完成待发布 A"), self.finished_job("已完成待发布 B")
         self.script("仍待制作的稿", text="Still to make.")
         page = self.content_page()
-        self.assertEqual(page.locator("[data-flow-view]").all_text_contents(), ["待处理1", "待发布2", "全部3"])
+        self.assertEqual(page.locator("[data-flow-view]").all_text_contents(), ["待处理1", "待发布2", "图文0", "全部3"])
         # The open preset tab already names its rule, so no chip repeats it.
         expect(page.locator(".flow-filter-chip")).to_have_count(0)
         expect(page.locator("#content-flow-filter-toggle")).to_have_attribute("aria-label", "规则")

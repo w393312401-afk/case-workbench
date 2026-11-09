@@ -338,6 +338,116 @@ class NotionUploadTests(unittest.TestCase):
         self.assertEqual("temporary-notion", tool["threadId"])
 
 
+class PhotoNotionUploadTests(unittest.TestCase):
+    """挂车图文: the exported 发布 JPGs and frozen copy go to the same calendar, recorded apart from video uploads."""
+    SET = "PHS-aaaaaaaaaaaa"
+
+    def setUp(self):
+        NotionUploadTests.setUp(self)  # same fixture order, Notion fake and settings as the video tests
+        self.exports = []
+        self.data = {"id": self.SET, "job_id": JOB, "timeline_uid": "timeline-1", "timeline_name": "Fixture261103-202-1",
+                     "current": "A", "works": [{"key": "A", "name_zh": "达人自述", "exports": self.exports}]}
+        self.app.photo_sets = type("Sets", (), {"_read": lambda _, set_id: copy.deepcopy(self.data), "ensure_open": lambda _, set_id: None})()
+
+    def export(self, name, slides=2):
+        folder = self.root / "图文成品" / name
+        (folder / "发布JPG").mkdir(parents=True)
+        for number in range(1, slides + 1):
+            (folder / "发布JPG" / f"{number:02d}.jpg").write_bytes(bytes([255, 216]) + bytes(40) + bytes([number]))
+        (folder / "copy.json").write_text(json.dumps({
+            "titles": ["🔴I found the next level#SHARPAL202H", "🔴Second title#tag"], "titles_zh": ["我找到了下一级", "第二个"],
+            "caption_en": "Seven plates in one case.", "caption_zh": "一个盒子装七块磨板。",
+            "slides": [{"number": n, "title_lines": [f"SLIDE {n} TITLE"], "body": f"Slide {n} line.", "title_zh": f"第 {n} 张", "body_zh": ""}
+                       for n in range(1, slides + 1)]}, ensure_ascii=False), encoding="utf-8")
+        self.exports.append({"folder": str(folder), "name": name, "at": "2026-11-08T00:00:00+00:00", "style": "bar"})
+        return folder
+
+    def photo_body(self, **extra):
+        return {"request_id": uuid4().hex, "work": "A", "published_on": "2026-11-09", "account": "fixture",
+                "title": "🔴I found the next level#SHARPAL202H", **extra}
+
+    def run_photo(self, body=None):
+        started = self.manager.photo_start(self.SET, body or self.photo_body())
+        self.manager._photo_run(started["id"])
+        return self.manager.photo_store.read()["uploads"][started["id"]]
+
+    def test_every_picture_goes_into_files_and_the_body_holds_copy_and_slide_text(self):
+        self.export("C1-20261108-A达人自述", slides=3)
+        detail = self.manager.photo_detail(self.SET, "A")
+        self.assertEqual(("", 3, "Fixture261103-202-1 图文A", "fixture"), (detail["blocked_reason"], detail["pictures"], detail["name"], detail["account"]))
+        self.assertEqual("🔴I found the next level#SHARPAL202H", detail["title"])
+        row = self.run_photo()
+        self.assertEqual("completed", row["status"])
+        uploads = [args for action, args in self.bridge.calls if action == "create_file_upload"]
+        self.assertEqual(["image/jpeg"] * 3, [args["content_type"] for args in uploads])
+        self.assertEqual("Fixture261103-202-1 图文A-01.jpg", uploads[0]["filename"])
+        page = self.bridge.pages[notion_id(PAGE)]
+        self.assertEqual(3, len(page["properties"]["文件和媒体"]))
+        self.assertEqual(("2026-11-09", "Fixture261103-202-1 图文A", "就绪"),
+                         (page["properties"]["date:日期:start"], page["properties"]["名称"], page["properties"]["视频状态"]))
+        for text in ("Seven plates in one case.", "一个盒子装七块磨板。", "SLIDE 2 TITLE", "Slide 3 line.", "第 1 张"):
+            self.assertIn(text, page["content"])
+        # Kept apart from video receipts: the video's own state is untouched.
+        self.assertEqual({}, self.manager.latest(JOB, "timeline-1"))
+        self.assertEqual({"A": "completed"}, self.manager.photo_summary()[self.SET])
+        self.assertNotIn("video:" + JOB, self.app.calendar)
+        self.assertFalse(self.manager.busy())
+
+    def test_an_export_made_before_titles_offers_the_caption_line(self):
+        folder = self.export("C1-20261105-A")
+        frozen = json.loads((folder / "copy.json").read_text(encoding="utf-8"))
+        frozen.pop("titles")
+        frozen["caption_en"] = "Stop guessing the angle. It locks in. #knife #sharpal"
+        (folder / "copy.json").write_text(json.dumps(frozen), encoding="utf-8")
+        self.assertEqual("🔴Stop guessing the angle.#knife #sharpal", self.manager.photo_detail(self.SET, "A")["title"])
+
+    def test_forgetting_a_deleted_carousel_only_drops_its_own_receipts(self):
+        rows = {"NPH-000000000001": {"id": "NPH-000000000001", "job_id": "PRD-000000000001", "set_id": "PHS-000000000001", "page_id": "p1"},
+                "NPH-000000000002": {"id": "NPH-000000000002", "job_id": "PRD-000000000001", "set_id": "PHS-000000000002", "page_id": "p2"}}
+        self.manager.photo_store.write({"schema_version": 1, "uploads": rows})
+        self.assertEqual([row["page_id"] for row in self.manager.photo_receipts({"PHS-000000000001"})], ["p1"])
+        self.manager.running.add(("PRD-000000000001", "photo:PHS-000000000001:A"))
+        self.assertTrue(self.manager.photo_busy({"PHS-000000000001"}))
+        self.assertFalse(self.manager.photo_busy({"PHS-000000000002"}))
+        self.manager.running.clear()
+        self.manager.forget_photo({"PHS-000000000001"})
+        self.assertEqual(list(self.manager.photo_store.read()["uploads"]), ["NPH-000000000002"])
+
+    def test_not_exported_yet_cannot_upload(self):
+        self.assertIn("先定稿导出", self.manager.photo_detail(self.SET, "A")["blocked_reason"])
+        with self.assertRaises(VoiceError) as caught:
+            self.manager.photo_start(self.SET, self.photo_body())
+        self.assertEqual(409, caught.exception.status)
+        self.assertEqual([], self.bridge.calls)
+
+    def test_a_newer_export_is_flagged_and_updates_the_same_page(self):
+        self.export("C1-20261108-A达人自述")
+        self.run_photo()
+        self.export("C1-20261108-A达人自述-v2", slides=4)
+        detail = self.manager.photo_detail(self.SET, "A")
+        self.assertEqual(("C1-20261108-A达人自述", "C1-20261108-A达人自述-v2"), (detail["receipt"]["export_name"], detail["export_name"]))
+        self.assertEqual("completed", self.run_photo()["status"])
+        self.assertEqual(1, len(self.bridge.pages))
+        self.assertEqual(4, len(self.bridge.pages[notion_id(PAGE)]["properties"]["文件和媒体"]))
+
+    def test_failed_readback_is_not_marked_uploaded_and_a_restart_reports_interruption(self):
+        self.export("C1-20261108-A达人自述")
+        self.bridge.bad_body = True
+        self.assertEqual("failed", self.run_photo()["status"])
+        started = self.manager.photo_start(self.SET, self.photo_body(account="fixture "))
+        self.assertTrue(self.manager.busy(JOB))
+        with self.assertRaises(VoiceError):
+            self.manager.photo_start(self.SET, self.photo_body())
+        again = NotionUploads(self.app, {"data_source_id": DEST}, self.bridge)
+        self.assertEqual("interrupted", again.photo_store.read()["uploads"][started["id"]]["status"])
+
+    def test_wrong_version_and_extra_fields_are_refused(self):
+        self.export("C1-20261108-A达人自述")
+        for body in (self.photo_body(work="Z"), self.photo_body(work="AB"), self.photo_body(file_path="C:/x.jpg"), self.photo_body(title=" ")):
+            with self.assertRaises(VoiceError):
+                self.manager.photo_start(self.SET, body)
+
+
 class NotionUploadHTTPTests(unittest.TestCase):
     def setUp(self):
         import test_server as fixture

@@ -202,6 +202,15 @@ Maybe.
 
 
 class NamedVariantTests(unittest.TestCase):
+    def test_suggested_variants_named_with_v_keep_their_own_label_and_text(self):
+        block = lambda heading, line: "\n".join([f"### {heading}", "", "**口播（配音用）**", "", "```", line, "```", "", "**对应中文**", "", "```", "中文", "```", ""]) + "\n"
+        text = block("变体 #1（已登记：价位对比）", "First one.") + block("建议新增变体 V2：先问价", "Second one.") + block("建议新增变体 V3：送礼", "Third one.")
+        found = parse_variants(text)
+        self.assertEqual([item["label"] for item in found], ["变体 #1", "变体 V2：先问价", "变体 V3：送礼"])
+        self.assertEqual([item["lines"][0]["spoken"] for item in found], ["First one.", "Second one.", "Third one."])
+        self.assertIn("Second one.", variant_script(text, 1))
+        self.assertNotIn("Third one.", variant_script(text, 1))
+
     def test_variants_named_by_version_letter_split_at_their_own_heading(self):
         found = parse_variants(NAMED)
         self.assertEqual([item["label"] for item in found], ["版本 A｜与原稿一致", "版本 B｜口袋刀是不是过头"])

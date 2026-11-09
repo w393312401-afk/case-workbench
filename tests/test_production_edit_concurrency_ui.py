@@ -22,6 +22,7 @@ class ProductionEditConcurrencyBrowserTests(unittest.TestCase):
 
     def setUp(self):
         defaults.ProductionEditDefaultsBrowserTests.setUp(self)
+        self.catalog["default_settings"]["reasoning_effort"] = "medium"
         self.clients["busy"] = True
         self.payload["product_settings"]["material_timelines"] = ["蓝点折刀成品素材"]
 

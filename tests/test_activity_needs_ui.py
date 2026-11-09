@@ -12,6 +12,7 @@ class ActivityNeedsBrowserTests(unittest.TestCase):
     add_run=fixture.TaskActivityBrowserTests.add_run
     counts=fixture.TaskActivityBrowserTests.counts
     respond=fixture.TaskActivityBrowserTests.respond
+    content_view=fixture.TaskActivityBrowserTests.content_view
     page=fixture.TaskActivityBrowserTests.page
     refresh=fixture.TaskActivityBrowserTests.refresh
 

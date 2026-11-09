@@ -439,6 +439,21 @@ class DataBackupTests(unittest.TestCase):
         with zipfile.ZipFile(result["recovery_path"]) as recovery:
             self.assertFalse(any("remote-access" in name.casefold() for name in recovery.namelist()))
 
+    def test_service_host_credentials_are_not_exported_or_replaced_on_import(self):
+        host = self.write(self.runtime / "service" / "task-host.json", b'{"proxy_secret":"live-local-fixture","launch_id":"live"}')
+        gateway = self.write(self.runtime / "service" / "gateway.json", b'{"pid":12345}')
+        archive = self.export()
+        with zipfile.ZipFile(archive) as packed:
+            self.assertFalse(any(name.startswith("runtime/service/") for name in packed.namelist()))
+            self.assertNotIn("service", json.loads(packed.read("manifest.json"))["runtime_entries"])
+        legacy = self.with_remote_access(archive, {"task-host.json": b'{"proxy_secret":"old-machine-fixture"}'}, entry="service")
+        self.manager.restore_archive(legacy, self.root / "recoveries")
+        self.assertEqual(host.read_bytes(), b'{"proxy_secret":"live-local-fixture","launch_id":"live"}')
+        self.assertEqual(gateway.read_bytes(), b'{"pid":12345}')
+        for recovery in (self.root / "recoveries").glob("*.zip"):
+            with zipfile.ZipFile(recovery) as packed:
+                self.assertFalse(any(name.startswith("runtime/service/") for name in packed.namelist()))
+
     def test_older_archive_with_remote_access_imports_without_touching_it(self):
         archive = self.export()
         plain = self.manager.inspect_archive(archive)

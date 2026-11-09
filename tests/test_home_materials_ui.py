@@ -17,23 +17,25 @@ class HomeMaterialUITests(unittest.TestCase):
     open_page = review.ReviewPageTests.open_page
     card = review.ReviewPageTests.card
 
-    def test_home_focuses_on_four_work_categories_and_mobile_tabs_remain_accessible(self):
+    def test_home_focuses_on_three_planning_categories_and_mobile_tabs_remain_accessible(self):
         page = self.open_page(route='#/202H/home', ready='[data-home-tab]')
         self.assertEqual(page.locator('#home-page h1').inner_text(), '工作概览')
-        self.assertEqual(page.locator('.home-tabs [role=tab]').count(), 4)
+        self.assertEqual(page.locator('.home-tabs [role=tab]').count(), 3)
         self.assertEqual(page.locator('.home-kpi, #home-weekly-section, #home-page [data-material-open]').count(), 0)
         self.assertIn('完整系统价值', page.locator('.home-case-list').inner_text())
-        self.assertEqual(page.locator('[data-home-tab]').first.get_attribute('data-home-tab'), 'tasks')
-        page.locator('[data-home-tab=tasks]').focus()
+        self.assertEqual(page.locator('[data-home-tab]').first.get_attribute('data-home-tab'), 'due')
+        page.locator('[data-home-tab=due]').focus()
         page.keyboard.press('ArrowRight')
+        self.assertEqual(page.locator('[data-home-tab=plans]').get_attribute('aria-selected'), 'true')
+        page.keyboard.press('ArrowLeft')
         self.assertEqual(page.locator('[data-home-tab=due]').get_attribute('aria-selected'), 'true')
         self.assertTrue(page.locator('#home-due-title-panel').is_visible())
         page.keyboard.press('End')
         self.assertEqual(page.locator('[data-home-tab=cases]').get_attribute('aria-selected'), 'true')
         page.keyboard.press('Home')
-        self.assertEqual(page.locator('[data-home-tab=tasks]').get_attribute('aria-selected'), 'true')
+        self.assertEqual(page.locator('[data-home-tab=due]').get_attribute('aria-selected'), 'true')
         page.set_viewport_size({'width':390,'height':844})
-        for key in ('tasks', 'due', 'plans', 'cases'):
+        for key in ('due', 'plans', 'cases'):
             tab = page.locator(f'[data-home-tab={key}]')
             self.assertTrue(tab.is_visible())
             self.assertGreaterEqual(tab.bounding_box()['height'], 44)

@@ -2,6 +2,10 @@
 
 Receipts and managed media live under production/notion-uploads. Uploading is
 independent of registering a TikTok post and never changes a script to published.
+
+挂车图文 goes to the same calendar: one page per carousel version, its exported 发布 JPGs in 「文件和媒体」 and
+the frozen copy.json text in the body. Its receipts live in photo-catalog.json beside the video catalog, so the
+video readers (task states, overview, needs-you) never mistake a picture upload for a video one.
 """
 from __future__ import annotations
 
@@ -44,6 +48,30 @@ def body_markdown(source):
             if option.get("zh"):
                 parts.append(option["zh"])
     return "\n\n".join(parts)
+
+
+def photo_markdown(source):
+    """Body of a carousel page: the publish copy, then every slide's English text with its Chinese reading."""
+    def block(value):
+        fence = "`" * max(3, max((len(x) + 1 for x in re.findall(r"`+", value)), default=3))
+        return f"{fence}text\n{value}\n{fence}"
+    parts = []
+    if source.get("caption_en"):
+        parts += ["## 英文文案", block(source["caption_en"])]
+    if source.get("caption_zh"):
+        parts += ["## 中文文案", block(source["caption_zh"])]
+    slides = source.get("slides") or []
+    if slides:
+        parts.append("## 逐张文字")
+    for slide in slides:
+        text = "\n".join([*(slide.get("title_lines") or []), *([slide["body"]] if slide.get("body") else [])]).strip()
+        parts.append(f"### 第 {slide.get('number')} 张")
+        if text:
+            parts.append(block(text))
+        reading = " / ".join(filter(None, [slide.get("title_zh", ""), slide.get("body_zh", "")]))
+        if reading:
+            parts.append(reading)
+    return "\n\n".join(parts) or "挂车图文"
 
 
 def upload_video(source, output, progress):
@@ -101,30 +129,59 @@ class NotionUploadStore(VideoPublicationStore):
             raise VoiceError(500, "Notion 上传记录无法读取，请保留资料并核对备份。") from None
 
 
+class PhotoNotionStore(NotionUploadStore):
+    """Receipts for carousel uploads: one row per (photo set, version), each pointing at a frozen 图文成品 folder."""
+    def __init__(self, production_root):
+        self.root = Path(production_root) / "notion-uploads"
+        self.path = self.root / "photo-catalog.json"
+
+    def read(self):
+        if not self.path.exists():
+            return {"schema_version": 1, "uploads": {}}
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if data.get("schema_version") != 1 or not isinstance(data.get("uploads"), dict):
+                raise ValueError()
+            for key, row in data["uploads"].items():
+                if (not re.fullmatch(r"NPH-[0-9a-f]{12}", key) or row.get("id") != key
+                        or not re.fullmatch(r"PRD-[0-9a-f]{12}", row.get("job_id", ""))
+                        or not re.fullmatch(r"PHS-[0-9a-f]{12}", row.get("set_id", ""))):
+                    raise ValueError()
+            return data
+        except (OSError, ValueError, TypeError, AttributeError):
+            raise VoiceError(500, "图文 Notion 上传记录无法读取，请保留资料并核对备份。") from None
+
+
 class NotionUploads:
     def __init__(self, workbench, settings=None, bridge=None):
         self.app = workbench
         self.settings = copy.deepcopy(settings or {})
         self.store = NotionUploadStore(workbench.production.root)
+        self.photo_store = PhotoNotionStore(workbench.production.root)
         self.bridge = bridge or NotionBridge(cache_path=self.store.root / "connection.json")
         self.lock = threading.RLock()
         self.running = set()
         # A restart never silently retries a cloud write. The next click searches
         # by the saved page/name and recovers the same receipt.
-        with self.transaction() as data:
-            for row in data["uploads"].values():
-                if row.get("status") == "running":
-                    row.update(status="interrupted", error="工作台已重启；重试会先查找已有 Notion 页面。")
+        for store in (self.store, self.photo_store):
+            with self.transaction(store) as data:
+                for row in data["uploads"].values():
+                    if row.get("status") == "running":
+                        row.update(status="interrupted", error="工作台已重启；重试会先查找已有 Notion 页面。")
 
-    def transaction(self):
+    def transaction(self, store=None):
         from contextlib import contextmanager
+        store = store or self.store
         @contextmanager
         def edit():
-            with self.lock, file_lock(self.store.root / "catalog.lock", "Notion 上传记录正在保存，请稍后重试。"):
-                data = self.store.read()
+            with self.lock, file_lock(store.path.with_suffix(".lock"), "Notion 上传记录正在保存，请稍后重试。"):
+                data = store.read()
                 yield data
-                self.store.write(data)
+                store.write(data)
         return edit()
+
+    def _store_of(self, identifier):
+        return self.photo_store if identifier.startswith("NPH-") else self.store
 
     def busy(self, job_id=None):
         with self.lock:
@@ -239,7 +296,7 @@ class NotionUploads:
         return result
 
     def _save(self, identifier, **patch):
-        with self.transaction() as data:
+        with self.transaction(self._store_of(identifier)) as data:
             data["uploads"][identifier].update(patch, updated_at=now())
 
     def _run(self, identifier):
@@ -250,8 +307,11 @@ class NotionUploads:
             self._save(identifier, file=media)
             path = upload_video(self.store.managed_path(media), self.store.root / "previews" / (identifier + ".mp4"), progress)
             progress("正在连接 Notion 并核对发布账号。")
+            mime = {".mov": "video/quicktime", ".webm": "video/webm"}.get(path.suffix.lower(), "video/mp4")
+            filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["name"]) + path.suffix.lower()
+            texts = [row["source"].get(key, "") for key in ("en", "zh", "screen_en")]
             with self.bridge.client() as client:
-                self._publish(client, row, path, progress)
+                self._publish(client, row, [(path, mime, filename)], body_markdown(row["source"]), texts, progress)
                 warning = "；".join(getattr(client, "warnings", []))
             # Readback succeeded before either local upload marker changes.
             job = self.app.production.job(row["job_id"])
@@ -273,6 +333,160 @@ class NotionUploads:
         finally:
             with self.lock:
                 self.running.discard((row["job_id"], row["timeline_uid"]))
+
+    # ---------- 挂车图文: one Notion page per carousel version ----------
+    def photo_latest(self, set_id, work_key):
+        rows = [row for row in self.photo_store.read()["uploads"].values() if row["set_id"] == set_id and row.get("work") == work_key]
+        return max(rows, key=lambda row: row.get("updated_at", ""), default={})
+
+    def photo_busy(self, set_ids):
+        with self.lock:
+            return any(str(key[1]).startswith(f"photo:{set_id}:") for key in self.running for set_id in set_ids)
+
+    def photo_receipts(self, set_ids):
+        return [row for row in self.photo_store.read()["uploads"].values() if row["set_id"] in set_ids]
+
+    def forget_photo(self, set_ids):
+        """Drop the local upload receipts of deleted carousels; the pages on Notion are left alone."""
+        with self.transaction(self.photo_store) as catalog:
+            for key, row in list(catalog["uploads"].items()):
+                if row["set_id"] in set_ids:
+                    del catalog["uploads"][key]
+
+    def photo_summary(self, set_ids=None):
+        """{set_id: {work_key: status}} from each version's latest upload; status is completed / running / failed / interrupted."""
+        latest = {}
+        for row in sorted(self.photo_store.read()["uploads"].values(), key=lambda row: row.get("updated_at", "")):
+            if set_ids is None or row["set_id"] in set_ids:
+                latest.setdefault(row["set_id"], {})[row.get("work", "")] = row.get("status", "")
+        return latest
+
+    def _photo_source(self, set_id, work_key):
+        """The set, the version's newest export and that export's frozen copy.json: what goes up is what was exported."""
+        from photo_carousel import PhotoSetError
+        photos = getattr(self.app, "photo_sets", None)
+        if photos is None:
+            raise VoiceError(404, "图文功能未启用。")
+        try:
+            data = photos._read(set_id)
+        except PhotoSetError as exc:
+            raise VoiceError(exc.status, str(exc)) from None
+        work = next((item for item in data.get("works") or [] if item.get("key") == (work_key or (data.get("current") or ""))), None)
+        if work is None and not work_key:
+            work = next(iter(data.get("works") or []), None)
+        if work is None:
+            raise VoiceError(404, "这一版图文不存在。")
+        export = (work.get("exports") or [None])[-1]
+        folder = Path(export["folder"]) if export else None
+        pictures = sorted((folder / "发布JPG").glob("*.jpg")) if folder and (folder / "发布JPG").is_dir() else []
+        try:
+            frozen = json.loads((folder / "copy.json").read_text(encoding="utf-8")) if pictures else {}
+        except (OSError, ValueError):
+            frozen = {}
+        return data, work, export, pictures, frozen
+
+    def photo_detail(self, set_id, work_key=""):
+        data, work, export, pictures, frozen = self._photo_source(set_id, work_key)
+        job = self.app.production.job(data["job_id"])
+        timeline = next((row for row in job.get("timelines") or [] if row.get("unique_id") == data.get("timeline_uid")), {})
+        previous = self.photo_latest(set_id, work["key"])
+        video = self.latest(data["job_id"], data.get("timeline_uid"))
+        creator = timeline.get("creator") or job.get("creator", "")
+        from photo_carousel import fallback_titles
+        # Exports made before titles existed get the same caption-derived line the carousel window shows.
+        titles = frozen.get("titles") or fallback_titles(frozen.get("caption_en"))
+        blocked = ("制作单已归档。" if job.get("archived") else "先定稿导出这一版，再上传到 Notion。" if not export
+                   else "这一版的成品文件夹不在了，请再导出一次。" if not pictures or not frozen else "")
+        return {"set_id": set_id, "work": work["key"], "work_name": work.get("name_zh", ""),
+            "name": f"{timeline.get('name') or data.get('timeline_name') or data['job_id']} 图文{work['key']}",
+            "export_name": (export or {}).get("name", ""), "pictures": len(pictures),
+            "copy": {"titles": titles, "titles_zh": frozen.get("titles_zh") or [], "caption_en": frozen.get("caption_en", ""), "caption_zh": frozen.get("caption_zh", "")},
+            "published_on": previous.get("published_on") or video.get("published_on") or date.today().isoformat(),
+            "account": ((previous.get("account") if "发布账号" not in str(previous.get("error") or "") else "")
+                        or self.settings.get("accounts", {}).get(creator) or video.get("account")
+                        or self._last_account(creator) or creator),
+            "title": previous.get("title") or (titles[0] if titles else ""),
+            "destination": self.settings.get("name", "TK排期计划"), "configured": bool(self.settings.get("data_source_id")),
+            "receipt": self.public(previous) | {"export_name": previous.get("export_name", "")} if previous else None,
+            "blocked_reason": blocked}
+
+    def photo_start(self, set_id, body):
+        if not isinstance(body, dict) or set(body) - {"work", "request_id", "published_on", "account", "title"}:
+            raise VoiceError(400, "图文上传参数无效。")
+        request = str(body.get("request_id", ""))
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,120}", request):
+            raise VoiceError(400, "上传请求标识无效，请刷新后重试。")
+        work_key = body.get("work")
+        if not isinstance(work_key, str) or not re.fullmatch(r"[A-Z]", work_key):
+            raise VoiceError(400, "请选择要上传的图文版本。")
+        self.app.photo_sets.ensure_open(set_id)
+        detail = self.photo_detail(set_id, work_key)
+        if detail["blocked_reason"]:
+            raise VoiceError(409, detail["blocked_reason"])
+        if not detail["configured"]:
+            raise VoiceError(409, "请先配置 Notion 发布日历地址。")
+        day = body.get("published_on", "")
+        try:
+            if date.fromisoformat(day).isoformat() != day:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise VoiceError(400, "请选择有效的发布日期。") from None
+        values = {}
+        for key, limit in (("account", 200), ("title", 2000)):
+            value = body.get(key, "")
+            if not isinstance(value, str) or len(value) > limit or "\x00" in value:
+                raise VoiceError(400, "上传文案内容无效。")
+            values[key] = value.strip()
+        if not values["account"] or not values["title"]:
+            raise VoiceError(400, "请补齐发布账号和标题。")
+        data, work, export, pictures, frozen = self._photo_source(set_id, work_key)
+        if any(path.stat().st_size > UPLOAD_LIMIT for path in pictures):
+            raise VoiceError(409, "有图片超过 20 MiB，Notion 收不下，请再导出一次。")
+        digest = fingerprint({"set_id": set_id, **body})
+        key = (data["job_id"], f"photo:{set_id}:{work_key}")
+        with self.transaction(self.photo_store) as catalog:
+            row = next((row for row in catalog["uploads"].values() if row.get("request_id") == request), None)
+            if row and row["request_hash"] != digest:
+                raise VoiceError(409, "此请求已用于另一项上传，请刷新后重试。")
+            if row and (row["status"] == "completed" or key in self.running):
+                return self.public(row) | {"export_name": row.get("export_name", "")}
+            if key in self.running:
+                raise VoiceError(409, "这一版图文正在上传，请等待完成。")
+            if not row:
+                previous = self.photo_latest(set_id, work_key)
+                row = {"id": "NPH-" + uuid4().hex[:12], "job_id": data["job_id"], "timeline_uid": data.get("timeline_uid", ""),
+                    "set_id": set_id, "work": work_key, "request_id": request, "request_hash": digest, "name": detail["name"],
+                    "published_on": day, **values, "export_name": export["name"], "folder": export["folder"],
+                    "source": {key: frozen.get(key) for key in ("caption_en", "caption_zh", "titles", "slides")},
+                    "destination_id": notion_id(self.settings["data_source_id"]),
+                    "page_id": previous.get("page_id", ""), "page_url": previous.get("page_url", "")}
+                catalog["uploads"][row["id"]] = row
+            row.update(status="running", progress="正在准备图片和 Notion 连接。", error="", updated_at=now())
+            self.running.add(key)
+            result = self.public(row) | {"export_name": row["export_name"]}
+        threading.Thread(target=self._photo_run, args=(row["id"],), daemon=True, name="notion-photo-upload").start()
+        return result
+
+    def _photo_run(self, identifier):
+        row = copy.deepcopy(self.photo_store.read()["uploads"][identifier])
+        progress = lambda message: self._save(identifier, progress=message)
+        try:
+            pictures = sorted((Path(row["folder"]) / "发布JPG").glob("*.jpg"))
+            if not pictures:
+                raise VoiceError(409, "这一版的成品文件夹不在了，请再导出一次。")
+            safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["name"])
+            files = [(path, "image/jpeg", f"{safe}-{index:02d}.jpg") for index, path in enumerate(pictures, 1)]
+            progress("正在连接 Notion 并核对发布账号。")
+            with self.bridge.client() as client:
+                self._publish(client, row, files, photo_markdown(row["source"]), [row["source"].get("caption_en", ""), row["source"].get("caption_zh", "")], progress)
+                warning = "；".join(getattr(client, "warnings", []))
+            self._save(identifier, status="completed", progress="已上传到 Notion。", warning=warning)
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, VoiceError) else "上传未完成，已有 Notion 页面会保留，重试不会主动新建副本。"
+            self._save(identifier, status="failed", error=message, progress="")
+        finally:
+            with self.lock:
+                self.running.discard((row["job_id"], f"photo:{row['set_id']}:{row['work']}"))
 
     # Account pages rarely change, so a confirmed match is kept locally and reused without a SQL query.
     def _last_account(self, creator):
@@ -330,10 +544,10 @@ class NotionUploads:
             if data.get(source, {}).pop(name, None) is not None:
                 self._write_accounts(data)
 
-    def _publish(self, client, row, path, progress):
+    def _publish(self, client, row, files, markdown, texts, progress):
         used = {}
         try:
-            self._write_page(client, row, path, progress, used)
+            self._write_page(client, row, files, markdown, texts, progress, used)
         except Exception as exc:
             # A remembered account may have been removed or renamed in Notion; the next try looks it up again.
             # An exhausted quota or a dropped connection says nothing about the account, so it stays.
@@ -341,7 +555,8 @@ class NotionUploads:
                 self._forget_account(*used["key"])
             raise
 
-    def _write_page(self, client, row, path, progress, used):
+    def _write_page(self, client, row, files, markdown, texts, progress, used):
+        """files: [(path, mime, filename)] for 「文件和媒体」; texts: body strings the readback must contain."""
         destination = client.call("fetch", {"id": "collection://" + row["destination_id"]})
         # Fetch and use the actual schemas before querying any properties.
         state = re.search(r"<data-source-state>\s*(.*?)\s*</data-source-state>", destination.get("text", ""), re.S)
@@ -396,7 +611,6 @@ class NotionUploads:
                 self._save(row["id"], page_id=row["page_id"], page_url=row["page_url"])
         properties = {"名称": row["name"], "标题＋tags": row["title"], "date:日期:start": row["published_on"],
             "date:日期:is_datetime": 0, field: json.dumps([account[0]["url"]])}
-        markdown = body_markdown(row["source"])
         if row.get("page_id"):
             existing = client.call("fetch", {"id": row["page_id"]})
             parent = re.search(r'<parent-data-source url="([^"]+)"', existing.get("text", ""))
@@ -415,22 +629,21 @@ class NotionUploads:
                 raise VoiceError(502, "Notion 页面创建结果未确认，请重试以查找已有页面。")
             row.update(page_id=notion_id(pages[0]["id"]), page_url=pages[0]["url"])
             self._save(row["id"], page_id=row["page_id"], page_url=row["page_url"])
-        progress("正在上传视频到 Notion。")
-        mime = {".mov": "video/quicktime", ".webm": "video/webm"}.get(path.suffix.lower(), "video/mp4")
-        filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["name"]) + path.suffix.lower()
-        upload = client.call("create_file_upload", {"filename": filename, "content_type": mime})
-        sent = send_video(upload, path)
+        sent = []
+        for index, (path, mime, filename) in enumerate(files, 1):
+            progress("正在上传视频到 Notion。" if mime.startswith("video/") else f"正在上传第 {index}/{len(files)} 张图到 Notion。")
+            upload = client.call("create_file_upload", {"filename": filename, "content_type": mime})
+            sent.append(send_video(upload, path)["file_upload_id"])
         client.call("update_page", {"page_id": row["page_id"], "command": "update_properties", "properties": {
-            **properties, "文件和媒体": [{"type": "file_upload", "file_upload": {"id": sent["file_upload_id"]}}]}})
+            **properties, "文件和媒体": [{"type": "file_upload", "file_upload": {"id": uid}} for uid in sent]}})
         client.call("update_page", {"page_id": row["page_id"], "command": "replace_content", "new_str": markdown})
-        progress("正在确认 Notion 的成片、日期和文案。")
+        progress("正在确认 Notion 的文件、日期和文案。")
         saved = client.call("fetch", {"id": row["page_id"]})
         actual = page_properties(saved)
         normalized = re.sub(r"\s+", " ", saved.get("text", ""))
-        copy_matches = all(re.sub(r"\s+", " ", row["source"].get(key, "")) in normalized
-                           for key in ("en", "zh", "screen_en") if row["source"].get(key))
+        copy_matches = all(re.sub(r"\s+", " ", text) in normalized for text in texts if text)
         if (actual.get("date:日期:start") != row["published_on"] or actual.get("标题＋tags") != row["title"]
                 or not actual.get("文件和媒体") or not copy_matches
                 or not any(notion_id(url) == notion_id(account[0]["url"]) for url in actual.get(field, []))):
-            raise VoiceError(502, "Notion 页面已保留，但日期、账号、成片或文案尚未核对一致，请重试。")
+            raise VoiceError(502, "Notion 页面已保留，但日期、账号、文件或文案尚未核对一致，请重试。")
         self._save(row["id"], page_id=row["page_id"], page_url=saved.get("url") or row["page_url"])

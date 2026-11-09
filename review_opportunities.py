@@ -2,6 +2,7 @@
 from collections import Counter, defaultdict
 from contextlib import closing
 from datetime import date, timedelta
+import hashlib
 import re
 import sqlite3
 
@@ -11,15 +12,17 @@ from review_taxonomy import PLATFORM_LABELS, ROLE_LABELS, TOPIC
 
 
 NOTICE = "评论频次只代表已导入样本中的表达，不代表市场占比或已验证的商品事实。相同原文去重，跨来源计数可重叠。"
-RANKING = "先按近14天首次入库的不同原文数；相同时依次看尚无已发布脚本、手动标注数、不同原文总数和来源数。"
+RANKING = ("先看 AI 三段骨架：开头、中段、收口都齐的在前，有缺口的其次，还没生成的再后，AI 判断不值得做的最后；"
+           "同一档里按近14天首次入库的不同原文数，相同时依次看尚无已发布脚本、手动标注数、不同原文总数和来源数。")
 
 
 def _normalized(text):
     return re.sub(r"\s+", " ", str(text or "")).strip().casefold()
 
 
-def opportunity_catalog(app, product, *, limit=20, offset=0):
-    """No sync, material mutation, sales lookup, or model call occurs here."""
+def opportunity_catalog(app, product, *, limit=20, offset=0, evidence_limit=3):
+    """No sync, material mutation, sales lookup, or model call occurs here. Saved AI skeletons
+    (app.opportunity_skeletons) are only read: they order the themes and join the writing brief."""
     try:
         limit, offset = max(1, min(int(limit), 100)), max(0, int(offset))
     except (TypeError, ValueError):
@@ -117,7 +120,7 @@ def opportunity_catalog(app, product, *, limit=20, offset=0):
                  for row in creation["plans"] if row.get("direction_id") in linked_directions and row.get("status") != "cancelled"]
         published = sum(row["published"] for row in coverage)
         evidence.sort(key=lambda row: (not row["recent"], not row["manual"], row["id"]))
-        evidence = evidence[:3]
+        evidence = evidence[:evidence_limit]
         reasons = [f"近 {NEW_DAYS} 天首次入库 {recent} 种不同原文", f"共 {len(unique)} 种不同原文，{len(source_counts)} 个来源平台"]
         reasons.append(f"关联方向已有 {published} 条已发布脚本" if published else "关联方向尚无已发布脚本" if coverage else "尚未关联方向")
         instruction = [f"产品：{product}。围绕用户评论主题「{group['title']}」写带货口播稿，每条回应评论里的顾虑或需求，落到产品怎么解决、观众为什么该买。",
@@ -134,8 +137,13 @@ def opportunity_catalog(app, product, *, limit=20, offset=0):
                                         for key, count in sorted(source_counts.items())],
                       "evidence": evidence, "directions": coverage, "selling_points": list(linked_points.values()), "plans": plans,
                       "priority_reasons": reasons, "draft_instruction": "\n\n".join(instruction),
+                      # Changes when the theme's quotes change, so a saved skeleton can tell it is out of date.
+                      "basis": hashlib.sha1("\n".join(sorted(unique)).encode("utf-8")).hexdigest()[:16],
                       "_rank": (-recent, bool(published), -manual_count, -len(unique), -len(source_counts), group["id"])})
-    items.sort(key=lambda item: item["_rank"])
+    skeletons = getattr(app, "opportunity_skeletons", None)
+    if skeletons is not None:
+        skeletons.attach(product, items)
+    items.sort(key=lambda item: (item.pop("_skeleton_rank", 2), item["_rank"]))
     result["total"] = len(items)
     for item in items:
         item.pop("_rank")

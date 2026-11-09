@@ -129,3 +129,16 @@
 .photo-queue-item.is-done button:first-child::before{content:"✓ ";color:var(--success-ink)}
 .photo-queue-item .photo-queue-remove{padding:4px 8px;color:var(--muted-soft);border-left:1px solid var(--line)}
 .photo-arrow{color:var(--muted-soft)}
+.photo-notion{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.photo-notion h4{margin:0 0 6px;font-size:var(--font-meta);font-weight:600}
+.photo-notion h4 small{font-weight:400;color:var(--muted-soft)}
+.photo-notion p{margin:4px 0}
+.photo-notion-status{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:var(--font-meta)}
+.photo-notion-fields{display:grid;grid-template-columns:minmax(130px,160px) minmax(160px,1fr);gap:8px 10px;margin:8px 0}
+.photo-notion-title{grid-column:1/-1}
+.photo-notion-title select{margin-bottom:4px}
+.photo-notion-again summary{cursor:pointer;font-size:var(--font-meta);color:var(--muted)}
+@media (max-width:560px){.photo-notion-fields{grid-template-columns:1fr}}
+.photo-finished-strip{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;padding:8px 12px;border-radius:8px;background:var(--surface-alt);color:var(--muted);font-size:var(--font-meta)}
+.photo-delete-confirm{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;margin:0 0 8px;padding:7px 12px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface-alt);color:var(--ink);font-size:var(--font-micro)}
+.photo-delete-confirm span{flex:1 1 220px;min-width:0}

@@ -89,6 +89,65 @@ class DownloaderTests(unittest.TestCase):
             self.assertEqual(seen, ["http://127.0.0.1:7900"] * 2)
 
 
+class ResumeReadinessTests(unittest.TestCase):
+    def test_startup_timer_only_blocks_when_a_real_analyzer_has_saved_jobs_to_scan(self):
+        with tempfile.TemporaryDirectory(prefix="resume-readiness-") as temporary:
+            auto = AUTO.AutoBreakdown(SimpleNamespace(runtime=Path(temporary)), analyzer=lambda *args: {})
+            auto.resume_timer = SimpleNamespace(is_alive=lambda: True)
+            self.assertFalse(auto.busy(), "An empty runtime has nothing to resume")
+            auto.root.mkdir(parents=True)
+            (auto.root / "PVR-fixture.json").write_text('{"status":"completed"}', encoding="utf-8")
+            self.assertTrue(auto.busy(), "The startup scan has not yet inspected the saved records")
+            auto.analyzer = AUTO.pending_analyzer
+            self.assertFalse(auto.busy(), "The waiting analyzer cannot start any resume work")
+            auto.analyzer = lambda *args: {}
+            auto.resume_timer = SimpleNamespace(is_alive=lambda: False)
+            self.assertFalse(auto.busy())
+
+    def test_busy_covers_the_resume_scan_until_its_registered_worker_finishes(self):
+        with tempfile.TemporaryDirectory(prefix="resume-readiness-") as temporary:
+            auto = AUTO.AutoBreakdown(SimpleNamespace(runtime=Path(temporary)), analyzer=lambda *args: {})
+            auto.root.mkdir(parents=True)
+            (auto.root / "PVR-fixture.json").write_text(
+                '{"case_id":"PVR-fixture","status":"analyzer_pending"}', encoding="utf-8")
+            scan_entered, scan_release = threading.Event(), threading.Event()
+            worker_entered, worker_release = threading.Event(), threading.Event()
+
+            def worker():
+                worker_entered.set()
+                worker_release.wait(3)
+
+            def start(case_id, **options):
+                scan_entered.set()
+                if not scan_release.wait(3):
+                    raise RuntimeError("The startup scan was not released")
+                with auto.lock:
+                    thread = threading.Thread(target=worker, daemon=True)
+                    auto.threads[case_id] = thread
+                    thread.start()
+                return {}
+
+            auto.resume_timer = threading.Timer(0, auto.resume_pending)
+            with patch.object(auto, "start", side_effect=start):
+                try:
+                    auto.resume_timer.start()
+                    self.assertTrue(scan_entered.wait(2))
+                    self.assertEqual(auto.threads, {})
+                    self.assertTrue(auto.busy(), "The timer is scanning, before any worker exists")
+                    scan_release.set()
+                    auto.resume_timer.join(2)
+                    self.assertFalse(auto.resume_timer.is_alive())
+                    self.assertTrue(worker_entered.wait(2))
+                    self.assertTrue(auto.busy(), "The registered worker takes over the busy state")
+                finally:
+                    scan_release.set()
+                    worker_release.set()
+                    auto.resume_timer.join(3)
+                    for thread in auto.threads.values():
+                        thread.join(3)
+            self.assertFalse(auto.busy())
+
+
 class WorkbenchCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="auto-breakdown-test-")

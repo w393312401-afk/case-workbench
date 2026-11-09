@@ -55,38 +55,16 @@ test('home loads only work data and keeps unavailable categories distinct from e
   context.api=async path=>{requests.push(path);if(path.startsWith('/api/creation'))throw Error('offline');return path.includes('videos')?{videos:[]}:{tasks:[]};};
   vm.runInContext(read('home.js'),context);
   await context.window.WorkbenchHome.route();
-  assert.deepEqual(requests,['/api/performance/videos?projection=home&product=202H','/api/ai/tasks','/api/creation?product=202H','/api/review-followups?product=202H','/api/content?view=attention&page_size=8&product=202H']);
+  assert.deepEqual(requests,['/api/performance/videos?projection=home&product=202H','/api/ai/tasks','/api/creation?product=202H','/api/review-followups?product=202H']);
   assert.ok(root.innerHTML.includes('<h1>工作概览</h1>'));
   assert.ok(root.innerHTML.includes('待写计划暂时无法读取。'));
   assert.ok(root.innerHTML.includes('data-home-retry'));
   assert.match(root.innerHTML,/data-home-tab="plans">下一轮待写<span class="home-tab-count">—</);
-  assert.equal((root.innerHTML.match(/role="tab"/g)||[]).length,4);
+  assert.equal((root.innerHTML.match(/role="tab"/g)||[]).length,3);
+  assert.ok(!root.innerHTML.includes('待我处理'));
   assert.ok(!root.innerHTML.includes('home-kpi'));
   assert.ok(!root.innerHTML.includes('home-weekly'));
   assert.ok(root.innerHTML.includes('#videos?tab=board'));
-});
-
-test('home lists posted videos that are not on the publish calendar yet and opens the publish step',async()=>{
-  const {context}=harness();
-  const root={innerHTML:'',querySelectorAll:()=>[],querySelector:()=>null}, breadcrumb={innerHTML:''};
-  context.$=selector=>({'#home-page':root,'#breadcrumb':breadcrumb}[selector] || null);
-  context.window.WorkbenchShell.parse=()=>({page:'home'});
-  const row={id:'video:PRD-111111111111',kind:'video',title:'Zack 202',product:'202H',direction_id:'202H-S1',published_on:'2026-10-22',next_hash:'#production/PRD-111111111111?step=publish'};
-  const other={...row,id:'video:PRD-222222222222',title:'Zack 203',next_hash:'#production/PRD-222222222222?step=publish'};
-  context.api=async path=>path.startsWith('/api/content')?{items:[],counts:{attention:0,publish:0},calendar_pending:{total:3,items:[row,other]}}:path.includes('videos')?{videos:[]}:{tasks:[]};
-  vm.runInContext(read('home.js'),context);
-  await context.window.WorkbenchHome.route();
-  assert.ok(root.innerHTML.includes('3 条已发布、还没上传到发布日历'));
-  assert.ok(root.innerHTML.includes('#production/PRD-111111111111?step=publish'));
-  assert.ok(root.innerHTML.includes('发布于 2026-10-22'));
-  assert.ok(root.innerHTML.includes('#production/PRD-222222222222?step=publish'));
-  assert.ok(root.innerHTML.includes('视频制作单'));
-  assert.ok(root.innerHTML.includes('另有 1 条'));
-  assert.ok(!root.innerHTML.includes('现在没有等你处理的内容'));
-  // Without any, the overview stays as before.
-  context.api=async path=>path.startsWith('/api/content')?{items:[],counts:{attention:0,publish:0},calendar_pending:{total:0,items:[]}}:path.includes('videos')?{videos:[]}:{tasks:[]};
-  await context.window.WorkbenchHome.route();
-  assert.ok(!root.innerHTML.includes('发布日历'));
 });
 
 test('a late home response cannot overwrite another product or page',async()=>{

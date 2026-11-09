@@ -287,5 +287,88 @@ class LauncherIntegrationTests(unittest.TestCase):
         self.assertNotIn(status["token"], log)
 
 
+@unittest.skipUnless(os.name == "nt", "Desktop launcher uses Windows process identities")
+class SplitServiceLauncherIntegrationTests(unittest.TestCase):
+    def test_real_launcher_replaces_gateway_but_keeps_one_task_host(self):
+        with tempfile.TemporaryDirectory(prefix="split-service-launcher-") as folder:
+            root = Path(folder)
+            for source in APP_ROOT.glob("*.py"):
+                shutil.copy2(source, root / source.name)
+            for name in ("scripts", "static"):
+                shutil.copytree(APP_ROOT / name, root / name, ignore=shutil.ignore_patterns("__pycache__"))
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            config = {"port": port, "skill_root": str(root / "skill"), "runtime_root": str(root / "runtime"),
+                      "task_host_enabled": True, "performance_sources": []}
+            (root / "config.json").write_text(json.dumps(config), encoding="utf-8")
+            children = {}
+            real_spawn = subprocess.Popen
+
+            def spawn(command, *args, **kwargs):
+                child = real_spawn(command, *args, **kwargs)
+                if any(str(root / name) in command for name in ("server.py", "service_gateway.py")):
+                    children[child.pid] = child
+                return child
+
+            url = f"http://127.0.0.1:{port}"
+            try:
+                with patch.object(LAUNCHER.subprocess, "Popen", side_effect=spawn), \
+                        patch.object(LAUNCHER, "prepare_start", wraps=LAUNCHER.prepare_start) as backup:
+                    first = LAUNCHER.restart(root, config, no_browser=True)
+                    before = LAUNCHER.read_json(url + "/api/service/status")
+                    host = LAUNCHER.task_host_manifest(root, config)
+                    self.assertTrue(before["restart_keeps_tasks"])
+                    self.assertEqual(before["task_host_pid"], host["pid"])
+                    second = LAUNCHER.restart(root, config, no_browser=True)
+                    after = LAUNCHER.read_json(url + "/api/service/status")
+                    self.assertNotEqual(first, second)
+                    self.assertEqual(after["pid"], second)
+                    self.assertEqual(after["task_host_pid"], host["pid"])
+                    self.assertEqual(before["token"], after["token"])
+                    self.assertEqual(LAUNCHER.task_host_manifest(root, config)["launch_id"], host["launch_id"])
+                    self.assertEqual(children[first].wait(timeout=10), 0)
+                    self.assertEqual(backup.call_count, 1, "A gateway restart must not back up a live task owner")
+                    with urllib.request.urlopen(url + "/api/state", timeout=20) as response:
+                        self.assertEqual(json.load(response)["token"], after["token"])
+                    # An idle engine update replaces only the host; the already-running public gateway follows it.
+                    updated = max(path.stat().st_mtime_ns for path in root.glob("*.py")) + 2_000_000_000
+                    os.utime(root / "server.py", ns=(updated, updated))
+                    LAUNCHER.refresh_task_host_on_idle(root, config)
+                    refreshed = LAUNCHER.read_json(url + "/api/service/status")
+                    self.assertEqual(refreshed["pid"], second)
+                    self.assertNotEqual(refreshed["task_host_pid"], host["pid"])
+                    self.assertFalse(refreshed["task_host_code_stale"])
+                    self.assertNotEqual(refreshed["token"], after["token"])
+                    self.assertEqual(children[host["pid"]].wait(timeout=10), 0)
+                    self.assertEqual(backup.call_count, 2, "Only replacing the idle task owner creates another backup")
+                    with urllib.request.urlopen(url + "/api/state", timeout=20) as response:
+                        self.assertEqual(json.load(response)["token"], refreshed["token"])
+            finally:
+                # Only processes started for this disposable installation are controlled here.
+                try:
+                    status = LAUNCHER.read_json(url + "/api/service/status")
+                    if status["pid"] in children:
+                        request = urllib.request.Request(url + "/api/service/shutdown", data=b"{}",
+                            headers={"Content-Type": "application/json", "X-Workbench-Token": status["token"]})
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            json.load(response)
+                except (OSError, ValueError):
+                    pass
+                try:
+                    host = LAUNCHER.task_host_manifest(root, config)
+                    if host and host["pid"] in children:
+                        status = LAUNCHER.task_host_status(root, config, host)
+                        LAUNCHER.task_host_request(host, "/api/service/shutdown", token=status["token"], body={})
+                except (OSError, ValueError, RuntimeError):
+                    pass
+                for child in children.values():
+                    try:
+                        child.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        child.terminate()
+                        child.wait(timeout=10)
+
+
 if __name__ == "__main__":
     unittest.main()

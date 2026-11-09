@@ -17,6 +17,16 @@ from resolve_bridge import render_recovery_message
 from workbench_video_publish import reviewed_source
 
 PLAYBACK_PROFILE = "web1"
+PLAYBACK_DIR = "在线播放"
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)), *(f"LPT{n}" for n in range(1, 10))}
+
+
+def video_file_name(name):
+    """The HD capture is stored under its timeline's name, so it reads right when located on disk."""
+    clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(name or "")).strip()[:120].rstrip(". ")
+    if clean.split(".")[0].upper() in _RESERVED:
+        clean += "_"
+    return (clean or "成片") + ".mp4"
 
 
 def optimize_playback(source, output, progress):
@@ -69,6 +79,8 @@ class TimelinePreviews:
         self.root.mkdir(parents=True, exist_ok=True)
         for path in self.root.glob("PRD-*/*/preview.json"):
             row = json.loads(path.read_text(encoding="utf-8"))
+            if self._tidy(path.parent, row):
+                durable_json(path, row)
             if row.get("status") == "running":
                 row.update(status="failed", error="工作台重启打断了预览更新，请重试。", finished_at=now())
                 durable_json(path, row)
@@ -215,8 +227,38 @@ class TimelinePreviews:
                 continue
             shutil.rmtree(run, ignore_errors=True)
 
+    @staticmethod
+    def _tidy(folder, row):
+        """Earlier previews were saved as preview.mp4 beside the playback copy: name the HD file after its
+        timeline and move the playback copy into its own folder. A file that cannot move now stays for next start."""
+        video, base, changed = row.get("video") or {}, Path(folder).resolve(), False
+        if not video.get("file"):
+            return False
+        key = "source_file" if video.get("source_file") else "file"
+        hd = (base / video[key]).resolve()
+        target = hd.with_name(video_file_name(str(video.get("name") or "").removesuffix(".mp4")))
+        if hd.is_relative_to(base) and hd.is_file() and hd.name != target.name and not target.exists():
+            try:
+                hd.replace(target)
+                video[key], changed = str(target.relative_to(base)), True
+            except OSError:
+                pass
+        if key == "source_file":
+            playback = (base / video["file"]).resolve()
+            if playback.is_relative_to(base) and playback.is_file() and playback.parent.name != PLAYBACK_DIR:
+                moved = playback.parent / PLAYBACK_DIR / playback.name
+                try:
+                    moved.parent.mkdir(exist_ok=True)
+                    playback.replace(moved)
+                    video["file"], changed = str(moved.relative_to(base)), True
+                except OSError:
+                    pass
+        return changed
+
     def _playback_video(self, folder, video, source, progress):
-        playback = self.optimizer(source, source.with_name(f"playback-{PLAYBACK_PROFILE}.mp4"), progress).resolve()
+        output = source.parent / PLAYBACK_DIR / f"playback-{PLAYBACK_PROFILE}.mp4"
+        output.parent.mkdir(exist_ok=True)
+        playback = self.optimizer(source, output, progress).resolve()
         if playback != source.resolve():
             return {**video, "file": str(playback.relative_to(folder.resolve())), "version": video["version"] + "-" + PLAYBACK_PROFILE,
                     "source_file": video["file"], "source_version": video["version"], "profile": PLAYBACK_PROFILE}
@@ -345,6 +387,11 @@ class TimelinePreviews:
                 if source != (scratch / "preview.mp4").resolve() or not source.is_file() or not source.stat().st_size:
                     raise VoiceError(502, "达芬奇没有交回可播放的预览视频。")
             # Encoding belongs outside the Resolve lease, so it cannot hold up another edit.
+            named = source.with_name(video_file_name(timeline["name"]))
+            try:
+                source = source.replace(named).resolve()
+            except OSError:
+                pass
             video = {"file": str(source.relative_to(folder.resolve())), "version": row["run_id"],
                      "name": timeline["name"] + ".mp4", "kind": self._label(job, uid), "generated_at": now()}
             update(pending_recovery=None)

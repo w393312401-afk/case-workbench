@@ -54,6 +54,7 @@ class TimelinePreviewBrowserTests(unittest.TestCase):
           window.previewCalls = [];window.previews = {one:{status:'idle'},two:{status:'idle'}};window.toast = () => {};
           window.job = {id:'PRD-111111111111',timelines:[{unique_id:'one',name:'First',project:'202H'},{unique_id:'two',name:'Second',project:'202H'}]};
           window.api = async (path,options) => {
+            if (path === '/api/open') {window.opened = structuredClone(options.body);return {ok:true};}
             if (path.startsWith('/api/content/calendar')) return {calendar_date:'2026-11-04'};
             if (path.startsWith('/api/performance/videos')) return {videos:[]};
             if (path.includes('/preview')) {
@@ -89,6 +90,17 @@ class TimelinePreviewBrowserTests(unittest.TestCase):
         self.page.wait_for_function("document.querySelector('[data-timeline-preview] video').currentTime > 1.05")
         self.assertEqual(self.page.locator('[name="post_id"]').input_value(), '7999999999999999901')
         self.assertIn('Second.mp4', self.page.locator('[data-preview-video]').inner_text())
+
+    def test_locate_button_appears_with_a_video_and_reveals_that_timelines_file(self):
+        reveal = self.page.get_by_role('button', name='定位本地文件')
+        self.assertFalse(reveal.is_visible())
+        self.ready()
+        self.page.locator('[data-publication-timeline="one"]').click()
+        self.page.locator('[data-publication-timeline="two"]').click()
+        reveal.wait_for()
+        reveal.click()
+        self.page.wait_for_function('window.opened')
+        self.assertEqual(self.page.evaluate('window.opened'), {'target':'preview','job_id':'PRD-111111111111','timeline_uid':'two'})
 
     def test_final_preview_and_each_timeline_keep_their_own_video(self):
         self.ready('one', 'first-final-web1', '成片预览')

@@ -107,6 +107,7 @@ class ProductionQueueBrowserTests(unittest.TestCase):
         page.locator('#content-production-settings').click()
         service = page.locator('#production-settings #production-eleven')
         service.get_by_text('本期已用 120 / 1,000 字符', exact=False).wait_for()
+        self.assertEqual(service.locator('.eleven-meter i').evaluate('node => node.style.width'), '12%')
         self.eleven = {'ok':False, 'error':'测试连接暂不可用'}
         service.locator('[data-recheck]').click()
         service.get_by_text('测试连接暂不可用', exact=True).wait_for()

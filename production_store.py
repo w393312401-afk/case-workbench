@@ -32,7 +32,7 @@ JOB_STATUSES = {"draft", "voiced", "timeline", "editing", "awaiting_review", "ap
                 "needs_verification", "verification_failed", "unverified", "failed", "cancelled", "interrupted"}
 TIMELINE_TASK_STATUSES = {"pending", "in_progress", "completed"}
 # Finished voiceovers and timelines are appended whatever else changed while they were being made.
-REVISION_FREE = {"take", "job_fill_start", "job_fill_finish", "timeline", "timeline_location", "timeline_subtitles", "timeline_hook", "timeline_campaign", "timeline_import", "job_completion", "edit_start", "edit_bind_timeline", "edit_finish", "edit_recheck", "edit_audio_repair", "edit_approve", "edit_baseline", "edit_delete", "timeline_delete", "job_delete"}
+REVISION_FREE = {"take", "job_fill_start", "job_fill_finish", "job_uk_start", "job_uk_result", "job_uk_link", "timeline", "timeline_location", "timeline_subtitles", "timeline_hook", "timeline_campaign", "timeline_comment_sticker", "timeline_import", "job_completion", "edit_start", "edit_bind_timeline", "edit_finish", "edit_recheck", "edit_audio_repair", "edit_approve", "edit_baseline", "edit_delete", "timeline_delete", "job_delete"}
 EDIT_ID = re.compile(r"EDT-[0-9a-f]{12}")
 PUBLICATION_ID = re.compile(r"PUB-[0-9a-f]{12}")
 # Timeline frame rates as exact ratios; names are what DaVinci Resolve shows.
@@ -296,7 +296,7 @@ def supplement_markdown(job):
 
 
 def reading_pattern(written):
-    return re.compile(r"(?<![A-Za-z0-9])" + re.escape(written) + r"(?![A-Za-z0-9])")
+    return re.compile(r"(?<![^\W_])" + re.escape(written) + r"(?![^\W_])")
 
 
 def apply_readings(lines, readings):
@@ -725,9 +725,10 @@ class ProductionStore:
             if kind not in REVISION_FREE and body.get("revision") != self.revision(data):
                 raise VoiceError(409, "制作资料已更新，请读取最新记录后重新保存。")
             handlers = {"voice": self._voice, "reading": self._reading, "job": self._job, "job_lines": self._job_lines, "job_fill_start": self._job_fill_start, "job_fill_finish": self._job_fill_finish,
+                        "job_uk_start": self._job_uk_start, "job_uk_result": self._job_uk_result, "job_uk_link": self._job_uk_link,
                         "job_archive": self._job_archive, "take": self._take, "select_take": self._select_take,
                         "settings": self._settings, "timeline": self._timeline, "timeline_location": self._timeline_location,
-                        "timeline_subtitles": self._timeline_subtitles, "timeline_hook": self._timeline_hook, "timeline_campaign": self._timeline_campaign, "timeline_import": self._timeline_import, "job_completion": self._job_completion,
+                        "timeline_subtitles": self._timeline_subtitles, "timeline_hook": self._timeline_hook, "timeline_campaign": self._timeline_campaign, "timeline_comment_sticker": self._timeline_comment_sticker, "timeline_import": self._timeline_import, "job_completion": self._job_completion,
                         "timeline_archive": self._timeline_archive, "timeline_delete": self._timeline_delete,
                         "timeline_task_status": self._timeline_task_status,
                         "edit_start": self._edit_start, "edit_bind_timeline": self._edit_bind_timeline,
@@ -910,6 +911,54 @@ class ProductionStore:
         job["history"].append({"at": job["updated_at"], "event": "fill", "note": "AI 补全完成" if fill["status"] == "completed" else "AI 补全未完成"})
         return {"job": copy.deepcopy(job)}
 
+    def _job_uk_start(self, data, body, extra):
+        """「做英国版」: a writing round is adapting this job; the job itself keeps its words."""
+        job = self._find_job(data, body.get("job_id"))
+        task_id = body.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise VoiceError(400, "英国版任务编号无效。")
+        job["uk_version"] = {"task_id": task_id, "status": "running", "started_at": now(), "error": ""}
+        job["updated_at"] = now()
+        job["history"].append({"at": job["updated_at"], "event": "uk_version", "note": "AI 开始改英国版"})
+        return {"job": copy.deepcopy(job)}
+
+    def _job_uk_result(self, data, body, extra):
+        job = self._find_job(data, body.get("job_id"))
+        version = job.get("uk_version") or {}
+        if version.get("task_id") != body.get("task_id"):
+            raise VoiceError(409, "这张制作单已换了英国版任务。")
+        if body.get("error"):
+            version.update(status="failed", error=text(str(body["error"])[:600], "失败原因", False, 600), finished_at=now())
+            version.pop("review", None)
+        else:
+            version.update(status="review", error="", review=copy.deepcopy(body.get("review")), finished_at=now())
+        job["uk_version"] = version
+        job["updated_at"] = now()
+        return {"job": copy.deepcopy(job)}
+
+    def _job_uk_link(self, data, body, extra):
+        """The checked British job takes the American job's picture requirements by row; the two point at each other."""
+        source, target = self._find_job(data, body.get("job_id")), self._find_job(data, body.get("target_id"))
+        version = source.get("uk_version") or {}
+        if version.get("task_id") != body.get("task_id"):
+            raise VoiceError(409, "这张制作单已换了英国版任务。")
+        if len(source["lines"]) != len(target["lines"]):
+            raise VoiceError(409, "英国版行数与原制作单不一致。")
+        for mine, theirs in zip(source["lines"], target["lines"]):
+            for key in ("proof", "tags", "evidence"):
+                if mine.get(key):
+                    theirs[key] = mine[key]
+        if all(line.get("proof") for line in target["lines"]):
+            target["problems"] = [item for item in target.get("problems", []) if MISSING_TABLE not in item]
+        stamp = now()
+        target["derived_from"] = {"job_id": source["id"], "market": "us"}
+        target["updated_at"] = stamp
+        target["history"].append({"at": stamp, "event": "uk_version", "note": f"由美国版制作单 {source['id']} 改来"})
+        source["uk_version"] = {"task_id": version["task_id"], "status": "created", "job_id": target["id"], "created_at": stamp, "error": ""}
+        source["updated_at"] = stamp
+        source["history"].append({"at": stamp, "event": "uk_version", "note": f"已生成英国版制作单 {target['id']}"})
+        return {"job": copy.deepcopy(target)}
+
     def _job_archive(self, data, body, extra):
         job = self._find_job(data, body.get("job_id"))
         if not isinstance(body.get("archived"), bool):
@@ -1051,6 +1100,18 @@ class ProductionStore:
         timeline["hook_overlay"] = copy.deepcopy(hook)
         job["updated_at"] = hook["at"]
         job["history"].append({"at": hook["at"], "event": "timeline_hook", "note": f"给时间线 {timeline.get('name', '')} {'加' if hook['created'] else '更新'}屏显：{hook['text']}"})
+        return self._timeline_management_result(job, timeline)
+
+    def _timeline_comment_sticker(self, data, body, card):
+        """Remember which comment the timeline opens with; the order's history keeps each change."""
+        job = self._find_job(data, body.get("job_id"))
+        uid = text(body.get("timeline_uid"), "时间线标识", limit=500)
+        timeline = next((row for row in job.get("timelines", []) if row.get("unique_id") == uid), None)
+        if not timeline:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        timeline["comment_sticker"] = copy.deepcopy(card)
+        job["updated_at"] = card["at"]
+        job["history"].append({"at": card["at"], "event": "timeline_comment_sticker", "note": f"给时间线 {timeline.get('name', '')} {'加' if card['created'] else '更新'}评论贴纸：{card['username']} {card['text']}"})
         return self._timeline_management_result(job, timeline)
 
     def _timeline_campaign(self, data, body, card):
@@ -1500,4 +1561,5 @@ class ProductionStore:
                     ((saved["result"].get("job") or {}).get("id") == job["id"] or
                      (saved["result"].get("edit") or {}).get("job_id") == job["id"])]:
             del data["requests"][key]
-        return {"deleted_job": job["id"], "title": job.get("title", ""), "edit_ids": [edit["id"] for edit in job.get("edits", [])]}
+        return {"deleted_job": job["id"], "title": job.get("title", ""), "edit_ids": [edit["id"] for edit in job.get("edits", [])],
+                "script_id": job.get("script_id", "")}

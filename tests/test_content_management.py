@@ -167,6 +167,19 @@ class ContentQueueTests(unittest.TestCase):
         self.assertEqual(row["stage"], "published")
         self.assertEqual(row["stage_label"], "已发布")
 
+    def test_marking_every_draft_shows_the_task_as_finished(self):
+        marks = lambda **picks: {"variant_choices": {"AIR-one": {"total": 3, "picks": picks}}}
+        row = lambda rows: next(item for item in rows if item["id"] == "task:AIT-one")
+        waiting = row(self.queue([task(**marks(**{"0": "skip"}))]))
+        self.assertEqual((waiting["stage_label"], waiting["needs_attention"]), ("待选稿 · 还剩 2 条", True))
+        # A draft marked 要做 keeps the task on the list even though another one was already adopted.
+        owed = row(self.queue([task(management_state="adopted", **marks(**{"0": "do", "1": "skip", "2": "skip"}))],
+                              [script(title="稿件", source={"task_id": "AIT-one", "round_id": "AIR-one", "variant_index": 1})]))
+        self.assertEqual((owed["stage_label"], owed["needs_attention"]), ("还有 1 条要做", True))
+        done = row(self.queue([task(management_state="finished", **marks(**{"1": "skip", "2": "skip"}))],
+                              [script(source={"task_id": "AIT-one", "round_id": "AIR-one", "variant_index": 0})]))
+        self.assertEqual((done["stage"], done["stage_label"], done["needs_attention"]), ("finished", "已完结", False))
+
     def test_task_id_without_round_id_is_not_adoption_evidence(self):
         rows = self.queue([task()], [script(source={"task_id": "AIT-one"})])
         self.assertEqual({row["id"] for row in rows}, {"script:SCR-one", "task:AIT-one"})
@@ -254,6 +267,21 @@ class ContentQueueTests(unittest.TestCase):
         marks["video:PRD-one_tl_uid-old"] = {"calendar_uploaded": True, "updated_at": "x"}
         row = self.queue(jobs=[order], management={"items": marks})[0]
         self.assertEqual((row["stage"], row["stage_label"]), ("uploaded", "完成"))
+
+    def test_a_completed_notion_upload_counts_when_a_newer_timeline_overwrote_the_order_mark(self):
+        # Old timeline uploaded first (order-level mark), then a newer one was uploaded and overwrote that mark.
+        lines = [{"unique_id": "uid-old", "take_id": "TAK-one"}, {"unique_id": "uid-new", "take_id": "TAK-one"}]
+        marks = {"video:PRD-one": {"calendar_uploaded": True, "updated_at": "x"}}
+        order = job(status="approved", selected_take="TAK-one", timelines=lines)
+        row = self.queue(jobs=[order], management={"items": marks})[0]
+        self.assertEqual(row["stage"], "awaiting_publication")
+        order = job(status="approved", selected_take="TAK-one", timelines=lines, notion_uploaded=["uid-old", "uid-new"])
+        row = self.queue(jobs=[order], management={"items": marks})[0]
+        self.assertEqual((row["stage"], row["stage_label"]), ("uploaded", "完成"))
+        # The newest still needs its own upload or mark; an old upload alone does not finish the order.
+        order = job(status="approved", selected_take="TAK-one", timelines=lines, notion_uploaded=["uid-old"])
+        row = self.queue(jobs=[order], management={"items": {}})[0]
+        self.assertEqual(row["stage"], "awaiting_publication")
 
     def test_skip_mark_settles_only_a_finished_unposted_video(self):
         marks = {"video:PRD-one": {"skip_publish": True, "skip_reason": "开头不行", "updated_at": "x"},

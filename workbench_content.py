@@ -1,13 +1,14 @@
 """Read-only content aggregation; the human controls are archiving a row and deleting archived rows for good."""
 from __future__ import annotations
 
+from concurrent.futures import Future
 import json
 import re
 import secrets
 import threading
 import time
 
-from ai_tasks import AITaskError
+from ai_tasks import AITaskError, made_variants
 from content_management import build_content_items
 from content_naming import variant_labels
 from creation_store import CreationError
@@ -154,6 +155,7 @@ class ContentWorkbenchMixin:
     _content_snapshot_writes = 0
     # One entry per product: background readers of other products (guest export, a second tab) must not evict this one.
     _content_snapshot_cache = None
+    _content_snapshot_pending = None
 
     def content_write_started(self):
         """A write request is in flight: nothing read from now until it ends is kept, and older snapshots are stale."""
@@ -176,16 +178,36 @@ class ContentWorkbenchMixin:
             if reuse and entry and time.monotonic() - entry["started"] <= SNAPSHOT_STALE_SECONDS:
                 return entry["snapshot"], (time.monotonic() - entry["started"] > SNAPSHOT_REUSE_SECONDS or
                                            entry["generation"] != generation or bool(self._content_snapshot_writes))
-        started = time.monotonic()
-        snapshot = self._content_snapshot(product)
-        with self._content_snapshot_lock:
-            # A write that began or ended while this was building may have left it stale: serve it, never keep it.
-            if self._content_snapshot_generation == generation and not self._content_snapshot_writes:
-                cache = self._content_snapshot_cache = {**(self._content_snapshot_cache or {}),
-                    key: {"generation": generation, "started": started, "snapshot": snapshot}}
-                while len(cache) > 8:
-                    cache.pop(min(cache, key=lambda name: cache[name]["started"]))
-        return snapshot, False
+            # The task panel asks for multiple content views together. Share only their in-flight build:
+            # later refreshes still read afresh, and a write's new generation never joins an older read.
+            if self._content_snapshot_pending is None:
+                self._content_snapshot_pending = {}
+            pending = self._content_snapshot_pending
+            flight_key = (key, generation)
+            future = pending.get(flight_key)
+            builder = future is None
+            if builder:
+                future = pending[flight_key] = Future()
+        if not builder:
+            return future.result(), False
+        try:
+            started = time.monotonic()
+            snapshot = self._content_snapshot(product)
+            with self._content_snapshot_lock:
+                # A write that began or ended while this was building may have left it stale: serve it, never keep it.
+                if self._content_snapshot_generation == generation and not self._content_snapshot_writes:
+                    cache = self._content_snapshot_cache = {**(self._content_snapshot_cache or {}),
+                        key: {"generation": generation, "started": started, "snapshot": snapshot}}
+                    while len(cache) > 8:
+                        cache.pop(min(cache, key=lambda name: cache[name]["started"]))
+            future.set_result(snapshot)
+            return snapshot, False
+        except BaseException as error:
+            future.set_exception(error)
+            raise
+        finally:
+            with self._content_snapshot_lock:
+                pending.pop(flight_key, None)
 
     def content_views_catalog(self, query):
         if set(query) - {"product"}:
@@ -217,12 +239,25 @@ class ContentWorkbenchMixin:
             job["publication_posts"] = [dict(record) for record in (*entry.get("history", []), entry.get("publication")) if record]
         return production
 
+    def _attach_notion_uploaded(self, production):
+        """Timelines whose Notion upload completed, so a lost calendar mark cannot hold an order at 待发布."""
+        uploads = getattr(self, "notion_uploads", None)
+        if uploads is None:
+            return
+        done = {}
+        for row in uploads.store.read().get("uploads", {}).values():
+            if row.get("status") == "completed" and row.get("job_id") and row.get("timeline_uid"):
+                done.setdefault(row["job_id"], set()).add(row["timeline_uid"])
+        for job in production.get("jobs", []):
+            job["notion_uploaded"] = sorted(done.get(job["id"], ()))
+
     def _content_snapshot(self, product=None):
         with self.lock:
             tasks = self.ai.list_tasks(product=product or None)
             scripts = self.creation_catalog(product or None, include_usage=False)["scripts"]
             production = self.production_catalog(product or None)
             management = self.content_management.public()
+            self._attach_notion_uploaded(production)
             # One read of the run feed serves every order; only an order whose feed is out of date touches it again.
             activity = getattr(self, "activity", None)
             runs = activity.existing() if activity is not None else None
@@ -238,7 +273,7 @@ class ContentWorkbenchMixin:
         """Which catalog variant each script, order and writing task belongs to, by the direction page's own rules,
         so the list names「S2 #4 身份认同」 exactly as that page numbers it. Scripts are read whole here: the list's
         copies drop the frozen writing snapshot that ownership is judged from."""
-        creation = self.creation.read()
+        creation = self.creation.records()
         links = [link for link in creation.get("variant_links", []) if link.get("kind") != "video"]
         owners, labels = {}, {}
         for direction in self.directions.read()["directions"]:
@@ -384,6 +419,57 @@ class ContentWorkbenchMixin:
             except Exception:
                 pass  # The task log is secondary; the deletion itself is complete.
         return {**result, "warnings": warnings}
+
+    def _draft_of(self, script_id):
+        """(script family, writing task) behind an order, or empty when the script did not come from a candidate."""
+        row = next((item for item in self.creation_catalog(include_usage=False)["scripts"] if item["id"] == script_id), None)
+        task_id = ((row or {}).get("source") or {}).get("task_id")
+        return (row.get("family_id") or row["id"], task_id) if task_id else ("", "")
+
+    def _draft_keeper(self, family, job_id):
+        """Why the script behind a deleted order must stay active, or "": something else still uses it."""
+        creation, production = self.creation._read_catalog(), self.production._read_catalog()
+        problem = self.creation.family_blocker(creation, family)
+        ids = {row["id"] for row in creation["scripts"] if (row.get("family_id") or row["id"]) == family}
+        if not problem and any(row["id"] != job_id and row.get("script_id") in ids for row in production.get("jobs", [])):
+            return "还有别的制作单在用这条稿，保留。"
+        return problem
+
+    def delete_candidate_order(self, identifier, body):
+        """Delete an order from its candidate desk and, when nothing else uses the script, put the draft back in play.
+
+        The script is archived rather than deleted, so its text and edits can still be restored from 内容进程."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        if body.get("preview") is True:
+            summary = self.delete_job_order(identifier, body)
+            family, _ = self._draft_of(self.production.job(identifier).get("script_id", ""))
+            kept = self._draft_keeper(family, identifier) if family else "这条稿不是从候选稿来的。"
+            return {**summary, "draft_returned": not kept, "draft_kept": kept}
+        result = self.delete_job_order(identifier, body)
+        family, task_id = self._draft_of(result.get("script_id", ""))
+        if not task_id:
+            return {**result, "draft_returned": False}
+        warnings = list(result.get("warnings", []))
+        with self.lock:
+            kept = self._draft_keeper(family, identifier)
+            if not kept:
+                try:
+                    for row in self.creation_catalog(include_usage=False)["scripts"]:
+                        if (row.get("family_id") or row["id"]) == family and not (row.get("archived") or row.get("status") == "archived"):
+                            self.creation.mutate("script_status", {
+                                "request_id": "candidate-archive-" + fingerprint([body["request_id"], row["id"]])[:40],
+                                "revision": self.creation.current_revision(),
+                                "script_status": {"script_id": row["id"], "archived": True}})
+                except CreationError as exc:
+                    warnings.append(f"制作单已删除，但采用稿没有转入归档：{exc}")
+            scripts = self.creation_catalog(include_usage=False)["scripts"]
+            if not any((row.get("source") or {}).get("task_id") == task_id and not (row.get("archived") or row.get("status") == "archived")
+                       for row in scripts):
+                self.ai.release_adoption(task_id)
+            task = self.ai.settle_variant_choices(task_id, made_variants(scripts))
+            self.state_cache = None
+        return {**result, "warnings": warnings, "draft_returned": not kept, "task": task}
 
     def delete_archived_content(self, body):
         """Permanently delete the archived rows of one product through each record's own delete.

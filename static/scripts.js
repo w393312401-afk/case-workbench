@@ -196,7 +196,7 @@ window.CaseScripts = (() => {
     const requestedId = options.requestedId ?? new URLSearchParams(pageHash().split('?').slice(1).join('?')).get('adopted') ?? '';
     const signature = JSON.stringify([task.task_id,task.revision,task.updated_at,task.adopted_script_count,requestedId]);
     const old = taskMounts.get(container);
-    if (old?.signature === signature && (old.pending || Date.now() - old.at < 30000)) return;
+    if (!options.force && old?.signature === signature && (old.pending || Date.now() - old.at < 30000)) return;
     const token = {signature,requestedId,pending:true,at:Date.now()};taskMounts.set(container,token);
     if (old?.requestedId !== requestedId) delete container.dataset.focusedAdopted;
     try {
@@ -330,24 +330,27 @@ window.CaseScripts = (() => {
       });if (modal) {modal.revision = data.revision;modal.product = product;}
     } catch (error) {toast(`暂时无法打开脚本编辑：${fail(error)}`,true);}
   }
-  async function adoptCandidate(task,round,writeBack = false) {
+  // With `pick` the variant is already chosen on the page: its text is filled in and the record keeps which one it was.
+  async function adoptCandidate(task,round,writeBack = false,pick = null) {
     if (round?.status !== 'completed' || !round.output?.trim()) {toast('只有完整完成的候选才可以采纳。',true);return;}
     const product = task.product || task.context?.product || (state.cases || []).find(item => item.case_id === task.case_id)?.product || currentProduct();
     try {
       const data = await catalog(product), direction = task.context?.direction_id || task.direction_id || '';
       const title = task.case_title || task.context?.title || direction || `${product} 写稿`;
       // A round with no direction names the one the writer picked for each variant; the person confirms it here.
-      const [directions,variants] = direction ? [[],[]] : await Promise.all([
-        api(`/api/direction-catalog?product=${encodeURIComponent(product)}`).then(result => (result.directions || []).filter(item => item.status !== 'archived')).catch(() => []),
+      const [directions,variants] = direction && !pick ? [[],[]] : await Promise.all([
+        direction ? [] : api(`/api/direction-catalog?product=${encodeURIComponent(product)}`).then(result => (result.directions || []).filter(item => item.status !== 'archived')).catch(() => []),
         api(`/api/production/variants?task_id=${encodeURIComponent(task.task_id)}&round_id=${encodeURIComponent(round.round_id)}`).then(result => result.variants || []).catch(() => [])]);
       const suggested = variant => directions.some(item => item.direction_id === variant.suggested_direction) ? variant.suggested_direction : '';
-      const picks = [...new Set(variants.map(suggested))], only = picks.length === 1 ? picks[0] : '';
+      const chosen = pick && variants.length === pick.variantCount ? variants.find(item => item.index === pick.variantIndex) || null : null;
+      const picks = [...new Set((chosen ? [chosen] : variants).map(suggested))], only = picks.length === 1 ? picks[0] : '';
       const directionField = directions.length ? `<label class="field"><span>关联方向</span><select name="direction_id"><option value="">暂不指定</option>${directions.map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === only ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>` : '';
-      const body = `<p class="context-note">从完整候选中选取一条准备采用的脚本，粘贴到「采用正文」。中文放入对照栏；多稿说明与评分不自动写入正文。</p><details open class="script-candidate-source"><summary>完整候选 · 第 ${(task.rounds || []).findIndex(item => item.round_id === round.round_id)+1} 轮</summary><pre>${esc(round.output)}</pre><button type="button" class="secondary" id="script-use-selection">把选中的候选文字填入正文</button></details>${field('title','脚本标题',title,{required:true})}${directionField}${field('text','采用正文','',{area:true,rows:9,required:true})}${field('translation_zh','中文对照','',{area:true})}<p class="context-note">${esc(product)}${direction ? ` · ${esc(direction)}` : ''} · 保存完整候选来源，正文以你核对的内容为准。</p>`;
+      const chosenText = chosen ? chosen.lines.map(line => line.spoken).join('\n') : '', chosenZh = chosen?.lines.every(line => line.zh) ? chosen.lines.map(line => line.zh).join('\n') : '';
+      const body = `<p class="context-note">${chosen ? '已带入这条稿件的口播和中文，核对后保存。' : '从完整候选中选取一条准备采用的脚本，粘贴到「采用正文」。中文放入对照栏；多稿说明与评分不自动写入正文。'}</p><details ${chosen ? '' : 'open'} class="script-candidate-source"><summary>完整候选 · 第 ${(task.rounds || []).findIndex(item => item.round_id === round.round_id)+1} 轮</summary><pre>${esc(round.output)}</pre><button type="button" class="secondary" id="script-use-selection">把选中的候选文字填入正文</button></details>${field('title','脚本标题',chosen ? `${title} ${chosen.label}` : title,{required:true})}${directionField}${field('text','采用正文',chosenText,{area:true,rows:9,required:true})}${field('translation_zh','中文对照',chosenZh,{area:true})}<p class="context-note">${esc(product)}${direction ? ` · ${esc(direction)}` : ''} · 保存完整候选来源，正文以你核对的内容为准。</p>`;
       const modal = showModal(writeBack ? '核对正文后写回案例' : '保存采用稿',body,writeBack ? '核对并继续写回' : '保存采用稿',async modal => {
         const values = Object.fromEntries(new FormData(modal.form));
         try {
-          const result = await post(modal,'/api/scripts',{revision:modal.revision,script:{...values,product,direction_id:direction || values.direction_id || '',confirmed:true},source:{task_id:task.task_id,round_id:round.round_id,task_revision:modal.taskRevision}});
+          const result = await post(modal,'/api/scripts',{revision:modal.revision,script:{...values,product,direction_id:direction || values.direction_id || '',confirmed:true},source:{task_id:task.task_id,round_id:round.round_id,task_revision:modal.taskRevision,...(chosen ? {variant_index:chosen.index} : {})}});
           const saved = result.script;closeModal(true);toast(result.reused ? '这条候选之前已采纳，已打开原来的采用稿。' : '采用稿已保存，来源已自动保留。');
           if (writeBack) await openCase(saved,task.case_id || '');else location.hash = scriptLink(saved);
         } catch (error) {

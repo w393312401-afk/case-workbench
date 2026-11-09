@@ -11,8 +11,9 @@ from pathlib import Path
 from creation_store import CreationError, PLAN_VARIANT_SNAPSHOT_KEYS, text
 from direction_store import product_key, fingerprint, now
 from review_store import NOTE_LIMIT
-from ai_tasks import MAX_PROMPT_CHARS
+from ai_tasks import MAX_PROMPT_CHARS, made_variants
 from case_replica import parse_transcript
+import markets
 from variant_parse import parse_variants
 from review_policy import review_context
 
@@ -29,14 +30,11 @@ def _check_note(value, label="备注"):
 
 class CreationWorkbenchMixin:
     def creation_catalog(self, product=None, *, include_usage=True):
-        result = self.creation.public(product)
+        result = self.creation.public(product, include_frozen_source=False)
         links = self._resolved_script_variant_links(result["variant_links"])
         usage = self._script_production_usage(product) if include_usage else None
         for script in result["scripts"]:
             script["script_id"] = script["id"]
-            source = script.get("source")
-            if source:
-                script["source"] = {key: value for key, value in source.items() if key not in {"snapshot", "candidate_text"}}
             self._attach_script_variant_link(script, links)
             if usage is not None:
                 script["production_usage"] = usage.get(script["id"], [])
@@ -291,6 +289,14 @@ class CreationWorkbenchMixin:
                     source["task_deleted"] = True
             return result
 
+    def save_variant_choice(self, task_id, body):
+        """要做 / 不做 on one draft of a writing task, then whether that settles the whole task."""
+        with self.lock:
+            self.ai.set_variant_choice(task_id, body)
+            task = self.ai.settle_variant_choices(task_id, made_variants(self.creation_catalog().get("scripts", [])))
+            self.state_cache = None
+            return task
+
     def save_script(self, body):
         with self.lock:
             prior = self.creation.replay("script", body)
@@ -319,6 +325,7 @@ class CreationWorkbenchMixin:
             result = self.creation.mutate("script", body, source)
             if source:
                 self.ai.note_adoption(source["task_id"])
+                self.ai.settle_variant_choices(source["task_id"], made_variants(self.creation_catalog().get("scripts", [])))
             self._link_script_plan(result["script"])
             result["script"] = self._script_alias(result["script"])
             self.state_cache = None
@@ -1005,6 +1012,11 @@ class CreationWorkbenchMixin:
                 if plan:
                     raise CreationError(400, "原稿发散与按变体写稿不能同时使用。")
                 context["writing_mode"] = mode
+            if body.get("market") is not None:
+                if body.get("action") != "variants" or not isinstance(body["market"], str) or body["market"] not in markets.MARKETS:
+                    raise CreationError(400, "目标市场无效，只有写稿可以选择市场。")
+                if body["market"] != markets.DEFAULT:
+                    context["market"] = body["market"]
             if body.get("plan_id"):
                 plan = task_plan
                 if plan["product"] != product or plan["direction_id"] != direction_id:

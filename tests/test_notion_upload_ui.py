@@ -130,5 +130,74 @@ class NotionUploadBrowserTests(unittest.TestCase):
         self.assertTrue(dialog.locator('[data-notion-submit]').is_enabled())
 
 
+
+class PhotoNotionPanelBrowserTests(unittest.TestCase):
+    """The carousel window's inline 上传到 Notion panel, against a simulated API."""
+    @classmethod
+    def setUpClass(cls):
+        cls.playwright = sync_playwright().start()
+        cls.browser = cls.playwright.chromium.launch(channel="chrome", headless=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.playwright.stop()
+
+    def setUp(self):
+        self.context = self.browser.new_context()
+        self.addCleanup(self.context.close)
+        self.page = self.context.new_page()
+        self.page.route("**/*", lambda route: route.fulfill(content_type="text/html", body='<main><div id="panel"></div></main>'))
+        self.errors = []
+        self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+        self.addCleanup(lambda: self.assertEqual([], self.errors))
+        self.page.goto("http://127.0.0.1:43219/photo-notion-test")
+        self.page.add_script_tag(path=str(STATIC / "notion-upload.js"))
+        self.page.evaluate("""() => {
+          window.toasts = [];window.toast = text => window.toasts.push(text);
+          window.calls = [];window.receipt = null;window.connector = 'connected';window.exportName = 'C1-20261108-A';
+          window.api = async (path,options) => {
+            if (path === '/api/notion/connection') return {status:window.connector};
+            if (options) {
+              window.calls.push(structuredClone(options.body));
+              window.receipt = {status:'completed',page_id:'40d4062a50ec81b8b4dceadc1c7acc8a',export_name:window.exportName,title:options.body.title};
+              return {...window.receipt,status:'running',progress:'正在上传第 1/3 张图到 Notion。'};
+            }
+            return {set_id:'PHS-aaaaaaaaaaaa',work:'A',name:'Fixture-1 图文A',destination:'TK排期计划',configured:true,blocked_reason:'',
+              export_name:window.exportName,pictures:3,published_on:'2026-11-09',account:'fixture',title:'🔴First#tag',
+              copy:{titles:['🔴First#tag','🔴Second#tag'],titles_zh:['第一','第二']},receipt:window.receipt};
+          };
+          window.panel = NotionUpload.photoPanel({api:window.api,setId:'PHS-aaaaaaaaaaaa',work:'A'});
+          window.panel.mount(document.querySelector('#panel'));
+        }""")
+        self.page.locator('[data-pn-submit]').wait_for()
+
+    def test_upload_sends_chosen_title_and_then_shows_the_page_link(self):
+        self.assertIn('还没上传', self.page.locator('.photo-notion').inner_text())
+        self.page.locator('[data-pn-title]').select_option('1')
+        self.page.locator('[data-pn-field="account"]').fill('other')
+        self.page.locator('[data-pn-submit]').click()
+        self.page.locator('.photo-notion-status a', has_text='查看 Notion').wait_for()
+        call = self.page.evaluate('window.calls[0]')
+        self.assertEqual(('A', '2026-11-09', 'other', '🔴Second#tag'), (call['work'], call['published_on'], call['account'], call['title']))
+        self.assertTrue(call['request_id'])
+        self.assertIn('已上传到 Notion（C1-20261108-A）', self.page.locator('.photo-notion').inner_text())
+        # Uploaded: the form folds away behind 重新上传.
+        self.assertFalse(self.page.locator('[data-pn-submit]').is_visible())
+        self.assertEqual(['图文已上传到 Notion。'], self.page.evaluate('window.toasts'))
+
+    def test_remount_after_redraw_keeps_typed_values(self):
+        self.page.locator('[data-pn-field="account"]').fill('typed')
+        self.page.evaluate("() => {const node = document.createElement('div');document.querySelector('#panel').replaceWith(node);node.id = 'panel';window.panel.mount(node);}")
+        self.assertEqual('typed', self.page.locator('[data-pn-field="account"]').input_value())
+
+    def test_newer_export_asks_to_update_and_no_connection_disables_upload(self):
+        self.page.evaluate("() => {window.receipt = {status:'completed',page_id:'40d4062a50ec81b8b4dceadc1c7acc8a',export_name:'C1-old'};window.connector = 'waiting';}")
+        self.page.evaluate("() => {window.panel.stop();window.panel = NotionUpload.photoPanel({api:window.api,setId:'PHS-aaaaaaaaaaaa',work:'A'});window.panel.mount(document.querySelector('#panel'));}")
+        self.page.locator('[data-pn-connect]').wait_for()
+        self.assertIn('Notion 上还是旧图', self.page.locator('.photo-notion').inner_text())
+        self.assertEqual('更新到 Notion', self.page.locator('[data-pn-submit]').inner_text())
+        self.assertTrue(self.page.locator('[data-pn-submit]').is_disabled())
+
 if __name__ == "__main__":
     unittest.main()

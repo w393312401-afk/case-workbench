@@ -205,6 +205,7 @@ class ExportBuildTests(unittest.TestCase):
     def test_clean_keeps_private_data_and_media_out_of_public_text(self):
         private = {
             "token": "fixture-token", "api_key": "short-secret", "password": "private", "thread_id": "private-thread",
+            "proxy_secret": "private-host-secret", "gateway_token": "private-gateway-token", "launch_id": "private-instance",
             "source_file": "C:/Users/private/source.json", "assets": {"video": {"path": "C:/private.mp4"}},
             "sources": [{"raw": "private"}],
             "source_analysis": {"content": "Contact test@example.com; file C:/Users/private.txt; ![shot](https://example.com/photo.jpg); Bearer " + "x" * 24,
@@ -212,7 +213,7 @@ class ExportBuildTests(unittest.TestCase):
             "nested": [{"authorization": "secret", "audio_file": "private.wav", "text": "public words"}],
         }
         cleaned = exporter.clean(private)
-        for key in ("api_key", "password", "thread_id", "source_file"):
+        for key in ("api_key", "password", "thread_id", "source_file", "proxy_secret", "gateway_token", "launch_id"):
             self.assertNotIn(key, cleaned)
         self.assertEqual(cleaned["token"], "")
         self.assertEqual(cleaned["assets"], {})

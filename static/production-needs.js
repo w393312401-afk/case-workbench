@@ -53,8 +53,10 @@ window.ProductionNeeds = (() => {
         add(`gap-${edit.id}-${index}`,`${lineText} · ${gap.status === 'unverified' ? '素材待核实' : '缺素材'}`,[gap.need || gap.name || '请核对该区间需要的画面',timelines.length > 1 ? timeline.name : ''].filter(Boolean).join(' · '),'edit',{run:edit.id,gap:index,...(Number.isInteger(gap.start) ? {start:gap.start} : {}),...(Number.isInteger(gap.end) ? {end:gap.end} : {})});
       });
       (report.questions || []).forEach((question,index) => add(`question-${edit.id}-${index}`,'剪辑问题待确认',String(question),'edit',{run:edit.id,question:index}));
-      if (['failed','interrupted','cancelled','needs_repair','verification_failed','unverified'].includes(edit.status)) add(`edit-${edit.id}`,'这次剪辑仍需处理',edit.error || edit.readback_error || '进入该次剪辑结果核对问题与恢复入口。','edit',{run:edit.id});
-      else if (!gaps.length && !report.questions?.length && ['completed','awaiting_review'].includes(edit.status)) add(`review-${edit.id}`,'当前剪辑待人工审查','核对画面、字幕、声音和实际导出。','edit',{run:edit.id});
+      // An order with several timelines names each one, so two reviews never read as the same card twice.
+      const named = text => timelines.length > 1 && timeline.name ? `${timeline.name}：${text}` : text;
+      if (['failed','interrupted','cancelled','needs_repair','verification_failed','unverified'].includes(edit.status)) add(`edit-${edit.id}`,'这次剪辑仍需处理',named(edit.error || edit.readback_error || '进入该次剪辑结果核对问题与恢复入口。'),'edit',{run:edit.id});
+      else if (!gaps.length && !report.questions?.length && ['completed','awaiting_review'].includes(edit.status)) add(`review-${edit.id}`,timelines.length > 1 ? '剪辑待人工审查' : '当前剪辑待人工审查',named('核对画面、字幕、声音和实际导出。'),'edit',{run:edit.id});
     }
     if (!latestCount && record.status !== 'approved') add('edit','当前时间线还没有剪辑结果','进入 AI 剪辑与人工审查步骤。','edit');
     // Registering the post is the order's normal next step, shown once by the 下一步 bar, not a gap.

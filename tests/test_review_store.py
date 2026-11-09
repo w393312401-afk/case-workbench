@@ -84,7 +84,10 @@ class ReviewStoreTests(unittest.TestCase):
             self.assertIn(name, dump)
         columns = self.store.search({"include_brand": True})["reviews"][0]
         self.assertNotIn("uid", columns)
-        self.assertNotIn("avatar", columns)
+        # 2026-11-09: avatars are shown, but only as a downloaded local file; the platform link itself never enters the library.
+        self.assertIsNone(columns["avatar"])
+        self.assertNotIn("avatarThumbnail", dump)
+        self.assertNotRegex(dump, r"tiktokcdn|fbcdn")
 
     def test_roles_and_hidden_by_default(self):
         self.store.sync()

@@ -163,26 +163,26 @@ class ContentSavedViewsBrowserTests(unittest.TestCase):
         page.locator("#content-flow-saved-menu > summary").click()
         keys = lambda target: target.locator("#content-flow-views [data-tab-key]").evaluate_all("tabs => tabs.map(tab => tab.dataset.tabKey)")
         pinned = "view:" + identifier
-        self.assertEqual(keys(page), ["attention", "publish", "all", pinned])
+        self.assertEqual(keys(page), ["attention", "publish", "carousel", "all", pinned])
 
         with page.expect_response(lambda response: "/api/content/views" in response.url and response.request.method == "POST"):
             page.locator(f'[data-tab-key="{pinned}"]').drag_to(page.locator('[data-tab-key="attention"]'),
                                                                 target_position={"x": 2, "y": 10})
         expect(page.locator(".flow-pinned-view")).to_have_attribute("data-tab-key", pinned)
         page.wait_for_function("() => document.querySelector('#content-flow-views [data-tab-key]').dataset.tabKey.startsWith('view:')")
-        self.assertEqual(keys(page), [pinned, "attention", "publish", "all"])
-        self.assertEqual(self.stored_views()["tab_order"], [pinned, "attention", "publish", "all"])
+        self.assertEqual(keys(page), [pinned, "attention", "publish", "carousel", "all"])
+        self.assertEqual(self.stored_views()["tab_order"], [pinned, "attention", "publish", "carousel", "all"])
 
         page.locator('[data-tab-key="all"]').focus()
         with page.expect_response(lambda response: "/api/content/views" in response.url and response.request.method == "POST"):
             page.keyboard.press("Alt+ArrowLeft")
-        page.wait_for_function("() => document.querySelectorAll('#content-flow-views [data-tab-key]')[2].dataset.tabKey === 'all'")
+        page.wait_for_function("() => document.querySelectorAll('#content-flow-views [data-tab-key]')[3].dataset.tabKey === 'all'")
         expect(page.locator('[data-tab-key="all"]')).to_be_focused()
         # Clicking still opens the tab; another browser reads the same order.
         self.view(page, "publish")
         other = self.content_page()
         expect(other.locator("#content-flow-views [data-tab-key]").first).to_have_attribute("data-tab-key", pinned)
-        self.assertEqual(keys(other), [pinned, "attention", "all", "publish"])
+        self.assertEqual(keys(other), [pinned, "attention", "publish", "all", "carousel"])
 
     def test_legacy_views_migrate_once_and_are_visible_in_an_independent_browser(self):
         record = self.legacy_view()

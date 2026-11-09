@@ -28,17 +28,53 @@ window.PhotoCarousel = (() => {
   };
   const tokenHeader = () => ({'X-Workbench-Token': (typeof state === 'object' && state.token) || ''});
 
-  const markup = uid => `<div class="photo-carousel-row" data-photo-carousel="${esc(uid)}"><button type="button" class="secondary compact" data-photo-open>做图文</button><span data-photo-status class="context-note" role="status"></span></div>`;
+  const markup = uid => `<div class="photo-carousel-row" data-photo-carousel="${esc(uid)}"><button type="button" class="secondary compact" data-photo-open>做图文</button><button type="button" class="subtle compact" data-photo-finish hidden title="不再提醒这条图文，做好的内容都保留，可以撤销">完结</button><span data-photo-status class="context-note" role="status"></span><button type="button" class="subtle compact" data-photo-reopen hidden>撤销</button><button type="button" class="danger-outline compact" data-photo-delete hidden>删除</button></div>`;
+  const sizeText = bytes => bytes >= 1073741824 ? `${(bytes / 1073741824).toFixed(1)} GB` : `${Math.max(1,Math.round(bytes / 1048576))} MB`;
+  // Deleting can't be undone, so the first click only reports what would go; the confirm sits on its own line under the row
+  // (no dialog on top of the task panel) and a repaint simply takes it away.
+  async function askDelete({host,api,jobId,uid,onDone}) {
+    const open = host.nextElementSibling?.matches('.photo-delete-confirm') ? host.nextElementSibling : null;
+    if (open) {open.remove();return;}
+    const url = `/api/production/jobs/${encodeURIComponent(jobId)}/photo-delete`;
+    const problem = error => {if (typeof toast === 'function') toast(error?.message || '操作没完成，请重试。',true);};
+    let info;
+    try {info = await api(url,{method:'POST',body:{timeline:uid,preview:true}});} catch (error) {problem(error);return;}
+    const parts = [info.versions ? `${info.versions} 版图文` : '',info.exports ? `${info.exports} 个成品文件夹` : '',info.files ? `${info.files} 个文件，共 ${sizeText(info.bytes)}` : ''].filter(Boolean);
+    const box = document.createElement('div');
+    box.className = 'photo-delete-confirm';box.setAttribute('role','alert');
+    box.innerHTML = `<span>永久删除这条图文的全部本地数据${parts.length ? `：${esc(parts.join('、'))}` : ''}，不能恢复。${info.notion_pages ? `Notion 上的 ${esc(info.notion_pages)} 个页面不会删。` : ''}</span><button type="button" class="danger compact" data-photo-delete-confirm>确认删除</button><button type="button" class="subtle compact" data-photo-delete-cancel>取消</button>`;
+    host.after(box);
+    box.querySelector('[data-photo-delete-cancel]').onclick = () => box.remove();
+    const confirm = box.querySelector('[data-photo-delete-confirm]');
+    confirm.onclick = async () => {
+      confirm.disabled = true;
+      try {
+        const result = await api(url,{method:'POST',body:{timeline:uid}});
+        box.remove();
+        window.TaskActivity?.refreshWork?.();
+        if (typeof toast === 'function') toast(result.warnings?.[0] || '图文和本地文件已永久删除。',!!result.warnings?.length);
+        await onDone?.();
+      } catch (error) {problem(error);confirm.disabled = false;}
+    };
+  }
+  const monthDay = value => {const date = new Date(value);return Number.isNaN(date.getTime()) ? '' : `${String(date.getMonth() + 1).padStart(2,'0')}/${String(date.getDate()).padStart(2,'0')}`;};
+  const sentVersions = set => Object.entries(set?.notion || {}).filter(([,status]) => status === 'completed').map(([key]) => key).sort();
+  // Every queued version finalized and one of them on Notion is the end of the road without anyone pressing 完结.
+  const autoEnded = set => !!(set?.works?.length && set.works.every(work => work.status === 'done') && sentVersions(set).length);
+  const decide = (api,jobId,uid,decision) => api(`/api/production/jobs/${encodeURIComponent(jobId)}/photo-decision`,{method:'POST',body:{timeline:uid,decision}}).then(result => {window.TaskActivity?.refreshWork?.();return result;});
 
   function statusText(set) {
     if (set?.resolve_import?.status === 'running') return '正在从达芬奇导入无字版…';
+    if (set?.finished_at) return `已完结 · ${monthDay(set.finished_at)} 手动`;
     if (!set?.exists) return '';
     if (set.frames_job?.status === 'running') return '正在抽帧…';
     if (set.ai?.status === 'running') return 'AI 正在写逐张表…';
     const works = set.works || [];
     if (works.length) {
       const done = works.filter(work => work.status === 'done').length;
-      return done === works.length ? `${done} 版都已定稿` : `${done}/${works.length} 版已定稿，正在做 ${set.work?.key || ''}`;
+      const sent = sentVersions(set);
+      const notion = sent.length ? ` · 已上传 Notion ${sent.join('、')}` : '';
+      return (autoEnded(set) ? '已完结 · ' : '') + (done === works.length ? `${done} 版都已定稿` : `${done}/${works.length} 版已定稿，正在做 ${set.work?.key || ''}`) + notion;
     }
     if (set.versions?.length) return '逐张表已出，待选版';
     return '已上传视频';
@@ -71,7 +107,7 @@ window.PhotoCarousel = (() => {
     document.body.append(dialog);dialog.showModal();
     const body = dialog.querySelector('[data-photo-body]');
     const ui = {set:null,frames:null,selected:1,cell:1,zhDraft:{},onlySharp:true,timer:null,busy:false,textTimer:null,pick:null,workKey:null};
-    const close = () => {clearTimeout(ui.timer);clearTimeout(ui.textTimer);dialog.close();dialog.remove();onChange?.(ui.set);};
+    const close = () => {clearTimeout(ui.timer);clearTimeout(ui.textTimer);ui.notion?.stop();dialog.close();dialog.remove();onChange?.(ui.set);};
     dialog.querySelector('[data-close]').onclick = close;
     dialog.addEventListener('cancel',event => {event.preventDefault();close();});
     // The error box sits at the top of a long dialog, so a toast also shows it next to wherever the user is.
@@ -89,7 +125,7 @@ window.PhotoCarousel = (() => {
       }
     };
     const call = async (path,payload = {}) => {
-      if (ui.busy) return;
+      if (ui.busy || (ui.set?.finished_at && !path.endsWith('/work'))) return;
       ui.busy = true;body.classList.add('is-busy');
       try {await apply(await api(path,{method:'POST',body:payload}));}
       catch (problem) {fail(problem);}
@@ -241,7 +277,8 @@ window.PhotoCarousel = (() => {
       return `<section class="photo-step"><h3><i>5</i>定稿</h3>
         ${publishCopy(w)}
         <div class="photo-step-line"><span class="context-note">把第 ${esc(w.key)} 版按当前排版导出到「图文成品」新文件夹（发布 JPG＋无损 PNG＋copy.json），旧版本不动。</span><button type="button" class="primary compact" data-photo-export>${w.status === 'done' ? '再导出一次' : '定稿导出'}</button>${set.next ? `<button type="button" class="primary compact" data-photo-work="${esc(set.next.key)}">做下一版：${esc(set.next.key)} ${esc(set.next.name_zh)}</button>` : ''}</div>
-        ${exports ? `<ul class="photo-exports">${exports}</ul>` : ''}</section>`;
+        ${exports ? `<ul class="photo-exports">${exports}</ul>` : ''}
+        ${w.exports?.length && window.NotionUpload?.photoPanel && !set.finished_at ? '<div data-photo-notion></div>' : ''}</section>`;
     };
 
     function draw() {
@@ -251,7 +288,8 @@ window.PhotoCarousel = (() => {
       const typing = focused && body.contains(focused) && focused.matches('textarea,input[type=text]')
         ? {name:[...focused.attributes].find(attr => attr.name.startsWith('data-photo'))?.name,value:focused.value,start:focused.selectionStart,end:focused.selectionEnd} : null;
       const importing = set.resolve_import?.status === 'running';
-      body.innerHTML = `<p class="ai-error" data-photo-error role="alert" hidden></p>${videoSection(set)}${importing ? '' : `${planSection(set)}${queueSection(set)}${styleSection(set)}${editSection(set)}${exportSection(set)}`}`;
+      const closed = set.finished_at ? `<div class="photo-finished-strip" role="status"><span>已完结，撤销后才能继续编辑</span><button type="button" class="secondary compact" data-photo-reopen>撤销完结</button></div>` : '';
+      body.innerHTML = `${closed}<p class="ai-error" data-photo-error role="alert" hidden></p>${videoSection(set)}${importing ? '' : `${planSection(set)}${queueSection(set)}${styleSection(set)}${editSection(set)}${exportSection(set)}`}`;
       // The page's security policy drops style="" written into markup, so cell boxes and crop positions are set here.
       body.querySelectorAll('[data-photo-cell][data-rect]').forEach(node => {
         const [x0,y0,x1,y1] = node.dataset.rect.split(',').map(Number);
@@ -276,10 +314,24 @@ window.PhotoCarousel = (() => {
         }
       }
       bind();
+      if (set.finished_at) lockEditing();
+    }
+
+    // A finished carousel can still be read: flip through slides and finished versions, copy text, open the export folder.
+    function lockEditing() {
+      body.querySelectorAll('button,input,textarea,select').forEach(node => {
+        if (!node.matches('[data-photo-reopen],[data-photo-select],.photo-queue-item.is-done [data-photo-work],[data-photo-folder],[data-photo-copy-title],[data-photo-copy-text],[data-photo-sharp]')) node.disabled = true;
+      });
+      body.querySelectorAll('[draggable="true"]').forEach(node => {node.draggable = false;});
     }
 
     function bind() {
       const set = ui.set, n = ui.selected;
+      const reopen = body.querySelector('[data-photo-reopen]');
+      if (reopen) reopen.onclick = async () => {
+        reopen.disabled = true;
+        try {await decide(api,job.id,uid,'reopen');await load();} catch (problem) {fail(problem);reopen.disabled = false;}
+      };
       const fromResolve = body.querySelector('[data-photo-resolve]');
       if (fromResolve) fromResolve.onclick = () => call(`/api/production/jobs/${encodeURIComponent(job.id)}/photo-set/from-resolve`,{timeline_uid:uid});
       body.querySelectorAll('[data-photo-video]').forEach(input => input.onchange = () => input.files[0] && sendVideo(input.files[0]));
@@ -353,7 +405,7 @@ window.PhotoCarousel = (() => {
         catch (problem) {fail(problem);}
       };
       const crop = body.querySelector('[data-photo-crop]');
-      if (crop) bindCrop(crop,cellsOf(set.work.slides[n - 1]),cellCall);
+      if (crop && !set.finished_at) bindCrop(crop,cellsOf(set.work.slides[n - 1]),cellCall);
       body.querySelectorAll('[data-photo-position]').forEach(button => button.onclick = () => slideCall({text_position:button.dataset.photoPosition}));
       body.querySelectorAll('[data-photo-size]').forEach(button => button.onclick = () => slideCall({text_size:button.dataset.photoSize}));
       const rewrite = body.querySelector('[data-photo-rewrite]');
@@ -396,6 +448,16 @@ window.PhotoCarousel = (() => {
           if (typeof toast === 'function') toast(`已导出到 图文成品/${result.export?.name}`);}
         catch (problem) {fail(problem);exporter.disabled = false;exporter.textContent = '定稿导出';}
       };
+      // One Notion panel per version and export; a new export starts a fresh panel that reads the new pictures.
+      const notionHost = body.querySelector('[data-photo-notion]');
+      if (notionHost) {
+        const key = `${set.id}|${set.work.key}|${(set.work.exports || []).length}`;
+        if (ui.notion?.key !== key) {
+          ui.notion?.stop();
+          ui.notion = Object.assign(window.NotionUpload.photoPanel({api,setId:set.id,work:set.work.key}),{key});
+        }
+        ui.notion.mount(notionHost);
+      }
       body.querySelectorAll('[data-photo-folder]').forEach(button => button.onclick = async () => {
         try {await api(`${base(set.id)}/open`,{method:'POST',body:{name:button.dataset.photoFolder}});} catch (problem) {fail(problem);}
       });
@@ -453,7 +515,7 @@ window.PhotoCarousel = (() => {
     }
 
     async function sendVideo(file) {
-      if (ui.busy || ui.set?.resolve_import?.status === 'running') return;
+      if (ui.busy || ui.set?.finished_at || ui.set?.resolve_import?.status === 'running') return;
       ui.busy = true;body.classList.add('is-busy');
       const note = body.querySelector('[data-photo-upload-progress]');
       try {
@@ -471,14 +533,29 @@ window.PhotoCarousel = (() => {
   async function bind(host,{job,api,uid} = {}) {
     const root = host.querySelector('[data-photo-carousel]');if (!root || !uid) return;
     const status = root.querySelector('[data-photo-status]'), button = root.querySelector('[data-photo-open]');
+    const finish = root.querySelector('[data-photo-finish]'), reopen = root.querySelector('[data-photo-reopen]'), remove = root.querySelector('[data-photo-delete]');
     const timeline = (job.timelines || []).find(row => row.unique_id === uid);
     const show = set => {
       if (!root.isConnected) return;
       status.textContent = statusText(set);
-      button.textContent = set?.exists ? '继续做图文' : '做图文';
+      const ended = !!set?.finished_at || autoEnded(set);
+      button.textContent = ended ? '查看图文' : set?.exists ? '继续做图文' : '做图文';
+      finish.hidden = ended || !set?.can_finish;
+      reopen.hidden = !set?.finished_at;
+      remove.hidden = !set?.can_delete;
     };
-    button.onclick = () => open({job,api,uid,timelineName:timeline?.name,onChange:show});
+    const change = (control,decision) => async () => {
+      control.disabled = true;
+      try {await decide(api,job.id,uid,decision);show(await api(setURL(job.id,uid)));}
+      catch (problem) {if (typeof toast === 'function') toast(problem?.message || '操作没完成，请重试。',true);}
+      finally {control.disabled = false;}
+    };
+    finish.onclick = change(finish,'finish');
+    reopen.onclick = change(reopen,'reopen');
+    remove.onclick = () => askDelete({host:root,api,jobId:job.id,uid,onDone:() => api(setURL(job.id,uid)).then(show).catch(() => {})});
+    // The window's copy of the set has no Notion summary, so the line reads the set again once the window closes.
+    button.onclick = () => open({job,api,uid,timelineName:timeline?.name,onChange:() => api(setURL(job.id,uid)).then(show).catch(() => {})});
     try {show(await api(setURL(job.id,uid)));} catch {status.textContent = '';}
   }
-  return {markup,bind};
+  return {markup,bind,open,askDelete};
 })();

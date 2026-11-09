@@ -91,7 +91,6 @@ a.home-chip:hover{filter:brightness(1.08);text-decoration:underline}
   .home-heading{align-items:flex-start}
 }
 @media(max-width:570px){
-  .home-flow-row{flex-direction:column;align-items:flex-start;gap:6px}
   .home-plan{align-items:flex-start;flex-direction:column;gap:10px}
   .home-plan-actions button,.home-menu>summary{min-height:var(--btn-h-lg)}
 }
@@ -100,14 +99,6 @@ a.home-chip:hover{filter:brightness(1.08);text-decoration:underline}
   .home-panel-head{flex-direction:column;align-items:flex-start;gap:6px}
 }
 /* 待我处理: each row ends with the next step it waits on. */
-.home-next{flex-shrink:0;display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:550;color:var(--accent-text);white-space:nowrap}
-.home-next svg{width:14px;height:14px}
-a.home-row:hover .home-next svg{transform:translateX(2px)}
-.home-running{display:flex;align-items:center;gap:10px;margin:8px 0 4px;padding:10px 12px;border-radius:8px;background:var(--surface-alt);color:var(--ink);font-size:13px;text-decoration:none}
-.home-running>span:nth-child(2){flex:1;min-width:0}
-.home-running svg{width:14px;height:14px;color:var(--accent-text)}
-.home-running:hover{background:color-mix(in srgb,var(--accent) 8%,var(--surface))}
-.home-publish{color:var(--ink)}
 /* 下一轮待写: plans that need no writing fold below the ones that do. */
 .home-plan-point{font-size:13px;font-weight:500;color:var(--muted)}
 .home-plan-rest{margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
@@ -129,7 +120,7 @@ a.home-row:hover .home-next svg{transform:translateX(2px)}
 /* Scan the current work without hiding its destination, dates or exceptions. */
 .home-heading h1{font-size:22px}.home-heading{margin-bottom:12px}
 .home-panel-head{margin:10px 0 6px}.home-explanation{font-size:12px;color:var(--muted)}.home-explanation summary{cursor:pointer}.home-explanation[open]{max-width:70%}
-.home-flow-row,.followup-row{padding-top:8px;padding-bottom:8px}
+.followup-row{padding-top:8px;padding-bottom:8px}
 .followup-row .home-row-main{flex:1;min-width:0}.followup-row strong{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.followup-row small{line-height:1.45}
 .followup-flags{display:inline-flex;gap:4px;flex-wrap:wrap;margin-left:6px;vertical-align:middle}.followup-flags .home-chip{font-size:11px;padding:0 5px}.followup-actions{flex-shrink:0;flex-wrap:nowrap}
 .followup-row{align-items:flex-start}.followup-actions{max-width:300px;flex-wrap:wrap;justify-content:flex-end}.followup-actions>.home-chip{flex-basis:auto}

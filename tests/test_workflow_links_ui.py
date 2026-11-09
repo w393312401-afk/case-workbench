@@ -101,8 +101,16 @@ class WorkflowLinksBrowserTests(unittest.TestCase):
             page.route(pattern, handler)
         page.goto(f"http://127.0.0.1:{self.server.server_port}/{hash_route or self.script_url()}")
         page.locator("#connection-text").get_by_text("案例库同步").wait_for(state="attached")
+        page.locator("#workflow-links").wait_for(state="attached")
+        # On a task page the hub lives inside 任务信息.
+        if "/ai/" in (hash_route or ""):
+            self.open_task_info(page)
         page.locator("#workflow-links").wait_for()
         return page
+
+    @staticmethod
+    def open_task_info(page):
+        page.locator("#ai-task-info > summary:visible, [data-desk-section='info']:visible").first.click()
 
     def script_url(self):
         return f"#/202H/content/{self.script['id']}"
@@ -181,6 +189,7 @@ class WorkflowLinksBrowserTests(unittest.TestCase):
         expect(page.locator(f'[data-round-id="{second["round_id"]}"] .ai-round-toggle')).to_have_attribute(
             "aria-expanded", "true")
         self.assertTrue(page.evaluate("document.querySelector('#workflow-links')===window.__workflowHubNode"))
+        self.open_task_info(page)
         self.listing["jobs"][0]["title"] = "轮次跳转后读取的新制作标题"
         page.locator("#workflow-links [data-workflow-retry]").click()
         self.assert_ready(page, "video", 2)

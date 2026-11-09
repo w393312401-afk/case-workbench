@@ -13,3 +13,9 @@
 目标日历保存在本机 `config.local.json` 的 `notion_upload` 中：`name` 是显示名称，`data_source_id` 是 Notion 数据源 ID，`accounts` 可把制作人名称映射到 Notion 账号列表的用户名。日历需要「名称」「日期」「发布账号」「标题＋tags」「文件和媒体」属性，关联账号列表需要「名称」「Username」「Nick Name」。配置不包含密钥。
 
 上传快照、请求恢复记录和原成片保存在 `runtime_root/production/notion-uploads/`，随工作台完整备份保存；重启备份仍只包含记录，不包含视频。
+
+## 挂车图文
+
+「做图文」窗口第 5 步定稿导出后，下方出现「上传到 Notion」：选发布日期、账号和标题，把这一版最新导出的发布 JPG 全部放进同一个发布日历的「文件和媒体」，正文放中英文案和逐张文字。每一版（A、B、C）各一个 Notion 页面，名称为「时间线名 图文A」；再次上传会更新原页面。上传的是导出文件夹里冻结的图和 copy.json，导出后又改过的内容要先再导出一次；导出过更新的版本时会提示 Notion 上还是旧图。
+
+上传成功后，内容进程「图文」标签里这条从「待上传」变成「已上传」并折叠。图文上传不改视频的发布日历标记，也不算登记 TikTok 发布。记录存在 `runtime_root/production/notion-uploads/photo-catalog.json`，不另存图片副本。

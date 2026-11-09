@@ -1,7 +1,7 @@
 """Restart launcher checks: mocked process control, disposable files, no live restart."""
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 import importlib.util
 import io
 import json
@@ -741,6 +741,139 @@ class BackupRetentionTests(unittest.TestCase):
         self.assertLessEqual(recent, kept)
         self.assertLessEqual(len(self.names()), LAUNCHER.BACKUP_KEEP + LAUNCHER.BACKUP_DAYS + 1)
         self.assertFalse([path for moment, path in moments if path.exists() and moment < time.time() - (LAUNCHER.BACKUP_DAYS + 1) * 86400])
+
+
+class TaskHostLauncherTests(unittest.TestCase):
+    setUp = LauncherTests.setUp
+    process = LauncherTests.process
+    status = LauncherTests.status
+    restart_mocks = LauncherTests.restart_mocks
+
+    def host(self, **changes):
+        runtime = Path(self.config["runtime_root"])
+        return {"app": "video-case-workbench", "role": "task-host", "protocol_version": 1,
+                "pid": 303, "port": 31234, "public_port": self.config["port"],
+                "launch_id": "a" * 32, "proxy_secret": "b" * 48,
+                "paths": {"records": str(Path(self.config["skill_root"]) / "cases"),
+                          "library": str(runtime / "library"), "runtime": str(runtime),
+                          "code_root": str(self.root)}, **changes}
+
+    def write_host(self, host):
+        path = Path(self.config["runtime_root"]) / "service" / "task-host.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(host), encoding="utf-8")
+
+    def test_task_host_manifest_checks_paths_protocol_and_control_secret(self):
+        host = self.host()
+        self.write_host(host)
+        self.assertEqual(LAUNCHER.task_host_manifest(self.root, self.config), host)
+        for change in ({"role": "gateway"}, {"protocol_version": 2}, {"pid": True}, {"port": 0}, {"port": self.config["port"]},
+                       {"public_port": 123}, {"proxy_secret": "short"},
+                       {"paths": {**host["paths"], "code_root": str(self.base / "other")}}):
+            self.write_host({**host, **change})
+            with self.subTest(change=list(change)), self.assertRaises(RuntimeError):
+                LAUNCHER.task_host_manifest(self.root, self.config)
+
+    @unittest.skipUnless(os.name == "nt", "Windows process inventory")
+    def test_gateway_restart_keeps_busy_task_host_and_does_not_copy_live_data(self):
+        gateway = self.process([self.executable, "-u", str(self.root / "service_gateway.py"),
+            "--port", str(self.config["port"]), "--skill-root", self.config["skill_root"],
+            "--runtime-root", self.config["runtime_root"]])
+        self.assertTrue(LAUNCHER.matches_workbench(gateway, self.root, self.config))
+        self.assertFalse(LAUNCHER.matches_workbench(self.process([self.executable, str(self.root / "server.py"),
+            "--task-host", "--port", "0"]), self.root, self.config))
+        with ExitStack() as stack:
+            mocks = self.restart_mocks(stack, processes=[gateway], responses=[self.status(101), self.status(202)])
+            keep = stack.enter_context(patch.object(LAUNCHER, "ensure_task_host", return_value=self.host()))
+            guard = stack.enter_context(patch.object(LAUNCHER, "ensure_no_active_tasks", side_effect=AssertionError("Must not inspect/cancel gateway tasks")))
+            backup = stack.enter_context(patch.object(LAUNCHER, "prepare_start"))
+            self.assertEqual(LAUNCHER.restart(self.root, {**self.config, "task_host_enabled": True}, no_browser=True), 202)
+            self.assertEqual(keep.call_count, 2)
+            guard.assert_not_called()
+            backup.assert_not_called()
+            self.assertIn(str(self.root / "service_gateway.py"), mocks["spawn"].call_args.args[0])
+            mocks["stop_legacy_process"].assert_not_called()
+
+    def test_live_task_host_is_reused_without_spawning_or_backup(self):
+        host = self.host()
+        self.write_host(host)
+        with patch.object(LAUNCHER, "task_host_status", return_value={"code_stale": True}), \
+                patch.object(LAUNCHER.subprocess, "Popen") as spawn, patch.object(LAUNCHER, "prepare_start") as backup:
+            self.assertEqual(LAUNCHER.ensure_task_host(self.root, self.config), host)
+        spawn.assert_not_called()
+        backup.assert_not_called()
+
+    def test_unresponsive_host_with_a_live_data_lease_is_never_backed_up_or_duplicated(self):
+        from data_lease import ServerLease
+        lease = ServerLease(self.config["runtime_root"])
+        self.assertTrue(lease.acquire())
+        try:
+            with patch.object(LAUNCHER.subprocess, "Popen") as spawn, patch.object(LAUNCHER, "prepare_start") as backup:
+                with self.assertRaisesRegex(RuntimeError, "仍占用数据"):
+                    LAUNCHER.ensure_task_host(self.root, self.config, locked=True)
+            spawn.assert_not_called()
+            backup.assert_not_called()
+        finally:
+            lease.close()
+
+    def test_missing_host_starts_with_a_random_private_port_and_verified_manifest(self):
+        host = self.host()
+        child = Mock(pid=host["pid"])
+        child.poll.return_value = None
+        with patch.object(LAUNCHER, "task_host_manifest", side_effect=[None, host]), \
+                patch.object(LAUNCHER, "task_host_status", return_value={"token": "fixture"}), \
+                patch.object(LAUNCHER, "prepare_start") as backup, \
+                patch.object(LAUNCHER.subprocess, "Popen", return_value=child) as spawn:
+            self.assertEqual(LAUNCHER.ensure_task_host(self.root, self.config, locked=True), host)
+        backup.assert_called_once()
+        command = spawn.call_args.args[0]
+        self.assertIn("--task-host", command)
+        self.assertEqual(command[command.index("--port") + 1], "0")
+        self.assertEqual(command[command.index("--public-port") + 1], str(self.config["port"]))
+        self.assertNotIn("--no-open", command, "The normal workbench must retain its folder/open actions")
+
+    def test_engine_update_waits_for_idle_and_rechecks_a_racing_new_task(self):
+        host = self.host()
+        ready = {"role": "task-host", "launch_id": host["launch_id"], "ready": True}
+        conflict = urllib.error.HTTPError("http://fixture", 409, "new task arrived", {}, None)
+        answers = [{**ready, "ready": False}, ready, conflict, ready, {"ok": True, "pid": host["pid"]}]
+        with patch.object(LAUNCHER, "launch_lock", return_value=nullcontext(True)), \
+                patch.object(LAUNCHER, "task_host_manifest", return_value=host), \
+                patch.object(LAUNCHER, "task_host_status", return_value={"code_stale": True, "token": "fixture"}), \
+                patch.object(LAUNCHER, "task_host_request", side_effect=answers) as request, \
+                patch.object(LAUNCHER.time, "sleep") as sleep, \
+                patch.object(LAUNCHER, "wait_for_port_release") as release, \
+                patch.object(LAUNCHER, "wait_for_task_host_release") as released_data, \
+                patch.object(LAUNCHER, "ensure_task_host") as start:
+            LAUNCHER.refresh_task_host_on_idle(self.root, self.config)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual([call.args[1] for call in request.call_args_list], [
+            "/api/service/ready", "/api/service/ready", "/api/service/shutdown",
+            "/api/service/ready", "/api/service/shutdown"])
+        release.assert_called_once_with(host["port"], timeout=30)
+        released_data.assert_called_once_with(self.config)
+        start.assert_called_once_with(self.root, self.config, locked=True)
+
+    def test_replacement_waits_for_data_lease_even_after_http_port_closed(self):
+        from data_lease import ServerLease
+        old, available = Mock(), Mock()
+        old.acquire.return_value = False
+        available.acquire.return_value = True
+        with patch("data_lease.ServerLease", side_effect=[old, available]), \
+                patch.object(LAUNCHER.time, "sleep") as sleep:
+            LAUNCHER.wait_for_task_host_release(self.config)
+        old.close.assert_not_called()
+        available.close.assert_called_once()
+        sleep.assert_called_once_with(.1)
+
+    def test_engine_update_does_not_stop_a_replacement_host(self):
+        host = self.host()
+        with patch.object(LAUNCHER, "launch_lock", return_value=nullcontext(True)), \
+                patch.object(LAUNCHER, "task_host_manifest", side_effect=[host, self.host(launch_id="c" * 32)]), \
+                patch.object(LAUNCHER, "task_host_request") as request, patch.object(LAUNCHER, "ensure_task_host") as start:
+            LAUNCHER.refresh_task_host_on_idle(self.root, self.config)
+        request.assert_not_called()
+        start.assert_not_called()
 
 
 if __name__ == "__main__":

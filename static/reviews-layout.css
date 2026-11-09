@@ -120,3 +120,6 @@
 }
 
 #rev-page .rev-heading{margin-bottom:12px}#rev-page .rev-heading p{margin-top:6px;font-size:12px;line-height:1.5}#rev-page .rev-text{font-size:14px;line-height:1.5}#rev-page .rev-text.is-clamped{-webkit-line-clamp:4}#rev-page .rev-card{padding-top:12px;padding-bottom:12px}#rev-page .rev-head{gap:4px 8px}#rev-page .rev-tag-details summary{cursor:pointer;font-size:12px;color:var(--muted-soft);line-height:1.5}#rev-page .rev-tag-details[open]>div{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}#rev-page .rev-tag-help{font-size:12px;color:var(--muted-soft)}.rev-page-tabs{display:flex;gap:16px;margin-top:8px;font-size:13px}.rev-page-tabs [aria-current]{font-weight:650}.rev-page-tabs a{color:var(--accent-text)}
+
+/* reviewer avatar (review_avatars.py) */
+.rev-avatar{width:22px;height:22px;border-radius:50%;flex:none;object-fit:cover;background:var(--fill);display:inline-grid;place-items:center;font-size:11px;font-weight:650;color:var(--muted);vertical-align:middle}

@@ -28,9 +28,9 @@ window.CaseAI = (() => {
     return {variants:[...modal.variantSel].sort((a,b) => a - b).map(index => ({index,progression:direction.variants[index].progression ?? null})),new_variant_count:modal.newVariants};
   }
   const statuses = {queued:'排队中',running:'正在处理',completed:'已完成',failed:'执行失败',cancelled:'已取消',interrupted:'执行中断'};
-  const managementStates = {pending_selection:'待选稿',needs_revision:'继续修改',adopted:'已采纳',abandoned:'已放弃'};
+  const managementStates = {pending_selection:'待选稿',needs_revision:'继续修改',adopted:'已采纳',abandoned:'已放弃',finished:'已完结'};
   const managementState = task => task.management_state || 'pending_selection';
-  const managementFilterLabels = {pending_selection:'待选稿 / 确认结果',needs_revision:'继续修改 / 讨论',adopted:'已采纳 / 确认结果',abandoned:'已放弃'};
+  const managementFilterLabels = {pending_selection:'待选稿 / 确认结果',needs_revision:'继续修改 / 讨论',adopted:'已采纳 / 确认结果',abandoned:'已放弃',finished:'已完结'};
   const managementLabels = task => isWriting(task) ? managementStates : {pending_selection:'待确认结果',needs_revision:'继续讨论',adopted:'已确认结果',abandoned:'已放弃'};
   const managementLabel = task => managementLabels(task)[managementState(task)] || '待查看';
   const taskStarted = task => task.task_started_label || (task.created_at ? `${readableDate(task.created_at)} 发起` : '');
@@ -254,6 +254,8 @@ window.CaseAI = (() => {
     return `create:${item.case_id || `${product}:${item.direction_id || 'blank'}`}:${action}${scope}`;
   }
   const variantIdentity = variant => JSON.stringify(['progression','variant_type','main_difference','concern','closing','execution_change'].map(key => variant?.[key] ?? ''));
+  // Same four as markets.py on the server, which rejects anything else.
+  const writingMarkets = [['us','美国 · 英语'],['uk','英国 · 英语'],['de','德国 · 德语'],['es','西班牙 · 西语']];
   // Writing entries are labelled 「开始写稿」 everywhere, so their dialog carries the same name; the case card keeps its own action names.
   async function openCreate(item,action,heading = actions[action],options = {}) {
     if (!actions[action] || ai.modal) return;
@@ -264,7 +266,7 @@ window.CaseAI = (() => {
     const verifyVariant = options.variantIndex !== undefined && !pending;
     const expectedVariant = verifyVariant ? variantIdentity(item.variants[options.variantIndex]) : '';
     const materialIds = pending?.payload.material_ids || item.material_ids || null;
-    const modal = {key,caseId:item.case_id,product,directionId:pending?.payload.direction_id || item.direction_id || '',caseTitle:item.current?.title || item.title || item.direction_id || item.case_id || `${product} · 空白写稿`,revision:pending?.payload.revision || item.revision,planId:pending?.payload.plan_id || item.plan_id || '',action,instruction:pending ? pending.payload.instruction || '' : item.plan_note || '',includeBasket:pending ? !!(pending.payload.include_basket || pending.payload.material_ids?.length) : !!(materialIds?.length || item.direction_id),materialIds,materials:[],directions:item.direction_id ? [item] : [],variantSel:pending?.payload.variants ? pending.payload.variants.map(item => item.index) : pending ? [] : options.variantIndex !== undefined ? [options.variantIndex] : null,newVariants:pending?.payload.new_variant_count || 0,sourceMode:pending?.payload.writing_mode?.mode || 'adapt',divergeCount:pending?.payload.writing_mode?.count || 3,settings:{skill_selection:pending?.payload.skill_selection || 'auto'},busy:false,blocked:verifyVariant,error:pending ? '此入口上次提交的结果尚未确认。请重试同一请求核对，不会重复创建任务。' : ''};
+    const modal = {key,caseId:item.case_id,product,directionId:pending?.payload.direction_id || item.direction_id || '',caseTitle:item.current?.title || item.title || item.direction_id || item.case_id || `${product} · 空白写稿`,revision:pending?.payload.revision || item.revision,planId:pending?.payload.plan_id || item.plan_id || '',action,instruction:pending ? pending.payload.instruction || '' : item.plan_note || '',includeBasket:pending ? !!(pending.payload.include_basket || pending.payload.material_ids?.length) : !!(materialIds?.length || item.direction_id),materialIds,materials:[],directions:item.direction_id ? [item] : [],variantSel:pending?.payload.variants ? pending.payload.variants.map(item => item.index) : pending ? [] : options.variantIndex !== undefined ? [options.variantIndex] : null,newVariants:pending?.payload.new_variant_count || 0,market:pending?.payload.market || 'us',sourceMode:pending?.payload.writing_mode?.mode || 'adapt',divergeCount:pending?.payload.writing_mode?.count || 3,settings:{skill_selection:pending?.payload.skill_selection || 'auto'},busy:false,blocked:verifyVariant,error:pending ? '此入口上次提交的结果尚未确认。请重试同一请求核对，不会重复创建任务。' : ''};
     ai.modal = modal;
     setText('#ai-create-title',heading);setText('#ai-create-case',modal.caseTitle);
     setText('#ai-create-version',item.case_id ? '基于当前案例版本' : item.direction_id ? '基于当前方向定义' : '空白写稿');
@@ -291,8 +293,9 @@ window.CaseAI = (() => {
     let modeHost = $('#ai-source-mode-host');
     if (!modeHost) {$('#ai-create-form .ai-create-ask').insertAdjacentHTML('beforebegin','<div id="ai-source-mode-host"></div>');modeHost = $('#ai-source-mode-host');}
     modeHost.innerHTML = modal.caseId && modal.action === 'variants' ? sourceModeMarkup(modal) : '';
-    host.innerHTML = `${modal.action === 'variants' ? '<div class="ai-source-row"><span class="context-note">已有写好的稿件？</span><button type="button" class="subtle" id="ai-create-manual">手动录入</button></div>' : ''}${!modal.caseId ? `<div class="ai-source-row"><label class="field"><span>本次方向</span><select id="ai-create-direction"><option value="">空白写稿，不指定方向</option>${modal.directions.filter(item => item.status !== 'archived').map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === modal.directionId ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>${!modal.materialIds ? '<button type="button" class="subtle" id="ai-create-from-case">改为从案例写稿</button>' : ''}</div>` : ''}<label class="ai-check"><input id="ai-include-basket" type="checkbox" ${modal.includeBasket ? 'checked' : ''} ${ai.pending.has(modal.key) ? 'disabled' : ''}> 携带${modal.materialIds ? '已选择的素材' : '当前产品的摘录篮'}（${modal.materialIds?.length ?? modal.materials.length} 条）</label><p class="context-note">${esc(modal.basketError ? `摘录篮暂不可用：${modal.basketError}。可取消携带素材，或关闭后重试。` : '提交时固定选中的素材；以后修改摘录篮不会改动此任务。')}</p><div id="ai-variant-plan"></div>`;
+    host.innerHTML = `${modal.action === 'variants' ? `<div class="ai-source-row"><label class="field"><span>目标市场</span><select id="ai-create-market">${writingMarkets.map(([id,label]) => `<option value="${id}" ${id === modal.market ? 'selected' : ''}>${label}</option>`).join('')}</select></label></div>` : ''}${modal.action === 'variants' ? '<div class="ai-source-row"><span class="context-note">已有写好的稿件？</span><button type="button" class="subtle" id="ai-create-manual">手动录入</button></div>' : ''}${!modal.caseId ? `<div class="ai-source-row"><label class="field"><span>本次方向</span><select id="ai-create-direction"><option value="">空白写稿，不指定方向</option>${modal.directions.filter(item => item.status !== 'archived').map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === modal.directionId ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>${!modal.materialIds ? '<button type="button" class="subtle" id="ai-create-from-case">改为从案例写稿</button>' : ''}</div>` : ''}<label class="ai-check"><input id="ai-include-basket" type="checkbox" ${modal.includeBasket ? 'checked' : ''} ${ai.pending.has(modal.key) ? 'disabled' : ''}> 携带${modal.materialIds ? '已选择的素材' : '当前产品的摘录篮'}（${modal.materialIds?.length ?? modal.materials.length} 条）</label><p class="context-note">${esc(modal.basketError ? `摘录篮暂不可用：${modal.basketError}。可取消携带素材，或关闭后重试。` : '提交时固定选中的素材；以后修改摘录篮不会改动此任务。')}</p><div id="ai-variant-plan"></div>`;
     $('#ai-include-basket').onchange = event => {modal.includeBasket = event.target.checked;updateCreateControls();};
+    if ($('#ai-create-market')) $('#ai-create-market').onchange = event => {modal.market = event.target.value;};
     $$('[name="ai-source-mode"]',modeHost).forEach(radio => {radio.onchange = () => {modal.sourceMode = radio.value;$('#ai-diverge-count').disabled = modal.sourceMode !== 'diverge';updateCreateControls();};});
     if ($('#ai-diverge-count')) $('#ai-diverge-count').oninput = event => {modal.divergeCount = Math.max(1,Math.min(5,Math.floor(Number(event.target.value) || 1)));updateCreateControls();};
     if ($('#ai-create-direction')) $('#ai-create-direction').onchange = event => {modal.directionId = event.target.value;modal.variantSel = null;renderVariantPlan(modal);updateCreateControls();};
@@ -389,7 +392,7 @@ window.CaseAI = (() => {
     event.preventDefault();const modal = ai.modal;
     if (!modal || modal.busy || modal.blocked || !ai.status?.available || (!ai.pending.has(modal.key) && ((modal.includeBasket && !!modal.basketError) || (!modal.instruction.trim() && !planActive(modal) && !divergeActive(modal)) || settingsIssue(modal.settings)))) return;
     let pending = ai.pending.get(modal.key);
-    if (!pending) {pending = {path:'/api/ai/tasks',payload:{request_id:crypto.randomUUID(),...(modal.planId ? {plan_id:modal.planId} : {}),...(modal.caseId ? {case_id:modal.caseId,revision:modal.revision} : {product:modal.product,...(modal.directionId ? {direction_id:modal.directionId} : {})}),...(modal.includeBasket && modal.materialIds ? {material_ids:modal.materialIds} : {include_basket:modal.includeBasket}),action:modal.action,instruction:modal.instruction.trim(),...planPayload(modal),...(divergeActive(modal) ? {writing_mode:{mode:'diverge',count:modal.divergeCount}} : {}),skill_selection:modal.settings.skill_selection}};ai.pending.set(modal.key,pending);}
+    if (!pending) {pending = {path:'/api/ai/tasks',payload:{request_id:crypto.randomUUID(),...(modal.planId ? {plan_id:modal.planId} : {}),...(modal.caseId ? {case_id:modal.caseId,revision:modal.revision} : {product:modal.product,...(modal.directionId ? {direction_id:modal.directionId} : {})}),...(modal.includeBasket && modal.materialIds ? {material_ids:modal.materialIds} : {include_basket:modal.includeBasket}),action:modal.action,instruction:modal.instruction.trim(),...planPayload(modal),...(divergeActive(modal) ? {writing_mode:{mode:'diverge',count:modal.divergeCount}} : {}),...(modal.action === 'variants' && modal.market !== 'us' ? {market:modal.market} : {}),skill_selection:modal.settings.skill_selection}};ai.pending.set(modal.key,pending);}
     modal.busy = true;pending.busy = true;modal.error = '';ai.mutation++;updateCreateControls();
     try {
       const response = await api(pending.path,{method:'POST',body:pending.payload});
@@ -670,11 +673,14 @@ window.CaseAI = (() => {
   function updateTitleLines(node,text,settled) {
     let panel = $('.ai-title-lines',node);
     const groups = settled ? titleLineGroups(text) : [], total = groups.reduce((sum,group) => sum + group.lines.length,0);
+    const entry = $('[data-desk-section="titles"]',node);
+    if (entry) {entry.hidden = !total;$('small',entry).textContent = total ? String(total) : '';}
     if (!total) {if (panel) panel.hidden = true;return;}
     const source = JSON.stringify(groups);
     if (!panel) {panel = document.createElement('section');panel.className = 'ai-title-lines';$('.ai-round-output',node).after(panel);}
     panel.hidden = false;
-    if (panel.dataset.source === source) return;
+    const showOpen = () => {if (node.classList.contains('is-desk')) $('.ai-title-lines-detail',panel).open = true;};
+    if (panel.dataset.source === source) {showOpen();return;}
     panel.dataset.source = source;
     panel.innerHTML = `<div class="ai-title-lines-head"><h3>发布文案 <small>${total} 条</small></h3><button type="button" class="subtle" data-copy-all-titles>${icon('copy')}复制全部</button></div><details class="ai-title-lines-detail"><summary>逐条查看与复制</summary>${groups.map(group => `<div class="ai-title-group">${group.heading ? `<h4>${esc(group.heading)}</h4>` : ''}${group.lines.map(line => `<button type="button" class="ai-title-line" data-title-line="${esc(line)}" title="复制这一行"><span>${esc(line)}</span>${icon('copy')}</button>`).join('')}</div>`).join('')}</details>`;
     panel.onclick = event => {
@@ -682,6 +688,7 @@ window.CaseAI = (() => {
       if (line) {copyText(line.dataset.titleLine,'标题行已复制');line.classList.add('copied');setTimeout(() => line.classList.remove('copied'),1200);return;}
       if (event.target.closest('[data-copy-all-titles]')) copyText(groups.flatMap(group => group.lines).join('\n'),'全部标题行已复制');
     };
+    showOpen();
   }
   // Every writing answer reads as cards: one per variant, what is read aloud on top and production notes folded.
   // Variants are found after rendering, by "变体 #N" title lines or, without them, by each 「口播（配音用）」 block and the
@@ -689,7 +696,7 @@ window.CaseAI = (() => {
   const scriptStatusNames = {draft:'草稿',adopted:'已采纳',filmed:'已拍摄',published:'已发布',reviewed:'已复盘',archived:'已归档'};
   const textOf = node => (node?.textContent || '').trim();
   const boldLine = node => node.tagName === 'P' && node.children.length === 1 && node.firstElementChild.tagName === 'STRONG' && textOf(node) === textOf(node.firstElementChild);
-  const variantNumber = node => (/^H[2-5]$/.test(node.tagName) || boldLine(node)) ? /^\s*(?:[\w-]+\s*[·・]\s*)?变体\s*#?\s*(\d+)/.exec(textOf(node))?.[1] || '' : '';
+  const variantNumber = node => (/^H[2-5]$/.test(node.tagName) || boldLine(node)) ? /^\s*(?:[\w-]+\s*[·・]\s*)?(?:建议)?(?:新增|备选)?变体\s*[#＃Vv]?\s*(\d+)/.exec(textOf(node))?.[1] || '' : '';
   const blockText = node => (node?.querySelector('code') || node)?.textContent.trim() || '';
   const sectionLabel = node => boldLine(node) || /^H[2-5]$/.test(node.tagName) ? textOf(node) : /^补拍清单\s*[：:]/.test(textOf(node)) ? '补拍清单' : '';
   const isSpokenLabel = node => /^口播\s*[（(]\s*配音用/.test(sectionLabel(node));
@@ -775,30 +782,88 @@ window.CaseAI = (() => {
     return `<div class="ai-variant-pairs is-blocks"><p>${esc(english.join('\n'))}</p><p class="ai-variant-zh">${esc(chinese.join('\n') || '未提供对应中文')}</p></div>`;
   }
   // An adopted script names its variant by index; older ones without it are matched by "变体 #N" in the title.
-  function variantStatus(round,number) {
-    const rows = (ai.taskScripts?.taskId === ai.task?.task_id ? ai.taskScripts.rows : []).filter(script => script.source?.round_id === round.round_id &&
-      (Number.isInteger(script.source.variant_index) ? script.source.variant_index === Number(number) - 1 : new RegExp(`变体\\s*#?\\s*${number}(?!\\d)`).test(script.title || '')));
-    const rank = ['draft','adopted','filmed','published','reviewed'];
-    const best = rows.sort((a,b) => rank.indexOf(b.status) - rank.indexOf(a.status))[0];
-    return best ? `<span class="ai-variant-state is-${esc(best.status)}">${esc(scriptStatusNames[best.status] || best.status)}</span>` : '<span class="ai-variant-state">待定</span>';
+  function variantScripts(round,number,position) {
+    return (ai.taskScripts?.taskId === ai.task?.task_id ? ai.taskScripts.rows : []).filter(script => script.source?.round_id === round.round_id &&
+      (Number.isInteger(script.source.variant_index) ? script.source.variant_index === position : new RegExp(`变体\\s*[#＃Vv]?\\s*${number}(?!\\d)`).test(script.title || '')));
   }
-  // One variant: just its card. Two to four: a row of switch chips. Five or more: an overview table.
-  function variantPicker(variants,round,picked) {
-    const status = variant => `<span data-variant-status="${esc(variant.number)}">${variantStatus(round,variant.number)}</span>`;
-    const head = `<div class="ai-variant-overview-head"><h4>${variants.length} 条变体${variants.length >= 5 ? '<small>点一行查看这一条</small>' : ''}</h4><button type="button" class="subtle" data-variant-show-all>全部展开</button></div>`;
-    if (variants.length < 5) return `${head}<div class="ai-variant-chips" role="listbox" aria-label="选择要查看的变体" aria-orientation="horizontal">${variants.map(variant => `<button type="button" class="ai-variant-chip" role="option" data-variant-pick="${esc(variant.number)}" aria-selected="${variant.number === picked}"><b>#${esc(variant.number)}</b>${variant.structure ? `<span>${esc(variant.structure)}</span>` : ''}${variant.seconds != null ? `<small>${esc(variant.seconds)} 秒</small>` : ''}${status(variant)}</button>`).join('')}</div>`;
-    return `${head}<div class="ai-variant-overview" role="listbox" aria-label="选择要查看的变体"><div class="ai-variant-columns" aria-hidden="true"><span>#</span><span>推进结构</span><span>开头屏显</span><span>第一句口播</span><span>时长</span><span>状态</span></div>${variants.map(variant => {
-      const first = blockText(variant.spoken).split(/\r?\n/).find(line => line.trim()) || '', screen = variant.screen.replace(/\s*[（(][^）)]*[）)]\s*$/,'');
-      return `<div class="ai-variant-pick" role="option" tabindex="0" data-variant-pick="${esc(variant.number)}" aria-selected="${variant.number === picked}"><b>#${esc(variant.number)}</b><span title="${esc(variant.title)}">${esc(variant.structure || '—')}</span><span title="${esc(variant.screen)}">${esc(screen || '—')}</span><span class="ai-variant-first" title="${esc(first)}">${esc(first)}</span><span class="ai-variant-seconds">${variant.seconds != null ? `${esc(variant.seconds)} 秒` : '—'}</span>${status(variant)}</div>`;
-    }).join('')}</div>`;
+  function variantScript(round,number,position) {
+    const rank = ['draft','adopted','filmed','published','reviewed'];
+    return variantScripts(round,number,position).filter(script => !script.archived && script.status !== 'archived').sort((a,b) => rank.indexOf(b.status) - rank.indexOf(a.status))[0] || null;
+  }
+  // Every order made from this draft, whichever version of its script it used.
+  function variantOrders(round,number,position) {
+    const orders = new Map();
+    for (const script of variantScripts(round,number,position)) for (const use of script.production_usage || []) if (use.kind === 'video') orders.set(use.id,{...use,product:script.product});
+    return [...orders.values()];
+  }
+  function variantOrdersMarkup(orders) {
+    return orders.map(order => {
+      const {href,status} = window.CaseProduction?.orderSummary?.(order) || {href:'#',status:''};
+      return `<div class="ai-variant-order"><span>制作单</span><a href="${esc(href)}">${esc(status)}${order.archived ? ' · 已归档' : ''}</a>${orders.length > 1 ? `<small>${esc(order.id)}</small>` : ''}<button type="button" class="ai-variant-order-delete" data-delete-order="${esc(order.id)}" data-order-product="${esc(order.product || '')}">删除</button></div>`;
+    }).join('');
+  }
+  function deleteVariantOrder(button) {
+    window.CaseProduction?.deleteCandidateOrder({id:button.dataset.deleteOrder,product:button.dataset.orderProduct},result => {
+      ai.taskListAt = 0;
+      if (result.task) updateTask(result.task);
+      void window.CaseScripts?.mountTaskAdopted?.($('#ai-task-adopted'),ai.task,{force:true});
+    });
+  }
+  const variantChoice = (round,position) => ai.task?.variant_choices?.[round.round_id]?.picks?.[String(position)] || '';
+  // A saved script says how far the draft got; before that, what was decided about it.
+  function variantStatus(round,number,position = Number(number) - 1) {
+    const best = variantScript(round,number,position), choice = variantChoice(round,position);
+    if (best) return `<span class="ai-variant-state is-${esc(best.status)}">${esc(scriptStatusNames[best.status] || best.status)}</span>`;
+    return choice === 'do' ? '<span class="ai-variant-state is-do">要做</span>' : choice === 'skip' ? '<span class="ai-variant-state is-skip">不做</span>' : '<span class="ai-variant-state">待定</span>';
+  }
+  // Pressing the marked choice again clears it. Settling the last open draft finishes the task on the server.
+  async function chooseVariant(round,position,button) {
+    const task = ai.task, wanted = button.dataset.variantChoice, before = managementState(task);
+    button.disabled = true;
+    try {
+      const result = await api(`/api/ai/tasks/${encodeURIComponent(task.task_id)}/variant-choice`,{method:'POST',body:{round_id:round.round_id,variant_index:position,choice:variantChoice(round,position) === wanted ? '' : wanted}});
+      ai.taskListAt = 0;
+      updateTask(result.task);
+      if (result.task.management_state === 'finished' && before !== 'finished') toast('这一轮的稿子都定了，任务已完结。');
+    } catch (error) {toast(message(error),true);}
+    finally {button.disabled = false;}
+  }
+  // The desk's left rail: one row per variant, then the round's shared sections. Whatever is picked here fills the right side.
+  function deskRail(variants,round,picked,sections) {
+    const rows = variants.map((variant,position) => `<button type="button" class="ai-desk-variant" role="option" data-variant-pick="${esc(variant.number)}" data-structure="${esc(variant.structure)}" aria-selected="${variant.number === picked}" title="${esc(variant.title)}"><span class="ai-desk-variant-name">${esc(variantName(variant))}</span><small>${variant.seconds != null ? `${esc(variant.seconds)} 秒 · ` : ''}<span data-variant-status="${esc(variant.number)}" data-variant-position="${position}">${variantStatus(round,variant.number,position)}</span></small></button>`).join('');
+    const links = sections.map(item => `<button type="button" class="ai-desk-section" data-desk-section="${item.key}" ${item.hidden ? 'hidden' : ''}><span>${item.label}</span><small class="${item.warn ? 'is-warn' : ''}">${esc(item.note || '')}</small></button>`).join('');
+    return `<div class="ai-desk-variants" role="listbox" aria-label="选择候选稿">${rows}</div><div class="ai-desk-sections">${links}</div>`;
+  }
+  const variantName = variant => variant.structure ? `#${variant.number} ${variant.structure}` : variant.title;
+  // "变体 #1（已登记：价位对比）", "建议新增变体 V2：先问价" and "202H-S2 · 变体 #3 · 其他：送礼" all reduce to the structure's own name.
+  function variantStructure(title) {
+    const tail = title.split(/[·・]/).pop().replace(/^\s*(?:建议)?(?:新增|备选)?变体\s*[#＃Vv]?\s*\d+\s*[：:]?/,'').trim();
+    return tail.replace(/^[（(]\s*(?:已登记\s*[：:])?\s*(.*?)\s*[）)]$/,'$1').replace(/^其他\s*[：:]/,'').trim();
+  }
+  // 🔴 lines come after the spoken block of their own variant, so counting those blocks tells whose they are.
+  function variantTitleLines(source,count) {
+    const found = [];let at = -1;
+    for (const raw of String(source || '').split(/\r?\n/)) {
+      const line = raw.trim().replace(/^[-*]\s+/,'').replace(/^\d+[.)、]\s*/,'');
+      if (/^(?:#{1,5}\s*)?(?:\*\*)?口播\s*[（(]\s*配音用/.test(raw.trim())) at++;
+      else if (line.startsWith('🔴') && at >= 0) (found[at] ||= []).push(line.replace(/\*\*/g,'').replace(/`/g,'').trim());
+    }
+    return at + 1 === count ? found : [];
+  }
+  function clearDesk(output) {
+    const node = output.closest('.ai-round');if (!node) return;
+    node.classList.remove('is-desk','is-single-draft');delete node.dataset.deskView;
+    $('.ai-desk-rail',node).hidden = true;
   }
   function layoutVariants(output,round) {
     if (output.dataset.layout === output.dataset.source) return;
     output.dataset.layout = output.dataset.source;
+    clearDesk(output);
     try {arrangeVariants(output,round);}
     catch (error) {
       // A shape the splitter did not foresee must never cost the reader any text: fall back to the answer as written.
       console.error(error);
+      clearDesk(output);
       output.innerHTML = renderMarkdown(displayResponseText(output.dataset.source,true));
       delete output.dataset.variantRound;
     }
@@ -810,77 +875,174 @@ window.CaseAI = (() => {
     const estimates = Array.isArray(round.read_estimates) ? round.read_estimates : [];
     variants.forEach((variant,index) => {
       variant.title = variant.heading ? textOf(variant.heading) : variants.length > 1 ? `第 ${variant.number} 条` : '口播稿';
-      variant.structure = variant.heading ? variant.title.split(/[·・]/).pop().replace(/^\s*变体\s*#?\s*\d+\s*[：:]?/,'').trim().replace(/^其他[：:]/,'') : '';
-      const estimate = estimates.find(item => /#\s*(\d+)/.exec(item.label || '')?.[1] === variant.number) || (estimates.length === variants.length ? estimates[index] : null);
+      variant.structure = variant.heading ? variantStructure(variant.title) : '';
+      const estimate = estimates.find(item => /(?:[#＃]|\bV)\s*(\d+)/i.exec(item.label || '')?.[1] === variant.number) || (estimates.length === variants.length ? estimates[index] : null);
       variant.seconds = estimate ? estimate.seconds : null;
     });
-    const several = variants.length > 1, picks = (ai.variantPicks ||= new Map()), key = `${ai.task.task_id}:${round.round_id}`;
+    const node = output.closest('.ai-round'), several = variants.length > 1, key = `${ai.task.task_id}:${round.round_id}`;
+    const picks = (ai.variantPicks ||= new Map()), tabs = (ai.variantTabs ||= new Map()), views = (ai.deskViews ||= new Map());
     if (!variants.some(variant => variant.number === picks.get(key))) picks.set(key,variants[0].number);
     const anchor = variant => variant.heading || variant.nodes[0];
-    let board = null;
-    if (several) {
-      board = document.createElement('div');board.className = 'ai-variant-board';board.dataset.roundId = round.round_id;
-      board.innerHTML = variantPicker(variants,round,picks.get(key));
-      anchor(variants[0]).before(board);
-    }
-    for (const variant of variants) {
+    const titleLines = variantTitleLines(output.dataset.source,variants.length);
+    const showTab = (card,wanted) => {
+      const label = $$('[data-variant-tab]',card).some(tab => tab.dataset.variantTab === wanted) ? wanted : '口播';
+      $$('[data-variant-tab]',card).forEach(tab => tab.setAttribute('aria-selected',String(tab.dataset.variantTab === label)));
+      $$('[data-variant-panel]',card).forEach(panel => panel.hidden = panel.dataset.variantPanel !== label);
+    };
+    // What the writer put before the first variant; collected now, while the first card is not yet in the way.
+    const leading = [];
+    for (let item = output.firstElementChild;item && item !== anchor(variants[0]);item = item.nextElementSibling) leading.push(item);
+    const currentRound = () => (ai.task?.rounds || []).find(item => item.round_id === round.round_id) || round;
+    variants.forEach((variant,position) => {
       const card = document.createElement('article');card.className = 'ai-variant-card';card.dataset.variantCard = variant.number;card.hidden = several && variant.number !== picks.get(key);
-      card.innerHTML = `<div class="ai-variant-card-head"><h4>${esc(variant.title)}</h4><span class="ai-variant-seconds">${variant.seconds != null ? `约 ${esc(variant.seconds)} 秒` : ''}</span><span data-variant-status="${esc(variant.number)}">${variantStatus(round,variant.number)}</span><button type="button" class="subtle" data-copy-variant-spoken>${icon('copy')}复制口播</button></div>${variant.subtitles.map(node => `<p class="ai-variant-subtitle">${esc(textOf(node))}</p>`).join('')}<div class="ai-variant-opening"></div><div class="ai-variant-script-labels" aria-hidden="true"><span>口播（配音用）</span><span>对应中文</span></div>${variantScriptPairs(variant)}<div class="ai-variant-folds"></div>`;
+      const screen = variant.screen.split(/屏显(?:搭配|备选)\s*[：:]/)[0].replace(/\s*[（(][^）)]*[）)]\s*$/,'').trim();
+      card.innerHTML = `<div class="ai-variant-card-head"><h4 title="${esc(variant.title)}">${esc(variantName(variant))}</h4><span class="ai-variant-seconds">${variant.seconds != null ? `约 ${esc(variant.seconds)} 秒` : ''}</span><span data-variant-status="${esc(variant.number)}" data-variant-position="${position}">${variantStatus(round,variant.number,position)}</span><div class="ai-variant-choice" role="group" aria-label="这条稿子做不做"><button type="button" data-variant-choice="do" aria-pressed="false">要做</button><button type="button" data-variant-choice="skip" aria-pressed="false">不做</button></div><div class="ai-variant-actions"><button type="button" class="secondary compact" data-copy-variant-spoken>${icon('copy')}复制口播</button><button type="button" class="secondary compact" data-desk-write-case>写回案例</button><button type="button" class="secondary compact" data-desk-adopt>保存采用稿</button><button type="button" class="primary compact" data-desk-produce>开始制作</button></div></div><div class="ai-variant-orders" hidden></div>${variant.subtitles.map(item => `<p class="ai-variant-subtitle">${esc(textOf(item))}</p>`).join('')}${screen ? `<p class="ai-variant-screen" title="${esc(variant.screen)}"><span>开头屏显</span>${esc(screen)}</p>` : ''}<div class="ai-variant-tabs" role="tablist" aria-label="这条稿件的内容"></div><div class="ai-variant-panel" data-variant-panel="口播"><div class="ai-variant-script-labels" aria-hidden="true"><span>口播（配音用）</span><span>对应中文</span></div>${variantScriptPairs(variant)}</div>`;
       // Placed before any of its nodes move in, since the first node is also where the card goes.
       anchor(variant).before(card);
-      $('.ai-variant-opening',card).append(...variant.opening);
+      const panels = new Map([['口播',$('[data-variant-panel]',card)]]);
+      const panelFor = label => {
+        if (!panels.has(label)) {const panel = document.createElement('div');panel.className = 'ai-variant-panel';panel.dataset.variantPanel = label;card.append(panel);panels.set(label,panel);}
+        return panels.get(label);
+      };
+      if (variant.opening.length) {const panel = panelFor('开头');panel.classList.add('ai-variant-opening');panel.append(...variant.opening);}
       for (const fold of variant.folds) {
-        const details = document.createElement('details');details.className = 'ai-variant-fold';
-        details.innerHTML = `<summary>${esc(fold.label)}</summary>`;
-        for (const node of fold.nodes) {
+        const panel = panelFor(fold.label);
+        for (const item of fold.nodes) {
           // Picture data in older candidates stays one more click away.
-          if (node.tagName === 'PRE' && /^\s*\{/.test(blockText(node))) {
-            const data = document.createElement('details');data.className = 'ai-variant-data';data.innerHTML = '<summary>图文数据（JSON）</summary>';data.append(node);details.append(data);
-          } else details.append(node);
+          if (item.tagName === 'PRE' && /^\s*\{/.test(blockText(item))) {
+            const data = document.createElement('details');data.className = 'ai-variant-data';data.innerHTML = '<summary>图文数据（JSON）</summary>';data.append(item);panel.append(data);
+          } else panel.append(item);
         }
-        $('.ai-variant-folds',card).append(details);
       }
+      const lines = titleLines[position] || [];
+      if (lines.length) {
+        const label = [...panels.keys()].find(name => /发布文案/.test(name)) || '发布文案';
+        panelFor(label).insertAdjacentHTML('beforeend',`<div class="ai-variant-title-lines">${lines.map(line => `<button type="button" class="ai-title-line" data-title-line="${esc(line)}" title="复制这一行"><span>${esc(line)}</span>${icon('copy')}</button>`).join('')}</div>`);
+      }
+      $('.ai-variant-tabs',card).innerHTML = [...panels.keys()].map(label => `<button type="button" class="ai-variant-tab" role="tab" data-variant-tab="${esc(label)}">${esc(label)}</button>`).join('');
+      showTab(card,tabs.get(key) || '口播');
+      const pick = {variantIndex:position,variantCount:variants.length};
       $('[data-copy-variant-spoken]',card).onclick = () => copyText(blockText(variant.spoken),'口播已复制');
-      [variant.heading,...variant.subtitles,...variant.nodes].filter(node => node?.isConnected && !card.contains(node)).forEach(node => node.remove());
+      $('[data-desk-produce]',card).onclick = () => window.CaseProduction?.fromCandidate(ai.task,currentRound(),pick);
+      $('[data-desk-adopt]',card).onclick = () => window.CaseScripts?.adoptCandidate(ai.task,currentRound(),false,pick);
+      $('[data-desk-write-case]',card).onclick = () => window.CaseScripts?.adoptCandidate(ai.task,currentRound(),true,pick);
+      card.addEventListener('click',event => {
+        const choice = event.target.closest('[data-variant-choice]');
+        if (choice) {void chooseVariant(currentRound(),position,choice);return;}
+        const removal = event.target.closest('[data-delete-order]');
+        if (removal) {deleteVariantOrder(removal);return;}
+        const tab = event.target.closest('[data-variant-tab]');
+        // The same tab follows from one variant to the next, so shot lists or copy can be compared in turn.
+        if (tab) {tabs.set(key,tab.dataset.variantTab);$$('.ai-variant-card',output).forEach(item => showTab(item,tab.dataset.variantTab));return;}
+        const line = event.target.closest('[data-title-line]');
+        if (line) {copyText(line.dataset.titleLine,'标题行已复制');line.classList.add('copied');setTimeout(() => line.classList.remove('copied'),1200);}
+      });
+      [variant.heading,...variant.subtitles,...variant.nodes].filter(item => item?.isConnected && !card.contains(item)).forEach(item => item.remove());
+    });
+    const sections = [];
+    const notes = leading.filter(item => item.tagName !== 'HR');
+    if (notes.length) {
+      const section = document.createElement('section');section.className = 'ai-desk-notes';section.append(...notes);output.prepend(section);
+      leading.filter(item => item.isConnected && !section.contains(item)).forEach(item => item.remove());
+      const count = section.querySelectorAll(':scope > ul > li, :scope > ol > li').length;
+      sections.push({key:'notes',label:'写作说明',note:count ? String(count) : ''});
     }
-    // The pre-publish check covers every variant, so it stays open under the cards.
+    // The pre-publish check covers every variant, so it is one section beside them.
     if (shared.length) {
       const section = document.createElement('section');section.className = 'ai-variant-shared';
       const title = sectionLabel(shared[0]), bare = /^(?:同批|共用)?发布前核对\s*[：:]?$/.test(title);
       section.innerHTML = `<h4>${esc(bare ? title.replace(/[：:]$/,'') : '发布前核对')}</h4>`;
       $$('.ai-variant-card',output).at(-1).after(section);
-      section.append(...shared.slice(bare ? 1 : 0).filter(node => node.tagName !== 'HR'));
-      shared.filter(node => node.isConnected && !section.contains(node)).forEach(node => node.remove());
+      section.append(...shared.slice(bare ? 1 : 0).filter(item => item.tagName !== 'HR'));
+      shared.filter(item => item.isConnected && !section.contains(item)).forEach(item => item.remove());
+      const open = /待核|未核|需核/.test(textOf(section));
+      sections.push({key:'check',label:'发布前核对',note:open ? '待核' : '',warn:open});
     }
-    if (!board) return;
-    const cards = () => $$('.ai-variant-card',output), showAll = $('[data-variant-show-all]',board);
+    sections.push({key:'titles',label:'发布文案',hidden:true},{key:'info',label:'任务信息'});
+    const rail = $('.ai-desk-rail',node), toTop = () => {
+      const top = $('.ai-desk',node).getBoundingClientRect().top, bar = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--topbar-h')) || 64;
+      if (top < bar) window.scrollBy(0,top - bar - 12);
+    };
+    rail.innerHTML = deskRail(variants,round,picks.get(key),sections);rail.hidden = false;
+    const setView = view => {
+      views.set(key,view);node.dataset.deskView = view;
+      $$('[data-desk-section]',rail).forEach(item => {if (item.dataset.deskSection === view) item.setAttribute('aria-current','true');else item.removeAttribute('aria-current');});
+    };
     const select = number => {
       picks.set(key,number);
-      $$('[data-variant-pick]',board).forEach(row => row.setAttribute('aria-selected',String(row.dataset.variantPick === number)));
-      cards().forEach(card => card.hidden = card.dataset.variantCard !== number);
-      showAll.textContent = '全部展开';
+      $$('[data-variant-pick]',rail).forEach(row => row.setAttribute('aria-selected',String(row.dataset.variantPick === number)));
+      $$('.ai-variant-card',output).forEach(card => card.hidden = card.dataset.variantCard !== number);
+      setView('variant');paintContinueTarget();
     };
-    board.addEventListener('click',event => {
+    rail.onclick = event => {
+      const row = event.target.closest('[data-variant-pick]'), section = event.target.closest('[data-desk-section]');
+      if (row) {select(row.dataset.variantPick);toTop();}
+      else if (section) {setView(section.dataset.deskSection);toTop();}
+    };
+    rail.onkeydown = event => {
       const row = event.target.closest('[data-variant-pick]');
-      if (row) {select(row.dataset.variantPick);return;}
-      if (!event.target.closest('[data-variant-show-all]')) return;
-      const expand = cards().some(card => card.hidden);
-      cards().forEach(card => card.hidden = !expand && card.dataset.variantCard !== picks.get(key));
-      showAll.textContent = expand ? '只看选中的一条' : '全部展开';
-    });
-    board.addEventListener('keydown',event => {
-      const row = event.target.closest('[data-variant-pick]');if (!row) return;
-      if ((event.key === 'Enter' || event.key === ' ') && row.tagName !== 'BUTTON') {event.preventDefault();select(row.dataset.variantPick);}
-      else if (/^Arrow(?:Down|Up|Left|Right)$/.test(event.key)) {
-        event.preventDefault();
-        (/Down|Right/.test(event.key) ? row.nextElementSibling : row.previousElementSibling)?.closest?.('[data-variant-pick]')?.focus();
-      }
-    });
+      if (!row || !/^Arrow(?:Down|Up|Left|Right)$/.test(event.key)) return;
+      event.preventDefault();
+      (/Down|Right/.test(event.key) ? row.nextElementSibling : row.previousElementSibling)?.focus();
+    };
+    node.classList.add('is-desk');node.classList.toggle('is-single-draft',!several);
+    setView(sections.some(item => item.key === views.get(key)) ? views.get(key) : 'variant');
+    paintInfoAttention();repaintVariantStatus();
+  }
+  // Only the round on screen has a desk; the task's own information and the follow-up box go with it, or back above and below the rounds.
+  function visibleDesk() {return $('#ai-rounds > .ai-round.is-desk:not(.is-off):not(.is-collapsed)');}
+  function placeDeskParts() {
+    const body = $('#ai-task-info-body'), home = $('#ai-task-info'), composer = $('.ai-composer'), rounds = $('#ai-rounds');
+    if (!body || !home || !composer || !rounds) return;
+    const desk = visibleDesk();
+    home.hidden = !!desk;
+    const infoTarget = desk ? $('.ai-desk-info-slot',desk) : home;
+    if (body.parentElement !== infoTarget) infoTarget.append(body);
+    const main = desk && $('.ai-desk-main',desk);
+    if (main ? composer.parentElement !== main : composer.previousElementSibling !== rounds) {
+      // Someone may be typing the next request while the round finishes; moving the box must not take the cursor away.
+      const box = document.activeElement?.id === 'ai-continue-instruction' ? document.activeElement : null, start = box?.selectionStart, end = box?.selectionEnd;
+      if (main) main.append(composer);else rounds.after(composer);
+      if (box) {box.focus({preventScroll:true});box.setSelectionRange(start,end);}
+    }
+    paintContinueTarget();
+  }
+  function continueTarget() {
+    const desk = visibleDesk();
+    if (!desk || desk.classList.contains('is-single-draft') || ai.continueAll) return null;
+    const row = $('[data-variant-pick][aria-selected="true"]',desk);
+    return row ? {number:row.dataset.variantPick,structure:row.dataset.structure || ''} : null;
+  }
+  function paintContinueTarget() {
+    const button = $('#ai-continue-target'), input = $('#ai-continue-instruction');if (!button || !input) return;
+    const desk = visibleDesk(), several = !!desk && !desk.classList.contains('is-single-draft'), target = continueTarget();
+    button.hidden = !several;
+    if (several) {
+      const number = $('[data-variant-pick][aria-selected="true"]',desk)?.dataset.variantPick || '';
+      button.textContent = target ? `只改 #${number}` : '改全部变体';button.setAttribute('aria-pressed',String(!!target));
+      button.title = target ? '点一下改成针对全部变体' : `点一下改成只针对 #${number}`;
+    }
+    input.dataset.defaultPlaceholder ||= input.placeholder;
+    input.placeholder = target ? `继续修改 #${target.number}…` : input.dataset.defaultPlaceholder;
+  }
+  function paintInfoAttention() {
+    const text = ai.infoAttention || '';
+    const tag = $('#ai-info-attention');if (tag) {tag.textContent = text;tag.hidden = !text;}
+    $$('[data-desk-section="info"] small').forEach(item => {item.textContent = text ? '需核对' : '';item.className = text ? 'is-warn' : '';});
   }
   function repaintVariantStatus() {
     $$('.ai-round-output[data-variant-round]').forEach(output => {
       const round = (ai.task?.rounds || []).find(item => item.round_id === output.dataset.variantRound);
-      if (round) $$('[data-variant-status]',output).forEach(cell => {const html = variantStatus(round,cell.dataset.variantStatus);if (cell.innerHTML !== html) cell.innerHTML = html;});
+      if (!round) return;
+      $$('[data-variant-status]',output.closest('.ai-round')).forEach(cell => {const html = variantStatus(round,cell.dataset.variantStatus,Number(cell.dataset.variantPosition));if (cell.innerHTML !== html) cell.innerHTML = html;});
+      $$('.ai-variant-card',output).forEach(card => {
+        const position = Number($('[data-variant-status]',card).dataset.variantPosition), choice = variantChoice(round,position);
+        card.classList.toggle('has-script',!!variantScript(round,card.dataset.variantCard,position));
+        $$('[data-variant-choice]',card).forEach(button => button.setAttribute('aria-pressed',String(button.dataset.variantChoice === choice)));
+        const orders = variantOrders(round,card.dataset.variantCard,position), list = $('.ai-variant-orders',card), html = variantOrdersMarkup(orders);
+        if (list.dataset.html !== html) {list.dataset.html = html;list.innerHTML = html;}
+        list.hidden = !orders.length;
+      });
     });
   }
   function taskScriptsLoaded(taskId,rows) {ai.taskScripts = {taskId,rows:Array.isArray(rows) ? rows : []};repaintVariantStatus();}
@@ -923,7 +1085,7 @@ window.CaseAI = (() => {
     updateTitleLines(node,text,round.status === 'completed' && isWriting(ai.task));
     if (isWriting(ai.task)) updateReadEstimates(node,round);
     let raw = $('.ai-raw-output',node);
-    if (!raw) {raw = document.createElement('details');raw.className = 'ai-raw-output ai-execution-details';raw.innerHTML = '<summary>查看原始回复与编号</summary><pre></pre>';node.querySelector('.ai-round-body').append(raw);}
+    if (!raw) {raw = document.createElement('details');raw.className = 'ai-raw-output ai-execution-details';raw.innerHTML = '<summary>查看原始回复与编号</summary><pre></pre>';$('.ai-desk-main',node).append(raw);}
     raw.hidden = !canonical;
     if (canonical && raw.querySelector('pre').textContent !== text) raw.querySelector('pre').textContent = text;
     copy.hidden = !text;
@@ -957,35 +1119,49 @@ window.CaseAI = (() => {
     const source = context.source_review || context.review_video;
     const sourceHash = source?.video_id ? `#videos?video=${encodeURIComponent(source.video_id)}${source.window_end ? '&feedback_window='+encodeURIComponent(source.window_end) : ''}` : '';
     const link = sourceHash ? `<a href="${esc(window.WorkbenchShell?.url(sourceHash,source.product || taskProduct(task)) || sourceHash)}">回来源视频与复盘</a>` : task.case_id ? `<a href="${esc(pageURL(`#case/${encodeURIComponent(task.case_id)}`))}">${icon('file')}查看关联案例</a>` : context.direction_id ? `<a href="${esc(window.WorkbenchShell?.url(`#directions/${encodeURIComponent(context.direction_id)}`,taskProduct(task)) || '#directions')}">查看来源方向</a>` : `<span>${esc(taskProduct(task))} · ${isWriting(task) ? '空白写稿' : resultName(task)}</span>`;
-    return `${link}<span>基于发起时固定的${task.case_id ? '案例版本' : context.direction_id ? '方向资料' : '创作要求'}</span>${context.writing_mode?.mode === 'diverge' ? `<span>原稿发散 · ${esc(context.writing_mode.count)} 条</span>` : context.writing_mode?.mode === 'replica' ? `<span>照原片优化 · ${esc(context.writing_mode.count)} 条 · 逐句对应 ${esc(context.writing_mode.lines)} 句</span>` : ''}<details class="ai-version-details"><summary>查看本次资料</summary><div>${task.case_id ? `<span>案例版本</span><code>${esc(task.base_revision || '未提供')}</code><span>来源记录</span><code>${esc(task.base_event_id || '首次原始资料')}</code>` : `<span>产品</span><code>${esc(taskProduct(task))}</code>`}${context.materials?.length ? `<span>随任务固定的素材（${context.materials.length} 条）</span>${context.materials.map(item => `<p>${esc(item.title || item.text || item.source_id || item.kind || '素材')}</p>`).join('')}` : '<span>未附摘录篮条目</span>'}${context.linked_reviews?.length ? `<span>带入的关联评论（${context.linked_reviews.length} 条）</span>${context.linked_reviews.map(item => `<p>${esc(item.linked_as)} · ${esc(item.quote)}</p>`).join('')}` : ''}</div></details>`;
+    return `${link}<span>基于发起时固定的${task.case_id ? '案例版本' : context.direction_id ? '方向资料' : '创作要求'}</span>${context.writing_mode?.mode === 'diverge' ? `<span>原稿发散 · ${esc(context.writing_mode.count)} 条</span>` : context.writing_mode?.mode === 'replica' ? `<span>照原片优化 · ${esc(context.writing_mode.count)} 条 · 逐句对应 ${esc(context.writing_mode.lines)} 句</span>` : ''}${context.market && context.market !== 'us' ? `<span>目标市场 · ${esc(writingMarkets.find(([id]) => id === context.market)?.[1] || context.market)}</span>` : ''}<details class="ai-version-details"><summary>查看本次资料</summary><div>${task.case_id ? `<span>案例版本</span><code>${esc(task.base_revision || '未提供')}</code><span>来源记录</span><code>${esc(task.base_event_id || '首次原始资料')}</code>` : `<span>产品</span><code>${esc(taskProduct(task))}</code>`}${context.materials?.length ? `<span>随任务固定的素材（${context.materials.length} 条）</span>${context.materials.map(item => `<p>${esc(item.title || item.text || item.source_id || item.kind || '素材')}</p>`).join('')}` : '<span>未附摘录篮条目</span>'}${context.linked_reviews?.length ? `<span>带入的关联评论（${context.linked_reviews.length} 条）</span>${context.linked_reviews.map(item => `<p>${esc(item.linked_as)} · ${esc(item.quote)}</p>`).join('')}` : ''}</div></details>`;
   }
   function roundMarkup(round,index) {
     return `<article class="ai-round" data-round-id="${esc(round.round_id || String(index))}"><div class="ai-round-heading"><button type="button" class="ai-round-toggle" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><h2>第 ${index+1} 轮</h2><span class="ai-round-summary">${esc(round.instruction || '')}</span></button><span class="ai-round-status ai-status ${esc(round.status)}">${esc(statusText(round))}</span><small class="ai-round-time">${esc(readableDate(round.completed_at || round.created_at))}</small></div>
-      <div class="ai-round-body"><details class="ai-user-request" ${String(round.instruction || '').length <= 180 ? 'open' : ''}><summary>本轮要求 · ${esc(String(round.instruction || '').replace(/\s+/g,' ').slice(0,90))}${String(round.instruction || '').length > 90 ? '…' : ''}</summary><p>${esc(round.instruction || '')}</p></details><div class="ai-round-execution"></div><div class="task-activity-logs"></div>
-      <div class="ai-output-heading"><h3 class="ai-output-title">实时回复</h3><div class="ai-output-actions"><button type="button" class="subtle ai-copy-round" hidden>${icon('copy')}复制当前文本</button></div></div><div class="ai-round-messages"></div><div class="ai-round-output markdown-body"></div><p class="ai-round-error ai-error" ${round.error ? '' : 'hidden'}>${esc(typeof round.error === 'string' ? round.error : round.error ? JSON.stringify(round.error) : '')}</p></div></article>`;
+      <div class="ai-round-body"><div class="ai-desk"><nav class="ai-desk-rail" aria-label="候选稿与说明" hidden></nav><div class="ai-desk-main"><details class="ai-user-request" ${String(round.instruction || '').length <= 180 ? 'open' : ''}><summary>本轮要求 · ${esc(String(round.instruction || '').replace(/\s+/g,' ').slice(0,90))}${String(round.instruction || '').length > 90 ? '…' : ''}</summary><p>${esc(round.instruction || '')}</p></details><div class="ai-round-execution"></div><div class="ai-desk-info-slot"></div><div class="task-activity-logs"></div>
+      <div class="ai-output-heading"><h3 class="ai-output-title">实时回复</h3><div class="ai-output-actions"><button type="button" class="subtle ai-copy-round" hidden>${icon('copy')}复制当前文本</button></div></div><div class="ai-round-messages"></div><div class="ai-round-output markdown-body"></div><p class="ai-round-error ai-error" ${round.error ? '' : 'hidden'}>${esc(typeof round.error === 'string' ? round.error : round.error ? JSON.stringify(round.error) : '')}</p></div></div></div></article>`;
   }
   function renderTaskShell(task,keepScroll) {
     ai.page = task.task_id;
     $('#breadcrumb').innerHTML = '内容创作 <span>/</span> 任务详情';
-    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || pageURL('#ai'))}">${icon('back')}返回协作记录</a><div class="page-heading ai-task-heading"><div><p class="ai-task-meta"><span class="ai-status" id="ai-task-status"></span><span>${esc(actions[task.action] || 'AI 协作')}</span></p><h1>${esc(contextTitle(task))}</h1></div><button type="button" class="secondary compact" id="ai-cancel-task">取消处理</button></div>
-      <div class="ai-task-context">${taskContextMarkup(task)}${experienceContextMarkup(task)}<details class="ai-version-details"><summary>任务编号</summary><code>${esc(task.task_id)}</code><button type="button" class="subtle compact" data-copy-task-id>复制编号</button></details></div><p id="ai-stale-warning" class="ai-stale-warning" hidden>案例已经更新。这个任务继续使用开始时的案例版本；若要基于新版讨论，请回到案例重新发起任务。</p>
-      <details class="ai-task-management-fold"><summary>任务处置 · <span id="ai-management-summary">${esc(managementLabel(task))}</span></summary><section class="ai-task-management" aria-label="协作任务管理"><label for="ai-management-state">管理状态</label><select id="ai-management-state">${Object.entries(managementLabels(task)).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select><button type="button" class="secondary compact" id="ai-save-management">保存状态</button><button type="button" class="subtle" id="ai-task-archive">归档任务</button><span id="ai-management-note"></span></section></details>
+    $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || pageURL('#ai'))}">${icon('back')}返回协作记录</a><div class="page-heading ai-task-heading"><div><p class="ai-task-meta"><span class="ai-status" id="ai-task-status"></span><span>${esc(actions[task.action] || 'AI 协作')}</span><span id="ai-archived-tag"></span></p><h1>${esc(contextTitle(task))}</h1></div><div class="ai-task-tools"><button type="button" class="secondary compact" id="ai-cancel-task">取消处理</button><label class="ai-task-pick" id="ai-round-pick" hidden><span class="sr-only">查看哪一轮</span><select id="ai-round-picker"></select></label><label class="ai-task-pick"><span class="sr-only">管理状态</span><select id="ai-management-state">${Object.entries(managementLabels(task)).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select></label><button type="button" class="secondary compact" id="ai-save-management" hidden>重试保存</button><details class="ai-menu" id="ai-task-menu"><summary class="icon-button" aria-label="任务菜单"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" id="ai-copy-full">复制完整原文</button><button type="button" role="menuitem" id="ai-task-archive">归档任务</button></div></details></div></div>
+      <details class="ai-task-info" id="ai-task-info"><summary><span>任务信息</span><small class="is-warn" id="ai-info-attention" hidden></small></summary><div class="ai-task-info-body ai-info-scope" id="ai-task-info-body"><p class="ai-info-kind">${esc(actions[task.action] || 'AI 协作')}</p><div class="ai-task-context">${taskContextMarkup(task)}${experienceContextMarkup(task)}<details class="ai-version-details"><summary>任务编号</summary><code>${esc(task.task_id)}</code><button type="button" class="subtle compact" data-copy-task-id>复制编号</button></details></div></div></details><p id="ai-stale-warning" class="ai-stale-warning" hidden>案例已经更新。这个任务继续使用开始时的案例版本；若要基于新版讨论，请回到案例重新发起任务。</p>
       <div id="ai-task-adopted"></div>${task.action === 'retrospective' ? '<div id="ai-retro-card" class="feedback-chain ai-retro-card" hidden></div>' : ''}
       <div class="ai-task-progress"><p id="ai-task-progress" role="status"></p><small id="ai-stream-status" class="ai-stream-status"></small></div><p class="ai-error" id="ai-task-error" role="alert" hidden></p><div id="ai-rounds"></div>
-      <section class="ai-continue-card ai-composer" aria-label="继续讨论"><form id="ai-continue-form"><label class="sr-only" for="ai-continue-instruction">下一步要求</label><textarea id="ai-continue-instruction" maxlength="12000" rows="2" required placeholder="${isWriting(task) ? '继续一起修改：例如保留第二版的推进结构，把正文压缩到 30 秒。' : task.action === 'retrospective' ? '继续复盘：补充观察、核对结论或讨论下一轮。' : '继续审稿：补充证据、核对意见或提出修改要求。'}"></textarea>
+      <section class="ai-continue-card ai-composer" aria-label="继续讨论"><form id="ai-continue-form"><button type="button" class="ai-continue-target" id="ai-continue-target" hidden></button><label class="sr-only" for="ai-continue-instruction">下一步要求</label><textarea id="ai-continue-instruction" maxlength="12000" rows="2" required placeholder="${isWriting(task) ? '继续一起修改：例如保留第二版的推进结构，把正文压缩到 30 秒。' : task.action === 'retrospective' ? '继续复盘：补充观察、核对结论或讨论下一轮。' : '继续审稿：补充证据、核对意见或提出修改要求。'}"></textarea>
         ${defaultsMarkup('ai-continue')}<details class="ai-advanced" id="ai-continue-advanced"><summary><span>技能与服务</span><span class="ai-advanced-summary" id="ai-continue-settings-summary"></span></summary>${serviceMarkup()}<div id="ai-continue-settings"></div></details>
         <div class="ai-continue-footer"><p class="ai-muted" id="ai-continue-note"></p><small class="ai-shortcut-hint">Ctrl + Enter 提交</small><button type="submit" class="primary compact" id="ai-continue-submit">继续修改</button></div></form></section>
       <nav id="ai-variant-nav" class="ai-variant-nav" aria-label="变体导航" hidden><button type="button" class="ai-variant-top" data-variant-top aria-label="回到顶部"><span class="ai-variant-tip"><b>回到顶部</b></span></button><div class="ai-variant-list"></div></nav>`;
-    window.WorkbenchLinks?.mount({kind:'task',record:task});
+    ai.infoAttention = '';
+    window.WorkbenchLinks?.mount({kind:'task',record:task,onAttention:text => {ai.infoAttention = text;paintInfoAttention();}});
+    const links = $('#workflow-links');if (links) $('#ai-task-info-body').append(links);
     bindVariantNav();
     $('#ai-continue-instruction').value = ai.drafts.get(task.task_id) || ai.pending.get(`continue:${task.task_id}`)?.payload.instruction || '';
     renderSettings('ai-continue',settingsForTask(task));
     $('#ai-continue-instruction').addEventListener('input',event => {ai.drafts.set(task.task_id,event.target.value);updateTaskControls();});
+    $('#ai-continue-target').onclick = () => {ai.continueAll = !ai.continueAll;paintContinueTarget();};
     $('#ai-continue-form').addEventListener('submit',submitContinue);$('#ai-cancel-task').onclick = cancelTask;connectServiceButton();
     $('[data-copy-task-id]').onclick = () => copyText(task.task_id,'任务编号已复制');
     $('#ai-management-state').value = managementState(task);
     $('#ai-management-state').dataset.persistedState = managementState(task);
-    $('#ai-save-management').onclick = () => manageTasks(`state:${ai.task.task_id}`,[ai.task],{management_state:$('#ai-management-state').value});
+    // Choosing a state saves it. If the save fails for good the list goes back to what is stored; an unconfirmed one offers a retry.
+    const saveManagement = async () => {
+      const select = $('#ai-management-state'), current = ai.task;
+      await manageTasks(`state:${current.task_id}`,[current],{management_state:select.value});
+      if (select.isConnected && !ai.pending.has(`manage:state:${current.task_id}`)) select.value = managementState(ai.task);
+    };
+    $('#ai-management-state').onchange = saveManagement;$('#ai-save-management').onclick = saveManagement;
+    $('#ai-round-picker').onchange = event => {(ai.roundPicks ||= new Map()).set(task.task_id,{id:event.target.value,count:$$('#ai-rounds > .ai-round').length});paintRoundFolding();updateVariantNav();window.scrollTo(0,0);};
+    $('#ai-copy-full').onclick = () => {
+      const id = $$('#ai-rounds > .ai-round:not(.is-off):not(.is-collapsed)').at(-1)?.dataset.roundId, round = (ai.task.rounds || []).find(item => item.round_id === id), text = round ? roundCopyText(round) : '';
+      if (text) copyText(text,'完整原文已复制');else toast('这一轮还没有可复制的文本。',true);
+    };
+    $('#ai-task-menu').addEventListener('click',event => {if (event.target.closest('[role=menuitem]')) event.currentTarget.open = false;});
     $('#ai-task-archive').onclick = () => manageTasks(`archive:${ai.task.task_id}`,[ai.task],{archived:!ai.task.archived});
     // Older rounds fold to one line; a click opens any of them.
     $('#ai-rounds').addEventListener('click',event => {
@@ -996,15 +1172,33 @@ window.CaseAI = (() => {
     if (!keepScroll) window.scrollTo(0,0);
   }
   function paintRoundFolding() {
-    const nodes = $$('#ai-rounds > .ai-round');
+    const nodes = $$('#ai-rounds > .ai-round'), writing = isWriting(ai.task), picks = (ai.roundPicks ||= new Map());
+    let picked = picks.get(ai.task?.task_id);
+    // A new round always comes to the front; otherwise the round the reader chose stays.
+    if (writing && (!picked || picked.count !== nodes.length || !nodes.some(node => node.dataset.roundId === picked.id))) {
+      picked = {id:nodes.at(-1)?.dataset.roundId,count:nodes.length};picks.set(ai.task.task_id,picked);
+    }
+    const holder = $('#ai-round-pick'), select = $('#ai-round-picker');
+    if (holder && select) {
+      holder.hidden = !writing || nodes.length < 2;
+      const options = (ai.task?.rounds || []).map((round,index) => `<option value="${esc(round.round_id || String(index))}">第 ${index+1} 轮${round.status === 'completed' ? '' : ` · ${esc(statusText(round))}`}</option>`).join('');
+      if (select.dataset.source !== options) {select.innerHTML = options;select.dataset.source = options;}
+      if (writing && picked?.id) select.value = picked.id;
+    }
     nodes.forEach((node,index) => {
+      if (writing) {
+        node.classList.toggle('is-off',node.dataset.roundId !== picked.id);node.classList.remove('is-collapsed');
+        $('.ai-round-toggle',node).disabled = true;$('.ai-round-toggle',node).setAttribute('aria-expanded','true');
+        return;
+      }
       const chosen = ai.openRounds?.get(`${ai.task?.task_id}:${node.dataset.roundId}`), open = chosen ?? index === nodes.length - 1;
       node.classList.toggle('is-collapsed',!open);$('.ai-round-toggle',node).setAttribute('aria-expanded',String(open));
     });
+    placeDeskParts();
   }
   // Right-edge outline of every "变体 X" heading in the open rounds: fixed on screen, click to jump, one tap back to top.
   function variantHeadings() {
-    const open = $$('#ai-rounds > .ai-round:not(.is-collapsed)'), found = [];
+    const open = $$('#ai-rounds > .ai-round:not(.is-collapsed):not(.is-off)'), found = [];
     open.forEach((round,roundIndex) => {
       if ($('.ai-variant-card',round)) return;
       $$('.markdown-body h2,.markdown-body h3,.markdown-body h4,.markdown-body h5,.markdown-body p',round).forEach(heading => {
@@ -1060,6 +1254,7 @@ window.CaseAI = (() => {
     if (!node) return;
     ai.focusedRound = hash;
     (ai.openRounds ||= new Map()).set(`${ai.task.task_id}:${round}`,true);
+    (ai.roundPicks ||= new Map()).set(ai.task.task_id,{id:round,count:$$('#ai-rounds > .ai-round').length});
     paintRoundFolding();
     if (params.get('adopted')) return;
     node.tabIndex = -1;node.focus({preventScroll:true});node.scrollIntoView({block:'start'});
@@ -1082,7 +1277,8 @@ window.CaseAI = (() => {
     const progress = typeof task.progress === 'string' ? task.progress : task.progress?.message || '';
     setText('#ai-task-progress',(task.stopping || ai.cancelWaiting.has(task.task_id)) && active(task) ? '已请求取消，正在等待处理进程停止…' : active(task) ? progress || '任务已进入处理队列，结果会自动更新。' : '');
     $('.ai-task-progress').hidden = !active(task);
-    setText('#ai-management-summary',managementLabel(task) + (task.archived ? ' · 已归档' : ''));
+    $('.ai-task-meta').hidden = task.status === 'completed' && !task.archived;
+    setText('#ai-archived-tag',task.archived ? '已归档' : '');
     const container = $('#ai-rounds'), rounds = task.rounds || [];
     rounds.forEach((round,index) => {
       const key = String(round.round_id || index);let node = [...container.children].find(child => child.dataset.roundId === key);
@@ -1096,6 +1292,7 @@ window.CaseAI = (() => {
       const time = $('.ai-round-time',node), value = readableDate(round.completed_at || round.created_at);if (time.textContent !== value) time.textContent = value;
     });
     paintRoundFolding();
+    repaintVariantStatus();
     focusRequestedRound();
     updateVariantNav();
     if (!active(task)) {ai.cancelWaiting.delete(task.task_id);ai.pending.delete(`cancel:${task.task_id}`);}
@@ -1105,12 +1302,12 @@ window.CaseAI = (() => {
   function paintTaskControls() {
     const task = ai.task;if (!task || !$('#ai-continue-form')) return;
     const managementBusy = !!ai.managing || active(task);
-    $('#ai-management-state').disabled = managementBusy || ai.pending.has(`manage:state:${task.task_id}`);
-    $('#ai-save-management').disabled = managementBusy;
+    const stateUnconfirmed = ai.pending.has(`manage:state:${task.task_id}`);
+    $('#ai-management-state').disabled = managementBusy || stateUnconfirmed;
+    $('#ai-save-management').hidden = !stateUnconfirmed;$('#ai-save-management').disabled = managementBusy;
     $('#ai-task-archive').disabled = managementBusy;
-    setText('#ai-save-management',ai.pending.has(`manage:state:${task.task_id}`) ? '重试保存' : '保存状态');
     setText('#ai-task-archive',ai.pending.has(`manage:archive:${task.task_id}`) ? '重试整理' : task.archived ? '恢复任务' : '归档任务');
-    setText('#ai-management-note',task.archived ? '已归档 · 各轮回答与来源关联均保留。继续讨论会恢复为活跃任务。' : active(task) ? '本轮结束后可保存管理状态或归档。' : isWriting(task) ? '管理状态由你确认；归档后可在历史中恢复。' : '仅整理此任务；正式复盘决定或案例修改请回到来源记录。');
+    $('#ai-management-state').title = (task.archived ? '已归档 · 各轮回答与来源关联均保留。继续讨论会恢复为活跃任务。' : active(task) ? '本轮结束后可保存管理状态或归档。' : isWriting(task) ? '管理状态由你确认；归档后可在历史中恢复。' : '仅整理此任务；正式复盘决定或案例修改请回到来源记录。');
     const key = `continue:${task.task_id}`, pending = ai.pending.get(key), cancel = ai.pending.get(`cancel:${task.task_id}`), waiting = task.stopping || ai.cancelWaiting.has(task.task_id), busy = pending?.busy || cancel?.busy || ai.managing;
     const input = $('#ai-continue-instruction');input.readOnly = !!pending;
     $('#ai-continue-submit').disabled = !!busy || (active(task) && !pending) || !ai.status?.available || !input.value.trim() || (!pending && !!settingsIssue(settingsForTask(task)));
@@ -1133,7 +1330,9 @@ window.CaseAI = (() => {
     const instruction = $('#ai-continue-instruction').value.trim(), key = `continue:${task.task_id}`;
     if (!instruction || ai.pending.get(key)?.busy || (!ai.pending.has(key) && settingsIssue(settingsForTask(task)))) return;
     let pending = ai.pending.get(key);
-    if (!pending) {pending = {path:`/api/ai/tasks/${encodeURIComponent(task.task_id)}/continue`,payload:{request_id:crypto.randomUUID(),task_revision:task.revision,instruction,skill_selection:settingsForTask(task).skill_selection}};ai.pending.set(key,pending);}
+    // Written into the request itself, so the round's record says which variant it was about.
+    const target = continueTarget(), scoped = target ? `本轮只改变体 #${target.number}${target.structure ? `（${target.structure}）` : ''}：${instruction}` : instruction;
+    if (!pending) {pending = {path:`/api/ai/tasks/${encodeURIComponent(task.task_id)}/continue`,payload:{request_id:crypto.randomUUID(),task_revision:task.revision,instruction:scoped,skill_selection:settingsForTask(task).skill_selection}};ai.pending.set(key,pending);}
     pending.busy = true;closeStream();ai.mutation++;ai.errors.delete(task.task_id);updateTaskControls();
     try {
       const response = await api(pending.path,{method:'POST',body:pending.payload});

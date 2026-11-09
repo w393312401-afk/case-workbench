@@ -74,6 +74,44 @@ class CatalogLoadingTests(unittest.TestCase):
             store.records()
         self.assertNotIn("requests", cloned.call_args.args[0])
 
+    def test_creation_records_keep_frozen_provenance_without_copying_receipts(self):
+        store = self.creation()
+        data = store.read()
+        source = {"snapshot": {"creation_context": {"direction": {"direction_id": "202H-S2"}}},
+                  "candidate_text": "Frozen candidate", "task_id": "AIT-source"}
+        data["scripts"][0]["source"] = source
+        store.write(data, backup=False)
+        with patch("creation_store.copy.deepcopy", wraps=copy.deepcopy) as cloned:
+            records = store.records()
+        self.assertNotIn("requests", cloned.call_args.args[0])
+        self.assertNotIn("requests", records)
+        self.assertEqual(records["scripts"][0]["source"], source)
+        self.assertEqual(store.revision(records), store.current_revision())
+        records["scripts"][0]["source"]["snapshot"]["creation_context"]["direction"]["direction_id"] = "local edit"
+        self.assertEqual(store.records()["scripts"][0]["source"], source)
+        self.assertIn("old-request", store.read()["requests"])
+
+    def test_creation_compact_public_excludes_frozen_sources_before_cloning(self):
+        store = self.creation()
+        data = store.read()
+        source = {"snapshot": {"creation_context": {"materials": [{"text": "frozen material"}]}},
+                  "candidate_text": "Frozen candidate", "task_id": "AIT-source", "variant_ref": {"index": 1}}
+        data["scripts"][0]["source"] = source
+        store.write(data, backup=False)
+        complete = store.public("202H")
+        with patch("creation_store.copy.deepcopy", wraps=copy.deepcopy) as cloned:
+            compact = store.public("202H", include_frozen_source=False)
+        script_copy = next(call.args[0] for call in cloned.call_args_list
+                           if isinstance(call.args[0], dict) and call.args[0].get("id") == "SCR-1")
+        self.assertNotIn("snapshot", script_copy["source"])
+        self.assertNotIn("candidate_text", script_copy["source"])
+        expected = copy.deepcopy(complete)
+        expected["scripts"][0]["source"] = {key: value for key, value in source.items()
+                                            if key not in {"snapshot", "candidate_text"}}
+        self.assertEqual(compact, expected)
+        compact["scripts"][0]["source"]["variant_ref"]["index"] = 9
+        self.assertEqual(store.public("202H")["scripts"][0]["source"], source)
+
     def test_external_atomic_replacement_with_preserved_timestamp_is_visible(self):
         for factory, collection in ((self.creation, "scripts"), (self.production, "jobs")):
             with self.subTest(factory=factory.__name__):

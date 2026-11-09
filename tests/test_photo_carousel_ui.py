@@ -75,6 +75,92 @@ class PhotoCarouselBrowserTests(unittest.TestCase):
         self.assertTrue(dialog.locator('[data-photo-resolve]').is_enabled())
         self.assertEqual(len(self.page.evaluate('window.calls')), 1)
 
+    def finishable(self):
+        self.page.evaluate("""async () => {
+          window.detail = {exists:true,id:'PHS-111111111111',video:{name:'v.mp4',duration:3},frames_job:{status:'done',count:15},works:[],versions:[],
+            ai:{status:'idle'},can_finish:true,finished_at:''};
+          window.api = async (path,options) => {
+            if (options) {
+              window.calls.push({path,body:structuredClone(options.body)});
+              const finished = options.body.decision === 'finish';
+              Object.assign(window.detail,{finished_at:finished ? '2026-11-08T12:00:00+00:00' : '',can_finish:!finished});
+            }
+            if (path.endsWith('/frames')) return {items:[]};
+            return structuredClone(window.detail);
+          };
+          const root = document.querySelector('#publication');
+          root.innerHTML = PhotoCarousel.markup('two');
+          await PhotoCarousel.bind(root,{job:window.job,api:window.api,uid:'two'});
+        }""")
+
+    def test_row_finishes_then_window_is_read_only_until_undone(self):
+        self.finishable()
+        row = self.page.locator('[data-photo-carousel]')
+        self.assertEqual(row.locator('[data-photo-open]').inner_text(), '继续做图文')
+        self.assertFalse(row.locator('[data-photo-reopen]').is_visible())
+        row.locator('[data-photo-finish]').click()
+        row.locator('[data-photo-status]', has_text='已完结').wait_for()
+        self.assertEqual(row.locator('[data-photo-open]').inner_text(), '查看图文')
+        self.assertFalse(row.locator('[data-photo-finish]').is_visible())
+        self.assertEqual(self.page.evaluate('window.calls'), [{
+            'path':'/api/production/jobs/PRD-111111111111/photo-decision', 'body':{'timeline':'two','decision':'finish'}}])
+        dialog = self.open()
+        dialog.locator('.photo-finished-strip').wait_for()
+        self.assertTrue(dialog.locator('[data-photo-plan]').is_disabled())
+        dialog.locator('[data-photo-reopen]').click()
+        dialog.locator('.photo-finished-strip').wait_for(state='detached')
+        self.assertTrue(dialog.locator('[data-photo-plan]').is_enabled())
+        self.assertEqual(self.page.evaluate('window.calls.at(-1).body.decision'), 'reopen')
+
+    def test_delete_shows_the_cost_and_only_deletes_on_confirm(self):
+        self.finishable()
+        self.page.evaluate("""async () => {
+          Object.assign(window.detail,{can_delete:true});
+          const original = window.api;
+          window.api = async (path,options) => {
+            if (path.endsWith('/photo-delete')) {
+              window.calls.push({path,body:structuredClone(options.body)});
+              if (options.body.preview) return {versions:2,exports:1,files:40,bytes:1572864,notion_pages:1};
+              window.detail = {exists:false};
+              return {deleted:true,warnings:[]};
+            }
+            return original(path,options);
+          };
+          const root = document.querySelector('#publication');
+          root.innerHTML = PhotoCarousel.markup('two');
+          await PhotoCarousel.bind(root,{job:window.job,api:window.api,uid:'two'});
+        }""")
+        row = self.page.locator('[data-photo-carousel]')
+        row.locator('[data-photo-delete]').click()
+        confirm = self.page.locator('.photo-delete-confirm')
+        confirm.wait_for()
+        text = confirm.inner_text()
+        for piece in ('2 版图文', '1 个成品文件夹', '40 个文件', '2 MB', '不能恢复', 'Notion 上的 1 个页面不会删'):
+            self.assertIn(piece, text)
+        confirm.locator('[data-photo-delete-cancel]').click()
+        self.assertEqual(self.page.locator('.photo-delete-confirm').count(), 0)
+        self.assertEqual([call['body'] for call in self.page.evaluate('window.calls')], [{'timeline':'two','preview':True}])
+        row.locator('[data-photo-delete]').click()
+        self.page.locator('[data-photo-delete-confirm]').click()
+        row.locator('[data-photo-open]', has_text='做图文').wait_for()
+        self.assertEqual(self.page.evaluate('window.calls.at(-1).body'), {'timeline':'two'})
+        self.assertFalse(row.locator('[data-photo-delete]').is_visible())
+        self.assertEqual(self.page.locator('.photo-delete-confirm').count(), 0)
+
+    def test_all_versions_final_and_on_notion_ends_without_a_button(self):
+        self.finishable()
+        self.page.evaluate("""async () => {
+          Object.assign(window.detail,{works:[{key:'B',status:'done',exports:1}],notion:{B:'completed'}});
+          const root = document.querySelector('#publication');
+          root.innerHTML = PhotoCarousel.markup('two');
+          await PhotoCarousel.bind(root,{job:window.job,api:window.api,uid:'two'});
+        }""")
+        row = self.page.locator('[data-photo-carousel]')
+        self.assertEqual(row.locator('[data-photo-status]').inner_text(), '已完结 · 1 版都已定稿 · 已上传 Notion B')
+        self.assertEqual(row.locator('[data-photo-open]').inner_text(), '查看图文')
+        self.assertFalse(row.locator('[data-photo-finish]').is_visible())
+        self.assertFalse(row.locator('[data-photo-reopen]').is_visible())
+
     def test_closing_and_reopening_preserves_running_import(self):
         dialog = self.open()
         dialog.locator('[data-photo-resolve]').click()

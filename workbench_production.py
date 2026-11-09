@@ -26,6 +26,8 @@ import time
 from uuid import uuid4
 import zipfile
 
+import comment_sticker
+import markets
 from creation_store import CreationError
 from direction_store import fingerprint, now, product_key
 from elevenlabs_client import DEFAULT_MODEL, MODELS, VOICE_ID, VoiceError, clean_settings, model
@@ -33,7 +35,7 @@ from production_operations import ProductionOperations, durable_json
 from production_store import (FRAME_RATES, JOB_ID, TAKE_ID, apply_readings, current_manual_receipt, skill_delivery_reviewable,
                               supplement_markdown, take_quality, job_status)
 from subtitle_check import compare, summary
-from workbench_video_publish import campaign_card_text
+from workbench_video_publish import campaign_card_open, campaign_card_text
 from task_activity import activity_label, record_activity, safe_error, settle_resolved_activity
 from variant_parse import parse_variants, same_lines, spoken_lines, variant_directions, variant_script
 
@@ -440,11 +442,20 @@ class ProductionWorkbenchMixin:
         if not JOB_ID.fullmatch(str(identifier)):
             raise VoiceError(404, "这张制作单不存在。")
         self._settle_job_fill(identifier)
+        settle_uk = getattr(self, "_settle_uk_version", None)
+        if settle_uk:
+            settle_uk(identifier)
         with self.lock:
             catalog = self.production.public()
             job = next((item for item in catalog["jobs"] if item["id"] == identifier), None)
             if not job:
                 raise VoiceError(404, "这张制作单不存在。")
+            # A deleted counterpart leaves no link behind, and the 美国版 can make a new 英国版.
+            known_jobs = {item["id"] for item in catalog["jobs"]}
+            if (job.get("uk_version") or {}).get("status") == "created" and job["uk_version"].get("job_id") not in known_jobs:
+                job.pop("uk_version")
+            if (job.get("derived_from") or {}).get("job_id") not in known_jobs:
+                job.pop("derived_from", None)
             readings = [item for item in catalog["readings"] if item["product"] == job["product"]]
             try:
                 full = self.creation.get_script(job["script_id"])
@@ -473,7 +484,8 @@ class ProductionWorkbenchMixin:
                     "historical_baseline_restore": True,
                     "recovery_operations": recovery,
                     "script": script, "variant": variant, "voices": catalog["voices"], "defaults": catalog["defaults"],
-                    "models": copy.deepcopy(MODELS), "default_model": DEFAULT_MODEL, "creators": catalog["settings"]["creators"],
+                    "models": copy.deepcopy(MODELS), "default_model": DEFAULT_MODEL, "markets": markets.public(),
+                    "creators": catalog["settings"]["creators"],
                     "product_settings": self.production.product_settings(catalog, job["product"]),
                     "material_combos": self.production.material_combos(catalog, job["product"]),
                     "today": datetime.now().strftime("%y%m%d")}
@@ -558,13 +570,23 @@ class ProductionWorkbenchMixin:
                             "这条脚本没有附带意群表，画面要求请在制作单里补填。"]
                 label = ""
             resolved = {"product": product_key(script["product"]), "direction_id": script.get("direction_id", ""),
-                        "script_id": script["id"], "script_version": script["version"], "script_family": script["family_id"],
+                        "market": self._script_market(source), "script_id": script["id"], "script_version": script["version"], "script_family": script["family_id"],
                         "title": script["title"], "variant_label": label, "lines": copy.deepcopy(records), "problems": problems,
                         "source": {"task_id": source.get("task_id", ""), "round_id": source.get("round_id", ""),
                                    "variant_index": source["variant_index"] if "variant_index" in source else chosen["index"] if chosen else None}}
             if replica:
                 self.apply_replica(resolved, lines, chinese, replica)
             return self.production.mutate("job", body, resolved)
+
+    def _script_market(self, source):
+        """The market the script was written for; a hand-entered script or an unreadable task falls back to the default."""
+        task_id = source.get("task_id")
+        if not task_id:
+            return markets.DEFAULT
+        try:
+            return markets.stored((self.ai.get(task_id).get("context") or {}).get("market"))
+        except Exception:
+            return markets.DEFAULT
 
     def _settle_job_fill(self, identifier):
         """A fill round that ended while nobody was listening (e.g. across a restart) is written back on the next read."""
@@ -676,6 +698,9 @@ class ProductionWorkbenchMixin:
         if not isinstance(voice_id, str) or not VOICE_ID.fullmatch(voice_id):
             raise VoiceError(400, "音色 ID 格式无效。")
         settings = clean_settings(model_id, body.get("settings"))
+        market = body.get("market", markets.DEFAULT)
+        if not isinstance(market, str) or market not in markets.MARKETS:
+            raise VoiceError(400, "配音语言无效，请重新选择。")
         with operations.guard("take", body) as record:
             prior = self.production.replay("take", body)
             if prior:
@@ -694,10 +719,12 @@ class ProductionWorkbenchMixin:
                         raise VoiceError(400, "口播超过所选模型单次可配音的字数。")
                     known = self.production.voice(voice_id)
                 record = operations.prepare("take", body, {"tts": tts, "voice_id": voice_id, "model_id": model_id,
-                    "settings": settings, "known_voice": known}, take_id="TAK-" + uuid4().hex[:12])
+                    "settings": settings, "known_voice": known, "market": market}, take_id="TAK-" + uuid4().hex[:12])
             snapshot = record["snapshot"]
             tts, known = snapshot["tts"], snapshot.get("known_voice")
             voice_id, model_id, settings = snapshot["voice_id"], snapshot["model_id"], snapshot["settings"]
+            market = markets.stored(snapshot.get("market"))
+            language = {"language_code": markets.MARKETS[market]["tts_language"]} if markets.MARKETS[market]["tts_language"] else {}
             take_id = record["take_id"]
             folder = self.production.audio / identifier / take_id
             mp3 = folder / "voiceover.mp3"
@@ -725,7 +752,7 @@ class ProductionWorkbenchMixin:
                         raise
                     record = operations.update(record, "inflight", lookup=lookup, error="")
                     try:
-                        result = self.voices.speech(voice_id, tts["text"], model_id, settings)
+                        result = self.voices.speech(voice_id, tts["text"], model_id, settings, **language)
                     except VoiceError as exc:
                         # Only an explicit provider refusal or a pre-call credential failure permits replay.
                         if exc.retry_safe:
@@ -753,7 +780,7 @@ class ProductionWorkbenchMixin:
                     duration = max(ends) if ends else None
                 durable_json(folder / "alignment.json", {"alignment": response.get("alignment"),
                     "normalized_alignment": response.get("normalized_alignment"), "groups": groups})
-                take = {"id": take_id, "voice_id": voice_id, "model_id": model_id, "settings": settings, "tts_lines": tts["lines"],
+                take = {"id": take_id, "voice_id": voice_id, "model_id": model_id, "settings": settings, "market": market, "tts_lines": tts["lines"],
                         "tts_sha256": hashlib.sha256(tts["text"].encode()).hexdigest(), "characters": tts["characters"],
                         "request_id": response["request_id"], "audio": f"{identifier}/{take_id}/voiceover.mp3",
                         "wav": f"{identifier}/{take_id}/voiceover.wav" if written else "", "duration": duration,
@@ -1051,7 +1078,7 @@ class ProductionWorkbenchMixin:
         return self.production.mutate("timeline_subtitles", request, check)
 
     def set_timeline_campaign(self, identifier, body):
-        """Put the campaign's end card on a timeline (its own 活动屏显 track, last seconds), or take it off when the campaign is over.
+        """Put the campaign's end card on a timeline (its own 活动屏显 track, last seconds) from a week before it starts, or take it off when it is over.
         The voice-over never changes: the script's swappable line stays the timeless one."""
         if not isinstance(body, dict) or body.get("action") not in {"add", "remove"}:
             raise VoiceError(400, "活动屏显参数无效。")
@@ -1071,9 +1098,10 @@ class ProductionWorkbenchMixin:
             done = self.resolve.run("remove_campaign_card", where, timeout=90)
             message = ("活动屏显已去掉" if done["removed"] else "这条时间线没有活动屏显") + ("" if done["saved"] else "，但工程没有保存，请到达芬奇保存")
             return self.production.mutate("timeline_campaign", request, {"at": now(), "status": "removed", "text": "", "campaign": None, "message": message})
-        campaign = (self._campaign_now() if hasattr(self, "_campaign_now") else {}).get("running")
-        if not campaign:
-            raise VoiceError(409, "现在没有进行中的活动，不能加活动屏显。活动开始后再加。")
+        campaigns = self._campaign_now() if hasattr(self, "_campaign_now") else {}
+        campaign = campaigns.get("running") or campaigns.get("upcoming")
+        if not campaign or not campaign_card_open(campaign):
+            raise VoiceError(409, "现在还不能加活动屏显，活动开始前 7 天起才能加。")
         lines = hook_lines(request["text"] or campaign_card_text(campaign))
         if not lines or len(lines) > 2:
             raise VoiceError(409, "活动屏显最多两行，请先改短。")
@@ -1108,6 +1136,77 @@ class ProductionWorkbenchMixin:
         message = ("屏显已加" if done["created"] else "屏显已更新") if done["saved"] else "屏显已写入，但工程没有保存，请到达芬奇保存"
         return self.production.mutate("timeline_hook", request, {"at": now(), "status": "saved" if done["saved"] else "unsaved", "created": done["created"],
                                                                  "text": " / ".join(lines), "start": done["start"], "end": done["end"], "message": message})
+
+    def _comment_template_path(self):
+        """The template synced from DaVinci, else the one shipped with the workbench."""
+        synced = self.production.root / comment_sticker.SYNCED_NAME
+        return synced if synced.is_file() else comment_sticker.SHIPPED_TEMPLATE
+
+    def comment_template_status(self):
+        path = self.production.root / comment_sticker.SYNCED_NAME
+        at = datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat() if path.is_file() else ""
+        return {"synced": bool(at), "synced_at": at, "timeline": comment_sticker.TEMPLATE_TIMELINE}
+
+    def sync_comment_template(self, body=None):
+        """Copy the sticker's look from the named timeline in the open DaVinci project; stickers already on timelines stay as they are."""
+        done = self.resolve.run("read_comment_template", {"name": comment_sticker.TEMPLATE_TIMELINE}, timeout=60)
+        try:
+            adapted = comment_sticker.adapt_template(done["comp"])
+        except comment_sticker.TemplateError as error:
+            raise VoiceError(409, str(error)) from error
+        path = self.production.root / comment_sticker.SYNCED_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(adapted, encoding="utf-8", newline="\n")
+        os.replace(temporary, path)
+        return {**self.comment_template_status(), "project": done["project"]}
+
+    def _sticker_comment(self, job, request):
+        """The comment typed on the panel, else the linked one picked there, else the script's first."""
+        if request["username"] or request["text"]:
+            row = comment_sticker.typed(request["username"], request["text"])
+            if not comment_sticker.username(row) or not comment_sticker.comment_lines(row["text"]):
+                raise VoiceError(409, "评论贴纸要同时填用户名和评论内容。")
+            if not comment_sticker.drawable(row):
+                raise VoiceError(409, "贴纸字体显示不了这段文字（比如中文、日文），请填评论的外文原文。")
+            return row
+        if request["review_id"]:
+            row = next((item for item in comment_sticker.options(self, job) if str(item["id"]) == request["review_id"]), None)
+            if not row:
+                raise VoiceError(409, "这条评论已经找不到了，请重新选一条，或者自己写。")
+            return row
+        row = comment_sticker.source(self, job)
+        if not row:
+            raise VoiceError(409, "这条稿子写的时候没有带评论，请填上用户名和评论内容。")
+        return row
+
+    def add_timeline_comment_sticker(self, identifier, body):
+        """Put a comment on a timeline with the commenter's avatar and name; clicking again replaces it."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        request = {"request_id": body.get("request_id"), "job_id": identifier, "timeline_uid": body.get("timeline_uid"), "review_id": str(body.get("review_id") or ""),
+                   "username": str(body.get("username") or "").strip()[:80], "text": str(body.get("text") or "").strip()[:1000]}
+        prior = self.production.replay("timeline_comment_sticker", request)
+        if prior:
+            return prior
+        job = self.production.job(identifier)
+        record = next((item for item in job.get("timelines", []) if item["unique_id"] == body.get("timeline_uid")), None)
+        if not record:
+            raise VoiceError(404, "这张制作单没有这条时间线。")
+        if job.get("archived") or record.get("archived"):
+            raise VoiceError(409, "已归档的时间线不能加评论贴纸，请先恢复。")
+        review = self._sticker_comment(job, request)
+        template = self._comment_template_path()
+        metrics = comment_sticker.template_metrics(template.read_text(encoding="utf-8"))
+        name, lines = comment_sticker.username(review), comment_sticker.comment_lines(review["text"], metrics["line_width"])
+        picture = self.reviews.avatars.file(review["avatar"]) if review.get("avatar") else None
+        avatar = comment_sticker.avatar_canvas(picture, self.production.root / "comment-stickers" / f"{hashlib.sha256(str(review['id'] or name).encode()).hexdigest()[:20]}.png", name, metrics)
+        where = {"project": record["project"], "unique_id": record["unique_id"], "name": record["name"], **timeline_location(record)}
+        done = self.resolve.run("add_comment_sticker", {**where, "username": name, "lines": lines, "avatar": str(avatar), "template": str(template),
+                                                        "first_line": (job.get("lines") or [{}])[0].get("spoken", "")}, timeout=120)
+        message = ("评论贴纸已加" if done["created"] else "评论贴纸已更新") if done["saved"] else "评论贴纸已写入，但工程没有保存，请到达芬奇保存"
+        return self.production.mutate("timeline_comment_sticker", request, {"at": now(), "status": "saved" if done["saved"] else "unsaved", "created": done["created"], "review_id": review["id"],
+                                                                            "username": name, "text": " ".join(lines), "start": done["start"], "end": done["end"], "message": message})
 
     def import_home_timeline(self, identifier, body):
         """Put a timeline cut on another computer (an uploaded .drt) in place of one of the order's timelines.

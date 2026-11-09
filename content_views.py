@@ -22,7 +22,7 @@ MAX_NAME_LENGTH = 40
 VIEW_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}\Z")
 PRESET_NAMES = frozenset({"待处理", "进行中", "待发布", "全部"})
 # Tab row order: preset keys and pinned views as "view:<id>". Keys for views that are gone are dropped on save.
-PRESET_TABS = ("attention", "running", "publish", "all")
+PRESET_TABS = ("attention", "running", "publish", "carousel", "all")
 MAX_TABS = len(PRESET_TABS) + MAX_VIEWS
 
 

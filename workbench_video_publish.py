@@ -6,7 +6,7 @@ Publication is a local registration only; this module never exports or uploads a
 from __future__ import annotations
 
 import copy
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import json
 import os
@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from campaign_store import pacific_today
+import comment_sticker
 from creation_store import CreationError
 from direction_store import fingerprint, now
 from elevenlabs_client import VoiceError
@@ -75,6 +76,10 @@ def remap_publication_revisions(value, revisions):
     return value
 
 
+CAMPAIGN_CARD_LEAD_DAYS = 7
+CAMPAIGN_SPOKEN = {"black friday": "Black Friday", "back to school": "back to school", "year-end": "the holidays"}
+
+
 def campaign_words(campaign):
     """The campaign's name as viewers read it (the Chinese gloss dropped) and its last day, e.g. ("Black Friday & Cyber Monday", "Nov 30")."""
     name = re.split(r"[（(]", str(campaign.get("name") or ""))[0].strip().replace(" / ", " & ")
@@ -85,15 +90,31 @@ def campaign_words(campaign):
         return name, ""
 
 
-def campaign_card_text(campaign):
-    """Two lines for the end card: the campaign, and when it ends."""
+def campaign_spoken(campaign):
+    """How to say the sale, and its last day. Viewers only know the big holidays; TikTok's own campaign names mean nothing to them."""
     name, end = campaign_words(campaign)
-    return f"{name} sale / Ends {end}" if end else f"{name} sale"
+    holiday = next((words for start, words in CAMPAIGN_SPOKEN.items() if name.lower().startswith(start)), None)
+    return f"sale for {holiday}" if holiday else "sale right now", end
+
+
+def campaign_card_text(campaign):
+    """Two lines for the end card, as a person would say them."""
+    lead, end = campaign_spoken(campaign)
+    return f"On {lead} / Until {end}" if end else f"On {lead}"
+
+
+def campaign_card_from(campaign):
+    """The first day the end card can go on a timeline: a week before the campaign starts, since a video is cut days before it is posted."""
+    return (date.fromisoformat(campaign["start"]) - timedelta(days=CAMPAIGN_CARD_LEAD_DAYS)).isoformat()
+
+
+def campaign_card_open(campaign, today=None):
+    return campaign_card_from(campaign) <= (today or pacific_today()).isoformat()
 
 
 def campaign_pin_text(campaign):
-    name, end = campaign_words(campaign)
-    return f"{name} sale{f' ends {end} (Pacific)' if end else ''}. Tap the cart below to grab it before then."
+    lead, end = campaign_spoken(campaign)
+    return f"It's on {lead}{f' until {end}' if end else ''}. Just tap the cart below."
 
 
 def title_headline(line):
@@ -145,7 +166,7 @@ def reviewed_source(job, timeline_uid=None):
             # signatures compatible with snapshots saved before these fields
             # existed, including archive/restore and public readback defaults.
             "timeline": {key: copy.deepcopy(value) for key, value in timeline.items()
-                         if key not in {"archived", "task_status", "manual_completion", "manual_completion_blocked", "subtitle_check", "hook_overlay"}},
+                         if key not in {"archived", "task_status", "manual_completion", "manual_completion_blocked", "subtitle_check", "hook_overlay", "comment_sticker"}},
             "edit": copy.deepcopy(edit), "manual_completion": receipt}
 
 
@@ -402,14 +423,20 @@ class VideoPublishMixin:
                 "timelines": self._notion_marked(identifier, self._video_publication_timelines(job, store.entry(store.read(), identifier))),
                 "script_registrations": self.script_registrations(job["script_id"]), **entry}
 
-    def order_states(self, identifiers):
+    def order_states(self, identifiers, *, skip_busy=False):
         """What each order needs now, summed over its current timelines, for the task panel: a timeline is 完成 once
         uploaded to Notion or registered, 待登记 once its cut is finished, otherwise 制作中. Archived and replaced timelines
         are history and not counted. One read of each store serves every order."""
         wanted = {value for value in identifiers if isinstance(value, str) and JOB_ID.fullmatch(value)}
         if not wanted:
             return {}
-        jobs = {job["id"]: job for job in self.production.records()["jobs"] if job["id"] in wanted}
+        if skip_busy and not self.lock.acquire(blocking=False):
+            return {}
+        try:
+            jobs = {job["id"]: job for job in self.production.records()["jobs"] if job["id"] in wanted}
+        finally:
+            if skip_busy:
+                self.lock.release()
         publications = self._video_publications().read()
         uploads = getattr(self, "notion_uploads", None)
         uploaded = set()
@@ -420,7 +447,7 @@ class VideoPublishMixin:
                 uploaded = {key for key, status in latest.items() if status == "completed"}
             except Exception:
                 uploaded = set()
-        states = {}
+        states, photo_pairs = {}, []
         for identifier, job in jobs.items():
             if job.get("archived"):
                 states[identifier] = {"label": "已归档", "tone": "muted"}
@@ -429,11 +456,12 @@ class VideoPublishMixin:
                 states[identifier] = {"label": "剪辑中", "tone": "running"}
                 continue
             entry = VideoPublicationStore.entry(publications, identifier)
-            counts = {}
+            counts, done_uids = {}, []
             for row in active_timelines(job):
                 uid = row.get("unique_id")
                 if (identifier, uid) in uploaded or timeline_records(entry, uid):
                     key = "完成"
+                    done_uids.append(uid)
                 elif timeline_task_status(job, row) == "completed":
                     key = "待登记"
                 else:
@@ -445,7 +473,126 @@ class VideoPublishMixin:
             open_parts = [f"{counts[key]} 条{key}" for key in ("待登记", "制作中") if counts.get(key)]
             states[identifier] = ({"label": "完成", "tone": "success"} if not open_parts else
                                   {"label": " · ".join(open_parts), "tone": "warning" if counts.get("待登记") else "neutral"})
+            # Uploaded videos whose picture carousel is still undecided: the 图文 tab lists them.
+            photo_pairs.extend((identifier, uid) for uid in done_uids)
+        photos = getattr(self, "photo_sets", None)
+        if photos and photo_pairs:
+            try:
+                photo_states = photos.states(photo_pairs)
+            except Exception:
+                photo_states = {}
+            for (identifier, _), found in photo_states.items():
+                if found["state"] == "pending":
+                    state = states[identifier]
+                    state["carousel_pending"] = state.get("carousel_pending", 0) + 1
         return states
+
+    def carousel_overview(self, product=""):
+        """God's-eye view of 图文: every timeline whose video is already up (Notion upload or registered post), with whether
+        its picture carousel is still to be decided, wanted, being made, exported or skipped. Orders still being cut are not
+        listed; only finished videos can ask the question."""
+        from direction_store import product_key
+        key = product_key(product) if product and product != "all" else ""
+        publications = self._video_publications().read()
+        uploaded = {}
+        uploads = getattr(self, "notion_uploads", None)
+        if uploads is not None:
+            try:
+                rows = sorted(uploads.store.read()["uploads"].values(), key=lambda row: row.get("updated_at", ""))
+                latest = {(row["job_id"], row["timeline_uid"]): row for row in rows}
+                uploaded = {pair: row.get("updated_at", "") for pair, row in latest.items() if row.get("status") == "completed"}
+            except Exception:
+                uploaded = {}
+        candidates = []
+        for job in self.production.records()["jobs"]:
+            if job.get("archived") or (key and job.get("product") != key):
+                continue
+            entry = VideoPublicationStore.entry(publications, job["id"])
+            for row in reversed(active_timelines(job)):
+                uid = row.get("unique_id")
+                records = timeline_records(entry, uid)
+                pair = (job["id"], uid)
+                if pair not in uploaded and not records:
+                    continue
+                since = uploaded.get(pair) or (records[-1].get("published_on") or "")
+                candidates.append({"job_id": job["id"], "job_title": job.get("title", ""), "timeline_uid": uid,
+                                   "timeline_name": row.get("name", ""), "product": job.get("product", ""),
+                                   "uploaded": pair in uploaded, "registered": bool(records), "since": since})
+        photos = getattr(self, "photo_sets", None)
+        states = photos.states([(row["job_id"], row["timeline_uid"]) for row in candidates]) if photos else {}
+        # An exported carousel with a version on the Notion calendar is 已上传, the end of its road like a video's.
+        sent = {}
+        if uploads is not None and hasattr(uploads, "photo_summary"):
+            try:
+                sent = uploads.photo_summary()
+            except Exception:
+                sent = {}
+        counts = {name: 0 for name in ("pending", "want", "doing", "exported", "uploaded", "finished", "skip")}
+        for row in candidates:
+            row.update(states.get((row["job_id"], row["timeline_uid"]), {"state": "pending"}))
+            done = sorted(key for key, status in (sent.get(row.get("set_id")) or {}).items() if status == "completed")
+            row["notion_works"] = done
+            if row["state"] == "exported" and done:
+                row["state"] = "uploaded"
+            counts[row["state"]] += 1
+        candidates.sort(key=lambda row: row["since"], reverse=True)
+        return {"product": key, "items": candidates, "counts": counts}
+
+    def needs_you(self, product=""):
+        """Things stuck on a failure that no task row will show again: a failed or interrupted Notion upload, a failed preview
+        export, a failed picture-carousel step. One row each, newest first. A timeline that is done meanwhile (uploaded, or
+        its post registered) and archived orders are left out; a retry that succeeds makes its row disappear by itself."""
+        from direction_store import product_key
+        key = product_key(product) if product and product != "all" else ""
+        publications = self._video_publications().read()
+        jobs = {}
+        for job in self.production.records()["jobs"]:
+            if job.get("archived") or (key and job.get("product") != key):
+                continue
+            entry = VideoPublicationStore.entry(publications, job["id"])
+            jobs[job["id"]] = (job, entry, {row["unique_id"]: row for row in active_timelines(job)})
+        latest = {}
+        uploads = getattr(self, "notion_uploads", None)
+        if uploads is not None:
+            try:
+                for row in sorted(uploads.store.read()["uploads"].values(), key=lambda row: row.get("updated_at", "")):
+                    latest[(row["job_id"], row["timeline_uid"])] = row
+            except Exception:
+                latest = {}
+        found = []
+
+        def add(kind, label, job_id, uid, message, since):
+            job, entry, timelines = jobs.get(job_id) or (None, None, {})
+            line = timelines.get(uid)
+            if not job or not line:
+                return
+            if (latest.get((job_id, uid)) or {}).get("status") == "completed" or timeline_records(entry, uid):
+                return
+            found.append({"kind": kind, "kind_label": label, "job_id": job_id, "job_title": job.get("title", ""), "timeline_uid": uid,
+                          "timeline_name": line.get("name", ""), "product": job.get("product", ""), "message": str(message or "")[:200],
+                          "since": since or "", "hash": f"#production/{job_id}?step=publish"})
+
+        for (job_id, uid), row in latest.items():
+            if row.get("status") in {"failed", "interrupted"}:
+                add("notion", "Notion 上传失败" if row["status"] == "failed" else "Notion 上传被打断", job_id, uid, row.get("error"), row.get("updated_at"))
+        previews = getattr(self, "video_previews", None)
+        if previews is not None:
+            for path in previews.root.glob("PRD-*/*/preview.json"):
+                try:
+                    row = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if row.get("status") == "failed":
+                    add("preview", "预览导出失败", row.get("job_id"), row.get("timeline_uid"), row.get("error"), row.get("finished_at"))
+        photos = getattr(self, "photo_sets", None)
+        if photos is not None:
+            for row in photos.failures():
+                add("carousel", f"图文{row['step']}失败", row["job_id"], row["timeline_uid"], row["error"], row["at"])
+        found.sort(key=lambda row: row["since"], reverse=True)
+        counts = {}
+        for row in found:
+            counts[row["kind"]] = counts.get(row["kind"], 0) + 1
+        return {"product": key, "items": found, "counts": counts}
 
     def _notion_marked(self, identifier, lines):
         """Mark each timeline whose video has been uploaded to Notion: that upload is where its task ends."""
@@ -502,7 +649,8 @@ class VideoPublishMixin:
         campaign = now["running"] or now["upcoming"]
         written = next((option for option in (swap or {}).get("options", []) if option["kind"] == "活动版"), None)
         pin = (swap or {}).get("pin") or ({"en": campaign_pin_text(campaign), "zh": ""} if campaign else None)
-        return {"campaign": {**campaign, "status": "running" if now["running"] else "upcoming"} if campaign else None,
+        return {"campaign": {**campaign, "status": "running" if now["running"] else "upcoming",
+                             "card_from": campaign_card_from(campaign), "card_open": campaign_card_open(campaign)} if campaign else None,
                 "card_text": campaign_card_text(campaign) if campaign else "", "pin": pin, "written": written}
 
     def set_video_pin_status(self, identifier, body):
@@ -548,36 +696,52 @@ class VideoPublishMixin:
         screen_en, screen_zh = screen_copy(markdown)
         swap = swap_notes(job["fill_markdown"], 0) if job.get("fill_markdown") else swap_notes(candidate, index) if matching else None
         return {"script_id": script.get("id"), "version": script.get("version"), "swap": swap, **self._campaign_copy(swap),
+                "comment_stickers": [{"id": row["id"], "username": comment_sticker.username(row), "text": " ".join(comment_sticker.comment_lines(row["text"]))} for row in comment_sticker.options(self, job)],
                 "titles": titles,
                 "screen_en": screen_en, "screen_zh": screen_zh, "screen_options": screen_options(markdown),
                 "zh": script.get("translation_zh") or ("\n".join(line["zh"] for line in job["lines"]) if all(line.get("zh") for line in job["lines"]) else ""),
                 "en": script.get("text") or ""}
 
     def _title_translations(self):
-        """Saved Chinese readings of title headlines, shared across orders. Regenerable, so an unreadable file counts as empty."""
+        """Saved Chinese readings of title headlines and sticker comments, shared across orders. Regenerable, so an unreadable file counts as empty."""
         try:
             saved = json.loads((self._video_publications().root / "title-translations.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         return saved if isinstance(saved, dict) else {}
 
-    def translate_video_titles(self, identifier, body=None):
-        """Chinese reading of each title's headline, for the eye only: tags stay out and the copied line stays foreign."""
+    def _chinese_readings(self, lines, failure):
+        """The saved readings, after generating any of `lines` not read before."""
         from case_breakdown_runner import translate_lines
-        titles = (self._video_publish_copy(self.production.job(identifier)) or {}).get("titles") or []
-        headlines = [title_headline(line) for line in titles]
         saved = self._title_translations()
-        missing = list(dict.fromkeys(line for line in headlines if line and line not in saved))
+        missing = list(dict.fromkeys(line for line in lines if line and line not in saved))
         if missing:
             with tempfile.TemporaryDirectory() as workdir:
                 chinese = translate_lines(self, missing, workdir)
             if not chinese:
-                raise VoiceError(502, "标题的中文对照没生成成功，可以稍后重新打开这张制作单再试。")
+                raise VoiceError(502, failure)
             root = self._video_publications().root
-            with file_lock(root / "title-translations.lock", "标题中文对照正在保存，请稍后再试。"):
+            with file_lock(root / "title-translations.lock", "中文对照正在保存，请稍后再试。"):
                 saved = {**self._title_translations(), **dict(zip(missing, chinese))}
                 durable_json(root / "title-translations.json", saved)
+        return saved
+
+    def translate_video_titles(self, identifier, body=None):
+        """Chinese reading of each title's headline, for the eye only: tags stay out and the copied line stays foreign."""
+        titles = (self._video_publish_copy(self.production.job(identifier)) or {}).get("titles") or []
+        headlines = [title_headline(line) for line in titles]
+        saved = self._chinese_readings(headlines, "标题的中文对照没生成成功，可以稍后重新打开这张制作单再试。")
         return {"titles_zh": [saved.get(line, "") for line in headlines]}
+
+    def translate_sticker_comment(self, identifier, body=None):
+        """Chinese reading of the comment in the sticker row, for the eye only: the card keeps the commenter's words."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        self.production.job(identifier)
+        line = re.sub(r"\s+", " ", str(body.get("text") or "")).strip()[:1000]
+        if not line or not comment_sticker.drawable({"author_handle": "a", "text": line}):
+            return {"zh": ""}
+        return {"zh": self._chinese_readings([line], "评论的中文对照没生成成功，可以稍后再试。").get(line, "")}
 
     def _video_publication_links(self, data, job, post, timeline_uid=None):
         """一张制作单可以绑定多个视频，但同一个帖子只能绑定一张制作单；同一张制作单里一个帖子也只属于一条时间线。"""

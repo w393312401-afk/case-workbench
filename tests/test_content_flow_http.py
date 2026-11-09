@@ -1,7 +1,9 @@
 """Content queue and archive routes over real HTTP and disposable business stores only."""
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -419,6 +421,127 @@ class ContentSnapshotReuseTests(unittest.TestCase):
 
     def reads(self):
         return patch.object(self.server.app, "_content_snapshot", wraps=self.server.app._content_snapshot)
+
+    @staticmethod
+    def waiting_futures(waiting):
+        class ObservedFuture(Future):
+            def result(self, timeout=None):
+                waiting.set()
+                return super().result(timeout)
+        return patch("workbench_content.Future", ObservedFuture)
+
+    def test_overlapping_fresh_views_build_once_and_later_refresh_rebuilds(self):
+        app = self.server.app
+        started, release, waiting = threading.Event(), threading.Event(), threading.Event()
+        original = app._content_snapshot
+
+        def blocked(product):
+            started.set()
+            if not release.wait(3):
+                raise TimeoutError("Snapshot test was not released")
+            return original(product)
+
+        with patch.object(app, "_content_snapshot", side_effect=blocked) as read, self.waiting_futures(waiting):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                try:
+                    attention = pool.submit(self.content, product="202H", view="attention")
+                    self.assertTrue(started.wait(2))
+                    publish = pool.submit(self.content, product="202H", view="publish")
+                    self.assertTrue(waiting.wait(2), "The second view must join the in-flight read")
+                    self.assertEqual(read.call_count, 1)
+                finally:
+                    release.set()
+                self.assertEqual(attention.result(5)["counts"], publish.result(5)["counts"])
+            self.content(product="202H", view="attention")
+            self.assertEqual(read.call_count, 2, "A later refresh must still rebuild")
+        self.assertEqual(app._content_snapshot_pending, {})
+
+    def test_snapshot_builds_stay_separate_for_products_and_instances(self):
+        from workbench_content import ContentWorkbenchMixin
+        app, peer = self.server.app, ContentWorkbenchMixin()
+        started, release = threading.Event(), threading.Event()
+
+        def blocked(product):
+            if product == "202H":
+                started.set()
+                if not release.wait(3):
+                    raise TimeoutError("Snapshot test was not released")
+            return product
+
+        with patch.object(app, "_content_snapshot", side_effect=blocked) as read, \
+                patch.object(peer, "_content_snapshot", return_value="other instance") as other:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                try:
+                    first = pool.submit(app._reusable_content_snapshot, "202H", False)
+                    self.assertTrue(started.wait(2))
+                    self.assertEqual(pool.submit(app._reusable_content_snapshot, "103N", False).result(2), ("103N", False))
+                    self.assertEqual(pool.submit(peer._reusable_content_snapshot, "202H", False).result(2), ("other instance", False))
+                    self.assertEqual((read.call_count, other.call_count), (2, 1))
+                finally:
+                    release.set()
+                self.assertEqual(first.result(2), ("202H", False))
+        self.assertEqual(app._content_snapshot_pending, {})
+        self.assertEqual(peer._content_snapshot_pending, {})
+
+    def test_write_boundaries_do_not_join_an_older_snapshot_build(self):
+        app = self.server.app
+        started, release = threading.Event(), threading.Event()
+        calls = []
+
+        def blocked(product):
+            value = len(calls)
+            calls.append(value)
+            if value == 0:
+                started.set()
+                if not release.wait(3):
+                    raise TimeoutError("Snapshot test was not released")
+            return value
+
+        with patch.object(app, "_content_snapshot", side_effect=blocked):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                try:
+                    old = pool.submit(app._reusable_content_snapshot, "202H", False)
+                    self.assertTrue(started.wait(2))
+                    app.content_write_started()
+                    try:
+                        self.assertEqual(pool.submit(app._reusable_content_snapshot, "202H", False).result(2), (1, False))
+                    finally:
+                        app.content_write_finished()
+                    self.assertEqual(pool.submit(app._reusable_content_snapshot, "202H", False).result(2), (2, False))
+                finally:
+                    release.set()
+                self.assertEqual(old.result(2), (0, False))
+            self.assertEqual(app._reusable_content_snapshot("202H", True), (2, False), "The old read cannot overwrite the post-write cache")
+        self.assertEqual(calls, [0, 1, 2])
+        self.assertEqual(app._content_snapshot_pending, {})
+
+    def test_failed_shared_build_wakes_waiters_and_next_read_can_retry(self):
+        app = self.server.app
+        started, release, waiting = threading.Event(), threading.Event(), threading.Event()
+
+        def failed(product):
+            started.set()
+            if not release.wait(3):
+                raise TimeoutError("Snapshot test was not released")
+            raise ValueError("Snapshot fixture failed")
+
+        with patch.object(app, "_content_snapshot", side_effect=failed) as read, self.waiting_futures(waiting):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                try:
+                    first = pool.submit(app._reusable_content_snapshot, "202H", False)
+                    self.assertTrue(started.wait(2))
+                    second = pool.submit(app._reusable_content_snapshot, "202H", False)
+                    self.assertTrue(waiting.wait(2))
+                    self.assertEqual(read.call_count, 1)
+                finally:
+                    release.set()
+                for request in (first, second):
+                    with self.assertRaisesRegex(ValueError, "Snapshot fixture failed"):
+                        request.result(2)
+            self.assertEqual(app._content_snapshot_pending, {})
+            read.side_effect = lambda product: "recovered"
+            self.assertEqual(app._reusable_content_snapshot("202H", False), ("recovered", False))
+            self.assertEqual(read.call_count, 2)
 
     def test_reuse_serves_a_recent_snapshot_but_refresh_and_other_products_rebuild(self):
         with self.reads() as read:

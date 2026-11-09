@@ -1,4 +1,4 @@
-"""One content identity and its task start time remain readable on both entry pages."""
+"""One content identity and its task start time remain readable in the content list."""
 from __future__ import annotations
 
 import json
@@ -47,21 +47,9 @@ class ContentNamingBrowserTests(unittest.TestCase):
         page.route("**/api/content?*", lambda route: route.fulfill(status=200,
             content_type="application/json", body=json.dumps(response, ensure_ascii=False)))
         base = f"http://127.0.0.1:{self.server.server_port}"
-        page.goto(base + "/#/202H/home")
-        page.locator("[data-home-tab=tasks]").click()
-        home_rows = page.locator("#home-tasks-title-panel .home-flow-row")
-        expect(home_rows).to_have_count(3)
-        self.assertEqual(home_rows.locator("strong").all_text_contents(), [item["title"] for item in items])
-        for index, task in enumerate((first, second)):
-            expect(home_rows.nth(index).locator("small")).to_contain_text(task["task_started_label"])
-            self.assertIn(task["next_hash"][1:], home_rows.nth(index).get_attribute("href"))
-        expect(home_rows.nth(2).locator("small")).to_contain_text(video["timeline_name"])
         artifacts = Path(__file__).resolve().parents[1] / ".test-artifacts"
         artifacts.mkdir(exist_ok=True)
         page.set_viewport_size({"width": 390, "height": 844})
-        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
-        page.screenshot(path=str(artifacts / "content-naming-home-mobile.png"), full_page=True)
-
         page.goto(base + "/#/202H/content")
         expect(page.locator(".flow-row")).to_have_count(3)
         self.assertEqual(page.locator(".flow-title").all_text_contents(), [item["title"] for item in items])

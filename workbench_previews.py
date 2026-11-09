@@ -22,7 +22,7 @@ def source_key(job, timeline):
     edits = [row for row in job.get('edits', []) if row.get('timeline_uid') == timeline['unique_id']]
     latest = edits[-1] if edits else {}
     value = {'timeline': {key: timeline.get(key) for key in ('unique_id', 'project_id', 'take_id', 'frames', 'fps',
-        'width', 'height', 'hook_overlay', 'subtitle_check')}, 'edit': {
+        'width', 'height', 'hook_overlay', 'comment_sticker', 'subtitle_check')}, 'edit': {
         key: latest.get(key) for key in ('id', 'finished_at')}}
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 

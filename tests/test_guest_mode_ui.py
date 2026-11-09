@@ -182,7 +182,7 @@ class GuestModeUITests(unittest.TestCase):
     def test_overview_write_actions_are_hidden_but_reading_and_playback_are_kept(self):
         self.open()
         self.page.evaluate("""document.querySelector('#dynamic').innerHTML = `
-          <div id="home-page"><div class="data-warning">待处理内容暂时无法读取。<button data-home-retry>重新读取</button></div></div>
+          <div id="home-page"></div>
           <button data-home-review>复盘</button><button data-home-batch>一起复盘</button>
           <button data-followup-chain>复盘</button><button data-followup-show-waiting>一起看</button>
           <select data-followup-filter><option>全部</option></select><input data-followup-search type="search">
@@ -192,7 +192,7 @@ class GuestModeUITests(unittest.TestCase):
           <section class="ai-case-actions"><div class="ai-case-heading">AI 协作</div><details class="ai-case-history" hidden></details></section>
           <details class="detail-product"><summary>202H</summary><div class="detail-product-panel"><select data-product-select></select></div></details>`;""")
         self.page.wait_for_function("document.querySelector('[data-followup-chain]').dataset.guestHidden==='true'")
-        for selector in ("#home-page > .data-warning", "[data-home-review]", "[data-home-batch]", "[data-followup-chain]", "[data-followup-show-waiting]", ".detail-menu", "button[aria-label='更多操作']", ".ai-case-actions", ".detail-product-panel"):
+        for selector in ("[data-home-review]", "[data-home-batch]", "[data-followup-chain]", "[data-followup-show-waiting]", ".detail-menu", "button[aria-label='更多操作']", ".ai-case-actions", ".detail-product-panel"):
             self.assertTrue(self.page.locator(selector).is_hidden(), selector)
         for selector in ("[data-followup-filter]", "[data-followup-search]", "[data-followup-next]", "#video-detail", ".detail-product > summary", ".player-loop"):
             self.assertTrue(self.page.locator(selector).is_visible(), selector)

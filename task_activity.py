@@ -21,7 +21,8 @@ from production_naming import production_title
 ACTIVE = frozenset({"queued", "running", "stopping"})
 TERMINAL = frozenset({"completed", "failed", "cancelled", "interrupted", "needs_attention"})
 # "prepublish" stays only so the history of the removed pre-publish review still reads back.
-KINDS = frozenset({"ai", "voice", "timeline", "edit", "validation", "data", "case", "prepublish"})
+# "photo" is the 图文 work of an order (抽帧, AI 逐张表, 单张改写, 导入无字版), listed under that order.
+KINDS = frozenset({"ai", "voice", "timeline", "edit", "validation", "data", "case", "photo", "prepublish"})
 RECOVERY_PHASES = frozenset({"save", "结果待恢复", "登记待恢复", "记录待恢复", "待核实外部结果", "结果已保存，正在登记"})
 IDENTIFIER = re.compile(r"[A-Za-z0-9_:.\-]{1,300}")
 UNAVAILABLE = "运行日志暂时不可用，任务仍按原流程处理。"
@@ -298,15 +299,17 @@ class ActivityStore:
     def _rows(self, db, where="1", values=(), suffix=""):
         return db.execute("SELECT r.*, COALESCE(n.read,1) AS notification_read FROM runs r LEFT JOIN notifications n ON n.event_id=r.event_id WHERE " + where + " " + suffix, values).fetchall()
 
-    def feed(self, *, after=None, limit=50, before=None, product=None, filter="all", owner_id=None, source_id=None, kind=None, q=None, group=None, since=None):
+    def feed(self, *, after=None, limit=50, before=None, product=None, filter="all", owner_id=None, source_id=None, kind=None, q=None, group=None, since=None, until=None):
         limit = _number(limit,50,200)
         after = _number(after) if after is not None else None
         before = _number(before) if before is not None else None
-        if filter not in {"all", "active", "unread", "attention", "current"}:
+        if filter not in {"all", "active", "unread", "attention", "current", "range"}:
             raise ActivityError("运行记录筛选无效。")
         if group not in (None, "", "owner"):
             raise ActivityError("运行记录分组无效。")
-        since = _since(since)
+        since, until = _since(since), _since(until)
+        if filter == "range" and not (since and until and since < until):
+            raise ActivityError("运行记录的时间范围无效。")
         if kind and kind not in KINDS:
             raise ActivityError("运行记录类型筛选无效。")
         if q is not None and len(q) > 100:
@@ -345,6 +348,10 @@ class ActivityStore:
                     else:
                         where.append(OPEN_RUN)
                     where.append("(r.status IN ('queued','running','stopping') OR (r.owner_archived=0 AND r.content_archived=0))")
+                elif filter == "range":
+                    # Every run that was going at some point inside [since, until): the calendar's days and timeline.
+                    where.append("COALESCE(r.started_at,r.updated_at)<? AND (r.status IN ('queued','running','stopping') OR COALESCE(r.finished_at,r.updated_at)>=?)")
+                    values.extend((until, since))
                 events, removed = [], []
                 cursor = maximum
                 if after is not None:

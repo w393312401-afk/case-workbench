@@ -1,4 +1,4 @@
-"""Editing inherits global defaults and requires an explicit compatible override, with fake HTTP clients only."""
+"""Editing pre-fills global defaults, allows a per-edit choice, and reminds above medium, with fake HTTP clients only."""
 from __future__ import annotations
 
 import json
@@ -50,16 +50,23 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.options_error = ""
         self.hold_options, self.pending_options = False, []
 
-    def test_compatible_defaults_hide_local_controls_and_submit_without_overrides(self):
+    def start_and_keep(self, form, effort):
+        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        bar = form.locator("[data-effort-confirm]")
+        expect(bar).to_contain_text(f"思考强度 {effort} 高于 medium")
+        self.assertEqual(self.calls, [])
+        bar.locator("[data-effort-keep]").click()
+
+    def test_compatible_defaults_prefill_controls_and_submit_without_overrides(self):
         page = self.open_page()
         form = page.locator("#edit-form")
         expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Claude Opus · high")
         expect(form.locator("[data-edit-settings]")).to_be_visible()
-        expect(form.locator('[name="model"]')).to_be_hidden()
-        expect(form.locator('[name="effort"]')).to_be_hidden()
+        expect(form.locator('[name="model"]')).to_have_value("claude-opus")
+        expect(form.locator('[name="effort"]')).to_have_value("high")
         form.locator('[name="instruction"]').fill("开头使用切纸结果")
         form.locator('[name="mode"]').select_option("sync")
-        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        self.start_and_keep(form, "high")
         page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertEqual(len(self.calls), 1)
         body = self.calls[0]["body"]
@@ -73,7 +80,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         page = self.open_page()
         form = page.locator("#edit-form")
         expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Claude Sonnet · medium")
-        expect(form.locator("[data-edit-override]")).to_be_hidden()
+        expect(form.locator("[data-edit-override-note]")).to_be_hidden()
         form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
         page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertNotIn("effort", self.calls[0]["body"])
@@ -91,7 +98,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         form.locator('[name="model"]').select_option("claude-opus")
         self.assertEqual(form.locator('[name="effort"] option').evaluate_all("rows => rows.map(row => row.value)"), ["", "low", "medium", "high", "xhigh", "max"])
         form.locator('[name="effort"]').select_option("max")
-        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        self.start_and_keep(form, "max")
         page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertEqual((self.calls[0]["body"]["model"], self.calls[0]["body"]["effort"]), ("claude-opus", "max"))
 
@@ -106,9 +113,8 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.catalog["default_settings"] = {"model": "claude-sonnet", "reasoning_effort": "high"}
         page.evaluate("window.dispatchEvent(new Event('focus'))")
         expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Claude Sonnet · high")
-        expect(form.locator('[name="model"]')).to_have_value("")
-        expect(form.locator('[name="effort"]')).to_have_value("")
-        expect(form.locator('[name="model"]')).to_be_hidden()
+        expect(form.locator('[name="model"]')).to_have_value("claude-sonnet")
+        expect(form.locator('[name="effort"]')).to_have_value("high")
         self.catalog["default_settings"] = {"model": "claude-opus", "reasoning_effort": "ultra"}
         form.locator('[data-edit-default-refresh]').click()
         expect(form.locator("[data-edit-override]")).to_be_visible()
@@ -126,8 +132,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Codex 测试模型 · ultra")
         expect(form.locator("[data-edit-provider-status]")).to_have_text("Codex 客户端可用于 AI 剪辑。")
         expect(form.locator("[data-edit-usage]")).to_contain_text("使用 Codex 客户端当前登录账户的额度")
-        expect(form.locator("[data-edit-override]")).to_be_hidden()
-        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        self.start_and_keep(form, "ultra")
         page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertEqual(len(self.calls), 1)
         self.assertNotIn("model", self.calls[0]["body"])
@@ -143,7 +148,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
                 page = self.open_page()
                 form = page.locator("#edit-form")
                 expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Codex 客户端默认")
-                expect(form.locator("[data-edit-override]")).to_be_hidden()
+                expect(form.locator('[name="model"]')).to_have_value("codex-default")
                 expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_enabled()
                 page.close()
         self.assertEqual(self.calls, [])
@@ -157,7 +162,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.assertEqual(form.locator('[name="effort"] option').evaluate_all("rows => rows.map(row => row.value)"),
                          ["", "low", "medium", "high", "xhigh", "max", "ultra"])
         form.locator('[name="effort"]').select_option("ultra")
-        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        self.start_and_keep(form, "ultra")
         page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertEqual((self.calls[0]["body"]["model"], self.calls[0]["body"]["effort"]), ("gpt-6.1-sol", "ultra"))
 
@@ -169,7 +174,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         form = page.locator("#edit-form")
         expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Claude Haiku · medium")
         expect(form.locator("[data-edit-default]")).not_to_contain_text("不兼容")
-        expect(form.locator("[data-edit-override]")).to_be_hidden()
+        expect(form.locator('[name="model"]')).to_have_value("claude-haiku")
         expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_enabled()
         self.assertEqual(form.locator('[name="model"] option[value="claude-haiku"]').count(), 1)
 
@@ -179,7 +184,6 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         page = self.open_page()
         form = page.locator("#edit-form")
         expect(form.locator("[data-edit-provider-status]")).to_contain_text("Codex 未登录")
-        expect(form.locator("[data-edit-override]")).to_be_hidden()
         expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
         expect(form.locator('[data-copy-handoff]')).to_be_enabled()
         self.clients["providers"]["codex"] = {"available": True}
@@ -209,7 +213,8 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.catalog["models_error"] = "Codex 模型目录读取失败"
         page = self.open_page()
         form = page.locator("#edit-form")
-        expect(form.locator("[data-edit-override]")).to_be_hidden()
+        expect(form.locator('[name="model"]')).to_have_value("gpt-6.1-sol")
+        expect(form.locator('[name="effort"]')).to_have_value("high")
         expect(form.locator("[data-edit-provider-status]")).to_contain_text("Codex 模型目录读取失败")
         expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
         self.assertEqual(self.calls, [])
@@ -266,7 +271,6 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         page = self.open_page()
         form = page.locator("#edit-form")
         expect(form.locator("[data-edit-default]")).to_contain_text("暂不可用，请在设置中检查连接")
-        expect(form.locator('[name="model"]')).to_be_hidden()
         expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
         expect(form.locator('[data-copy-handoff]')).to_be_enabled()
         self.assertEqual(self.calls, [])
@@ -281,6 +285,78 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
         expect(form.locator('[data-copy-handoff]')).to_be_enabled()
         self.assertEqual(self.calls, [])
+
+    def test_one_edit_can_pick_another_model_without_a_reminder_at_medium(self):
+        self.catalog["default_settings"] = {"model": "claude-opus", "reasoning_effort": "max"}
+        page = self.open_page()
+        form = page.locator("#edit-form")
+        form.locator('[name="model"]').select_option("claude-sonnet")
+        expect(form.locator('[name="effort"]')).to_have_value("max")
+        form.locator('[name="effort"]').select_option("medium")
+        expect(form.locator("[data-edit-default]")).to_contain_text("全局默认：Claude Opus · max（本次已单独选择）")
+        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
+        self.assertEqual((self.calls[0]["body"]["model"], self.calls[0]["body"]["effort"]), ("claude-sonnet", "medium"))
+
+    def test_picking_the_default_again_sends_no_override(self):
+        page = self.open_page()
+        form = page.locator("#edit-form")
+        form.locator('[name="effort"]').select_option("medium")
+        form.locator('[name="effort"]').select_option("high")
+        expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Claude Opus · high")
+        self.start_and_keep(form, "high")
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
+        self.assertNotIn("model", self.calls[0]["body"])
+
+    def test_reminder_can_lower_to_medium_for_this_edit_only(self):
+        self.catalog["default_settings"] = {"model": "gpt-6.1-sol", "reasoning_effort": "max"}
+        page = self.open_page()
+        form = page.locator("#edit-form")
+        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        bar = form.locator("[data-effort-confirm]")
+        expect(bar).to_be_visible()
+        expect(form.locator(".take-actions")).to_be_hidden()
+        expect(bar.locator("[data-effort-keep]")).to_have_text("仍用 max 开始")
+        bar.locator("[data-effort-lower]").click()
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual((self.calls[0]["body"]["model"], self.calls[0]["body"]["effort"]), ("gpt-6.1-sol", "medium"))
+
+    def test_reminder_cancel_and_form_changes_do_not_start(self):
+        page = self.open_page()
+        form = page.locator("#edit-form")
+        bar = form.locator("[data-effort-confirm]")
+        start = form.get_by_role('button', name='开始 AI 剪辑', exact=True)
+        start.click()
+        bar.locator("[data-effort-cancel]").click()
+        expect(bar).to_be_hidden()
+        expect(start).to_be_visible()
+        start.click()
+        expect(bar).to_be_visible()
+        form.locator('[name="effort"]').select_option("xhigh")
+        expect(bar).to_be_hidden()
+        self.assertEqual(self.calls, [])
+        self.start_and_keep(form, "xhigh")
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
+        self.assertEqual(self.calls[0]["body"]["effort"], "xhigh")
+
+    def test_reminder_hides_lowering_when_the_model_has_no_medium(self):
+        self.catalog["models"][3]["reasoning_efforts"] = ["high", "max"]
+        self.catalog["default_settings"] = {"model": "gpt-6.1-sol", "reasoning_effort": "max"}
+        page = self.open_page()
+        form = page.locator("#edit-form")
+        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        bar = form.locator("[data-effort-confirm]")
+        expect(bar.locator("[data-effort-keep]")).to_be_visible()
+        expect(bar.locator("[data-effort-lower]")).to_be_hidden()
+
+    def test_client_default_effort_is_judged_by_the_models_own_default(self):
+        self.catalog["models"][3]["default_reasoning_effort"] = "ultra"
+        self.catalog["default_settings"] = {"model": "gpt-6.1-sol", "reasoning_effort": None}
+        page = self.open_page()
+        form = page.locator("#edit-form")
+        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        expect(form.locator("[data-effort-confirm]")).to_contain_text("思考强度 ultra 高于 medium")
 
 
 if __name__ == "__main__":

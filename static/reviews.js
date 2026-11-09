@@ -63,7 +63,9 @@
     const name = String(record.author_name || '').trim(), handle = String(record.author_handle || '').trim().replace(/^@+/, '');
     return [name, handle ? `@${handle}` : ''].filter(Boolean).join(' · ') || '评论者未记录';
   };
-  const authorMarkup = record => `<span class="rev-meta rev-author" data-review-author>${esc(authorLabel(record))}</span>`;
+  // Avatar saved on this computer when the comment was scraped; otherwise the first letter of the name.
+  const avatarMarkup = record => record.avatar ? `<img class="rev-avatar" src="/api/reviews/avatar/${esc(record.avatar)}" alt="" loading="lazy" decoding="async">` : `<span class="rev-avatar is-empty" aria-hidden="true">${esc((authorLabel(record).trim()[0] || "?").toUpperCase())}</span>`;
+  const authorMarkup = record => `${avatarMarkup(record)}<span class="rev-meta rev-author" data-review-author>${esc(authorLabel(record))}</span>`;
   const summaryText = summary => `${num(summary.default_visible)} 条真实评论，来自 ${summary.platforms.filter(item => item.total > 0).length} 个来源${summary.synced_at ? ` · 最近同步 ${summary.synced_at.slice(0,16).replace('T',' ')}` : ''}。保留来源提供的评论者昵称与账号；评论里的说法均未核实。`;
   const NL = String.fromCharCode(10);
   const num = (v) => Math.round(v).toLocaleString("en-US");
@@ -404,8 +406,8 @@
     const f = rev.filters, s = rev.summary, sources = s.platforms.filter((p) => p.total).length;
     const select = (id, label, options, value) => `<label class="rev-field"><span>${label}</span><select id="${id}">${options.map(([k, v]) => `<option value="${esc(k)}" ${String(k) === String(value) ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>`;
     $("#breadcrumb").innerHTML = "用户声音";
-    $("#content").innerHTML = `<div id="rev-page"><div class="page-heading rev-heading"><div><h1>用户声音</h1><nav class="rev-page-tabs" aria-label="用户声音视图"><span aria-current="page">评论</span><a href="${esc(pageURL('#reviews?tab=opportunities'))}">选题机会</a></nav><p><span data-review-library-status>${esc(summaryText(s))}</span><button type="button" class="subtle rev-coverage-link" id="rev-coverage-toggle" aria-expanded="false" aria-controls="rev-coverage">数据来源说明</button></p></div><div class="perf-actions"><button type="button" class="subtle" id="rev-basket-toggle"></button><button type="button" class="secondary" id="rev-copy-all">${icon("copy")}复制当前结果</button><button type="button" class="secondary" id="rev-sync">${icon("refresh")}重新同步</button></div></div>
-      <div id="rev-sync-result" role="status"></div><p class="rev-records" id="rev-records"></p>${coverageMarkup()}
+    $("#content").innerHTML = `<div id="rev-page"><div class="page-heading rev-heading"><div><h1>用户声音</h1><nav class="rev-page-tabs" aria-label="用户声音视图"><span aria-current="page">评论</span><a href="${esc(pageURL('#reviews?tab=opportunities'))}">选题机会</a></nav><p><span data-review-library-status>${esc(summaryText(s))}</span><button type="button" class="subtle rev-coverage-link" id="rev-coverage-toggle" aria-expanded="false" aria-controls="rev-coverage">数据来源说明</button></p></div><div class="perf-actions"><button type="button" class="subtle" id="rev-basket-toggle"></button><button type="button" class="secondary" id="rev-copy-all">${icon("copy")}复制当前结果</button><button type="button" class="secondary" id="rev-scrape-toggle" aria-expanded="false" aria-controls="rev-scrape">从 Apify 抓评论</button><button type="button" class="secondary" id="rev-sync">${icon("refresh")}重新同步</button></div></div>
+      <section class="rev-scrape section-card" id="rev-scrape" hidden></section><div id="rev-sync-result" role="status"></div><p class="rev-records" id="rev-records"></p>${coverageMarkup()}
       <div class="rev-searchbar"><label class="search">${icon("search")}<input id="rev-q" aria-label="搜索评论" placeholder="搜索评论：英文原词，或夹具、晃动、价格等中文词" value="${esc(f.q)}"></label><button type="button" class="secondary rev-filter-open" id="rev-filter-open" aria-haspopup="dialog" aria-controls="rev-drawer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>筛选<span class="rev-filter-count" id="rev-filter-count" hidden></span></button></div>
       <div class="rev-sources" id="rev-sources" role="group" aria-label="来源"></div>
       <div class="rev-quick" role="group" aria-label="快捷筛选"><button type="button" class="rev-quick-btn" data-quick="low">低星评价</button><button type="button" class="rev-quick-btn" data-quick="questions" id="rev-open-questions" title="TikTok 视频评论里，库里没有任何回复的提问：可以用真实画面回答的选题">没人回复的提问</button><button type="button" class="rev-quick-btn" id="rev-new" title="最近几次同步新增的评论"></button><button type="button" class="rev-quick-btn" data-quick="defects">具体缺陷</button></div>
@@ -721,6 +723,20 @@
       event.currentTarget.setAttribute("aria-expanded", String(open));
     };
     $("#rev-basket-toggle").onclick = () => window.MaterialBasket?.open();
+    $("#rev-scrape-toggle").onclick = (event) => {
+      const box = $("#rev-scrape"), open = box.hidden;
+      box.hidden = !open;
+      event.currentTarget.setAttribute("aria-expanded", String(open));
+      if (open) window.ReviewScrape?.mount(box, currentProduct(), async (job) => {
+        const hash = pageHash();
+        const [,loaded] = await Promise.all([loadSummary(true), loadResults(true)]);
+        if (!loaded || pageHash() !== hash) return;
+        render();
+        const note = $("#rev-sync-result");
+        note.className = "context-note";
+        note.textContent = `Apify 抓取完成（${job.start} 至 ${job.end}），评论库新增 ${num(job.added)} 条，点「近 ${rev.summary.new_days || 14} 天新增」查看。`;
+      });
+    };
     $("#rev-sync").onclick = async () => {
       prepareSearchRefresh();
       const hash = pageHash(), button = $("#rev-sync"), box = $("#rev-sync-result");

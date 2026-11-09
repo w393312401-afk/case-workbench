@@ -45,12 +45,10 @@ class ActivityIntegrationBrowserTests(unittest.TestCase):
         page = self.open_page("#/202H/library")
         expect(page.locator("#task-activity-open")).to_have_attribute("aria-label", "任务，1 项进行中，1 条未读")
         page.locator("#task-activity-open").click()
-        # 当前 lists the run still stopping; the one that finished today folds below it.
-        expect(page.locator(".activity-row")).to_have_count(1)
-        expect(page.locator(".activity-status")).to_have_text("正在停止")
-        expect(page.locator(".activity-done-fold")).to_have_text("今天已完成 1 项")
-        page.get_by_role("button", name="全部", exact=True).click()
+        # The panel opens on today's page of the calendar, which lists both runs with their own state.
         expect(page.locator(".activity-row")).to_have_count(2)
+        expect(page.locator('[data-run-id="ai:fixture:round1"] .activity-status')).to_have_text("正在停止")
+        expect(page.locator('[data-activity-date][aria-pressed="true"]')).to_contain_text("今天")
         page.locator('[data-activity-log="edit:fixture"]').click()
         expect(page.locator("#activity-log-body .activity-log-lines li")).to_have_count(1)
         expect(page.locator("#activity-log-body")).to_contain_text("执行结束")

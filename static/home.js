@@ -1,7 +1,8 @@
 "use strict";
 
 // The calendar week is independent of the last week for which exports exist.
-// One counted tab list keeps the work waiting on you together; trends live in Video Data.
+// One counted tab list keeps the planning work together: 待复盘, 下一轮待写, 待补案例. What waits on you right now
+// (待我处理, 待发布, 发布日历, 图文, failures) lives in the 任务 panel; trends live in Video Data.
 window.WorkbenchHome = (() => {
   let sequence = 0, chosenTab = null, undoTimer = null, renderedProduct = null;
   let repaintLibrary = null, lastRender = null;
@@ -34,28 +35,15 @@ window.WorkbenchHome = (() => {
     if (!current.publish?.published_on && !(video && published?.has(video))) missing.push(["发布", "data"]);
     return missing;
   }
-  const taskActive = task => task.busy || task.stopping || ["queued","running"].includes(task.status);
   const empty = (text, action = "") => `<div class="home-empty"><p>${esc(text)}</p>${action}</div>`;
   const chip = (text, tone = "") => `<span class="home-chip${tone ? ` is-${tone}` : ""}">${esc(text)}</span>`;
   const more = (href, label) => `<a class="home-link" href="${esc(url(href))}">${esc(label)}${icon("arrow")}</a>`;
   const loading = '<div class="home-empty"><p role="status">正在读取…</p></div>';
   const planActions = { scale: ["加码", "good"], execution: ["换执行", "info"], stop: ["停测", "warn"] };
-  const kindNames = { task: "协作候选", script: "脚本", video: "视频制作单" };
   const decisionOf = plan => plan.experiment?.decision || plan.action;
   // Only scale-up or new-execution plans that nobody has started writing yet are still "to write".
   const needsWriting = plan => ["scale","execution"].includes(decisionOf(plan)) && !plan.task_id;
 
-  function contentRow(item) {
-    const typed = /｜(?:候选稿|复盘结果|审稿结果|脚本|视频(?:方案.*)?)$/.test(item.title || '');
-    const redundantStage = {待制作:'开始制作',待选稿:'查看并选择候选',待人工审查:'核对剪辑结果'}[item.stage_label] === item.next_label;
-    const detail = [typed ? '' : kindNames[item.kind], item.direction_id, item.timeline_name, item.task_started_label, redundantStage ? '' : item.stage_label].filter(Boolean).join(" · ");
-    return `<a class="home-row home-flow-row" href="${esc(url(item.next_hash || "#content", item.product))}"><span class="home-row-main"><strong title="${esc([item.title,item.subtitle].filter(Boolean).join('\n'))}">${esc(item.title)}</strong><small>${esc(detail)}</small></span><span class="home-next">${esc(item.next_label || "继续处理")}${icon("arrow")}</span></a>`;
-  }
-  // Posted but not yet on the publish calendar: the row opens the order's publish step, where the mark is set.
-  function calendarRow(item) {
-    const detail = [kindNames[item.kind], item.direction_id, item.timeline_name, item.published_on ? `发布于 ${item.published_on}` : ""].filter(Boolean).join(" · ");
-    return `<a class="home-row home-flow-row" href="${esc(url(item.next_hash || "#content", item.product))}"><span class="home-row-main"><strong title="${esc([item.title,item.subtitle].filter(Boolean).join('\n'))}">${esc(item.title)}</strong><small>${esc(detail)}</small></span><span class="home-next">${chip("未上传", "warn")}去标记${icon("arrow")}</span></a>`;
-  }
   function planRow(plan) {
     const decision = decisionOf(plan);
     const [label, tone] = planActions[decision] || ['历史安排', ""];
@@ -111,11 +99,11 @@ window.WorkbenchHome = (() => {
     const controlsOpen = root.querySelector('.followup-controls')?.open;
     lastRender = {root,signature,tab:chosenTab};
     renderedProduct = product;
-    const [videosData, tasksData, creation, followups, flow] = data;
+    const [videosData, tasksData, creation, followups] = data;
     const libraryReady = Boolean(state.signature), libraryFailed = !libraryReady && Boolean(state.libraryReadError);
     const settled = results.every(result => result.status !== "pending") && (libraryReady || libraryFailed);
     const pendingRead = index => results[index].status === "pending";
-    const failed = results.map((result,index) => result.status === "rejected" && !data[index] ? ["视频列表","协作任务","待写计划","复盘记录","待处理内容"][index] : null).filter(Boolean);
+    const failed = results.map((result,index) => result.status === "rejected" && !data[index] ? ["视频列表","协作任务","待写计划","复盘记录"][index] : null).filter(Boolean);
     // Newly published posts belong to observation immediately, including those whose report window ends next week.
     const videos = videosData?.videos || [], due = videos.filter(matches);
     const followupReady = !!videosData && !!followups && !!creation;
@@ -125,19 +113,9 @@ window.WorkbenchHome = (() => {
     const pending = state.cases.filter(item => !item.archived && matches(item)).map(item => ({item,missing:missingCase(item, videosData ? published : null)})).filter(row => row.missing.length).sort((a,b) => b.missing.length-a.missing.length);
     // Whether a video is published comes from the video list, so the case count waits for it (or for its failure).
     const casesKnown = libraryReady && (!!videosData || !pendingRead(0));
-    const caseProducts = new Map(state.cases.map(item => [item.case_id, item.product]));
-    const running = (tasksData?.tasks || []).filter(task => matches({ product: task.product || caseProducts.get(task.case_id) })).filter(taskActive).length;
     const plans = (creation?.plans || []).filter(plan => matches(plan) && ["pending","working"].includes(plan.status));
     const toWrite = plans.filter(needsWriting), otherPlans = plans.filter(plan => !needsWriting(plan));
-    const attention = flow?.counts?.attention ?? 0, toPublish = flow?.counts?.publish ?? 0, flowItems = flow?.items || [];
-    const calendarTotal = flow?.calendar_pending?.total ?? 0, calendarItems = flow?.calendar_pending?.items || [];
-    const calendarBlock = calendarTotal ? `<div class="home-calendar"><p class="home-overflow">${calendarTotal} 条已发布、还没上传到发布日历</p><div class="home-list">${calendarItems.map(calendarRow).join("")}</div>${calendarTotal > calendarItems.length ? `<p class="home-overflow">另有 ${calendarTotal-calendarItems.length} 条，${more("#content?view=all", "去内容进程查看")}</p>` : ""}</div>` : "";
-    const startWriting = `<button type="button" class="secondary compact" data-home-start-writing>${icon("plus")}开始写稿</button>`;
-    const runningLine = running ? `<a class="home-running" href="${esc(url("#ai"))}"><span class="home-chip is-good is-live"><i></i>运行中</span><span>${running} 个协作任务正在生成，生成完会出现在这里</span>${icon("arrow")}</a>` : "";
-
     const tabs = [
-      { key: "tasks", id: "home-tasks-title", label: "待我处理", count: flow ? attention : null, work: attention + calendarTotal, hint: "等你做下一步的内容，和内容创作里的「待我处理」一致。", link: more("#content", "内容进程"),
-        body: !flow ? (pendingRead(4) ? loading : empty("待处理内容暂时无法读取。")) : `${runningLine}${flowItems.length ? `<div class="home-list">${flowItems.map(contentRow).join("")}</div>` : calendarTotal ? "" : empty("现在没有等你处理的内容。", runningLine ? "" : startWriting)}${attention > flowItems.length ? `<p class="home-overflow">另有 ${attention-flowItems.length} 条，${more("#content", "去内容进程查看")}</p>` : ""}${toPublish ? `<p class="home-overflow home-publish">${toPublish} 条已做完、等你发布，${more("#content?view=publish", "去登记发布")}</p>` : ""}${calendarBlock}` },
       { key: "due", id: "home-due-title", label: "待复盘", count: ready ? ready.length : null, hint: "数字是全部可复盘视频。优先核对已备好的结论、到期复查和异常变化。发布未满14天由系统自动观察，缺数据先补齐。", link: `<div class="home-experience-links">${!window.PublicTextMode && !window.WorkbenchGuest && !window.GuestMode ? '<button type="button" class="subtle compact" data-home-experiences>复盘经验</button>' : ''}${more("#videos?tab=list", "自制视频")}</div>`,
         body: !followupReady ? ([0,2,3].some(pendingRead) ? loading : empty("复盘队列暂时无法读取，请重新读取。")) : '<div id="home-followups"></div>' },
       { key: "plans", id: "home-plans-title", label: "下一轮待写", count: creation ? toWrite.length : null, hint: "在方向详情定了加码或换执行、还没开写的安排。", link: more("#directions", "卖点与方向"),
@@ -173,7 +151,6 @@ window.WorkbenchHome = (() => {
         select(tabs[next].key, true);
       };
     });
-    root.querySelector("[data-home-start-writing]")?.addEventListener("click", () => window.CaseAI?.startBlank());
     root.querySelector("[data-home-experiences]")?.addEventListener("click", () => window.ReviewExperiences?.open({product}));
     root.querySelectorAll("[data-home-plan-write]").forEach(button => button.onclick = async () => {
       const plan = plans.find(item => item.id === button.dataset.homePlanWrite);
@@ -234,13 +211,13 @@ window.WorkbenchHome = (() => {
   async function route() {
     const seq = ++sequence, product = selectedProduct(), week = currentWeek();
     const saved = window.WorkbenchShell?.listState?.("home", product);
-    if (["due", "tasks", "plans", "cases"].includes(saved?.tab)) chosenTab = saved.tab;
+    if (["due", "plans", "cases"].includes(saved?.tab)) chosenTab = saved.tab;
     else if (!$("[data-home-tab]")) chosenTab = null;
     $("#breadcrumb").innerHTML = "工作概览";
     if (!$("#home-page")) $("#content").innerHTML = '<div id="home-page"></div>';
     const isCurrent = () => seq === sequence && selectedProduct() === product && window.WorkbenchShell?.parse().page === "home";
-    const previous = cache.get(product), data = previous ? [...previous] : Array(5).fill(null);
-    const results = Array.from({length:5}, () => ({status:"pending"}));
+    const previous = cache.get(product), data = previous ? [...previous] : Array(4).fill(null);
+    const results = Array.from({length:4}, () => ({status:"pending"}));
     let paintQueued = false;
     const paint = () => {
       if (!isCurrent() || paintQueued) return;
@@ -254,8 +231,7 @@ window.WorkbenchHome = (() => {
     if (!previous || renderedProduct !== product || !$("[data-home-tab]")) render(data, results, product, week);
     const read = (index,path) => api(path).then(value => { results[index] = {status:"fulfilled",value}; data[index] = value; }, reason => { results[index] = {status:"rejected",reason}; data[index] = null; })
       .then(() => { if (isCurrent()) { cache.set(product, [...data]); paint(); } });
-    await Promise.all([read(0,`/api/performance/videos?${new URLSearchParams({projection:"home",...(product ? {product} : {})})}`),read(1,"/api/ai/tasks"),read(2,`/api/creation?product=${encodeURIComponent(product)}`),read(3,`/api/review-followups?product=${encodeURIComponent(product)}`),
-      read(4,`/api/content?${new URLSearchParams({view:"attention",page_size:"8",...(product ? {product} : {})})}`)]);
+    await Promise.all([read(0,`/api/performance/videos?${new URLSearchParams({projection:"home",...(product ? {product} : {})})}`),read(1,"/api/ai/tasks"),read(2,`/api/creation?product=${encodeURIComponent(product)}`),read(3,`/api/review-followups?product=${encodeURIComponent(product)}`)]);
   }
   const captureListState = () => {
     const active = document.querySelector('[data-home-tab][aria-selected="true"]');

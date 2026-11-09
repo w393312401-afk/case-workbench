@@ -38,6 +38,7 @@ PRIVATE_KEYS = {
     "api_key", "api_token", "access_token", "oauth_token", "authorization",
     "cookie", "cookies", "password", "plan_token", "request_id", "local_path",
     "audio_file", "voiceover_path", "ledger_path", "output_path", "sources",
+    "proxy_secret", "gateway_token", "launch_id",
 }
 
 

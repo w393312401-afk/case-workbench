@@ -9,3 +9,25 @@
 .opportunity-evidence:has(.opportunity-full[open])>.opportunity-excerpt{display:none}
 
 .opportunity-grid{align-items:start;gap:12px;margin:12px 0}.opportunity-card{padding:14px;border-radius:10px}.opportunity-heading h2{font-size:15px}.opportunity-reasons{font-size:12px;line-height:1.5;margin:6px 0}.opportunity-reasons:empty{display:none}.opportunity-evidence{padding:8px 10px}.opportunity-evidence .opportunity-excerpt{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;margin:6px 0;font-size:13px;line-height:1.5}.opportunity-full{font-size:12px;color:var(--muted)}.opportunity-full blockquote{font-size:13px;color:var(--ink);max-height:45vh;overflow:auto}.opportunity-coverage{margin:8px 0;font-size:12px}.opportunity-coverage p{margin:3px 0}.opportunity-card>.context-note{font-size:12px;padding:0;background:transparent}.opportunity-boundary,.opportunity-rules{font-size:12px;color:var(--muted-soft)}.opportunity-rules summary{cursor:pointer}.opportunity-pool{border-top:1px solid var(--line);padding-top:14px}.opportunity-pool>h2{font-size:15px}.opportunity-pool>.context-note{font-size:12px}.opportunity-pool .opportunity-card{margin-top:10px}.opportunity-actions{font-size:12px}
+
+/* AI 三段骨架 */
+.opportunity-skeleton{margin:8px 0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:12px;line-height:1.5}
+.skeleton-head{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:4px}.skeleton-head strong{font-size:13px}
+.skeleton-state{padding:0 6px;border-radius:999px;background:var(--fill);font-weight:650}.skeleton-state[data-state="complete"]{color:var(--green)}.skeleton-state[data-state="gaps"]{color:var(--orange)}.skeleton-state[data-state="skip"]{color:var(--muted)}
+.skeleton-stale{color:var(--orange)}.skeleton-progress,.opportunity-skeleton .context-note{margin:2px 0 6px;color:var(--muted)}.skeleton-error{margin:2px 0 6px;color:var(--danger)}
+.skeleton-rows{list-style:none;margin:0;padding:0;display:grid;gap:4px}.skeleton-rows li{display:grid;grid-template-columns:30px 1fr;gap:6px}.skeleton-rows b{color:var(--muted);font-weight:650}
+.skeleton-rows small{display:block;color:var(--muted)}.skeleton-cite{color:var(--muted-soft);margin-left:4px;cursor:help}
+.skeleton-gaps{list-style:none;margin:6px 0 0;padding:0}.skeleton-gaps b{color:var(--orange);margin-right:6px}.skeleton-note{color:var(--muted)}.skeleton-note b{color:var(--muted-soft)}
+.skeleton-verdict{margin:6px 0}.skeleton-actions{display:flex;gap:8px;flex-wrap:wrap}
+.opportunity-skeleton-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;margin:6px 0}.opportunity-skeleton-bar:empty{display:none}
+
+/* 从 Apify 抓评论 (on the comment page; review-scrape.js) */
+.rev-scrape{display:grid;gap:8px;margin:8px 0}.rev-scrape p{margin:0}
+.scrape-range,.scrape-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.scrape-platforms{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.scrape-platform{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;border-top:1px solid var(--line);padding-top:6px}
+.scrape-meta{color:var(--muted)}.scrape-run small{display:block}
+.scrape-platform details{flex-basis:100%}.scrape-platform textarea{width:100%;box-sizing:border-box;font:inherit;font-size:12px}
+.scrape-status{padding:0 6px;border-radius:999px;background:var(--fill);font-weight:650}
+.scrape-status[data-state="done"]{color:var(--green)}.scrape-status[data-state="failed"]{color:var(--danger)}.scrape-status[data-state="running"]{color:var(--orange)}
+.scrape-error{color:var(--danger)}

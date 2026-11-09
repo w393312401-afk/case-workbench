@@ -70,6 +70,11 @@ class CreationStore:
         with self.lock:
             return copy.deepcopy(self._read_catalog())
 
+    def records(self):
+        """Detached business records without the historical request replay payloads."""
+        with self.lock:
+            return copy.deepcopy({key: value for key, value in self._read_catalog().items() if key != "requests"})
+
     def clear_cache(self):
         """Discard snapshots after a runtime restore or an in-process replacement."""
         with self.lock:
@@ -207,7 +212,7 @@ class CreationStore:
             elif receipt["at"] < cutoff:
                 del data["requests"][key]
 
-    def public(self, product=None):
+    def public(self, product=None, *, include_frozen_source=True):
         with self.lock:
             data = self._read_catalog()
             selected = product_key(product) if product and product != "all" else None
@@ -216,14 +221,19 @@ class CreationStore:
                 if key in {"requests", "schema_version"}:
                     continue
                 rows = value if selected is None else [item for item in value if item.get("product") == selected]
-                result[key] = ([self.script_lifecycle(item) for item in rows] if key == "scripts"
+                result[key] = ([self.script_lifecycle(item, include_frozen_source=include_frozen_source) for item in rows] if key == "scripts"
                                else copy.deepcopy(rows))
             result["revision"] = self._snapshot_revision(data)
             return result
 
     @staticmethod
-    def script_lifecycle(item):
+    def script_lifecycle(item, *, include_frozen_source=True):
         """Project legacy archive statuses without silently migrating business data on read."""
+        if not include_frozen_source and item.get("source"):
+            # The list never returns these frozen writing inputs. Exclude them before cloning,
+            # rather than spending most of a list read copying snapshots it immediately discards.
+            item = {**item, "source": {key: value for key, value in item["source"].items()
+                                     if key not in {"snapshot", "candidate_text"}}}
         item = copy.deepcopy(item)
         status = item.get("status", "draft")
         if status == "archived":

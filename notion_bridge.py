@@ -85,8 +85,9 @@ def send_video(upload, path):
     boundary = "workbench" + uuid4().hex
     name = re.sub(r'["/\\\r\n]', "_", str(upload.get("filename") or path.name))
     mime = upload.get("content_type") or "video/mp4"
-    if mime not in {"video/mp4", "video/quicktime", "video/webm", "video/x-matroska", "video/x-msvideo"}:
-        raise VoiceError(502, "Notion 返回了不匹配的视频类型。")
+    # 挂车图文 sends its 发布 JPGs through the same scoped request, one picture per upload.
+    if mime not in {"video/mp4", "video/quicktime", "video/webm", "video/x-matroska", "video/x-msvideo", "image/jpeg", "image/png"}:
+        raise VoiceError(502, "Notion 返回了不匹配的文件类型。")
     body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{name}"\r\n'
             f"Content-Type: {mime}\r\n\r\n").encode() + data + f"\r\n--{boundary}--\r\n".encode()
     headers = dict(upload.get("upload_headers") or {})
@@ -97,7 +98,7 @@ def send_video(upload, path):
     except Exception:
         raise VoiceError(502, "成片上传未确认完成，请保留当前记录后重试。") from None
     if result.get("status") != "uploaded" or notion_id(result.get("file_upload_id")) != uid:
-        raise VoiceError(502, "Notion 尚未确认收到完整视频，未标记为上传成功。")
+        raise VoiceError(502, "Notion 尚未确认收到完整文件，未标记为上传成功。")
     return result
 
 

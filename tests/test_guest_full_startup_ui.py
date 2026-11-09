@@ -226,11 +226,12 @@ class GuestFullStartupTests(unittest.TestCase):
         self.assertEqual(self.page.locator(".guest-media-gallery img").count(), 2)
         self.page.evaluate("location.hash='#/202H/home'")
         self.page.locator("[data-home-tab='due'][aria-selected='true']").wait_for()
-        self.page.locator("#home-page > .data-warning[data-guest-hidden='true']").wait_for(state="attached")
-        self.assertTrue(self.page.locator("[data-home-tab='tasks']").is_hidden())
-        self.assertTrue(self.page.locator("#home-tasks-title-panel").is_hidden())
-        self.assertTrue(self.page.locator("#home-page > .data-warning").is_hidden())
-        self.assertTrue(self.page.locator("#home-due-title-panel").get_by_text("今天先看", exact=True).is_visible())
+        # 待我处理 lives in the task panel now, so the overview reads nothing a guest cannot.
+        self.assertEqual(self.page.locator("[data-home-tab='tasks'], #home-tasks-title-panel").count(), 0)
+        self.assertEqual(self.page.locator("#home-page > .data-warning").count(), 0)
+        # Once everything is read the overview opens the first tab with work; 待复盘 stays one click away.
+        self.page.locator("[data-home-tab='due']").click()
+        self.page.locator("#home-due-title-panel").get_by_text("今天先看", exact=True).wait_for()
         self.assertEqual(self.page.locator("#connection-text").inner_text(), "访客浏览 · 仅供查看")
         self.assertEqual(self.page.locator("#sync-detail").text_content(), "仅供查看；登录后操作。")
         content_reads = sum(path == "/guest/api/content" for _, path in self.requests)

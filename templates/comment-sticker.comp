@@ -1,0 +1,220 @@
+Composition {
+	CurrentTime = 53,
+	RenderRange = { 0, 149 },
+	GlobalRange = { 0, 149 },
+	CurrentID = 16,
+	HiQ = true,
+	PlaybackUpdateMode = 0,
+	StereoMode = false,
+	Version = "DaVinci Resolve Studio 21.2.0.0005",
+	SavedOutputs = 0,
+	HeldTools = 0,
+	DisabledTools = 0,
+	LockedTools = 0,
+	AudioOffset = 0,
+	Resumable = true,
+	OutputClips = {
+	},
+	Tools = {
+		CardShape = RectangleMask {
+			Inputs = {
+				Filter = Input { Value = FuID { "Fast Gaussian" }, },
+				MaskWidth = Input { Value = 1080, },
+				MaskHeight = Input { Value = 1920, },
+				PixelAspect = Input { Value = { 1, 1 }, },
+				UseFrameFormatSettings = Input { Value = 1, },
+				ClippingMode = Input { Value = FuID { "None" }, },
+				Center = Input { Value = { 0.5, 0.64 }, },
+				Width = Input { Value = 0.68, },
+				Height = Input { Value = 0.087, },
+				CornerRadius = Input { Value = 0.2, }
+			},
+			ViewInfo = OperatorInfo { Pos = { 165, 16.5 } },
+		},
+		Card = Background {
+			Inputs = {
+				GlobalOut = Input { Value = 149, },
+				Width = Input { Value = 1080, },
+				Height = Input { Value = 1920, },
+				UseFrameFormatSettings = Input { Value = 1, },
+				["Gamut.SLogVersion"] = Input { Value = FuID { "SLog2" }, },
+				TopLeftRed = Input { Value = 0.98, },
+				TopLeftGreen = Input { Value = 0.98, },
+				TopLeftBlue = Input { Value = 0.98, },
+				EffectMask = Input {
+					SourceOp = "CardShape",
+					Source = "Mask",
+				}
+			},
+			ViewInfo = OperatorInfo { Pos = { 55, 16.5 } },
+		},
+		MessageTailShape = TriangleMask {
+			Inputs = {
+				Filter = Input { Value = FuID { "Fast Gaussian" }, },
+				MaskWidth = Input { Value = 1080, },
+				MaskHeight = Input { Value = 1920, },
+				PixelAspect = Input { Value = { 1, 1 }, },
+				UseFrameFormatSettings = Input { Value = 1, },
+				ClippingMode = Input { Value = FuID { "None" }, },
+				Point1 = Input { Value = { 0.171, 0.615 }, },
+				Point2 = Input { Value = { 0.16, 0.59 }, },
+				Point3 = Input { Value = { 0.207, 0.598 }, }
+			},
+			ViewInfo = OperatorInfo { Pos = { 275, 148.5 } },
+		},
+		MessageTail = Background {
+			Inputs = {
+				GlobalOut = Input { Value = 149, },
+				Width = Input { Value = 1080, },
+				Height = Input { Value = 1920, },
+				UseFrameFormatSettings = Input { Value = 1, },
+				["Gamut.SLogVersion"] = Input { Value = FuID { "SLog2" }, },
+				TopLeftRed = Input { Value = 0.98, },
+				TopLeftGreen = Input { Value = 0.98, },
+				TopLeftBlue = Input { Value = 0.98, },
+				EffectMask = Input {
+					SourceOp = "MessageTailShape",
+					Source = "Mask",
+				}
+			},
+			ViewInfo = OperatorInfo { Pos = { 55, 181.5 } },
+		},
+		BubbleWithTail = Merge {
+			Inputs = {
+				Background = Input {
+					SourceOp = "Card",
+					Source = "Output",
+				},
+				Foreground = Input {
+					SourceOp = "MessageTail",
+					Source = "Output",
+				},
+				PerformDepthMerge = Input { Value = 0, }
+			},
+			ViewInfo = OperatorInfo { Pos = { 165, 181.5 } },
+		},
+		AvatarCircle = EllipseMask {
+			Inputs = {
+				Filter = Input { Value = FuID { "Fast Gaussian" }, },
+				MaskWidth = Input { Value = 1080, },
+				MaskHeight = Input { Value = 1920, },
+				PixelAspect = Input { Value = { 1, 1 }, },
+				UseFrameFormatSettings = Input { Value = 1, },
+				ClippingMode = Input { Value = FuID { "None" }, },
+				Center = Input { Value = { 0.218, 0.64 }, },
+				Width = Input { Value = 0.073, },
+				Height = Input { Value = 0.073, }
+			},
+			ViewInfo = OperatorInfo { Pos = { 165, 49.5 } },
+		},
+		Merge1 = Merge {
+			Inputs = {
+				Background = Input {
+					SourceOp = "BubbleWithTail",
+					Source = "Output",
+				},
+				Foreground = Input {
+					SourceOp = "MediaIn1",
+					Source = "Output",
+				},
+				PerformDepthMerge = Input { Value = 0, },
+				EffectMask = Input {
+					SourceOp = "AvatarCircle",
+					Source = "Mask",
+				}
+			},
+			ViewInfo = OperatorInfo { Pos = { 275, 49.5 } },
+		},
+		Username = TextPlus {
+			Inputs = {
+				GlobalOut = Input { Value = 149, },
+				Width = Input { Value = 1080, },
+				Height = Input { Value = 1920, },
+				UseFrameFormatSettings = Input { Value = 1, },
+				["Gamut.SLogVersion"] = Input { Value = FuID { "SLog2" }, },
+				Wrap = Input { Value = 1, },
+				Center = Input { Value = { 0.275, 0.654 }, },
+				LayoutRotation = Input { Value = 1, },
+				TransformRotation = Input { Value = 1, },
+				Red1 = Input { Value = 0.42, },
+				Green1 = Input { Value = 0.42, },
+				Blue1 = Input { Value = 0.44, },
+				Softness1 = Input { Value = 1, },
+				StyledText = Input { Value = "@username", },
+				Font = Input { Value = "Arial", },
+				Style = Input { Value = "Regular", },
+				Size = Input { Value = 0.023, },
+				VerticalJustificationNew = Input { Value = 3, },
+				HorizontalLeftCenterRight = Input { Value = -1, },
+				HorizontalJustificationNew = Input { Value = 3, }
+			},
+			ViewInfo = OperatorInfo { Pos = { 55, 115.5 } },
+			Version = 1
+		},
+		Merge3 = Merge {
+			Inputs = {
+				Background = Input {
+					SourceOp = "Merge1",
+					Source = "Output",
+				},
+				Foreground = Input {
+					SourceOp = "Username",
+					Source = "Output",
+				},
+				PerformDepthMerge = Input { Value = 0, }
+			},
+			ViewInfo = OperatorInfo { Pos = { 165, 115.5 } },
+		},
+		Comment = TextPlus {
+			Inputs = {
+				GlobalOut = Input { Value = 149, },
+				Width = Input { Value = 1080, },
+				Height = Input { Value = 1920, },
+				UseFrameFormatSettings = Input { Value = 1, },
+				["Gamut.SLogVersion"] = Input { Value = FuID { "SLog2" }, },
+				Wrap = Input { Value = 1, },
+				Center = Input { Value = { 0.275, 0.627 }, },
+				LayoutRotation = Input { Value = 1, },
+				TransformRotation = Input { Value = 1, },
+				Red1 = Input { Value = 0.08, },
+				Green1 = Input { Value = 0.08, },
+				Blue1 = Input { Value = 0.09, },
+				Softness1 = Input { Value = 1, },
+				StyledText = Input { Value = "Does this really work?", },
+				Font = Input { Value = "Arial", },
+				Style = Input { Value = "Regular", },
+				Size = Input { Value = 0.034, },
+				VerticalJustificationNew = Input { Value = 3, },
+				HorizontalLeftCenterRight = Input { Value = -1, },
+				HorizontalJustificationNew = Input { Value = 3, }
+			},
+			ViewInfo = OperatorInfo { Pos = { 55, 148.5 } },
+			Version = 1
+		},
+		Merge4 = Merge {
+			CtrlWZoom = false,
+			Inputs = {
+				Background = Input {
+					SourceOp = "Merge3",
+					Source = "Output",
+				},
+				Foreground = Input {
+					SourceOp = "Comment",
+					Source = "Output",
+				},
+				PerformDepthMerge = Input { Value = 0, }
+			},
+			ViewInfo = OperatorInfo { Pos = { 165, 148.5 } },
+		},
+		MediaOut1 = Saver {
+			Inputs = {
+				Index = Input { Value = "0", },
+				Input = Input {
+					SourceOp = "Merge4",
+					Source = "Output",
+				}
+			},
+			ViewInfo = OperatorInfo { Pos = { 440, 49.5 } },
+		}
+	},
+}

@@ -26,6 +26,7 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
 
     def setUp(self):
         defaults.ProductionEditDefaultsBrowserTests.setUp(self)
+        self.catalog["default_settings"]["reasoning_effort"] = "medium"
         take = fixture.ProductionValidationBrowserTests.take(
             self, TAKE_ID, [{"number": 1, "start": 0, "end": 1.5, "coverage": 1}])
         self.payload["job"].update(

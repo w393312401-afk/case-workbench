@@ -360,37 +360,19 @@
 .ai-source-mode .ai-variant-new input{width:72px;height:auto;border:1px solid var(--line);border-radius:7px;padding:6px 8px;background:var(--surface);color:var(--ink)}
 
 /* Reading views keep the current answer visible; request, provenance and raw output stay accessible. */
-.ai-user-request>summary,.ai-task-management-fold>summary,.ai-title-lines-detail>summary{cursor:pointer;font-size:12px;line-height:1.6;color:var(--muted)}
+.ai-user-request>summary,.ai-title-lines-detail>summary{cursor:pointer;font-size:12px;line-height:1.6;color:var(--muted)}
 .ai-user-request>summary{overflow-wrap:anywhere;color:var(--on-accent)}
 .ai-user-request[open]>summary{margin-bottom:8px}
 .ai-user-request:not([open]){padding:8px 12px}
 .ai-user-request:not([open])>summary{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ai-user-request:not([open])>summary::before{content:'▸ ';font-size:11px}
-.ai-task-management-fold{margin:8px 0 14px}
-.ai-task-management-fold>.ai-task-management{margin:8px 0 0}
 .ai-raw-output{font-size:12px;margin:14px 0 0}
 .ai-raw-output pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:440px;overflow:auto;padding:12px;background:var(--surface-alt);color:var(--muted);border:1px solid var(--line);border-radius:8px}
 .ai-title-lines-detail{margin-top:4px}
 .ai-task-progress[hidden]{display:none}
 #content .ai-composer:not(:focus-within):has(#ai-continue-instruction:placeholder-shown){position:static}
 
-/* 2026-10-29 several variants in one answer: overview rows on top, only the picked variant in full below. */
-.ai-variant-board{margin:4px 0 14px}
-.ai-variant-overview-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
-.ai-variant-overview-head h4{margin:0;font-size:14px;display:flex;align-items:baseline;gap:8px}
-.ai-variant-overview-head h4 small{font-size:12px;font-weight:400;color:var(--muted-soft)}
-.ai-variant-overview{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface)}
-.ai-variant-columns,.ai-variant-pick{display:grid;grid-template-columns:36px minmax(70px,.8fr) minmax(90px,1.1fr) minmax(0,2.2fr) 52px 64px;gap:10px;align-items:center;padding:0 12px}
-.ai-variant-columns{font-size:12px;color:var(--muted-soft);background:var(--surface-alt);min-height:30px}
-.ai-variant-columns>span:nth-child(5),.ai-variant-pick>.ai-variant-seconds{text-align:right}
-.ai-variant-pick{min-height:38px;font-size:13px;line-height:1.4;border-top:1px solid var(--line);cursor:pointer}
-.ai-variant-pick>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ai-variant-pick>b{font-weight:600;font-variant-numeric:tabular-nums}
-.ai-variant-pick .ai-variant-first{color:var(--muted)}
-.ai-variant-pick .ai-variant-seconds{color:var(--muted);font-variant-numeric:tabular-nums}
-.ai-variant-pick:hover{background:var(--fill)}
-.ai-variant-pick[aria-selected=true]{background:var(--surface-tint);box-shadow:inset 3px 0 0 var(--accent)}
-.ai-variant-pick:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+/* 2026-10-29 one card per variant; only the picked one shows. */
 .ai-variant-state{display:inline-flex;padding:1px 8px;border-radius:999px;font-size:12px;color:var(--muted-soft);background:var(--fill)}
 .ai-variant-state.is-adopted,.ai-variant-state.is-filmed{color:var(--accent-text);background:var(--surface-tint)}
 .ai-variant-state.is-published,.ai-variant-state.is-reviewed{color:var(--success-ink);background:var(--surface-success)}
@@ -408,34 +390,138 @@
 .ai-variant-pairs p:nth-child(-n+2){border-top:0}
 .ai-variant-pairs.is-blocks p{white-space:pre-wrap;border-top:0}
 .ai-variant-pairs .ai-variant-zh{color:var(--muted)}
-.ai-variant-folds{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
-.ai-variant-fold>summary{cursor:pointer;font-size:12px;padding:3px 10px;border-radius:999px;background:var(--fill);color:var(--muted);list-style:none}
-.ai-variant-fold>summary::-webkit-details-marker{display:none}
-.ai-variant-fold[open]{flex-basis:100%;order:1}
-.ai-variant-fold[open]>summary{color:var(--ink);background:var(--fill-hover);width:fit-content}
 .ai-variant-data{margin:8px 0;font-size:12px}
 .ai-variant-data>summary{cursor:pointer;color:var(--accent-text)}
 @media(max-width:760px){
-  .ai-variant-columns{display:none}
-  .ai-variant-pick{grid-template-columns:32px minmax(0,1fr) auto;row-gap:2px;padding:6px 12px}
-  .ai-variant-pick>span:nth-of-type(2),.ai-variant-pick>span:nth-of-type(4){display:none}
-  .ai-variant-pick .ai-variant-first{grid-column:2/4;grid-row:2}
   .ai-variant-script-labels{display:none}
   .ai-variant-pairs{grid-template-columns:1fr}
   .ai-variant-pairs p{border-top:0;padding:2px 0}
   .ai-variant-pairs .ai-variant-zh{padding-bottom:8px;border-bottom:1px solid var(--line)}
 }
-.ai-variant-fold{min-width:0;max-width:100%}.ai-variant-card,.ai-variant-board{min-width:0;max-width:100%}
-/* Two to four variants switch by chips; a single variant is just its card; the round's pre-publish check stays open below. */
-.ai-variant-chips{display:flex;flex-wrap:wrap;gap:6px}
-.ai-variant-chip{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:4px 10px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--ink);font-size:13px;max-width:100%}
-.ai-variant-chip>span:not([data-variant-status]){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:12em}
-.ai-variant-chip small{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
-.ai-variant-chip:hover{background:var(--fill)}
-.ai-variant-chip[aria-selected=true]{border-color:var(--accent);background:var(--surface-tint);box-shadow:inset 0 0 0 1px var(--accent)}
-.ai-variant-chips+*,.ai-variant-board{margin-bottom:12px}
+.ai-variant-card{min-width:0;max-width:100%}
+/* The round's pre-publish check is one section of the desk. */
 .ai-variant-card-head [data-variant-status]{flex:none}
 .ai-variant-subtitle{margin:-4px 0 8px;font-size:12px;color:var(--muted-soft);line-height:1.6}
 .ai-variant-shared{border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin:0 0 14px;background:var(--surface-alt)}
 .ai-variant-shared h4{margin:0 0 6px;font-size:14px}
 .ai-variant-shared :is(p,ul,ol){margin:4px 0;font-size:13px;line-height:1.7}
+
+/* 2026-11-09 候选稿选稿台：左栏选稿与说明，右栏一次只看一项；任务级控件在标题行，其余来源和记录收进「任务信息」。 */
+.ai-task-tools{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:6px;flex:none}
+.ai-task-tools [hidden],.ai-task-meta[hidden],.ai-task-info[hidden],.ai-desk-rail[hidden],.ai-desk-section[hidden],.ai-variant-panel[hidden],.ai-continue-target[hidden]{display:none}
+.ai-task-pick select{height:30px;padding:0 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit;font-size:13px}
+#ai-archived-tag:empty{display:none}
+.ai-task-info{margin:0 0 12px}
+.ai-task-info-body{padding:8px 0 4px}
+.ai-info-kind{margin:0 0 6px;font-size:12px;color:var(--muted-soft)}
+#content .ai-task-info-body .ai-task-context{flex-direction:column;align-items:flex-start;gap:8px;margin:0}
+#content .ai-task-info-body .ai-task-context>*{order:0}
+#content .ai-task-info-body .workflow-links{margin:8px 0 0;padding:0;border:0;background:none;box-shadow:none}
+#content .ai-task-info-body .workflow-fold,#content .ai-task-info-body .workflow-fold[open]{padding:0}
+#content .ai-task-info-body .workflow-fold>summary,#content .ai-task-info-body .workflow-fold[open]>summary{margin:0;padding:0;border:0}
+#ai-info-attention,.ai-desk-section small.is-warn{color:var(--warm-ink)}
+
+/* One way to fold, wherever task information is shown. */
+#content :is(.ai-task-info,.ai-info-scope details,.ai-round.is-desk :is(.ai-user-request,.ai-round-execution details,.ai-raw-output))>summary{display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;font-size:13px;line-height:1.6;color:var(--muted);text-align:left;white-space:normal;overflow:visible}
+#content :is(.ai-task-info,.ai-info-scope details,.ai-round.is-desk :is(.ai-user-request,.ai-round-execution details,.ai-raw-output))>summary::-webkit-details-marker{display:none}
+#content :is(.ai-task-info,.ai-info-scope details,.ai-round.is-desk :is(.ai-user-request,.ai-round-execution details,.ai-raw-output))>summary::before{content:"";flex:none;width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .15s}
+#content :is(.ai-task-info,.ai-info-scope details,.ai-round.is-desk :is(.ai-user-request,.ai-round-execution details,.ai-raw-output))[open]>summary::before{transform:rotate(45deg)}
+
+.ai-round.is-off{display:none}
+.ai-round-toggle:disabled{cursor:default;opacity:1}
+.ai-round-toggle:disabled svg{display:none}
+.ai-desk-main{min-width:0}
+#content .ai-round.is-desk{padding:14px 16px}
+.ai-round.is-desk>.ai-round-heading{display:none}
+.ai-round.is-desk>.ai-round-body{margin-top:0}
+.ai-round.is-desk .ai-desk{display:grid;grid-template-columns:196px minmax(0,1fr);gap:16px;align-items:start;scroll-margin-top:calc(var(--topbar-h) + 12px)}
+
+/* Each rail entry shows exactly one thing on the right. */
+#content .ai-round.is-desk :is(.ai-output-heading,.ai-read-estimates,.ai-round-messages,.ai-user-request,.ai-round-execution,.ai-desk-info-slot,.task-activity-logs,.ai-raw-output,.ai-title-lines,.ai-desk-notes,.ai-variant-shared,.ai-variant-card){display:none}
+#content .ai-round.is-desk[data-desk-view=variant] .ai-variant-card:not([hidden]),
+#content .ai-round.is-desk[data-desk-view=notes] .ai-desk-notes,
+#content .ai-round.is-desk[data-desk-view=check] .ai-variant-shared,
+#content .ai-round.is-desk[data-desk-view=titles] .ai-title-lines:not([hidden]),
+#content .ai-round.is-desk[data-desk-view=info] :is(.ai-user-request,.ai-round-execution,.ai-desk-info-slot,.task-activity-logs,.ai-raw-output:not([hidden])){display:block}
+#content .ai-round.is-desk .ai-title-lines{margin-top:0}
+#content .ai-round.is-desk .ai-title-lines-detail>summary{display:none}
+#content .ai-round.is-desk .ai-user-request{margin:0 0 8px;max-width:none;width:auto;padding:0;border-radius:0;background:none;color:var(--ink)}
+#content .ai-round.is-desk .ai-user-request p{color:var(--ink);font-size:13px}
+#content .ai-round.is-desk .ai-round-execution{margin:0 0 8px}
+#content .ai-round.is-desk .ai-run-line{text-align:left;margin:0 0 8px}
+#content .ai-round.is-desk .ai-execution-details,#content .ai-round.is-desk .ai-execution-details[open]{margin:0 0 8px;padding:0;border-radius:0;background:none;text-align:left}
+#content .ai-round.is-desk .ai-raw-output{margin:8px 0 0}
+
+.ai-desk-rail{position:sticky;top:calc(var(--topbar-h) + 10px);display:flex;flex-direction:column;gap:8px;min-width:0;max-height:calc(100dvh - var(--topbar-h) - 20px);overflow-y:auto}
+.ai-desk-variants{display:flex;flex-direction:column;gap:2px;min-width:0}
+.ai-desk-sections{display:flex;flex-direction:column;gap:1px;padding-top:8px;border-top:1px solid var(--line)}
+#content .ai-desk-variant,#content .ai-desk-section{min-height:0;border:0;border-radius:8px;background:none;color:var(--ink);font:inherit;text-align:left;cursor:pointer}
+#content .ai-desk-variant{display:block;width:100%;padding:7px 10px;font-size:13px;line-height:1.35}
+.ai-desk-variant-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ai-desk-variant small{display:block;margin-top:2px;font-size:12px;color:var(--muted-soft);font-variant-numeric:tabular-nums}
+.ai-desk-variant .ai-variant-state{padding:0;background:none}
+#content .ai-desk-section{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:5px 10px;font-size:13px;color:var(--muted)}
+.ai-desk-section small{font-size:12px;color:var(--muted-soft);font-variant-numeric:tabular-nums}
+#content :is(.ai-desk-variant,.ai-desk-section):hover{background:var(--fill)}
+#content :is(.ai-desk-variant,.ai-desk-section):focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+#content .ai-round[data-desk-view=variant] .ai-desk-variant[aria-selected=true],#content .ai-desk-section[aria-current=true]{background:var(--surface-tint);color:var(--accent-text)}
+.ai-round[data-desk-view=variant] .ai-desk-variant[aria-selected=true] small{color:var(--accent-text)}
+
+#content .ai-round.is-desk .ai-variant-card,#content .ai-round.is-desk .ai-variant-shared{margin:0}
+.ai-round.is-desk .ai-variant-card-head{position:sticky;top:var(--topbar-h);z-index:3;flex-wrap:wrap;margin:-14px -16px 10px;padding:10px 16px;border-radius:12px 12px 0 0;background:var(--surface)}
+.ai-round.is-desk .ai-variant-card-head h4{flex:0 1 auto}
+.ai-variant-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-left:auto}
+.ai-variant-actions svg{width:14px;height:14px}
+.ai-variant-screen{margin:0 0 8px;font-size:13px;line-height:1.6;color:var(--ink);overflow-wrap:anywhere}
+.ai-variant-screen>span{margin-right:8px;font-size:12px;color:var(--muted-soft)}
+.ai-variant-tabs{display:flex;flex-wrap:wrap;gap:2px;margin:0 0 10px;border-bottom:1px solid var(--line)}
+#content .ai-variant-tab{min-height:0;margin-bottom:-1px;padding:6px 12px;border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:var(--muted);font:inherit;font-size:13px;cursor:pointer}
+#content .ai-variant-tab:hover{color:var(--ink)}
+#content .ai-variant-tab[aria-selected=true]{border-bottom-color:var(--accent);color:var(--accent-text)}
+.ai-variant-panel{min-width:0;max-width:100%;overflow-x:auto}
+.ai-variant-panel .ai-variant-script-labels{margin-top:0}
+
+#content .ai-round.is-desk .ai-composer{position:sticky!important;bottom:12px;margin:12px 0 0;box-shadow:none}
+/* The right column is too narrow for the model line beside the box; it comes back as soon as the box is used, and a problem opens the settings anyway. */
+#content .ai-round.is-desk .ai-composer:not(:focus-within):has(#ai-continue-instruction:placeholder-shown) .ai-global-defaults{display:none}
+#content .ai-continue-target{flex:none;min-height:0;padding:3px 10px;border:1px solid var(--line);border-radius:999px;background:var(--fill);color:var(--muted);font:inherit;font-size:12px;cursor:pointer}
+#content .ai-continue-target[aria-pressed=true]{border-color:var(--accent);background:var(--surface-tint);color:var(--accent-text)}
+
+/* A single draft has nothing to choose between; a narrow screen has no room for a column. Either way the rail becomes rows. */
+.ai-round.is-desk.is-single-draft .ai-desk{display:block}
+.ai-round.is-single-draft .ai-desk-rail{position:static;flex-direction:row;flex-wrap:wrap;align-items:center;max-height:none;overflow:visible;margin-bottom:10px}
+.ai-round.is-single-draft .ai-desk-sections{flex-direction:row;flex-wrap:wrap;gap:2px 4px;padding-top:0;border-top:0}
+#content .ai-round.is-single-draft :is(.ai-desk-variant,.ai-desk-section){width:auto}
+@media(max-width:860px){
+  .ai-round.is-desk .ai-desk{display:block}
+  .ai-desk-rail{position:static;max-height:none;overflow:visible;margin-bottom:10px}
+  .ai-desk-variants{flex-direction:row;overflow-x:auto;padding-bottom:2px}
+  #content .ai-desk-variant{flex:0 0 auto;width:auto;max-width:168px}
+  .ai-desk-sections{flex-direction:row;flex-wrap:wrap;gap:2px 4px}
+  #content .ai-desk-section{width:auto}
+  .ai-round.is-desk .ai-variant-card-head{position:static;margin:0 0 10px;padding:0 0 10px;border-radius:0;background:none}
+  .ai-variant-actions{margin-left:0}
+  .ai-task-tools{justify-content:flex-start}
+}
+@media(max-width:760px){#content .ai-round.is-desk .ai-composer{bottom:calc(var(--mobile-tabs,60px) + 10px)}}
+
+/* 每条稿子做不做：有了采用稿就显示进度，没有时显示选择。 */
+.ai-variant-choice{display:inline-flex;flex:none;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+#content .ai-variant-choice button{min-height:0;padding:3px 10px;border:0;border-radius:0;background:none;color:var(--muted);font:inherit;font-size:12px;cursor:pointer}
+#content .ai-variant-choice button+button{border-left:1px solid var(--line)}
+#content .ai-variant-choice button:hover{color:var(--ink)}
+#content .ai-variant-choice [data-variant-choice=do][aria-pressed=true]{background:var(--surface-tint);color:var(--accent-text)}
+#content .ai-variant-choice [data-variant-choice=skip][aria-pressed=true]{background:var(--fill-hover);color:var(--ink)}
+.ai-variant-card.has-script .ai-variant-choice{display:none}
+.ai-variant-card:not(.has-script) .ai-variant-card-head [data-variant-status]{display:none}
+.ai-variant-state.is-do{color:var(--accent-text);background:var(--surface-tint)}
+.ai-desk-variant .ai-variant-state.is-do{background:none}
+.ai-desk-variant:has(.is-skip) .ai-desk-variant-name{color:var(--muted-soft);text-decoration:line-through}
+/* Orders made from the draft on screen: visible beside it, each with its own delete. */
+.ai-variant-orders{display:flex;flex-direction:column;gap:2px;margin:-2px 0 8px}
+.ai-variant-orders[hidden]{display:none}
+.ai-variant-order{display:flex;align-items:center;gap:8px;min-height:26px;font-size:12px;color:var(--muted-soft)}
+.ai-variant-order a{color:var(--ink);font-weight:500}
+.ai-variant-order small{font-size:12px;color:var(--muted-soft)}
+.ai-variant-order-delete{appearance:none;border:0;background:transparent;padding:2px 6px;border-radius:6px;font:inherit;color:var(--danger-ink);cursor:pointer}
+.ai-variant-order-delete:hover,.ai-variant-order-delete:focus-visible{background:var(--line)}

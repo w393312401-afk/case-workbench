@@ -44,9 +44,12 @@ DEFAULT_CONFIG = load_config(APP_ROOT)
 sys.path.insert(0, str(Path(DEFAULT_CONFIG.get("skill_code_root", DEFAULT_CONFIG["skill_root"])) / "scripts"))
 sys.path.insert(0, str(APP_ROOT / "scripts"))
 sys.path.insert(0, str(APP_ROOT))
-from workbench_notion import NotionUploads, NotionUploadStore
+from workbench_notion import NotionUploads, NotionUploadStore, PhotoNotionStore
 from workbench_previews import PreviewExports
 from photo_carousel import PhotoCarousels, PhotoSetError
+from opportunity_skeletons import OpportunitySkeletons, SkeletonError
+from review_scrape import ReviewScraper, ScrapeError
+import api_keys
 from timeline_preview import TimelinePreviews
 from carousel_render import RenderError
 from case_store import CaseStore, StoreError, add_schema, current_schema, current_sources, encode
@@ -78,6 +81,7 @@ from workbench_creation import CreationWorkbenchMixin
 from workbench_tk_candidates import TKCandidateWorkbenchMixin
 from production_store import ProductionStore
 from elevenlabs_client import ElevenLabsClient, VoiceError
+from workbench_market_version import MarketVersionMixin
 from workbench_production import ProductionWorkbenchMixin
 from resolve_bridge import ResolveBridge
 import edit_transfer
@@ -89,7 +93,7 @@ from workbench_retro_draft import RetroDraftWorkbenchMixin
 from workbench_replica import ReplicaWorkbenchMixin
 from codex_edit_bridge import CodexEditBridge
 from plugin_codex import PluginCodex, PluginCodexError
-from data_transfer import DataTransfer, TransferError, pick_directory
+from data_transfer import DataTransfer, TransferError, atomic_json, pick_directory
 from data_backup import BackupError, MAX_BYTES
 from data_lease import ServerLease
 from ai_resolution import ai_task_resolutions
@@ -413,7 +417,7 @@ def job_fill_result(job, task):
             "markdown": variant_script(output, chosen["index"]), "changed": changed}
 
 
-class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, FeedbackWorkbenchMixin, ContentWorkbenchMixin, CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, OrderDeleteMixin, VideoPublishMixin, PublicationMatchMixin, RetroDraftWorkbenchMixin, ReplicaWorkbenchMixin):
+class Workbench(MarketVersionMixin, ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, FeedbackWorkbenchMixin, ContentWorkbenchMixin, CreationWorkbenchMixin, ProductionWorkbenchMixin, EditingWorkbenchMixin, OrderDeleteMixin, VideoPublishMixin, PublicationMatchMixin, RetroDraftWorkbenchMixin, ReplicaWorkbenchMixin):
     def __init__(self, skill_root, runtime_root, allow_open=True, ai_bridge=None, performance_sources=(), skill_code_root=None, legacy_runtime_roots=(), notion_settings=None, tiktok_download_proxy=None):
         self.store = CachedCaseStore(skill_root)
         self.runtime = Path(runtime_root).resolve()
@@ -454,6 +458,7 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         self.auto_breakdown = AutoBreakdown(self, analyzer=CaseBreakdownRunner(), download_proxy=tiktok_download_proxy)
         # Cases left at 「视频已关联，拆解待接入」 (or cut off by the restart) are broken down without a click.
         resume = threading.Timer(8, self.auto_breakdown.resume_pending)
+        self.auto_breakdown.resume_timer = resume
         resume.daemon = True
         resume.start()
         self.voices = ElevenLabsClient()
@@ -471,6 +476,10 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         self.notion_uploads = NotionUploads(self, notion_settings, bridge=None)
         self.preview_exports = PreviewExports(self)
         self.photo_sets = PhotoCarousels(self)
+        self.opportunity_skeletons = OpportunitySkeletons(self, self.reviews.root)
+        self.review_scraper = ReviewScraper(self)
+        self.reviews.avatar_downloads = True
+        self.reviews.refresh_avatars()  # fetch avatars whose links still work before they expire
         self.video_previews = TimelinePreviews(self)
         self.edit_skill_dir = code_root.parent / "davinci-product-video-editing"
         self.ledger_dir = self.runtime / "davinci-ledger"
@@ -498,6 +507,7 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         ProductionStore(runtime).read()
         VideoPublicationStore(Path(runtime) / "production").validate()
         NotionUploadStore(Path(runtime) / "production").read()
+        PhotoNotionStore(Path(runtime) / "production").read()
 
     def ensure_data_idle(self):
         with self.lock:
@@ -581,6 +591,21 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
         details = getattr(claude, "login_details", None)
         return details() if callable(details) else {"attempt_id": None, "pending": False, "url": None,
                                                    "expires_at": None, "callback_submitted": False}
+
+    def check_api_key(self, body):
+        """Ask the service whether the saved key works; answers with the account it belongs to, never the key."""
+        name = str((body or {}).get("name") or "")
+        try:
+            if name == "APIFY_TOKEN":
+                me = self.review_scraper.client.me()
+                return {"name": name, "ok": True, "detail": f"Apify 账号 {me.get('username') or '已连接'}"}
+            if name == "ELEVENLABS_API_KEY":
+                plan = self.voices.subscription()
+                used, limit = plan.get("character_count"), plan.get("character_limit")
+                return {"name": name, "ok": True, "detail": f"ElevenLabs {plan.get('tier') or '已连接'}" + (f"，本期已用 {used}/{limit} 字符" if limit else "")}
+        except (ScrapeError, VoiceError) as error:
+            return {"name": name, "ok": False, "detail": str(error)}
+        raise api_keys.KeyError_(400, "不认识的密钥。")
 
     def claude_login_state(self):
         claude = getattr(self.ai.bridge, "claude", None)
@@ -957,6 +982,7 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
     def _ai_round_finished(self, task_id):
         self._candidate_round_finished(task_id)
         self._job_fill_finished(task_id)
+        self._uk_version_round_finished(task_id)
         settle_ai_activity(self)  # a rerun or refill may settle an earlier failure in the task panel
 
     def fill_production_job(self, identifier, body):
@@ -1907,6 +1933,14 @@ class Workbench(ReviewExperiencesWorkbenchMixin, TKCandidateWorkbenchMixin, Feed
             if not source:
                 raise ApiError(404, "这条案例没有关联旧库来源。")
             path = Path(source["file_path"])
+        elif target == "preview":
+            # The HD file behind a timeline's video preview; resolved server-side, never a browser-supplied path.
+            job_id, uid = str(body.get("job_id") or ""), str(body.get("timeline_uid") or "")
+            if not re.fullmatch(r"PRD-[0-9a-f]{12}", job_id) or not uid:
+                raise ApiError(400, "缺少制作单或时间线。")
+            path = self.video_previews.export_file(job_id, uid)
+            if not path:
+                raise ApiError(404, "这条时间线还没有导出的视频。")
         else:
             raise ApiError(400, "未知文件位置。")
         if not path.exists():
@@ -1932,7 +1966,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # Page polling hits these every few seconds; successful polls would bury
     # real requests and errors in server.log.
-    QUIET_POLLS = ("/api/state", "/api/ai/tasks", "/api/ai/status", "/api/ai/claude/login", "/api/activity")
+    QUIET_POLLS = ("/api/state", "/api/ai/tasks", "/api/ai/status", "/api/ai/claude/login", "/api/activity", "/api/service/ready")
 
     def log_request(self, code="-", size="-"):
         path = urlparse(getattr(self, "path", "") or "").path
@@ -1968,8 +2002,21 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(content)
 
+    def request_port(self):
+        """Only a local gateway holding the private host credential may forward a browser's origin."""
+        if not getattr(self.server, "task_host", False):
+            return self.server.server_port
+        supplied = self.headers.get_all("X-Workbench-Gateway", [])
+        if (self.client_address[0] not in {"127.0.0.1", "::1"} or len(supplied) != 1
+                or not secrets.compare_digest(supplied[0], self.server.proxy_secret)):
+            raise ApiError(403, "任务服务只接受本机工作台入口的连接。")
+        forwarded = self.headers.get_all("X-Workbench-Forwarded", [])
+        if forwarded not in ([], ["1"]):
+            raise ApiError(403, "工作台转发信息无效。")
+        return self.server.public_port if forwarded else self.server.server_port
+
     def guard(self, write=False):
-        port = self.server.server_port
+        port = self.request_port()
         hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
         if self.headers.get("Host") not in hosts:
             raise ApiError(403, "仅允许通过本机地址访问。")
@@ -1990,7 +2037,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def extension_guard(self):
         """The TK 看板 extension posts from its own origin with the pairing key shown in settings."""
-        port = self.server.server_port
+        port = self.request_port()
         if self.headers.get("Host") not in {f"127.0.0.1:{port}", f"localhost:{port}"}:
             raise ApiError(403, "仅允许通过本机地址访问。")
         if not (self.headers.get("Origin") or "").startswith("chrome-extension://"):
@@ -2017,6 +2064,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.guard(self.command == "POST")
             query = parse_qs(parsed.query)
+            if path.startswith("/api/keys") and (self.client_address[0] not in {"127.0.0.1", "::1"}
+                    or any(self.headers.get(name) for name in ("Forwarded", "X-Forwarded-For", "CF-Connecting-IP"))):
+                raise ApiError(403, "密钥只能在运行工作台的电脑上查看和设置。")
             if path == "/api/remote-account" and (self.client_address[0] not in {"127.0.0.1", "::1"}
                     or any(self.headers.get(name) for name in ("Forwarded", "X-Forwarded-For", "CF-Connecting-IP"))):
                 raise ApiError(403, "账号密码只能在运行工作台的电脑上设置。")
@@ -2056,14 +2106,14 @@ class Handler(BaseHTTPRequestHandler):
                     with self.app.lock:
                         return self.output(200, RemoteAccounts(self.app.runtime).metadata())
                 if path == "/api/activity":
-                    accepted = {"after", "limit", "before", "product", "filter", "owner_id", "source_id", "kind", "q", "group", "since"}
+                    accepted = {"after", "limit", "before", "product", "filter", "owner_id", "source_id", "kind", "q", "group", "since", "until"}
                     activity_query = parse_qs(parsed.query, keep_blank_values=True)
                     if activity_query.keys() - accepted or any(len(values) != 1 for values in activity_query.values()):
                         raise ApiError(400, "运行记录筛选参数无效。")
                     refresh_activity_projection_briefly(self.app)
                     feed = self.app.activity.feed(**{key: values[0] for key, values in activity_query.items()})
-                    try:  # The orders' current state is a reading aid; the run feed stands without it.
-                        feed["owner_states"] = self.app.order_states({row.get("owner_id") for row in feed.get("items", [])})
+                    try:  # This reading aid must not queue the feed behind a full content rebuild.
+                        feed["owner_states"] = self.app.order_states({row.get("owner_id") for row in feed.get("items", [])}, skip_busy=True)
                     except Exception:
                         feed["owner_states"] = {}
                     return self.output(200, feed)
@@ -2076,10 +2126,9 @@ class Handler(BaseHTTPRequestHandler):
                 if download:
                     return self.file(self.app.data_transfer.download(download.group(1)), download=True)
                 if path == "/api/service/status":
-                    return self.output(200, {"app": "video-case-workbench", "pid": os.getpid(),
-                        "token": self.app.token, "shutdown_supported": True, "shutting_down": self.server.shutting_down,
-                        "code_stale": code_signature() > CODE_AT_START,
-                        "paths": {"records": str(self.app.store.root / "cases"), "library": str(self.app.library)}})
+                    return self.output(200, self.server.service_status())
+                if path == "/api/service/ready":
+                    return self.output(200, self.server.restart_readiness())
                 if path == "/api/settings/paths":
                     # Settings can be opened directly, before the case catalogue has loaded.
                     return self.output(200, {"paths": {
@@ -2165,12 +2214,29 @@ class Handler(BaseHTTPRequestHandler):
                             raise
                         portable = {"task": None, "preview": None}
                     return self.output(200, {**portable, **detail})
+                if path == "/api/needs-you":
+                    return self.output(200, self.app.needs_you((query.get("product") or [""])[0]))
+                if path == "/api/photo-overview":
+                    return self.output(200, self.app.carousel_overview((query.get("product") or [""])[0]))
                 photo_set = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/photo-set", path)
                 if photo_set:
                     values = query.get("timeline", [])
                     if len(values) != 1:
                         raise ApiError(400, "请选择时间线。")
-                    return self.output(200, self.app.photo_sets.detail(photo_set[1], values[0]))
+                    detail = self.app.photo_sets.detail(photo_set[1], values[0])
+                    if detail.get("exists"):
+                        # Which versions are already on the Notion calendar, for the 成片与发布 status line.
+                        try:
+                            detail["notion"] = self.app.notion_uploads.photo_summary({detail["id"]}).get(detail["id"], {})
+                        except Exception:
+                            detail["notion"] = {}
+                    return self.output(200, detail)
+                photo_notion = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/notion", path)
+                if photo_notion:
+                    values = query.get("work", [""])
+                    if set(query) - {"work"} or len(values) != 1:
+                        raise ApiError(400, "请选择要上传的图文版本。")
+                    return self.output(200, self.app.notion_uploads.photo_detail(photo_notion[1], values[0]))
                 photo_frames = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/frames", path)
                 if photo_frames:
                     return self.output(200, self.app.photo_sets.frames(photo_frames[1]))
@@ -2295,7 +2361,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.performance.summary(shop))
                 if path == "/api/public-stats/link":
                     return self.output(200, {"key": self.app.public_stats.link_key(),
-                                             "address": f"http://127.0.0.1:{self.server.server_port}"})
+                                             "address": f"http://127.0.0.1:{getattr(self.server, 'public_port', self.server.server_port)}"})
                 if path == "/api/performance/analytics":
                     return self.output(200, self.app.performance.analytics(shop))
                 if path == "/api/performance/creators":
@@ -2350,6 +2416,20 @@ class Handler(BaseHTTPRequestHandler):
                     if comments:
                         video["review_comments"], video["review_open"] = comments["comments"], comments["open_questions"]
                     return self.output(200, {"video": self.app.annotate_review_status([video])[0]})
+                if path == "/api/reviews/opportunities/skeletons":
+                    return self.output(200, self.app.opportunity_skeletons.states(query.get("product", [""])[0]))
+                if path == "/api/production/comment-template":
+                    return self.output(200, self.app.comment_template_status())
+                if path == "/api/keys":
+                    return self.output(200, api_keys.status())
+                avatar = re.fullmatch(r"/api/reviews/avatar/([0-9a-f]{20})", path)
+                if avatar:
+                    found = self.app.reviews.avatars.file(avatar.group(1))
+                    if not found:
+                        raise ApiError(404, "没有这个头像。")
+                    return self.file(found, cache=True)
+                if path == "/api/reviews/scrape":
+                    return self.output(200, self.app.review_scraper.overview(query.get("product", [None])[0]))
                 if path == "/api/reviews/opportunities":
                     from review_opportunities import opportunity_catalog
                     try:
@@ -2439,7 +2519,7 @@ class Handler(BaseHTTPRequestHandler):
                 files.update({"/review-experiences.js": "review-experiences.js", "/review-experiences.css": "review-experiences.css"})
                 files.update({"/notion-upload.js": "notion-upload.js", "/remote-session.js": "remote-session.js", "/remote-session.css": "remote-session.css",
                               "/tk-candidates.js": "tk-candidates.js", "/tk-candidates.css": "tk-candidates.css",
-                              "/buttons.css": "buttons.css", "/notion-upload.js": "notion-upload.js", "/photo-carousel.js": "photo-carousel.js", "/photo-carousel.css": "photo-carousel.css"})
+                              "/buttons.css": "buttons.css", "/notion-upload.js": "notion-upload.js", "/photo-carousel.js": "photo-carousel.js", "/photo-overview.js": "photo-overview.js","/photo-carousel.css": "photo-carousel.css"})
                 if path in files:
                     return self.file(APP_ROOT / "static" / files[path], cache=True, immutable=path != "/" and "v" in query)
                 if path in {"/activity.js", "/activity.css"}:
@@ -2551,6 +2631,8 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/service/restart":
                     if body:
                         raise ApiError(400, "重启服务只接受空对象。")
+                    if self.server.task_host:
+                        raise ApiError(409, "请从工作台入口重新启动网页服务，后台任务会继续运行。")
                     self.server.check_restart_ready()
                     creation = (subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
                     # The launcher asks this process to shut down through the same checks, starts the new one and exits.
@@ -2560,6 +2642,8 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/service/shutdown":
                     if body:
                         raise ApiError(400, "关闭服务只接受空对象。")
+                    if self.server.task_host and self.headers.get("X-Workbench-Forwarded"):
+                        raise ApiError(403, "任务服务只能由本机工作台入口在空闲时更新。")
                     self.server.prepare_shutdown()
                     self.close_connection = True
                     try:
@@ -2635,7 +2719,7 @@ class Handler(BaseHTTPRequestHandler):
                     identifier, edit_id, action = edit_action.groups()
                     handler = {"approval": self.app.approve_edit, "baseline": self.app.adopt_edit_baseline}[action]
                     return self.output(200, handler(identifier, edit_id, body))
-                video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication(/verify|/calendar|/pin|/undo-auto|/edit|/dismiss|/title-zh)?", path)
+                video_publication = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/publication(/verify|/calendar|/pin|/undo-auto|/edit|/dismiss|/title-zh|/comment-zh)?", path)
                 preview = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/preview(/portable)?", path)
                 if preview:
                     manager = self.app.preview_exports if preview[2] or "request_id" in body else self.app.video_previews
@@ -2643,6 +2727,16 @@ class Handler(BaseHTTPRequestHandler):
                 photo_import = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/photo-set/from-resolve", path)
                 if photo_import:
                     return self.output(202, self.app.photo_sets.import_resolve(photo_import[1], body))
+                photo_decide = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/photo-decision", path)
+                if photo_decide:
+                    if not isinstance(body, dict) or not isinstance(body.get("timeline"), str):
+                        raise ApiError(400, "请选择时间线。")
+                    return self.output(200, self.app.photo_sets.decide(photo_decide[1], body["timeline"], {k: v for k, v in body.items() if k != "timeline"}))
+                photo_delete = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/photo-delete", path)
+                if photo_delete:
+                    if not isinstance(body, dict) or not isinstance(body.get("timeline"), str):
+                        raise ApiError(400, "请选择时间线。")
+                    return self.output(200, self.app.photo_sets.delete(photo_delete[1], body["timeline"], {k: v for k, v in body.items() if k != "timeline"}))
                 photo_create = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/photo-set", path)
                 if photo_create:
                     return self.output(200, self.app.photo_sets.create(photo_create[1], body))
@@ -2676,6 +2770,9 @@ class Handler(BaseHTTPRequestHandler):
                 notion_upload = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/notion", path)
                 if notion_upload:
                     return self.output(202, self.app.notion_uploads.start(notion_upload[1], body))
+                photo_notion = re.fullmatch(r"/api/photo-sets/(PHS-[0-9a-f]{12})/notion", path)
+                if photo_notion:
+                    return self.output(202, self.app.notion_uploads.photo_start(photo_notion[1], body))
                 if path == "/api/notion/connect":
                     if body:
                         raise ApiError(400, "Notion 连接只接受空对象。")
@@ -2684,7 +2781,7 @@ class Handler(BaseHTTPRequestHandler):
                     handler = {"/verify": self.app.verify_video_publication, "/calendar": self.app.set_video_calendar_status, "/pin": self.app.set_video_pin_status,
                                "/undo-auto": self.app.undo_auto_video_publication, "/edit": self.app.edit_video_publication,
                                "/dismiss": self.app.dismiss_publication_candidate,
-                               "/title-zh": self.app.translate_video_titles}.get(video_publication[2], self.app.save_video_publication)
+                               "/title-zh": self.app.translate_video_titles, "/comment-zh": self.app.translate_sticker_comment}.get(video_publication[2], self.app.save_video_publication)
                     return self.output(200, handler(video_publication[1], body))
                 timeline_cancel = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/timeline/(cancel|abandon)", path)
                 if timeline_cancel:
@@ -2697,12 +2794,12 @@ class Handler(BaseHTTPRequestHandler):
                     handler = {"archive": self.app.archive_timeline, "delete": self.app.delete_timeline,
                                "task-status": self.app.set_timeline_task_status}[action]
                     return self.output(200, handler(identifier, body))
-                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|fill|archive|delete|timeline|open|subtitles|hook|campaign|home-timeline|edit|handoff|recover|completion)", path)
+                job_action = re.fullmatch(r"/api/production/jobs/(PRD-[0-9a-f]{12})/(takes|select|lines|fill|uk-version-confirm|uk-version|archive|delete|candidate-delete|timeline|open|subtitles|hook|comment-sticker|campaign|home-timeline|edit|handoff|recover|completion)", path)
                 if job_action:
                     identifier, action = job_action.groups()
                     handler = {"takes": self.app.generate_take, "select": self.app.select_take,
-                               "lines": self.app.save_job_lines, "fill": self.app.fill_production_job, "archive": self.app.archive_job, "delete": self.app.delete_job_order,
-                               "timeline": self.app.build_timeline, "open": self.app.open_timeline, "subtitles": self.app.check_timeline_subtitles, "hook": self.app.add_timeline_hook, "campaign": self.app.set_timeline_campaign, "home-timeline": self.app.import_home_timeline,
+                               "lines": self.app.save_job_lines, "fill": self.app.fill_production_job, "uk-version": self.app.start_uk_version, "uk-version-confirm": self.app.confirm_uk_version, "archive": self.app.archive_job, "delete": self.app.delete_job_order, "candidate-delete": self.app.delete_candidate_order,
+                               "timeline": self.app.build_timeline, "open": self.app.open_timeline, "subtitles": self.app.check_timeline_subtitles, "hook": self.app.add_timeline_hook, "comment-sticker": self.app.add_timeline_comment_sticker, "campaign": self.app.set_timeline_campaign, "home-timeline": self.app.import_home_timeline,
                                "edit": self.app.start_edit, "handoff": self.app.edit_handoff,
                                "recover": self.app.recover_production_operation, "completion": self.app.complete_production_job}[action]
                     return self.output(200, handler(identifier, body))
@@ -2737,6 +2834,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app.claude_login_action("cancel", body))
                 if path in {"/api/ai/claude/key", "/api/ai/claude/key/delete", "/api/ai/claude/install"}:
                     return self.output(200, self.app.claude_settings(path.rsplit("/", 1)[-1], body))
+                ai_choice = re.fullmatch(r"/api/ai/tasks/(AIT-[0-9a-f]{12})/variant-choice", path)
+                if ai_choice:
+                    return self.output(200, {"task": self.app.save_variant_choice(ai_choice.group(1), body)})
                 ai_action = re.fullmatch(r"/api/ai/tasks/(AIT-[0-9a-f]{12})/(continue|cancel)", path)
                 if ai_action:
                     identifier, action = ai_action.groups()
@@ -2758,6 +2858,22 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(200, self.app._performance_registration_result(result))
                 if path == "/api/performance/public-export":
                     return self.output(200, self.app.export_public_views(body))
+                if path == "/api/reviews/opportunities/skeletons":
+                    return self.output(202, self.app.opportunity_skeletons.start(body))
+                if path == "/api/reviews/scrape":
+                    return self.output(202, self.app.review_scraper.start(body))
+                if path == "/api/keys":
+                    return self.output(200, api_keys.save(body))
+                if path == "/api/production/comment-template/sync":
+                    return self.output(200, self.app.sync_comment_template(body))
+                if path == "/api/keys/remove":
+                    return self.output(200, api_keys.remove(body))
+                if path == "/api/keys/check":
+                    return self.output(200, self.app.check_api_key(body))
+                if path == "/api/reviews/scrape/stop":
+                    return self.output(200, self.app.review_scraper.stop(body))
+                if path == "/api/reviews/opportunities/skeletons/stop":
+                    return self.output(200, self.app.opportunity_skeletons.stop(body))
                 if path == "/api/reviews/sync":
                     if body:
                         raise ApiError(400, "同步只接受空对象。")
@@ -2847,6 +2963,12 @@ class Handler(BaseHTTPRequestHandler):
         except AITaskError as exc:
             return self.output(exc.status, {"error": str(exc)})
         except PhotoSetError as exc:
+            return self.output(exc.status, {"error": str(exc)})
+        except SkeletonError as exc:
+            return self.output(exc.status, {"error": str(exc)})
+        except ScrapeError as exc:
+            return self.output(exc.status, {"error": str(exc)})
+        except api_keys.KeyError_ as exc:
             return self.output(exc.status, {"error": str(exc)})
         except RenderError as exc:
             return self.output(400, {"error": str(exc)})
@@ -3075,7 +3197,65 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
         self._shutting_down = False
         self.data_maintenance = False
         self._request_context = threading.local()
+        self.task_host = False
         super().__init__(*args, **kwargs)
+
+    def configure_task_host(self, runtime, public_port):
+        if not isinstance(public_port, int) or not 1 <= public_port <= 65535:
+            raise ValueError("工作台入口端口无效。")
+        self.task_host = True
+        self.public_port = public_port
+        self.launch_id = secrets.token_hex(24)
+        self.proxy_secret = secrets.token_urlsafe(48)
+        self.host_manifest_path = Path(runtime).resolve() / "service" / "task-host.json"
+
+    def publish_task_host(self):
+        if not self.task_host:
+            return
+        folder = self.host_manifest_path.parent
+        if folder.is_symlink() or (folder.exists() and bool(getattr(folder.lstat(), "st_file_attributes", 0) & 0x400)):
+            raise RuntimeError("任务服务控制目录不能是链接。")
+        if self.host_manifest_path.is_symlink():
+            raise RuntimeError("任务服务控制文件不能是链接。")
+        atomic_json(self.host_manifest_path, {
+            "app": "video-case-workbench", "role": "task-host", "protocol_version": 1,
+            "pid": os.getpid(), "port": self.server_port, "public_port": self.public_port,
+            "launch_id": self.launch_id, "proxy_secret": self.proxy_secret,
+            "paths": {"records": str(self.app.store.root / "cases"), "library": str(self.app.library),
+                      "runtime": str(self.app.runtime), "code_root": str(APP_ROOT)}})
+        if os.name != "nt":
+            self.host_manifest_path.chmod(0o600)
+
+    def remove_task_host_manifest(self):
+        if not self.task_host:
+            return
+        try:
+            current = json.loads(self.host_manifest_path.read_text(encoding="utf-8"))
+            if current.get("launch_id") == self.launch_id and current.get("pid") == os.getpid():
+                self.host_manifest_path.unlink()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def service_status(self):
+        result = {"app": "video-case-workbench", "pid": os.getpid(),
+                  "token": self.app.token, "shutdown_supported": True, "shutting_down": self.shutting_down,
+                  "code_stale": code_signature() > CODE_AT_START,
+                  "paths": {"records": str(self.app.store.root / "cases"), "library": str(self.app.library)}}
+        if self.task_host:
+            result.update(role="task-host", protocol_version=1, launch_id=self.launch_id,
+                          public_port=self.public_port, port=self.server_port)
+        return result
+
+    def restart_readiness(self):
+        reason = ""
+        try:
+            self.check_restart_ready()
+        except ApiError as error:
+            reason = str(error)
+        result = {"ready": not bool(reason), "reason": reason, "code_stale": code_signature() > CODE_AT_START}
+        if self.task_host:
+            result.update(role="task-host", launch_id=self.launch_id)
+        return result
 
     @property
     def shutting_down(self):
@@ -3140,6 +3320,12 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
 
     def _activity_blocker(self):
         """Why the service must not stop right now, or None. Never interrupts: running work is only reported."""
+        for name, message in (("opportunity_skeletons", "选题骨架仍在生成，请完成后再更新任务服务。"),
+                              ("auto_breakdown", "案例下载或拆解仍在运行，请完成后再更新任务服务。"),
+                              ("review_scraper", "评论抓取或同步仍在运行，请完成后再更新任务服务。")):
+            worker = getattr(self.app, name, None)
+            if worker is not None and callable(getattr(worker, "busy", None)) and worker.busy():
+                return message
         if getattr(self.app, "preview_exports", None) and self.app.preview_exports.busy():
             return "视频预览正在导出，请完成后再重新启动。"
         if getattr(self.app, "video_previews", None) and self.app.video_previews.busy():
@@ -3152,6 +3338,9 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
         if any(task.get("status") in {"queued", "running", "stopping"}
                or task.get("busy") or task.get("stopping") for task in tasks):
             return "AI 协作仍在运行或停止中，请完成后再重新启动。"
+        background_busy = getattr(self.app.ai, "background_busy", None)
+        if callable(background_busy) and background_busy():
+            return "AI 结果仍在保存或整理，请完成后再更新任务服务。"
         if self.app.edit_running():
             return "AI 剪辑仍在运行，请等它结束或先停止，再重新启动。"
         if getattr(self.app, "_voicing_jobs", set()):
@@ -3208,16 +3397,34 @@ class WorkbenchHTTPServer(ThreadingHTTPServer):
             if callable(close):
                 close()
         super().server_close()
+        self.remove_task_host_manifest()
         if getattr(self, "data_lease", None):
             self.data_lease.close()
 
 
-def make_server(skill_root, runtime_root, port=8767, allow_open=True, ai_bridge=None, performance_sources=None):
-    server = WorkbenchHTTPServer(("127.0.0.1", port), Handler)
+def make_server(skill_root, runtime_root, port=8767, allow_open=True, ai_bridge=None, performance_sources=None,
+                *, task_host=False, public_port=None):
+    host_public_port = DEFAULT_CONFIG["port"] if public_port is None else public_port
+    if task_host:
+        if not isinstance(host_public_port, int) or not 1 <= host_public_port <= 65535:
+            raise ValueError("工作台入口端口无效。")
+        if port and port == host_public_port:
+            raise ValueError("后台任务服务端口不能与网页入口相同。")
+    for _ in range(8):
+        server = WorkbenchHTTPServer(("127.0.0.1", port), Handler)
+        if not task_host or server.server_port != host_public_port:
+            break
+        # An OS-selected port may be the configured public port. Release it before any
+        # Workbench or data lease exists, then choose another private listener.
+        server.server_close()
+    else:
+        raise RuntimeError("暂未选到独立的后台任务端口，请稍后重新打开工作台。")
     server.daemon_threads = True
     if performance_sources is None:
         performance_sources = DEFAULT_CONFIG.get("performance_sources", [])
     try:
+        if task_host:
+            server.configure_task_host(runtime_root, host_public_port)
         server.data_lease = ServerLease(runtime_root)
         if not server.data_lease.acquire():
             raise RuntimeError("此工作台正在运行或正在离线备份，请稍后重新打开。")
@@ -3232,7 +3439,8 @@ def make_server(skill_root, runtime_root, port=8767, allow_open=True, ai_bridge=
                                tiktok_download_proxy=(DEFAULT_CONFIG.get("tiktok_download_proxy")
                                                       if Path(runtime_root).resolve() == Path(DEFAULT_CONFIG["runtime_root"]).resolve() else None))
         server.app.data_transfer.maintenance = server.data_operation
-        server.app.data_transfer.start(server.server_port)
+        server.app.data_transfer.start(server.public_port if task_host else server.server_port)
+        server.publish_task_host()
     except Exception:
         server.server_close()
         raise
@@ -3245,8 +3453,11 @@ def main():
     parser.add_argument("--runtime-root", default=DEFAULT_CONFIG["runtime_root"])
     parser.add_argument("--port", type=int, default=DEFAULT_CONFIG["port"])
     parser.add_argument("--no-open", action="store_true")
+    parser.add_argument("--task-host", action="store_true")
+    parser.add_argument("--public-port", type=int, default=DEFAULT_CONFIG["port"])
     args = parser.parse_args()
-    server = make_server(args.skill_root, args.runtime_root, args.port, not args.no_open)
+    server = make_server(args.skill_root, args.runtime_root, 0 if args.task_host else args.port, not args.no_open,
+                         task_host=args.task_host, public_port=args.public_port)
     print(f"Case workbench: http://127.0.0.1:{server.server_port}", flush=True)
     try:
         server.serve_forever(poll_interval=.05)  # shutdown() waits for one poll; the default 0.5s delayed every restart

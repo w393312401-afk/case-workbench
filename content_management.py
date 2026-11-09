@@ -12,6 +12,7 @@ import threading
 from urllib.parse import quote, urlencode
 
 from ai_resolution import ai_task_resolutions
+from ai_tasks import made_variants, variant_progress
 from creation_store import CreationError, CreationStore
 from direction_store import fingerprint, now, product_key
 from elevenlabs_client import VoiceError
@@ -264,13 +265,17 @@ def _bound_posts(row, kind):
 
 
 def _all_calendar_marked(identifier, row, overrides):
-    """Whether every current timeline of an order is marked uploaded to the publish calendar. The newest keeps the
-    order's own entry; each older one has its own (video-publication.js builds the same IDs)."""
+    """Whether every current timeline of an order is uploaded to the publish calendar. The newest keeps the
+    order's own mark; each older one has its own (video-publication.js builds the same IDs). A timeline whose
+    Notion upload completed also counts: its mark is lost when a newer timeline later overwrites the order's own."""
     if not isinstance(overrides, dict):
         return False
     lines = list(reversed(active_timelines(row))) if isinstance(row.get("timelines"), list) else []
-    keys = [identifier] + [f"{identifier}_tl_{re.sub(r'[^A-Za-z0-9-]', '', str(line.get('unique_id') or ''))[:120]}" for line in lines[1:]]
-    return all(isinstance(overrides.get(key), dict) and overrides[key].get("calendar_uploaded") is True for key in keys)
+    uploaded = set(row.get("notion_uploaded") or ())
+    keys = [(identifier, lines[0].get("unique_id") if lines else None)] + [
+        (f"{identifier}_tl_{re.sub(r'[^A-Za-z0-9-]', '', str(line.get('unique_id') or ''))[:120]}", line.get("unique_id")) for line in lines[1:]]
+    return all((isinstance(overrides.get(key), dict) and overrides[key].get("calendar_uploaded") is True) or
+               (uid and uid in uploaded) for key, uid in keys)
 
 
 def _calendar_state(posted, own, kind):
@@ -391,6 +396,7 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
         rows.sort(key=lambda row: (row.get("version", 0), row.get("created_at", ""), row["id"]))
     used_script_ids = {row.get("script_id") for row in job_rows if row.get("script_id")}
     adopted_pairs = {_provenance(row) for row in script_rows if _provenance(row)}
+    made_drafts = made_variants(script_rows)
     result = []
 
     def make(identifier, row, kind, related_scripts, related_tasks, production_ids, state):
@@ -526,7 +532,7 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
         if not task_id or row.get("action") == "retrospective":
             continue
         status, disposition = row.get("status"), row.get("management_state", "pending_selection")
-        resolution = settled.get(task_id) if disposition not in {"needs_revision", "adopted", "abandoned"} else None
+        resolution = settled.get(task_id) if disposition not in {"needs_revision", "adopted", "abandoned", "finished"} else None
         writing = (row.get("action") or "variants") == "variants"
         result_kind = "审稿" if row.get("action") == "review" else "协作"
         rounds = row.get("rounds") or []
@@ -534,7 +540,9 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
                         row.get("latest_round_id") or row.get("round_id"))
         linked = any(pair[0] == task_id for pair in adopted_pairs)
         new_candidate = bool(latest_round and (task_id, latest_round) not in adopted_pairs)
-        if linked and not row.get("archived") and disposition != "needs_revision" and status not in {"running", "queued", "failed", "interrupted"} and not new_candidate:
+        progress = variant_progress(row, latest_round, made_drafts.get((task_id, latest_round), set())) if writing else None
+        owed = progress["to_make"] if progress and disposition in {"pending_selection", "adopted"} else 0
+        if linked and not row.get("archived") and disposition not in {"needs_revision", "finished"} and status not in {"running", "queued", "failed", "interrupted"} and not new_candidate and not owed:
             continue
         if not writing:
             if status in {"running", "queued"}:
@@ -549,6 +557,10 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
                 state = (status or "unknown", {"failed": f"{result_kind}失败", "interrupted": f"{result_kind}已中断", "cancelled": f"{result_kind}已停止"}.get(status, "待处理"), f"查看并继续{result_kind}", "", True, False)
         elif status in {"running", "queued"}:
             state = (status, "生成中" if status == "running" else "排队中", "查看生成进度", "", False, False)
+        elif disposition == "finished":
+            state = ("finished", "已完结", "查看协作记录", "", False, True)
+        elif owed:
+            state = ("pending_selection", f"还有 {owed} 条要做", "去开始制作", "", True, False)
         elif disposition in {"adopted", "abandoned"}:
             state = (disposition, "已采纳" if disposition == "adopted" else "已放弃", "查看协作记录", "", False, True)
         elif disposition == "needs_revision":
@@ -560,7 +572,7 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
             # A fill's result is already on its 制作单; the candidate can still be adopted from the task page.
             state = ("written_back", "已写回制作单", "查看协作记录", "", False, True)
         elif status == "completed":
-            state = ("pending_selection", "未写回" if resolution and resolution["kind"] == "not_written" else "待选稿",
+            state = ("pending_selection", "未写回" if resolution and resolution["kind"] == "not_written" else f"待选稿 · 还剩 {progress['undecided']} 条" if progress and progress["undecided"] else "待选稿",
                      "查看并选择候选", "", True, False)
         else:
             state = (status or "unknown", {"failed": "生成失败", "interrupted": "生成已中断", "cancelled": "生成已停止"}.get(status, "待处理"), "查看并继续任务", "", True, False)

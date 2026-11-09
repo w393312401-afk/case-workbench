@@ -77,6 +77,8 @@ window.NotionUpload = (() => {
           progress.textContent = current.warning || '已上传到 Notion。';
           if (typeof toast === 'function') toast('已上传到 Notion。');
           window.VideoPublication?.markNotionUploaded?.(host,data.timeline_uid);
+          // The order may now be 完成: refresh the content list and the task panel instead of waiting for their polls.
+          window.ContentFlow?.refreshNow?.();void window.TaskActivity?.refreshWork?.();
           // The selected timeline's own marker changes, preserving any typed post ID.
           if (host.querySelector('[data-notion-upload]')?.dataset.notionUpload === data.timeline_uid) {
             const mark = host.querySelector('[data-calendar-toggle]');
@@ -150,5 +152,100 @@ window.NotionUpload = (() => {
     };
     await load();
   }
-  return {markup,bind};
+  // 挂车图文: an inline panel in the carousel window's 定稿 step (no window on top of a window). One panel per version;
+  // it keeps its own data, typed values and polling, and is re-mounted whenever the carousel window redraws.
+  function photoPanel({api,setId,work,onChange}) {
+    const base = `/api/photo-sets/${encodeURIComponent(setId)}/notion`;
+    const ctl = {host:null,data:null,draft:null,connection:null,request:null,timer:null,busy:false,error:'',stopped:false};
+    const receiptText = receipt => {
+      if (!receipt) return '';
+      if (receipt.status === 'running') return receipt.progress || '正在上传…';
+      if (receipt.status === 'completed') return receipt.warning || `已上传到 Notion${receipt.export_name ? `（${receipt.export_name}）` : ''}`;
+      return receipt.error || '上传未完成，可以重试。';
+    };
+    function paint() {
+      const host = ctl.host;if (!host?.isConnected || !ctl.data) return;
+      const data = ctl.data, receipt = data.receipt, running = receipt?.status === 'running', done = receipt?.status === 'completed';
+      const draft = ctl.draft, titles = data.copy?.titles || [];
+      const stale = done && receipt.export_name && data.export_name && receipt.export_name !== data.export_name;
+      const href = link(receipt);
+      const connected = ctl.connection?.status === 'connected';
+      const connection = ctl.connection && !connected ? `<div class="notion-upload-connection"><span>${esc(ctl.connection.error || '请连接 Notion，并允许访问发布日历。')}</span><button type="button" class="secondary compact" data-pn-connect>连接 Notion</button>${/^https:\/\//.test(ctl.connection.authorization_url || '') ? `<a href="${esc(ctl.connection.authorization_url)}" target="_blank" rel="noopener noreferrer">前往 Notion 授权</a>` : ''}<button type="button" class="subtle compact" data-pn-recheck>重新检查</button></div>` : '';
+      const label = running ? '正在上传…' : receipt?.page_id ? '更新到 Notion' : '上传到 Notion';
+      const disabled = running || ctl.busy || !connected || Boolean(data.blocked_reason) || !data.configured;
+      const fields = `<div class="photo-notion-fields"><label class="field"><span>发布日期</span><input type="date" data-pn-field="published_on" value="${esc(draft.published_on)}" ${running ? 'disabled' : ''}></label>
+        <label class="field"><span>发布账号</span><input data-pn-field="account" maxlength="200" value="${esc(draft.account)}" placeholder="Notion 账号列表里的用户名" ${running ? 'disabled' : ''}></label>
+        <label class="field photo-notion-title"><span>标题＋tags</span>${titles.length > 1 ? `<select data-pn-title ${running ? 'disabled' : ''}>${titles.map((title,index) => `<option value="${index}" ${title === draft.title ? 'selected' : ''}>${esc(titleLabel(title,data.copy?.titles_zh?.[index]))}</option>`).join('')}</select>` : ''}<textarea rows="2" maxlength="2000" data-pn-field="title" ${running ? 'disabled' : ''}>${esc(draft.title)}</textarea></label></div>
+        <div class="photo-step-line"><span class="context-note">${esc(data.pictures)} 张发布 JPG 放进「文件和媒体」，正文放中英文案和逐张文字。</span><button type="button" class="primary compact" data-pn-submit ${disabled ? 'disabled' : ''}>${label}</button></div>`;
+      const note = ctl.error || receiptText(receipt);
+      const tone = ctl.error || receipt?.status === 'failed' || receipt?.status === 'interrupted' || receipt?.warning ? 'ai-error' : 'context-note';
+      host.innerHTML = `<div class="photo-notion"><h4>上传到 Notion <small>${esc(data.name)} → ${esc(data.destination)}</small></h4>
+        ${data.blocked_reason ? `<p class="context-note">${esc(data.blocked_reason)}</p>` : `
+        <p class="photo-notion-status"><span class="${tone}" role="status">${esc(note || '还没上传。')}</span>${href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">查看 Notion</a>` : ''}</p>
+        ${stale ? '<p class="ai-error">导出过更新的版本，Notion 上还是旧图：点「更新到 Notion」换上新图。</p>' : ''}
+        ${data.configured ? '' : '<p class="ai-error">请先在本机配置 Notion 发布日历地址。</p>'}
+        ${connection}
+        ${done && !stale ? `<details class="photo-notion-again"><summary>改日期、账号或标题后重新上传</summary>${fields}</details>` : fields}`}</div>`;
+      host.querySelectorAll('[data-pn-field]').forEach(node => node.oninput = () => {draft[node.dataset.pnField] = node.value;});
+      const choice = host.querySelector('[data-pn-title]');
+      if (choice) choice.onchange = () => {draft.title = titles[Number(choice.value)] || '';const box = host.querySelector('[data-pn-field="title"]');if (box) box.value = draft.title;};
+      const submit = host.querySelector('[data-pn-submit]');if (submit) submit.onclick = send;
+      const connect = host.querySelector('[data-pn-connect]');
+      if (connect) connect.onclick = async () => {
+        connect.disabled = true;
+        try {const state = await api('/api/notion/connect',{method:'POST',body:{}});if (state.error) throw new Error(state.error);await check();}
+        catch (problem) {ctl.error = problem.message || 'Notion 连接没有完成。';paint();}
+      };
+      const recheck = host.querySelector('[data-pn-recheck]');if (recheck) recheck.onclick = () => void check(true);
+    }
+    async function check(refresh = false) {
+      try {ctl.connection = await api(refresh ? '/api/notion/connection?refresh=1' : '/api/notion/connection');}
+      catch (problem) {ctl.connection = {status:'error',error:problem.message || '连接检查未完成。'};}
+      if (!ctl.stopped) {
+        paint();
+        if (['waiting','preparing'].includes(ctl.connection.status)) setTimeout(() => {if (!ctl.stopped) void check();},2000);
+      }
+    }
+    async function load() {
+      clearTimeout(ctl.timer);
+      if (ctl.stopped) return;
+      try {
+        const data = await api(`${base}?work=${encodeURIComponent(work)}`);
+        const was = ctl.data?.receipt?.status;
+        ctl.data = data;
+        if (!ctl.draft) ctl.draft = {published_on:data.published_on || '',account:data.account || '',title:data.title || ''};
+        const status = data.receipt?.status;
+        if (status === 'running') ctl.timer = setTimeout(load,1500);
+        else if (was === 'running') {
+          ctl.busy = false;
+          if (status === 'completed') {ctl.request = null;if (typeof toast === 'function') toast('图文已上传到 Notion。');}
+          if (/连接|授权/.test(data.receipt?.error || '')) void check(true);
+          onChange?.(data);
+        }
+      } catch (problem) {ctl.error = problem.message || 'Notion 状态暂时无法读取。';}
+      paint();
+    }
+    async function send() {
+      if (ctl.busy) return;
+      ctl.busy = true;ctl.error = '';
+      const body = {work,published_on:ctl.draft.published_on,account:ctl.draft.account,title:ctl.draft.title};
+      const signature = JSON.stringify(body);
+      if (!ctl.request || ctl.request.signature !== signature) ctl.request = {signature,body:{...body,request_id:crypto.randomUUID()}};
+      paint();
+      try {
+        const started = await api(base,{method:'POST',body:ctl.request.body});
+        ctl.busy = false;ctl.data = {...ctl.data,receipt:started};
+        void load();
+      } catch (problem) {ctl.busy = false;ctl.error = problem.message || '上传未开始，请重试。';paint();}
+    }
+    return {
+      mount(host) {
+        ctl.host = host;
+        if (ctl.data) paint(); else host.innerHTML = '<div class="photo-notion"><h4>上传到 Notion</h4><p class="context-note">正在读取…</p></div>';
+        if (!ctl.started) {ctl.started = true;void load();void check();}
+      },
+      stop() {ctl.stopped = true;clearTimeout(ctl.timer);}
+    };
+  }
+  return {markup,bind,photoPanel};
 })();
