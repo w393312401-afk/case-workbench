@@ -81,7 +81,7 @@ class AIProductionEntryBrowserTests(unittest.TestCase):
         fixture.WorkbenchHTTPTests.setUp(self)
         self.server.daemon_threads = False
 
-    def open_candidate(self, output, *, action="variants", scripts=None):
+    def open_candidate(self, output, *, action="variants", scripts=None, instruction="临时写稿要求", routes=None):
         context = self.browser.new_context(viewport={"width": 1080, "height": 850})
         self.addCleanup(context.close)
         page = context.new_page()
@@ -90,7 +90,7 @@ class AIProductionEntryBrowserTests(unittest.TestCase):
         page.on("pageerror", lambda error: errors.append(str(error)))
         self.addCleanup(lambda: self.assertEqual(errors, [], "Browser JavaScript errors"))
         round_record = {
-            "round_id": ROUND_ID, "status": "completed", "instruction": "临时写稿要求",
+            "round_id": ROUND_ID, "status": "completed", "instruction": instruction,
             "output": output, "messages": [], "skill_selection": "none",
         }
         task = {
@@ -128,6 +128,8 @@ class AIProductionEntryBrowserTests(unittest.TestCase):
                 route.fulfill(status=404, json={"error": "Unexpected mocked AI endpoint"})
 
         page.route("**/api/ai/**", ai_api)
+        for pattern, handler in (routes or {}).items():
+            page.route(pattern, handler)
         if scripts is not None:
             page.route("**/api/creation?*", lambda route: route.fulfill(json={"revision": "fixture", "scripts": scripts}))
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#/202H/ai/{TASK_ID}")
@@ -185,6 +187,47 @@ class AIProductionEntryBrowserTests(unittest.TestCase):
         self.assertEqual([bool(call.get("preview")) for call in calls], [True, False])
         self.assertTrue(calls[1]["request_id"])
 
+    def test_drafts_written_from_a_comment_show_that_comment_above_the_opening(self):
+        review_id = "0123456789abcdef"
+        instruction = (f"顺着这条评论写稿（站在观众这边）。评论 {review_id}｜Sam · @sam_k｜TikTok｜观众（评论者说法未核实）：\n"
+                       "That won't make a mirror edge.\n\n写法：……")
+        review = {"id": review_id, "author_name": "Sam", "author_handle": "sam_k", "text": "That won't make a mirror edge.", "avatar": None}
+        lookups = []
+        routes = {f"**/api/reviews/{review_id}": lambda route: (lookups.append(1), route.fulfill(json={"review": review})),
+                  "**/api/reviews/translations/lookup": lambda route: route.fulfill(json={"items": {review_id: {"zh": "这磨不出镜面。"}}})}
+        output = "".join(titled_variant(index + 1, "回应质疑", f"First line {index + 1}.") for index in range(2))
+        page, *_ = self.open_candidate(output, instruction=instruction, routes=routes)
+        reply = page.locator('.ai-variant-card[data-variant-card="1"] .ai-variant-reply')
+        reply.locator(".ai-variant-reply-text").wait_for()
+        self.assertEqual(reply.locator(".ai-variant-reply-label").inner_text(), "回应评论")
+        self.assertEqual(reply.locator(".ai-variant-reply-who strong").inner_text(), "@sam_k")
+        self.assertEqual(reply.locator(".ai-variant-reply-text").inner_text(), "That won't make a mirror edge.")
+        page.wait_for_function("() => document.querySelector('.ai-variant-card[data-variant-card=\"1\"] .ai-variant-reply-zh')?.textContent === '这磨不出镜面。'")
+        self.assertTrue(page.evaluate("() => { const card = document.querySelector('.ai-variant-card[data-variant-card=\"1\"]'); return card.querySelector('.ai-variant-reply').compareDocumentPosition(card.querySelector('.ai-variant-screen')) === Node.DOCUMENT_POSITION_FOLLOWING; }"))
+        page.locator('[data-variant-pick="2"]').click()
+        page.locator('.ai-variant-card[data-variant-card="2"] .ai-variant-reply-text').wait_for()
+        self.assertEqual(len(lookups), 1)
+
+    def test_each_draft_shows_the_comment_its_link_line_names(self):
+        ids = ["0123456789abcdef", "fedcba9876543210"]
+        reviews = {identifier: {"id": identifier, "author_handle": f"user{index}", "text": f"Comment {index}.", "zh": f"评论 {index}。", "avatar": None}
+                   for index, identifier in enumerate(ids)}
+        routes = {"**/api/reviews/*": lambda route: route.fulfill(json={"review": reviews[route.request.url.rsplit("/", 1)[1]]})}
+        output = "".join(titled_variant(index + 1, "回应质疑", f"First line {index + 1}.") for index in range(2))
+        output += "".join(f"\n评论贴纸关联：第 {index + 1} 稿｜{identifier}" for index, identifier in enumerate(ids))
+        instruction = "".join(f"评论 {identifier}｜TikTok｜viewer\nComment.\n\n" for identifier in ids)
+        page, *_ = self.open_candidate(output, instruction=instruction, routes=routes)
+        for number in (1, 2):
+            page.locator(f'[data-variant-pick="{number}"]').click()
+            text = page.locator(f'.ai-variant-card[data-variant-card="{number}"] .ai-variant-reply-text')
+            text.wait_for()
+            self.assertEqual(text.inner_text(), f"Comment {number - 1}.")
+
+    def test_ordinary_drafts_have_no_comment_line(self):
+        page, *_ = self.open_candidate("".join(titled_variant(1, "回应质疑", "First line.")))
+        page.locator(".ai-variant-screen").first.wait_for()
+        self.assertEqual(page.locator(".ai-variant-reply").count(), 0)
+
     def visible_cards(self, page):
         return [card.get_attribute("data-variant-card") for card in page.locator(".ai-variant-card").all() if card.is_visible()]
 
@@ -202,7 +245,8 @@ class AIProductionEntryBrowserTests(unittest.TestCase):
         self.assertEqual(rows.count(), 5)
         self.assertEqual(rows.nth(1).locator(".ai-desk-variant-name").inner_text(), "#2 原理讲解")
         self.assertEqual(rows.nth(1).locator("[data-variant-status]").inner_text(), "待定")
-        self.assertEqual(page.locator('.ai-variant-card[data-variant-card="2"] .ai-variant-screen').text_content(), "开头屏显Screen 2")
+        self.assertEqual(page.locator('.ai-variant-card[data-variant-card="2"] .ai-variant-screen').text_content(), "开头屏显Screen 2屏显 2")
+        self.assertEqual(page.locator('.ai-variant-card[data-variant-card="2"] .ai-variant-screen-zh').inner_text(), "屏显 2")
         # Notes wait behind their own rail entry and the rail shows there is something in them.
         self.assertTrue(page.locator(".ai-desk-notes").is_hidden())
         rail.locator('[data-desk-section="notes"]').click()
@@ -214,7 +258,10 @@ class AIProductionEntryBrowserTests(unittest.TestCase):
         self.assertEqual(self.visible_cards(page), ["3"])
         visible = page.locator('.ai-variant-card[data-variant-card="3"]')
         visible.locator("[data-desk-produce]").click()
+        # Saving only, and writing back to the case, wait in the draft's ··· menu.
+        visible.locator(".ai-variant-more > summary").click()
         visible.locator("[data-desk-adopt]").click()
+        visible.locator(".ai-variant-more > summary").click()
         visible.locator("[data-desk-write-case]").click()
         calls = page.evaluate("window.productionEntryCalls")
         self.assertEqual([(call["kind"], call["pick"]["variantIndex"], call["pick"]["variantCount"], call.get("writeBack")) for call in calls],
@@ -325,7 +372,7 @@ Spoken {number}.
         card = page.locator('.ai-variant-card[data-variant-card="1"]')
         self.assertEqual([line.split("：")[0] for line in card.locator(".ai-variant-opening p").all_inner_texts()],
                          ["开头逻辑", "开头画面（待核，新拍）", "开头屏显"])
-        self.assertEqual(self.tabs(card), ["口播", "开头", "补拍清单", "发布文案"])
+        self.assertEqual(self.tabs(card), ["口播", "开头画面与屏显", "补拍清单", "发布文案"])
         card.locator('[data-variant-tab="补拍清单"]').click()
         self.assertIn("镜头 1", card.locator('[data-variant-panel="补拍清单"]').inner_text())
         shared = page.locator(".ai-variant-shared")

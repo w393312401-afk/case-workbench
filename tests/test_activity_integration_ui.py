@@ -45,10 +45,16 @@ class ActivityIntegrationBrowserTests(unittest.TestCase):
         page = self.open_page("#/202H/library")
         expect(page.locator("#task-activity-open")).to_have_attribute("aria-label", "任务，1 项进行中，1 条未读")
         page.locator("#task-activity-open").click()
-        # The panel opens on today's page of the calendar, which lists both runs with their own state.
-        expect(page.locator(".activity-row")).to_have_count(2)
+        # The panel opens on 要处理; the run still going is under 进行中, and 记录 lists both runs with their own state.
+        expect(page.locator('[data-activity-filter="needs"]')).to_have_attribute("aria-pressed", "true")
+        expect(page.locator("#activity-detail")).to_be_hidden()
+        page.locator('[data-activity-filter="running"]').click()
+        expect(page.locator(".activity-row")).to_have_count(1)
         expect(page.locator('[data-run-id="ai:fixture:round1"] .activity-status')).to_have_text("正在停止")
-        expect(page.locator('[data-activity-date][aria-pressed="true"]')).to_contain_text("今天")
+        page.locator('[data-activity-filter="history"]').click()
+        expect(page.locator(".activity-row")).to_have_count(2)
+        # The week strip opens on request; a run's log shows as soon as its row is opened.
+        expect(page.locator("#activity-week")).to_be_hidden()
         page.locator('[data-activity-log="edit:fixture"]').click()
         expect(page.locator("#activity-log-body .activity-log-lines li")).to_have_count(1)
         expect(page.locator("#activity-log-body")).to_contain_text("执行结束")
@@ -65,7 +71,7 @@ class ActivityIntegrationBrowserTests(unittest.TestCase):
         expect(page.locator("#task-activity-dialog")).to_be_visible()
         self.assertTrue(page.evaluate("document.querySelector('#task-activity-dialog').scrollWidth <= document.querySelector('#task-activity-dialog').clientWidth"))
         page.keyboard.press("Escape")
-        page.evaluate("location.hash = WorkbenchShell.url('#settings')")
+        page.evaluate("location.hash = WorkbenchShell.url('#settings/tools')")
         expect(page.locator("#settings-activity-heading")).to_be_visible()
         expect(page.locator("#settings-activity-status")).to_contain_text("未开启")
 

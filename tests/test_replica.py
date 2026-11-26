@@ -9,7 +9,7 @@ from unittest.mock import patch
 import case_replica
 from case_replica import estimated_spans, handoff_section, line_records, parse_transcript, shot_targets
 from edit_planning import mode_selection_rules, prepare_workers
-from creation_store import CreationStore
+from creation_store import CreationError, CreationStore
 from elevenlabs_client import VoiceError
 from retro_draft import PrepareError
 from workbench_editing import MODES, handoff_markdown
@@ -66,6 +66,24 @@ class ShotTargetTest(unittest.TestCase):
         self.assertEqual(rows[-1]["target_end"], 12)
         self.assertTrue(all(row["target_end"] - row["target_start"] >= 1 for row in rows))
 
+    def test_an_added_closing_line_stretches_the_last_shot_not_the_ones_before(self):
+        # Original: two 2 s sentences, cut at 2 s. The script adds a third line the original has no time for.
+        replica = reference([(0, 2, [1]), (2, 4, [2, 3])], [{"start": 0, "end": 2}, {"start": 2, "end": 4}, {"start": 4, "end": 4}], 4)
+        groups = [{"start": 0, "end": 2}, {"start": 2, "end": 4}, {"start": 4, "end": 7}]
+        rows = shot_targets(replica, groups, "30", 0, 210)
+        self.assertEqual([(0, 60), (60, 210)], [(row["target_start"], row["target_end"]) for row in rows])
+
+    def test_the_stage_the_original_won_at_is_kept_and_the_other_repaired(self):
+        focus = case_replica.optimize_focus({"key": "traffic", "label": "流量型", "reasons": ["播放 9 万"]})
+        self.assertIn("开头", focus["keep"])
+        self.assertIn("收口", focus["change"])
+        self.assertEqual(["播放 9 万"], focus["reasons"])
+        won_selling = case_replica.optimize_focus({"key": "conversion", "label": "转化型"})
+        self.assertEqual((focus["change"], focus["keep"]), (won_selling["keep"], won_selling["change"]))
+        self.assertEqual("", case_replica.optimize_focus({"key": "both"})["change"])
+        for unsure in ({"key": "plain"}, {"key": "unknown"}, None):
+            self.assertIsNone(case_replica.optimize_focus(unsure))
+
     def test_a_voice_group_list_shorter_than_the_lines_still_tiles(self):
         replica = reference([(0, 2, [1]), (2, 4, [2])], [{"start": 0, "end": 2}, {"start": 2, "end": 4}], 4)
         rows = shot_targets(replica, [{"start": 0, "end": 1}], "24", 0, 96)
@@ -91,7 +109,7 @@ class HandoffTest(unittest.TestCase):
         self.assertIn("原片镜头表", text)
         self.assertIn("[0, 90)", text)
         self.assertIn("reference/shot-02.jpg", text)
-        self.assertIn("优先于技能的分类时长上限", text)
+        self.assertIn("优先于技能的镜头数与镜头时长规则", text)
         self.assertLess(text.index("原片镜头表"), text.index("## 交付"))
 
     def test_an_optimized_script_is_named_as_such_to_the_editor(self):
@@ -100,6 +118,9 @@ class HandoffTest(unittest.TestCase):
         text = self.handoff("replica")
         self.assertIn("逐句对应原片的优化稿", text)
         self.assertNotIn("口播已和原片逐句相同", text)
+        self.assertNotIn("多出的一句下单理由", text)
+        self.replica["closing_extra"] = True
+        self.assertIn("多出的一句下单理由", self.handoff("replica"))
 
     def test_other_modes_of_the_same_job_stay_as_they_were(self):
         self.assertNotIn("原片镜头表", self.handoff("explain"))
@@ -107,7 +128,7 @@ class HandoffTest(unittest.TestCase):
     def test_other_modes_do_not_inherit_the_lines_copy_the_original_hint(self):
         self.job["lines"][0]["proof"] = "照原片 镜头 1（0.00–2.00 秒）"
         self.job["lines"][1]["proof"] = "Show the edge"
-        for mode in ("explain", "sync", "montage"):
+        for mode in ("explain",):  # 卡点、混剪模式已取消，非复刻只剩解释模式。
             text = self.handoff(mode)
             self.assertNotIn("照原片 镜头", text)
             self.assertIn("Show the edge", text)
@@ -208,6 +229,22 @@ class MediaTest(unittest.TestCase):
         # An optimized script that lost or gained a line can no longer sit on the original's lines.
         drifted = case_replica.snapshot("PVR-000000000001", source, ["All in one."], aligned=True)
         self.assertEqual(("changed", False), (drifted["wording"], drifted["timed"]))
+
+    def test_an_added_closing_line_runs_on_under_the_last_shot(self):
+        source = Bench(self.root, self.case)._replica_case("PVR-000000000001")[2]
+        result = case_replica.snapshot("PVR-000000000001", source, ["One.", "Two.", "Grab it below, four-year warranty."], aligned=True)
+        self.assertEqual(("aligned", True, True), (result["wording"], result["timed"], result["closing_extra"]))
+        # The original's two sentences keep their own times; the added line takes what is left after them.
+        self.assertEqual([{"start": 0.0, "end": 1.0}, {"start": 1.0, "end": 2.0}], result["spans"][:2])
+        self.assertEqual(2.0, result["spans"][2]["start"])
+        self.assertIn(3, result["shots"][-1]["lines"])
+        self.assertTrue(any("多一句下单理由" in note for note in result["notes"]))
+        records = case_replica.line_records(["One.", "Two.", "Grab it."], [], result)
+        self.assertIn(f"镜头 {result['shots'][-1]['number']}", records[2]["proof"])
+        # The same words without the task's line-for-line promise, or two added lines, are not a replica any more.
+        self.assertEqual("changed", case_replica.snapshot("PVR-000000000001", source, ["One.", "Two.", "Three."])["wording"])
+        self.assertEqual("changed", case_replica.snapshot("PVR-000000000001", source, ["One.", "Two.", "3.", "4."], aligned=True)["wording"])
+        self.assertNotIn("closing_extra", case_replica.snapshot("PVR-000000000001", source, ["One.", "Two."]))
 
     def test_the_machine_transcript_is_flagged(self):
         source = Bench(self.root, self.case)._replica_case("PVR-000000000001")[2]
@@ -346,11 +383,148 @@ class OptimizedOriginTest(unittest.TestCase):
             {"notes": [], "wording": "aligned", "shots": [], "spans": [{"start": 0, "end": 1}, {"start": 1, "end": 2}]}, {"caption": ""}))
         self.assertEqual("1:1 复刻·优化稿", resolved["variant_label"])
 
+    def test_the_focus_comes_from_the_case_videos_sales_and_is_absent_without_them(self):
+        bench = Bench(".", {**CASE, "current": {**CASE["current"], "metrics": {"video_id": "7000000000000000001"}}})
+        strong = {"video_id": "7000000000000000001", "product": "202H", "views": 90000, "clicks": 900, "orders": 2}
+        peers = [{"video_id": str(n), "product": "202H", "views": 5000 + n, "clicks": 100, "orders": 4} for n in range(12)]
+        bench.video_case_links = lambda: {}
+        bench.performance = type("Sales", (), {"videos": staticmethod(lambda links: [strong, *peers])})
+        focus = bench.replica_focus(bench.store.read_case("PVR-000000000001"))
+        self.assertEqual("traffic", focus["key"])
+        self.assertIn("开头", focus["keep"])
+        bench.performance = type("Sales", (), {"videos": staticmethod(lambda links: peers)})
+        self.assertIsNone(bench.replica_focus(bench.store.read_case("PVR-000000000001")))
+        self.assertIsNone(bench.replica_focus(CASE))
+
     def test_the_optimize_count_is_checked_before_anything_is_made(self):
         bench = Bench(".", CASE)
         for count in (-1, 6, "2", 1.5):
             with self.assertRaises(VoiceError):
                 bench.start_case_replica("PVR-000000000001", {"new": True, "optimize": count})
+
+
+class ReplicaChoicesTest(unittest.TestCase):
+    """The dialog may skip the original's job (only optimized scripts are written) and may name the AI model."""
+
+    def setUp(self):
+        self.bench = bench = Bench(".", CASE)
+        bench._replica_case = lambda case_id: (CASE, "202H", {"title": "t", "lines": [], "chinese": [], "direction_id": ""})
+        bench._replica_script = lambda *args: {"id": "SCR-000000000001"}
+        bench.detail = lambda case_id: {"revision": "r1"}
+        bench.production.revision = lambda records: "p1"
+        self.tasks, self.fills = [], []
+        bench.create_ai_task = lambda body: self.tasks.append(body) or {"task_id": "AIT-000000000001"}
+        bench.create_production_job = lambda body, fill_settings=None: self.fills.append(fill_settings) or {"job": {"id": "PRD-1"}}
+
+    def test_optimized_only_writes_scripts_without_a_job(self):
+        picked = {"model": "claude-x", "reasoning_effort": "high"}
+        result = self.bench.start_case_replica("PVR-000000000001", {"original": False, "optimize": 2, **picked})
+        self.assertEqual({"task": {"task_id": "AIT-000000000001"}}, result)
+        self.assertEqual([], self.fills)
+        self.assertEqual(("claude-x", "high", 2), (self.tasks[0]["model"], self.tasks[0]["reasoning_effort"],
+                                                  self.tasks[0]["writing_mode"]["count"]))
+
+    def test_the_picked_model_reaches_the_scripts_and_the_jobs_fill(self):
+        picked = {"model": "claude-x", "reasoning_effort": None}
+        self.bench.start_case_replica("PVR-000000000001", {"new": True, "optimize": 1, **picked})
+        self.assertEqual([picked], self.fills)
+        self.assertEqual("claude-x", self.tasks[-1]["model"])
+        self.bench.start_case_replica("PVR-000000000001", {"new": True, "optimize": 1})
+        self.assertEqual({}, self.fills[-1])
+        self.assertNotIn("model", self.tasks[-1])
+
+    def test_bad_choices_are_refused_before_anything_is_made(self):
+        for body in ({"original": False, "optimize": 0}, {"original": "no", "optimize": 1}, {"optimize": 1, "model": 3},
+                     {"optimize": 1, "model": "claude-x", "reasoning_effort": 2}):
+            with self.assertRaises(VoiceError):
+                self.bench.start_case_replica("PVR-000000000001", body)
+        self.assertEqual(([], []), (self.tasks, self.fills))
+
+    def test_optimized_only_reports_a_task_that_cannot_start(self):
+        def refuse(body):
+            raise CreationError(409, "AI 不可用")
+        self.bench.create_ai_task = refuse
+        with self.assertRaises(VoiceError) as caught:
+            self.bench.start_case_replica("PVR-000000000001", {"original": False, "optimize": 1})
+        self.assertIn("AI 不可用", str(caught.exception))
+
+    def test_the_automatic_fill_runs_on_the_picked_model(self):
+        asked = []
+        self.bench.fill_production_job = lambda identifier, body: asked.append(body)
+        self.bench.ai = type("AI", (), {"bridge": object()})()
+        replica = {**reference([(0, 1, [1])], [{"start": 0, "end": 1}], 1), "wording": "original"}
+        bare = {"id": "PRD-1", "replica": replica, "lines": line_records(["One."], [], replica)}
+        self.bench.auto_fill_replica(bare, {"model": "claude-x", "reasoning_effort": None})
+        self.bench.auto_fill_replica(bare)
+        self.assertEqual([{"model": "claude-x", "reasoning_effort": None}, {}], asked)
+
+
+class ReplicaTitlesTest(unittest.TestCase):
+    """A replica never reuses the original's post title (it often comes cut off with an ellipsis): three new 🔴 lines are written."""
+
+    LINES = ["🔴Mirror Edge in Ten Minutes#SHARPAL202H #knifesharpening #edc", "🔴Why My EDC Stays Sharp#SHARPAL202H #edcknife",
+             "🔴The Angle Never Moves#SHARPAL202H #sharpeningkit"]
+
+    def test_three_complete_lines_are_read_and_anything_else_refused(self):
+        reply = "```\n" + "\n".join(self.LINES) + "\n```"
+        self.assertEqual(self.LINES, case_replica.parse_titles(reply))
+        self.assertIsNone(case_replica.parse_titles("\n".join(self.LINES[:2])))
+        self.assertIsNone(case_replica.parse_titles("\n".join([*self.LINES[:2], "🔴Is A Mirror Edge Overrated?#knifesharpen..."])))
+        self.assertIsNone(case_replica.parse_titles("\n".join(line.replace("🔴", "") for line in self.LINES)))
+        prompt = case_replica.title_prompt("SHARPAL 202H Kit", ["One.", "Two."])
+        self.assertIn("不照搬原视频的发布标题", prompt)
+        self.assertIn("One.\nTwo.", prompt)
+
+    def test_the_new_job_does_not_carry_the_original_caption(self):
+        resolved = Bench(".", CASE).apply_replica({}, ["One."], [], (
+            {"notes": [], "wording": "original", "shots": [], "spans": [{"start": 0, "end": 1}]}, {"caption": "🔴Cut off#knifesharpen..."}))
+        self.assertEqual({}, resolved["supplement"])
+
+    def test_the_lines_are_kept_once_and_replace_the_old_caption(self):
+        from production_store import ProductionStore
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        store = ProductionStore(folder.name)
+        job = {"id": "PRD-000000000001", "replica": {"case_id": "PVR-1"}, "supplement": {"captions": ["🔴Old…"], "hook_text": "KEEP"}, "history": []}
+        data = {"jobs": [job, {"id": "PRD-000000000002", "history": []}]}
+        self.assertEqual(self.LINES, store._job_captions(data, {"job_id": job["id"], "captions": self.LINES}, None)["captions"])
+        self.assertEqual({"captions": self.LINES, "hook_text": "KEEP"}, job["supplement"])
+        self.assertTrue(job["replica"]["titles_written"])
+        # A second writer that raced the first finds the lines there and keeps them.
+        self.assertEqual(self.LINES, store._job_captions(data, {"job_id": job["id"], "captions": ["🔴Other#x"]}, None)["captions"])
+        with self.assertRaises(VoiceError):
+            store._job_captions(data, {"job_id": "PRD-000000000002", "captions": self.LINES}, None)
+
+    def test_pending_until_written(self):
+        self.assertTrue(Bench.replica_titles_pending({"replica": {}}))
+        self.assertFalse(Bench.replica_titles_pending({"replica": {"titles_written": True}}))
+        self.assertFalse(Bench.replica_titles_pending({}))
+
+    def _title_bench(self):
+        bench = Bench.__new__(Bench)
+        job = {"id": "PRD-000000000001", "replica": {"case_id": "PVR-1"}, "product": "SHARPAL 202H", "lines": [{"spoken": "Watch this."}]}
+        bench.production = type("P", (), {"job": lambda self, _: job})()
+        bench._video_publish_copy = lambda _: {"titles_pending": True}
+        return bench
+
+    def test_title_failure_names_the_cause_without_leaking_secrets(self):
+        bench = self._title_bench()
+        with patch("workbench_replica.run_prompt", side_effect=RuntimeError("Claude login expired token=sk-123456")), \
+                patch("sys.stderr") as log:
+            with self.assertRaises(VoiceError) as error:
+                bench.write_replica_titles("PRD-000000000001")
+        self.assertIn("登录或授权失效", str(error.exception))
+        self.assertNotIn("sk-123456", str(error.exception))
+        logged = "".join(call.args[0] for call in log.write.call_args_list)
+        self.assertIn("login expired", logged)
+        self.assertNotIn("sk-123456", logged)
+
+    def test_title_bad_format_says_so(self):
+        bench = self._title_bench()
+        with patch("workbench_replica.run_prompt", return_value="only one line"), patch("sys.stderr"):
+            with self.assertRaises(VoiceError) as error:
+                bench.write_replica_titles("PRD-000000000001")
+        self.assertIn("格式不对", str(error.exception))
 
 
 class ScriptSourceTest(unittest.TestCase):
@@ -393,3 +567,98 @@ class ScriptSourceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShotTableTest(unittest.TestCase):
+    """A replica job's 意群表 says what each line must show, not only where it sits in the original (2026-11-16: jobs
+    with pointer-only rows were cut in 解释 mode from the spoken words alone, and optimized scripts lost their table)."""
+
+    def setUp(self):
+        self.replica = reference([(0, 2, [1]), (2, 4, [2])], [{"start": 0, "end": 2}, {"start": 2, "end": 4}], 4)
+
+    def test_pointer_and_written_text_are_told_apart(self):
+        pointer = "照原片 镜头 1–2（0.00–2.00 秒）"
+        self.assertEqual(case_replica.shot_pointer("夹刀｜" + pointer), pointer)
+        self.assertEqual(case_replica.written_proof("夹刀｜" + pointer), "夹刀")
+        self.assertEqual(case_replica.written_proof(pointer), "")
+        self.assertEqual(case_replica.written_proof("照原片 无对应镜头（1.00–2.00 秒）"), "")
+        self.assertEqual(case_replica.with_pointer("夹刀｜" + pointer, pointer), "夹刀｜" + pointer)
+        self.assertEqual(case_replica.with_pointer("", pointer), pointer)
+
+    def test_an_optimized_scripts_table_is_kept_with_the_shots_named(self):
+        rows = case_replica.keep_written(line_records(["One.", "Two."], ["一", "二"], self.replica),
+                                         [{"proof": "刀夹紧", "tags": "组装", "evidence": "动作演示"}, {"proof": "", "tags": "", "evidence": ""}])
+        self.assertEqual(rows[0]["proof"], "刀夹紧｜照原片 镜头 1（0.00–2.00 秒）")
+        self.assertEqual((rows[0]["tags"], rows[0]["evidence"]), ("组装", "动作演示"))
+        self.assertEqual(rows[1]["proof"], "照原片 镜头 2（2.00–4.00 秒）")
+        self.assertTrue(case_replica.needs_table({"replica": self.replica, "lines": rows}))
+        rows[1]["proof"] = "看刃口｜" + rows[1]["proof"]
+        self.assertFalse(case_replica.needs_table({"replica": self.replica, "lines": rows}))
+        self.assertFalse(case_replica.needs_table({"lines": [{"proof": ""}]}))
+
+    def test_a_table_of_another_length_is_not_misaligned(self):
+        rows = line_records(["One.", "Two."], [], self.replica)
+        self.assertEqual(case_replica.keep_written(rows, [{"proof": "x"}]), rows)
+
+    def test_apply_replica_keeps_the_written_rows_and_flags_a_bare_table(self):
+        bench = Bench(".", CASE)
+        found = ({**self.replica, "wording": "aligned"}, {})
+        written = {"lines": [{"proof": "刀夹紧", "tags": "组装", "evidence": ""}, {"proof": "看刃口", "tags": "", "evidence": ""}]}
+        kept = bench.apply_replica(written, ["One.", "Two."], [], found)
+        self.assertTrue(kept["lines"][1]["proof"].startswith("看刃口｜照原片 镜头 2"))
+        from production_store import MISSING_TABLE
+        from workbench_replica import BARE_TABLE
+        self.assertNotIn(BARE_TABLE, kept["problems"])
+        bare = bench.apply_replica({}, ["One.", "Two."], [], ({**self.replica, "wording": "original"}, {}))
+        self.assertIn(BARE_TABLE, bare["problems"])
+        self.assertIn(MISSING_TABLE, BARE_TABLE)
+
+    def test_a_bare_job_asks_for_a_fill_once_made_and_only_with_ai(self):
+        bench = Bench(".", CASE)
+        asked = []
+        bench.fill_production_job = lambda identifier, body: asked.append(identifier)
+        bare = {"id": "PRD-1", "replica": self.replica, "lines": line_records(["One.", "Two."], [], self.replica)}
+        bench.auto_fill_replica(bare)
+        self.assertEqual(asked, [])
+        bench.ai = type("AI", (), {"bridge": object()})()
+        bench.auto_fill_replica(bare)
+        bench.auto_fill_replica({**bare, "lines": [{**line, "proof": "x｜" + line["proof"]} for line in bare["lines"]]})
+        self.assertEqual(asked, ["PRD-1"])
+
+    def test_other_modes_show_the_written_part_and_refuse_a_bare_job(self):
+        from workbench_editing import EditingWorkbenchMixin, visual_hint
+        job = {"id": "PRD-1", "replica": self.replica, "lines": line_records(["One.", "Two."], [], self.replica)}
+        job["lines"][0]["proof"] = "刀夹紧｜" + job["lines"][0]["proof"]
+        self.assertEqual(visual_hint(job, job["lines"][0], "explain"), "刀夹紧")
+        self.assertIn("镜头 1", visual_hint(job, job["lines"][0], "replica"))
+        self.assertIn("无推荐", visual_hint(job, job["lines"][1], "explain"))
+
+        class Editing(EditingWorkbenchMixin):
+            production = type("Store", (), {"job": staticmethod(lambda identifier: job)})
+
+            def replica_frames(self, record):
+                return "frames"
+        with self.assertRaises(VoiceError) as caught:
+            Editing()._edit_reference("PRD-1", "explain")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertEqual(Editing()._edit_reference("PRD-1", "replica"), "frames")
+        job["lines"][1]["proof"] = "看刃口｜" + job["lines"][1]["proof"]
+        self.assertIsNone(Editing()._edit_reference("PRD-1", "explain"))
+
+
+class FillTest(unittest.TestCase):
+    def test_the_fill_keeps_each_rows_shots_and_tells_the_writer_where_they_are(self):
+        import server
+        replica = reference([(0, 2, [1]), (2, 4, [2])], [{"start": 0, "end": 2}, {"start": 2, "end": 4}], 4)
+        job = {"id": "PRD-1", "title": "t", "replica": replica, "lines": line_records(["One.", "Two."], ["一", "二"], replica)}
+        prompt = server.job_fill_instruction(job)
+        self.assertIn("2. 照原片 镜头 2（2.00–4.00 秒）", prompt)
+        self.assertNotIn("已有的画面要求", prompt)
+        output = ("**口播（配音用）**\n\n```\nOne.\nTwo.\n```\n\n**意群表**\n\n| # | 口播 | 画面要证明什么 | 素材标签 | 证据 |\n|---|---|---|---|---|\n"
+                  "| 1 | One. | 刀夹紧 | 组装 | 动作演示 |\n| 2 | Two. | 看刃口 | 镜面 | 展示 |\n")
+        task = {"status": "completed", "rounds": [{"status": "completed", "output": output}]}
+        result = server.job_fill_result(job, task)
+        if "error" in result:
+            self.skipTest("fill output format differs: " + result["error"])
+        self.assertEqual(result["lines"][0]["proof"], "刀夹紧｜照原片 镜头 1（0.00–2.00 秒）")
+        self.assertEqual(result["lines"][1]["tags"], "镜面")

@@ -37,7 +37,7 @@ class DataBackupTests(unittest.TestCase):
         self.write(self.runtime / "auth" / "secret.json", b'{"token": "local only"}')
         self.write(self.runtime / "thumbnail-cache" / "thumb.png", b"cache")
         self.write(self.runtime / "data-transfer" / "config.json", b'{"enabled": false}')
-        self.write(self.app / "图文素材" / "202H" / "unused.png", b"unreferenced image")
+        self.write(self.app / "工作台数据" / "图文素材" / "202H" / "unused.png", b"unreferenced image")
 
     @staticmethod
     def write(path, content):
@@ -76,12 +76,12 @@ class DataBackupTests(unittest.TestCase):
         self.write(self.skill / "cases" / "case.json", b'{"changed": true}')
         self.write(self.skill / "cases" / "new.json", b'{}')
         self.write(self.runtime / "new-business" / "file.txt", b"newer")
-        self.write(self.app / "图文素材" / "202H" / "unused.png", b"changed image")
+        self.write(self.app / "工作台数据" / "图文素材" / "202H" / "unused.png", b"changed image")
         result = self.manager.restore_archive(archive, self.runtime / "data-transfer" / "recovery")
         self.assertEqual((self.skill / "cases" / "case.json").read_bytes(), self.original)
         self.assertFalse((self.skill / "cases" / "new.json").exists())
         self.assertFalse((self.runtime / "new-business").exists())
-        self.assertEqual((self.app / "图文素材" / "202H" / "unused.png").read_bytes(), b"unreferenced image")
+        self.assertEqual((self.app / "工作台数据" / "图文素材" / "202H" / "unused.png").read_bytes(), b"unreferenced image")
         self.assertTrue((self.runtime / "auth" / "secret.json").exists())
         self.assertTrue((self.runtime / "thumbnail-cache" / "thumb.png").exists())
         self.assertEqual((self.runtime / "data-transfer" / "config.json").read_bytes(), b'{"enabled": false}')
@@ -93,6 +93,47 @@ class DataBackupTests(unittest.TestCase):
         with zipfile.ZipFile(archive) as packed:
             names = packed.namelist()
             self.assertFalse(any("auth/" in name or "thumbnail-cache/" in name or "data-transfer/" in name for name in names))
+
+    def test_interrupted_restore_returns_old_data_on_next_start(self):
+        archive = self.export()
+        live = self.write(self.skill / "cases" / "case.json", b'{"before_restore": true}')
+        replace = os.replace
+
+        def interrupt(source, destination):
+            if Path(source).name == "cases" and Path(destination) == live.parent:
+                raise KeyboardInterrupt("fixture: interrupted before installing new cases")
+            return replace(source, destination)
+
+        with patch("data_backup.os.replace", side_effect=interrupt), self.assertRaises(KeyboardInterrupt):
+            self.manager.restore_archive(archive, self.root / "recoveries")
+        self.assertFalse(live.exists())
+        self.assertEqual(len(list(self.manager.transfer_root.glob("restore-*/transaction.json"))), 1)
+        restarted = BackupManager(self.skill, self.runtime, self.app)
+        restarted.recover_interrupted_restores()
+        restarted.recover_interrupted_restores()
+        self.assertEqual(live.read_bytes(), b'{"before_restore": true}')
+        self.assertEqual(len(list((self.root / "recoveries").glob("*.zip"))), 1)
+        self.assertFalse(list(self.manager.transfer_root.glob("restore-*")))
+
+    def test_split_volume_restore_uses_destination_staging_without_cross_volume_rename(self):
+        archive = self.export()
+        live = self.write(self.skill / "cases" / "case.json", b'{"before_restore": true}')
+        replace = os.replace
+
+        def volume(path):
+            return 2 if path.is_relative_to(self.skill) else 1
+
+        def replace_on_same_volume(source, destination):
+            if volume(Path(source)) != volume(Path(destination)):
+                raise OSError("fixture: cross-volume rename")
+            return replace(source, destination)
+
+        with patch.object(self.manager, "_restore_volume", side_effect=volume), \
+                patch("data_backup.os.replace", side_effect=replace_on_same_volume):
+            result = self.manager.restore_archive(archive, self.root / "recoveries")
+        self.assertTrue(result["restored"])
+        self.assertEqual(live.read_bytes(), self.original)
+        self.assertFalse(list(self.skill.glob(".restore-*")))
 
     def test_portable_restore_remaps_json_keys_values_text_and_external_assets(self):
         external = self.write(self.root / "outside" / "source video.mp4", bytes(range(256)) * 8)
@@ -270,7 +311,7 @@ class DataBackupTests(unittest.TestCase):
         recovery = next((self.root / "recoveries").glob("*.zip"))
         self.manager.inspect_archive(recovery)
         self.assertTrue((self.runtime / "creation" / "catalog.json").exists())
-        self.assertTrue((self.app / "图文素材" / "202H" / "unused.png").exists())
+        self.assertTrue((self.app / "工作台数据" / "图文素材" / "202H" / "unused.png").exists())
 
     def test_recovery_failure_leaves_live_data_untouched(self):
         archive = self.export()
@@ -318,7 +359,7 @@ class DataBackupTests(unittest.TestCase):
 
     def test_exact_directory_root_aliases_are_safe_and_portable(self):
         aliases = {"runtime": str(self.runtime / "creation" / ".."),
-            "skill": str(self.skill / "sources" / ".."), "app": str(self.app / "图文素材" / "..")}
+            "skill": str(self.skill / "sources" / ".."), "app": str(self.app / "工作台数据" / "..")}
         self.write(self.skill / "cases" / "root-aliases.json", json.dumps(aliases).encode())
         archive = self.export()
         with zipfile.ZipFile(archive) as packed:
@@ -334,6 +375,16 @@ class DataBackupTests(unittest.TestCase):
                 bad = self.rewrite(archive, mutate_manifest=lambda manifest: manifest["path_aliases"].update({aliases["runtime"]: unsafe}))
                 with self.assertRaises(BackupError):
                     self.manager.inspect_archive(bad)
+
+    def test_notes_naming_the_old_picture_folder_follow_it_into_the_data_folder(self):
+        # Before 2026-11-15 图文素材 sat directly in the project folder; backups from then name it there.
+        manifest = {"source_roots": {"skill": str(self.skill), "runtime": str(self.runtime), "app": str(self.root / "old-app")}}
+        replacements = BackupManager._replacements(manifest, self.skill, self.runtime, self.app)
+        before = json.dumps({"image": str(self.root / "old-app" / "图文素材" / "202H" / "a.png"),
+            "other": str(self.root / "old-app" / "notes.md")}, ensure_ascii=False)
+        after = json.dumps({"image": str(self.app / "工作台数据" / "图文素材" / "202H" / "a.png"),
+            "other": str(self.app / "notes.md")}, ensure_ascii=False)
+        self.assertEqual(BackupManager._remap_text(before, replacements), after)
 
     def test_nonexistent_prose_containing_multiple_paths_is_not_recorded_as_alias(self):
         prose = str(self.runtime / "media" / "nonexistent.mp4") + "；已有拆解：" + str(self.skill / "sources" / "source.md")
@@ -368,7 +419,7 @@ class DataBackupTests(unittest.TestCase):
         sensitive = [self.root / ".codex" / "auth.json", self.root / ".claude" / ".credentials.json",
             self.root / "credentials.json", self.root / ".netrc", self.root / ".env", self.root / ".env.local",
             self.root / "id_rsa", self.root / "id_ed25519", self.root / "private.pem", self.root / "private.key",
-            self.root / "account.p12", self.root / "account.pfx"]
+            self.root / "account.p12", self.root / "account.pfx", self.root / "config.local.json"]
         sensitive.extend(self.root / folder / "unusual-name.json" for folder in (".ssh", ".aws", ".azure", ".kube", ".gnupg"))
         for path in sensitive:
             self.write(path, b'{"dummy": "isolated fixture, never real credentials"}')
@@ -519,7 +570,7 @@ class DataBackupTests(unittest.TestCase):
         self.assertEqual(list(Path(elsewhere.name).iterdir()), [])
 
     def test_backup_destinations_inside_business_data_are_rejected_and_ordinary_locks_work(self):
-        for destination in (self.skill / "cases" / "backup", self.runtime / "creation" / "backup", self.app / "图文素材" / "backup",
+        for destination in (self.skill / "cases" / "backup", self.runtime / "creation" / "backup", self.app / "工作台数据" / "图文素材" / "backup",
                 self.runtime / "remote-access" / "guest" / "site"):
             with self.subTest(destination=destination), self.assertRaises(BackupError):
                 self.manager.create_archive(destination)

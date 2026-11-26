@@ -30,7 +30,7 @@ class SettingsBrowserTests(unittest.TestCase):
         cls.browser.close()
         cls.playwright.stop()
 
-    def open_page(self, responses, *, controlled_clock=False, origin=None):
+    def open_page(self, responses, *, controlled_clock=False, origin=None, show_all=True):
         context = self.browser.new_context(viewport={"width": 920, "height": 800})
         self.addCleanup(context.close)
         page = context.new_page()
@@ -49,6 +49,8 @@ class SettingsBrowserTests(unittest.TestCase):
             "/api/settings/paths": {"paths": {"records":"C:/isolated/records", "evidence":"C:/isolated/evidence", "library":"C:/isolated/library", "directions":"C:/isolated/directions", "creation":"C:/isolated/creation"}},
             "/api/ai/preferences": {"preferences": {"model": None, "reasoning_effort": None}},
             "/api/ai/options": {"models": [], "default_settings": {"model": None, "reasoning_effort": None}, "defaults_configured": True},
+            "/api/ai/antigravity": {"settings": {"enabled": False, "base_url": "http://127.0.0.1:8046/v1", "model": "claude-sonnet-5-5-medium", "vision": False},
+                                    "status": {"available": False, "label": "Antigravity API 未启用"}, "key_set": False, "key_tail": ""},
             "/api/data/preferences": {"ok": True},
             "/api/data/status": {"settings": {"enabled": False, "directory": "", "interval_days": 1, "time": "02:00", "keep": 14}, "backups": []},
             **responses,
@@ -91,8 +93,44 @@ class SettingsBrowserTests(unittest.TestCase):
           window.openNavigationSettings = () => window.actions.push({navigation:true});
         ''')
         page.add_script_tag(path=str(ROOT / "static" / "settings.js"))
-        page.evaluate("WorkbenchSettings.render()")
+        # Card tests see every section at once; the section test below keeps the real one-at-a-time view.
+        page.evaluate("WorkbenchSettings.render()" + (";document.querySelectorAll('[data-settings-section]').forEach(s=>s.hidden=s.dataset.settingsSection==='overview')" if show_all else ""))
         return page
+
+    def test_sections_show_one_at_a_time_and_overview_sends_problems_to_their_section(self):
+        page = self.open_page({"/api/ai/status": {"error_fixture": "fixture offline"}}, show_all=False)
+        overview = page.locator("[data-settings-section=overview]")
+        self.assertTrue(overview.is_visible())
+        self.assertFalse(page.locator("[data-settings-section=ai]").is_visible())
+        self.assertEqual(page.locator("[data-settings-nav=overview]").get_attribute("aria-current"), "page")
+        todo = page.locator("#settings-overview-todo")
+        todo.get_by_text("本机 Codex", exact=True).wait_for()
+        self.assertIn("需要处理", todo.inner_text())
+        # The backup is off in this fixture, which is a choice rather than a to-do.
+        self.assertNotIn("自动备份", todo.inner_text())
+        page.locator("#settings-overview-groups").get_by_text("未开启 · 尚未备份", exact=True).wait_for()
+        self.assertTrue(page.locator("[data-settings-nav=ai] .settings-nav-dot").is_visible())
+        todo.locator(".settings-overview-todo-row", has_text="本机 Codex").get_by_role("button", name="去处理").click()
+        self.assertTrue(page.locator("#settings-codex-status").is_visible())
+        self.assertFalse(overview.is_visible())
+        self.assertEqual(page.locator("[data-settings-nav=ai]").get_attribute("aria-current"), "page")
+        page.locator("[data-settings-nav=data]").click()
+        self.assertTrue(page.locator("#settings-data-danger").is_visible())
+        self.assertFalse(page.locator("#settings-codex-status").is_visible())
+
+    def test_unsaved_changes_gather_in_one_bar_and_backup_tag_reads_status(self):
+        page = self.open_page({}, show_all=False)
+        page.locator("[data-settings-nav=data]").click()
+        tag = page.locator("#settings-backup-tag")
+        tag.wait_for()
+        self.assertEqual(tag.inner_text(), "还没备份过")
+        bar = page.locator(".settings-dirty-bar")
+        self.assertFalse(bar.is_visible())
+        page.locator("#settings-backup-keep").fill("20")
+        bar.wait_for()
+        self.assertIn("改了 1 项：备份设置", bar.inner_text())
+        bar.get_by_role("button", name="放弃").click()
+        self.assertFalse(page.locator(".settings-dirty-bar").is_visible())
 
     def test_remote_account_form_only_appears_on_loopback(self):
         page = self.open_page({}, origin="https://workbench.example.com")
@@ -198,7 +236,7 @@ class SettingsBrowserTests(unittest.TestCase):
         self.assertEqual(page.evaluate("window.actions"), [
             {"copy": "C:/isolated/records"}, {"open": "evidence"}, {"navigation": True}, {"copy": source},
         ])
-        self.assertEqual(page.evaluate("window.calls.filter(path => !path.startsWith('/api/data/') && !['/api/ai/preferences','/api/ai/options'].includes(path))"), ["/api/ai/status", "/api/settings/paths", "/api/performance/summary", "/api/public-stats/link", "/api/ai/claude/login"])
+        self.assertEqual(page.evaluate("window.calls.filter(path => !path.startsWith('/api/data/') && !['/api/ai/preferences','/api/ai/options','/api/ai/antigravity'].includes(path))"), ["/api/ai/status", "/api/settings/paths", "/api/performance/summary", "/api/public-stats/link", "/api/ai/claude/login"])
         self.assertFalse(page.evaluate("Boolean(window.injected)"))
 
     def test_independent_failure_retries_and_shutdown_status(self):
@@ -236,9 +274,11 @@ class SettingsBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator("#settings-claude-card input").count(), 0)
         self.assertFalse(page.locator("#settings-claude-recovery").is_visible())
         self.assertEqual(page.get_by_role("button", name="安装 Anthropic SDK").count(), 0)
-        self.assertIn("客户端额度，无需填写 key", page.locator("#settings-claude-card").inner_text())
-        self.assertIn("Claude 桌面版自带的调用程序", page.locator("#settings-claude-card").inner_text())
-        self.assertIn("默认沿用本机调用设置", page.locator("#settings-claude-card").inner_text())
+        self.assertIn("同一账号的额度，不用填密钥", page.locator("#settings-claude-card").inner_text())
+        # First-time setup steps stay folded under 「怎么连接」 until opened.
+        help_text = page.locator("#settings-claude-card .settings-help")
+        self.assertFalse(help_text.locator(".settings-note").is_visible())
+        self.assertIn("沿用本机调用设置", help_text.text_content())
         self.assertFalse(page.locator("#settings-claude-login").is_visible())
         self.assertEqual(page.locator("#settings-claude-card img").count(), 0)
         self.assertFalse(page.evaluate("Boolean(window.injected)"))
@@ -263,10 +303,113 @@ class SettingsBrowserTests(unittest.TestCase):
         page.get_by_text("已连接 Claude 订阅", exact=True).wait_for()
         self.assertIn("订阅：pro", page.locator("#settings-claude-detail").inner_text())
         self.assertFalse(page.get_by_role("button", name="检查 Claude", exact=True).is_disabled())
-        self.assertEqual(page.evaluate("window.calls.filter(path => !path.startsWith('/api/data/') && !['/api/ai/preferences','/api/ai/options'].includes(path))"), [
+        self.assertEqual(page.evaluate("window.calls.filter(path => !path.startsWith('/api/data/') && !['/api/ai/preferences','/api/ai/options','/api/ai/antigravity'].includes(path))"), [
             "/api/ai/status", "/api/settings/paths", "/api/performance/summary", "/api/public-stats/link", "/api/ai/claude/login", "/api/ai/status",
         ])
         self.assertTrue(page.evaluate("window.aiStatuses.at(-1).providers.claude.available"))
+
+    def open_claude_logout_page(self, responses=None, *, origin="http://127.0.0.1:8765"):
+        connected = {"available": True, "login_pending": False, "auth_method": "claude.ai", "subscription_type": "pro"}
+        return self.open_page({
+            "/api/ai/status": {"available": True, "providers": {
+                "codex": {"available": True, "label": "Codex 已连接"},
+                "antigravity": {"available": True, "label": "Antigravity 已连接"}, "claude": connected}},
+            "/api/ai/options?refresh=1": {"models": [], "default_settings": {"model": None, "reasoning_effort": None}},
+            **(responses or {}),
+        }, controlled_clock=True, origin=origin)
+
+    def test_claude_logout_confirmation_cancel_keeps_connection_without_request(self):
+        page = self.open_claude_logout_page()
+        page.wait_for_function("!document.querySelector('#settings-claude-logout').disabled")
+        page.evaluate("window.confirmMessages=[];window.confirm = message => { window.confirmMessages.push(message);return false; };void 0")
+        page.get_by_role("button", name="断开授权", exact=True).click()
+        self.assertIn("本机使用同一授权的 Claude Code 调用需要重新连接", page.evaluate("window.confirmMessages[0]"))
+        self.assertEqual(page.evaluate("window.requests.filter(row => row.path === '/api/ai/claude/logout')"), [])
+        self.assertEqual(page.locator("#settings-claude-status").inner_text(), "已连接 Claude 订阅")
+        self.assertTrue(page.get_by_role("button", name="断开授权", exact=True).is_enabled())
+
+    def test_claude_logout_submits_once_clears_recovery_and_reconnects(self):
+        page = self.open_claude_logout_page({"/api/ai/claude/logout": {"deferred_fixture": True}})
+        page.wait_for_function("!document.querySelector('#settings-claude-logout').disabled")
+        page.evaluate("""() => {
+          window.confirmMessages=[];window.confirm=message => {window.confirmMessages.push(message);return true;};
+          document.querySelector('#settings-claude-callback').value='old-code#old-state';
+          document.querySelector('#settings-claude-reopen').href='https://claude.com/oauth/authorize?old=true';
+          const button=document.querySelector('#settings-claude-logout');button.onclick();button.onclick();
+          document.querySelector('#settings-claude-check').onclick();
+          document.querySelector('#settings-check-codex').onclick();
+        }""")
+        page.wait_for_function("window.deferredRequests.length === 1")
+        self.assertEqual(page.evaluate("window.confirmMessages.length"), 1)
+        self.assertTrue(page.get_by_role("button", name="正在断开…", exact=True).is_disabled())
+        for selector in ("#settings-claude-check", "#settings-check-codex", "#settings-claude-login", "#settings-claude-callback"):
+            self.assertTrue(page.locator(selector).is_disabled())
+        posts = page.evaluate("window.requests.filter(row => row.path === '/api/ai/claude/logout')")
+        self.assertEqual(posts, [{"path": "/api/ai/claude/logout", "method": "POST", "body": {}}])
+        terminal = {"available": False, "login_pending": False, "error": "请重新连接 Claude 订阅。"}
+        result = {"claude": terminal, "login": pending_login(attempt_id=None, pending=False, url=None),
+                  "message": "已断开本机 Claude Code 调用授权。"}
+        page.evaluate("""result => {
+          window.responses['/api/ai/status'].providers.claude=result.claude;
+          window.responses['/api/ai/claude/login#GET']=result;
+          window.deferredRequests[0].resolve(result);
+        }""", result)
+        page.get_by_text("Claude 订阅尚未连接", exact=True).wait_for()
+        reconnect = page.get_by_role("button", name="重新连接 Claude 订阅", exact=True)
+        page.wait_for_function("!document.querySelector('#settings-claude-login').disabled")
+        self.assertTrue(reconnect.is_enabled())
+        self.assertFalse(page.locator("#settings-claude-logout").is_visible())
+        self.assertFalse(page.locator("#settings-claude-recovery").is_visible())
+        self.assertEqual(page.locator("#settings-claude-callback").input_value(), "")
+        self.assertIsNone(page.locator("#settings-claude-reopen").get_attribute("href"))
+        providers = page.evaluate("window.aiStatuses.at(-1).providers")
+        self.assertFalse(providers["claude"]["available"])
+        self.assertTrue(providers["codex"]["available"])
+        self.assertTrue(providers["antigravity"]["available"])
+        self.assertIn("/api/ai/options?refresh=1", page.evaluate("window.calls"))
+        pending = {"claude": PENDING, "login": pending_login(attempt_id="fixture-reconnect")}
+        page.evaluate("""result => {
+          window.responses['/api/ai/status'].providers.claude=result.claude;
+          window.responses['/api/ai/claude/login#GET']=result;
+          window.responses['/api/ai/claude/login#POST']=result;
+        }""", pending)
+        reconnect.click()
+        page.get_by_text("正在等待 Claude 账号授权", exact=True).wait_for()
+        posts = page.evaluate("window.requests.filter(row => row.path === '/api/ai/claude/login' && row.method === 'POST')")
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["body"], {})
+
+    def test_claude_logout_failure_keeps_connected_state_and_safe_error(self):
+        error = '<img src=x onerror="window.injected=true">Claude 任务尚未结束，请稍后再断开。'
+        page = self.open_claude_logout_page({"/api/ai/claude/logout": {"error_fixture": error}})
+        page.wait_for_function("!document.querySelector('#settings-claude-logout').disabled")
+        page.evaluate("window.confirm = () => true")
+        page.get_by_role("button", name="断开授权", exact=True).click()
+        page.get_by_text(error, exact=True).wait_for()
+        self.assertEqual(page.locator("#settings-claude-status").inner_text(), "已连接 Claude 订阅")
+        self.assertTrue(page.get_by_role("button", name="断开授权", exact=True).is_enabled())
+        self.assertFalse(page.locator("#settings-claude-login").is_visible())
+        self.assertEqual(page.locator("#settings-claude-login-error img").count(), 0)
+        self.assertFalse(page.evaluate("Boolean(window.injected)"))
+        self.assertTrue(page.evaluate("window.aiStatuses.at(-1).providers.claude.available"))
+        self.assertNotIn("/api/ai/options?refresh=1", page.evaluate("window.calls"))
+
+    def test_claude_logout_is_local_only(self):
+        page = self.open_claude_logout_page(origin="https://workbench.example.com")
+        page.get_by_text("已连接 Claude 订阅", exact=True).wait_for()
+        page.get_by_text("断开授权请在运行工作台的电脑上操作。", exact=True).wait_for()
+        self.assertEqual(page.locator("#settings-claude-logout").count(), 0)
+        self.assertNotIn("/api/ai/claude/logout", page.evaluate("window.calls"))
+
+    def test_pending_login_keeps_cancel_action_separate_from_logout(self):
+        page = self.open_claude_logout_page({
+            "/api/ai/status": {"available": True, "providers": {"claude": PENDING}},
+            "/api/ai/claude/login#GET": {"claude": PENDING, "login": pending_login()},
+        })
+        page.get_by_role("button", name="取消本次授权", exact=True).wait_for(state="visible")
+        self.assertFalse(page.locator("#settings-claude-logout").is_visible())
+        page.evaluate("document.querySelector('#settings-claude-logout').onclick()")
+        self.assertNotIn("/api/ai/claude/logout", page.evaluate("window.calls"))
 
     def test_claude_connect_posts_once_and_polls_until_subscription_is_ready(self):
         pending = {"available": False, "desktop_bundled": True, "login_pending": True}
@@ -374,7 +517,7 @@ class SettingsBrowserTests(unittest.TestCase):
         }, controlled_clock=True)
         page.get_by_role("button", name="复制授权链接", exact=True).wait_for(state="visible")
         page.get_by_label("填写回调链接或授权码", exact=True).fill("fixture-code#fixture-state")
-        page.evaluate("window.dispatchEvent(new Event('hashchange')); WorkbenchSettings.render()")
+        page.evaluate("window.dispatchEvent(new Event('hashchange')); WorkbenchSettings.render();document.querySelectorAll('[data-settings-section]').forEach(s=>s.hidden=s.dataset.settingsSection==='overview')")
         page.wait_for_function("window.requests.filter(call => call.path === '/api/ai/claude/login').length === 2")
         self.assertEqual(page.get_by_label("填写回调链接或授权码", exact=True).input_value(), "")
         self.assertEqual(page.locator("#settings-claude-reopen").get_attribute("href"), AUTH_URL)

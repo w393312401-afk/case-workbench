@@ -177,6 +177,7 @@ class BoardCampaignFilterTests(unittest.TestCase):
         self.assertTrue(page.locator("#perf-reset").is_visible())
         page.locator("[data-perf-campaign-retry]").click()
         self.wait_gmv(page, "$150")
+        page.locator(".perf-calendar-fold > summary").click()
         page.locator("#perf-campaigns .campaign-past > summary").click()
         page.locator(f'[data-campaign-edit="{CAMPAIGN}"]').click()
         dialog = page.locator("dialog.campaign-dialog")

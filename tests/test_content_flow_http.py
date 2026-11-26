@@ -30,6 +30,11 @@ class ContentFlowHTTPTests(unittest.TestCase):
         self.assertEqual(status, 200, response)
         return response
 
+    def film(self, script):
+        """A saved draft without an order is not a to-do; a filmed one is, and these rows must sit in 待处理."""
+        self.server.app.creation.mutate("script_status", {"request_id": uuid4().hex, "revision": self.server.app.creation.current_revision(),
+                                                          "script_status": {"script_id": script["id"], "status": "filmed"}})
+
     def content(self, **query):
         return self.ok("GET", "/api/content" + ("?" + urlencode(query) if query else ""))
 
@@ -136,7 +141,7 @@ class ContentFlowHTTPTests(unittest.TestCase):
         self.assertNotIn(identifier, {row["id"] for row in self.content(view="all")["items"]})
         self.assertEqual(self.ok("POST", "/api/content/manage", body), saved)
         # An archived candidate does not archive the script adopted from it.
-        script_row = next(row for row in self.content()["items"] if row["id"] == "script:" + adopted["family_id"])
+        script_row = next(row for row in self.content(view="all")["items"] if row["id"] == "script:" + adopted["family_id"])
         self.assertFalse(script_row["archived"])
         self.manage("script:" + adopted["family_id"], archived=True)
         self.assertEqual(self.ok("POST", "/api/content/manage", body), saved)
@@ -197,11 +202,21 @@ class ContentFlowHTTPTests(unittest.TestCase):
         self.assertTrue(self.content(view="all")["items"][0]["archived"])
         self.assertEqual(self.server.app.ai.get(task["task_id"])["status"], settled["status"])
 
+    def test_archived_script_held_by_a_posted_video_is_counted_as_kept(self):
+        row = self.script(title="Posted Script")
+        self.server.app.creation.mutate("script_status", {"request_id": uuid4().hex, "revision": self.server.app.creation.current_revision(),
+            "script_status": {"script_id": row["id"], "status": "published", "video_id": "7703208501283245342", "published_on": "2026-11-01"}})
+        self.manage("script:" + row["family_id"], archived=True)
+        result = self.content(view="all", status="archived")
+        self.assertEqual((result["total"], result["archived_deletable"], result["archived_kept"]), (1, 0, 1))
+
     def test_views_search_kind_and_pagination_are_stable_and_validate_input(self):
         first = self.script(title="Alpha Queue")
         second = self.script(title="Beta Queue", text="Beta text.")
         third = self.script(title="Gamma Queue", text="Gamma text.")
         ids = ["script:" + row["family_id"] for row in (first, second, third)]
+        for row in (first, second, third):
+            self.film(row)
         queue = self.content(page_size=2)
         self.assertEqual([row["id"] for row in queue["items"]], [ids[2], ids[1]])
         self.assertEqual((queue["total"], queue["page"], queue["pages"]), (3, 1, 2))
@@ -298,6 +313,7 @@ class ContentFlowHTTPTests(unittest.TestCase):
             "revision": self.ok("GET", "/api/creation")["revision"], "request_id": uuid4().hex,
             "script_status": {"archived": True}})
         current = "script:" + active["family_id"]
+        self.film(active)
         self.manage(current, archived=True)
         before = self.server.app.creation.path.read_bytes()
         self.assertEqual(self.content()["items"], [])

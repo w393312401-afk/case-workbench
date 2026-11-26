@@ -128,7 +128,7 @@ class ContentQuickFiltersBrowserTests(unittest.TestCase):
         self.assert_rows(page, [rows["approved"]])
         self.assertEqual(len(metadata_requests), 1, "Quick filtering should reuse recent saved-view metadata")
         with page.expect_response(lambda response: "/api/content/views?" in response.url):
-            page.locator("#content-flow-refresh").click()
+            page.locator(".flow-main-menu > summary").click(); page.locator("#content-flow-refresh").click()
         self.assert_rows(page, [rows["approved"]])
         self.assertEqual(len(metadata_requests), 2, "Explicit refresh must retrieve current shared views")
 
@@ -156,6 +156,7 @@ class ContentQuickFiltersBrowserTests(unittest.TestCase):
         self.assertEqual(spec.get("conditions", []), [])
         popup.locator("[data-quick-done]").click()
         # The existing complete editor remains reachable from the rules button.
+        page.locator(".flow-main-menu > summary").click()
         page.locator("#content-flow-filter-toggle").click()
         expect(page.locator("#content-flow-filter-editor")).to_be_visible()
 

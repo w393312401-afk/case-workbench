@@ -58,13 +58,13 @@ class ProductionActivityDetailBrowserTests(unittest.TestCase):
         self.payload["job"]["edits"] = [self.edit("awaiting_review")]
         page = self.open_page()
         page.evaluate("hash => location.hash = hash", f"#/202H/production/{production_fixture.JOB_ID}?step=voice&run={take_id}")
-        page.wait_for_function("() => document.querySelector('.production-steps [aria-selected=true]')?.dataset.step === 'voice'")
+        page.wait_for_function("() => document.querySelector('.production-steps [aria-selected=true]')?.dataset.stage === 'prep'")
         page.wait_for_function("id => document.activeElement?.dataset.activitySource === id", arg=take_id)
         take = page.locator(f'[data-activity-source="{take_id}"]')
         # A run recorded before activity logging existed gets no status line rather than an invented history.
         take.locator('.task-activity-logs').wait_for(state="hidden")
         page.evaluate("hash => location.hash = hash", f"#/202H/production/{production_fixture.JOB_ID}?step=validation&run=EDT-0123456789ab")
-        page.wait_for_function("() => document.querySelector('.production-steps [aria-selected=true]')?.dataset.step === 'edit'")
+        page.wait_for_function("() => document.querySelector('.production-steps [aria-selected=true]')?.dataset.stage === 'review'")
         page.wait_for_function("() => document.activeElement?.dataset.activitySource === 'EDT-0123456789ab'")
         self.assertEqual(self.calls, [])
 

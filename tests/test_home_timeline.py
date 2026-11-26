@@ -355,6 +355,15 @@ class WorkerTests(unittest.TestCase):
         self.assertIs(project.current, self.source)
         self.assertEqual(resolve.saved, 0)
 
+    def test_offline_import_reports_a_failed_cleanup_and_keeps_identity(self):
+        imported = Line("uid-new", "cut", [Item("b.mov", online="Offline")])
+        project, resolve, run = self.run_import(imported)
+        project.pool.DeleteTimelines = lambda rows: False
+        with self.assertRaisesRegex(worker.WorkerError, "未确认撤销.*uid-new"):
+            run()
+        self.assertIn(imported, project.lines)
+        self.assertEqual(resolve.saved, 0)
+
     def test_a_different_frame_rate_is_reported(self):
         imported = Line("uid-new", "cut", [Item("a.mov")], {"timelineFrameRate": "25", "timelineResolutionWidth": "1080", "timelineResolutionHeight": "1920"})
         _, _, run = self.run_import(imported)

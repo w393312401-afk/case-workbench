@@ -76,8 +76,9 @@ class DirectionProgressiveTests(unittest.TestCase):
         self.assertEqual(len(held), 1, "A task read should start after the core detail is visible")
 
     def open_detail(self, page, route="#/202H/directions/202H-S1"):
-        page.evaluate("value=>{location.hash=value}", route)
-        page.locator("#direction-definition").wait_for()
+        catalog_ui.show_direction(page, route)
+        # Related content sits in one fold since 2026-11-22; these tests read its tabs.
+        page.locator("details.dir-related").evaluate("node=>{node.open=true}")
 
     def test_core_and_all_variants_render_before_tasks_and_keep_user_selection(self):
         page = self.open_page()
@@ -182,7 +183,8 @@ class DirectionProgressiveTests(unittest.TestCase):
         page.route(self.detail_pattern, lambda route: cores.append(route))
         held = self.hold_tasks(page)
         page.evaluate("location.hash='#/202H/directions/202H-S1'")
-        page.locator("#content [role=status]").get_by_text("正在读取卖点与方向…", exact=True).wait_for()
+        # The direction already beside the list stays on screen, marked busy, while its fresh data is read.
+        page.locator("#direction-pane[aria-busy=true]").wait_for()
         page.wait_for_timeout(30)
         self.assertEqual(len(cores), 1)
         page.evaluate("location.hash='#/202H/settings'")
@@ -250,19 +252,12 @@ class DirectionProgressiveTests(unittest.TestCase):
         last.scroll_into_view_if_needed()
         self.assertTrue(last.is_visible())
         self.assertIn("隔离测试顾虑 9", page.locator(".dir-variant").last.inner_text())
-        last.select_option("结果倒叙")
-        page.get_by_text("变体标注已保存", exact=True).wait_for()
+        last.fill("结果倒叙")
+        page.locator('[data-variant-progression-save="8"]').click()
+        page.get_by_text("推进结构已保存", exact=True).wait_for()
         self.assertEqual(writes[0]["direction"]["index"], 8)
         self.assertEqual(writes[0]["direction"]["progression"], "结果倒叙")
-        page.locator(".dir-case-performance > summary").click()
-        table = page.locator(".dir-primary>.dir-case-performance .direction-group .direction-observations")
-        table.scroll_into_view_if_needed()
-        table.focus()
-        self.assertTrue(table.locator("tbody tr").first.is_visible())
-        table.evaluate("node=>{node.scrollLeft=node.scrollWidth}")
-        self.assertGreater(table.evaluate("node=>node.scrollLeft"), 0)
-        table.locator("summary").first.click()
-        self.assertTrue(table.locator(".direction-record-details").first.get_attribute("open") is not None)
+        self.assertEqual(page.locator(".dir-case-performance").count(), 0)  # per-case table left on 2026-11-22
         self.assertFalse(page.evaluate("document.documentElement.scrollWidth>document.documentElement.clientWidth"))
 
 

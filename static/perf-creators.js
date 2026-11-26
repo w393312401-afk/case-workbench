@@ -3,9 +3,12 @@
 // Overseas creators (海外达人): the shop's all-creator video exports, summed per export range and per creator.
 // Our own and unnamed accounts never count as creators; they only give the creators' share of all video GMV.
 (() => {
-  const money = (v) => (v == null ? "—" : "$" + Math.round(v).toLocaleString("en-US"));
-  const money2 = (v) => (v == null ? "—" : "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
-  const count = (v) => (v == null ? "—" : Math.round(v).toLocaleString("en-US"));
+  // One formatter for the page: toLocaleString builds a new one on every call, and the boards format tens of thousands of numbers.
+  const usWhole = new Intl.NumberFormat("en-US");
+  const usCents = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = (v) => (v == null ? "—" : "$" + usWhole.format(Math.round(v)));
+  const money2 = (v) => (v == null ? "—" : "$" + usCents.format(v));
+  const count = (v) => (v == null ? "—" : usWhole.format(Math.round(v)));
   const pct = (v) => (v == null ? "—" : v.toFixed(2) + "%");
   const ratio = (a, b, scale = 1) => (b ? (a * scale) / b : null);
   const share = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : "—");
@@ -136,7 +139,8 @@
   function kpis(S, data) {
     const t = S.total;
     const tiles = [
-      ["达人归因 GMV", money(t.gmv), `${scopeLabel(S, data)} · 占全部视频 ${share(t.gmv, t.all)}`],
+      // The share is of this all-creator export only; self-made accounts such as bushcraftedge are in another export.
+      ["达人归因 GMV", money(t.gmv), `${scopeLabel(S, data)} · 占达人导出 ${share(t.gmv, t.all)}，其余是自有账号`],
       ["出单达人", count(t.sellers.size), `有数据达人 ${count(t.creators.size)} 位`],
       ["出单视频", count(t.sold.size), `有数据视频 ${count(t.videos.size)} 条`],
       ["归因订单", count(t.orders), `售出 ${count(t.items)} 件${t.orders ? ` · 每单 ${money2(t.gmv / t.orders)}` : ""}`],

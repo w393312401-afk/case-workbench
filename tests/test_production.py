@@ -17,7 +17,7 @@ from creation_store import CreationStore
 from elevenlabs_client import ElevenLabsClient, VoiceError, clean_settings
 from production_store import ProductionStore, apply_readings
 from variant_parse import parse_variants, spoken_lines
-from workbench_production import ProductionWorkbenchMixin, map_groups
+from workbench_production import ProductionWorkbenchMixin, map_groups, word_times
 
 CANDIDATE = """核对范围：示例。
 
@@ -196,6 +196,17 @@ class ParseTests(unittest.TestCase):
         self.assertFalse(any("🔴" in line["spoken"] for item in parse_variants(CANDIDATE) for line in item["lines"]))
         self.assertEqual(parse_variants("**英文口播稿**\n> One line. *(拿走旧夹具)*"), [])
         self.assertEqual(spoken_lines("Line one.\n\nLine two.\n"), ["Line one.", "Line two."])
+
+    def test_word_times_fill_unmatched_words_between_neighbours(self):
+        voiced = "One kit, two oh two H.\nDone."
+        exact = alignment_for(voiced)
+        triples = list(zip(exact["characters"], exact["character_start_times_seconds"], exact["character_end_times_seconds"]))
+        first, second = word_times(["One kit, 202H.", "Done."], triples)
+        self.assertEqual(len(first), 3)
+        self.assertLessEqual(first[0], first[1])
+        self.assertLessEqual(first[1], first[2])
+        self.assertGreater(second[0], first[2])
+        self.assertEqual(word_times(["Nothing matches"], []), [None])
 
     def test_timing_maps_each_line_even_when_alignment_text_differs(self):
         lines = ["One kit, replacing this jig.", "Out goes the jig."]
@@ -400,12 +411,21 @@ class WorkbenchTests(unittest.TestCase):
                                                       "take_id": take["id"]})
         self.assertEqual((selected["job"]["status"], selected["job"]["selected_take"]), ("voiced", take["id"]))
         self.assertTrue(self.bench.production_audio(job["id"], take["id"], "mp3").is_file())
+        words = self.bench.production_take_words(job["id"], take["id"])
+        self.assertEqual(words["source"], "tts")
+        self.assertEqual([len(line["words"]) for line in words["lines"]], [5, 4, 4])
+        starts = [time for line in words["lines"] for time in line["words"]]
+        self.assertEqual(starts, sorted(starts))
+        group = take["groups"][2]
+        # "202H" is voiced as "two oh two H"; its word still lands inside its own line.
+        self.assertTrue(group["start"] <= words["lines"][2]["words"][1] <= group["end"])
 
     def test_missing_timestamps_fall_back_to_forced_alignment(self):
         self.fake.alignment = False
         job = self.job(self.adopt("One kit, replacing this jig.\nOut goes the jig.\nFull 202H kit's below."))
         take = self.bench.generate_take(job["id"], {"request_id": uuid4().hex, "voice_id": "VOICE123456789"})["take"]
         self.assertEqual(take["alignment_source"], "forced")
+        self.assertTrue(all(line["words"] for line in self.bench.production_take_words(job["id"], take["id"])["lines"]))
         self.assertTrue(all(group["start"] is not None for group in take["groups"]))
 
     def test_key_problems_are_reported_without_calling_speech(self):

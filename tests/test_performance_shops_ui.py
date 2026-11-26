@@ -112,7 +112,7 @@ class ShopPageTests(unittest.TestCase):
         self.assertIn("售出 3", texts[1])     # first "items sold" column only
         self.assertIn("$100", texts[2])      # alice only; the brand handle is not a creator
         self.assertIn("不含自有账号", texts[2])
-        self.assertEqual(page.locator("#perf-board .perf-kpi").count(), 6)  # the six video tiles are unchanged
+        self.assertEqual(page.locator("#perf-board .perf-kpi").count(), 5)  # the five video tiles
         fold = page.locator("details.perf-fold", has_text="按月对比")
         fold.locator("summary").click()
         row = fold.locator("tbody tr").first
@@ -190,12 +190,12 @@ class ShopPageTests(unittest.TestCase):
         page = self.open_page("#/all/videos?period=2026-09-01~2026-09-02")
         video = page.locator(".perf-sources .perf-source").first
         video.get_by_text("$80.00", exact=True).wait_for()
-        self.assertIn("2026-09-01 至 2026-09-02", video.inner_text())
+        self.assertIn("2026-09-01 至 2026-09-02", video.get_attribute("title"))  # the span sits in the hover text
         self.assertIn("首尾周只计所选日期", page.locator("#perf-board").inner_text())
         page.locator("#perf-tab-list").click()
         other_row = page.locator('[data-video-row="7600000000000000099"]')
         other_row.wait_for()
-        self.assertEqual(other_row.locator("td").nth(6).inner_text(), "$25.00")
+        self.assertEqual(other_row.locator("td").nth(7).inner_text(), "$25.00")
         self.assertIn("按 2026-09-01 至 2026-09-02", page.locator("#perf-date-note").inner_text())
 
         base = f"http://127.0.0.1:{self.server.server_port}"
@@ -220,7 +220,7 @@ class ShopPageTests(unittest.TestCase):
         page = self.open_page("#/all/videos?tab=board&period=2026-07-01~2026-09-30")
         card = page.locator(".perf-sources .perf-source").first
         card.get_by_text("$1,525.78", exact=True).wait_for()
-        self.assertIn("完整区间报表", card.inner_text())
+        self.assertIn("完整区间报表", card.get_attribute("title"))
         self.assertIn("不与日报或周报相加", page.locator("#perf-board").inner_text())
         self.assertIn("周走势另用", page.locator("#perf-board").inner_text())
         page.locator("#perf-account").select_option(["bushcraftedge", "sharpal_us"])
@@ -228,7 +228,7 @@ class ShopPageTests(unittest.TestCase):
         page.locator("#perf-tab-list").click()
         row = page.locator('[data-video-row="7600000000000000099"]')
         row.wait_for()
-        self.assertEqual(row.locator("td").nth(6).inner_text(), "$200.25")
+        self.assertEqual(row.locator("td").nth(7).inner_text(), "$200.25")
         self.assertEqual(page.locator('[data-video-row="7600000000000000003"]').count(), 0)
 
     def test_quarter_report_alone_still_shows_accounts_and_totals(self):
@@ -249,7 +249,7 @@ class ShopPageTests(unittest.TestCase):
         page.locator("#perf-tab-list").click()
         row = page.locator('[data-video-row="7600000000000000099"]')
         row.wait_for()
-        self.assertEqual(row.locator("td").nth(6).inner_text(), "$125.75")
+        self.assertEqual(row.locator("td").nth(7).inner_text(), "$125.75")
 
     def test_quarter_report_missing_gmv_is_not_shown_as_an_exact_total(self):
         missing = exports.row(LINKED, 100, 1, 10, 0)

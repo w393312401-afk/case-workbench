@@ -5,6 +5,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
@@ -17,11 +18,16 @@ import time
 from uuid import uuid4
 import zipfile
 
+from production_operations import durable_json
+
 
 FORMAT = "case-workbench-full-data"
 VERSION = 1
 SKILL_PATHS = ("cases", "sources", "references/products", "deleted_case_sources.json")
 APP_PATHS = ("图文素材",)
+# The folders above live in the project's data folder (moved there 2026-11-15). Archives keep naming them
+# app/<name>, so backups made before the move restore into the data folder and newer ones stay readable.
+APP_DATA = "工作台数据"
 RUNTIME_EXCLUDED = frozenset({"auth", "credentials", "thumbnail-cache", "cache", "__pycache__",
     "staging", "split-staging", "text-public-sync", "data-transfer"})
 # Public access and the persistent task host keep machine-local credentials here. Never exported, never
@@ -36,7 +42,7 @@ COMPRESSED_SUFFIXES = frozenset({".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"
     ".xlsx", ".xlsm", ".docx", ".pptx", ".ods", ".odt", ".odp", ".pdf"})
 CREDENTIAL_NAMES = frozenset({"auth.json", "credentials.json", ".credentials.json", ".netrc", "_netrc",
     ".npmrc", ".pypirc", ".git-credentials", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "identity",
-    "id_ecdsa_sk", "id_ed25519_sk", "task-host.json"})
+    "id_ecdsa_sk", "id_ed25519_sk", "task-host.json", "config.local.json"})
 PRIVATE_KEY_NAMES = frozenset({"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "identity", "id_ecdsa_sk", "id_ed25519_sk"})
 CREDENTIAL_DIRECTORIES = frozenset({".ssh", ".aws", ".azure", ".kube", ".gnupg"})
 CREDENTIAL_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".pkcs12", ".jks", ".keystore", ".ppk"})
@@ -52,6 +58,10 @@ class BackupError(ValueError):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+class RestoreRecoveryError(BackupError):
+    """The data owner must recover an interrupted replacement before serving requests."""
 
 
 def linked(path):
@@ -103,6 +113,16 @@ def _credential_reference(path):
 def _logical_path(path, root, category):
     relative = path.relative_to(root)
     return category if not relative.parts else category + "/" + relative.as_posix()
+
+
+def _app_logical(path, app_root):
+    """app/<name>/… for a file in the data folder; the project folder itself stays plain app."""
+    return "app" if path == app_root else _logical_path(path, app_root / APP_DATA, "app")
+
+
+def _app_place(parts, app_root):
+    """Where an app/… archive path lives on this computer."""
+    return app_root if len(parts) == 1 else app_root / APP_DATA / Path(*parts[1:])
 
 
 def _alias_target(value):
@@ -250,6 +270,10 @@ class BackupManager:
         return sorted(path.name for path in self.runtime_root.iterdir()
             if path.name.casefold() not in RUNTIME_EXCLUDED | RUNTIME_PRIVATE and not path.name.endswith(("-wal", "-shm")))
 
+    @property
+    def app_data(self):
+        return self.app_root / APP_DATA if self.app_root else None
+
     def _walk(self, path, root, archive_path, directories):
         safe_name(archive_path)
         no_links(path, root)
@@ -275,7 +299,7 @@ class BackupManager:
             relative = destination.relative_to(self.runtime_root)
             if not relative.parts or relative.parts[0].casefold() not in RUNTIME_EXCLUDED:
                 raise BackupError("备份位置不能放在要备份的运行资料目录里面。")
-        for source in (*((self.app_root / p for p in APP_PATHS) if self.app_root else ()), *self.extra_sources):
+        for source in (*((self.app_data / p for p in APP_PATHS) if self.app_root else ()), *self.extra_sources):
             if destination == source or destination.is_relative_to(source):
                 raise BackupError("备份位置不能放在要备份的原始素材目录里面。")
         destination.mkdir(parents=True, exist_ok=True)
@@ -297,9 +321,9 @@ class BackupManager:
             queue.extend(self._walk(self.runtime_root / relative, self.runtime_root, "runtime/" + relative, directories))
         if self.app_root:
             for relative in APP_PATHS:
-                path = self.app_root / relative
+                path = self.app_data / relative
                 if path.exists():
-                    queue.extend(self._walk(path, self.app_root, "app/" + relative, directories))
+                    queue.extend(self._walk(path, self.app_data, "app/" + relative, directories))
         external_seen = {}
         for source in self.extra_sources:
             if not source.exists():
@@ -314,8 +338,8 @@ class BackupManager:
                     included = _logical_path(source, self.runtime_root, "runtime")
             elif source.is_relative_to(self.skill_root) and any(source == self.skill_root / p or source.is_relative_to(self.skill_root / p) for p in SKILL_PATHS):
                 included = _logical_path(source, self.skill_root, "skill")
-            elif self.app_root and any(source == self.app_root / p or source.is_relative_to(self.app_root / p) for p in APP_PATHS):
-                included = _logical_path(source, self.app_root, "app")
+            elif self.app_root and any(source == self.app_data / p or source.is_relative_to(self.app_data / p) for p in APP_PATHS):
+                included = _app_logical(source, self.app_root)
             if included:
                 included_sources[str(source)] = included
                 continue
@@ -453,8 +477,8 @@ class BackupManager:
                                     included = _logical_path(canonical, self.skill_root, "skill")
                                 elif canonical.is_relative_to(self.runtime_root):
                                     included = _logical_path(canonical, self.runtime_root, "runtime")
-                                elif self.app_root and (canonical == self.app_root or any(canonical == self.app_root / p or canonical.is_relative_to(self.app_root / p) for p in APP_PATHS)):
-                                    included = _logical_path(canonical, self.app_root, "app")
+                                elif self.app_root and (canonical == self.app_root or any(canonical == self.app_data / p or canonical.is_relative_to(self.app_data / p) for p in APP_PATHS)):
+                                    included = _app_logical(canonical, self.app_root)
                                 if included:
                                     if str(reference) != str(canonical):
                                         _alias_target(included)
@@ -671,18 +695,27 @@ class BackupManager:
                     for source, target in manifest.get("external_files", {}).items()]
         mappings.extend([(manifest["source_roots"]["skill"], str(skill_root)), (manifest["source_roots"]["runtime"], str(runtime_root))])
         if app_root and manifest["source_roots"].get("app"):
-            mappings.append((manifest["source_roots"]["app"], str(app_root)))
+            old = manifest["source_roots"]["app"]
+            mappings.append((old, str(app_root)))
+            # Before 2026-11-15 these folders sat directly in the project folder; notes naming them follow the move.
+            separator = "\\" if "\\" in old else "/"
+            mappings.extend((old.rstrip("\\/") + separator + name, str(Path(app_root) / APP_DATA / name)) for name in APP_PATHS)
         roots = {"skill": skill_root, "runtime": runtime_root, "app": app_root}
-        for source, target in manifest.get("path_aliases", {}).items():
+
+        def place(target):
             parts = PurePosixPath(target).parts
-            if roots[parts[0]]:
-                mappings.append((source, str(roots[parts[0]] / Path(*parts[1:]))))
+            if not roots[parts[0]]:
+                return None
+            return _app_place(parts, Path(app_root)) if parts[0] == "app" else roots[parts[0]] / Path(*parts[1:])
+
+        for source, target in manifest.get("path_aliases", {}).items():
+            if place(target):
+                mappings.append((source, str(place(target))))
         mappings.extend((source, str(runtime_root / "restored-assets" / Path(*PurePosixPath(target).parts[1:])))
             for source, target in manifest.get("extra_source_roots", {}).items())
         for source, target in manifest.get("included_source_roots", {}).items():
-            parts = PurePosixPath(target).parts
-            if roots[parts[0]]:
-                mappings.append((source, str(roots[parts[0]] / Path(*parts[1:]))))
+            if place(target):
+                mappings.append((source, str(place(target))))
         replacements = {}
         for source, target in mappings:
             for before, after in ((source, target), (source.replace("\\", "/"), target.replace("\\", "/")), (source.replace("/", "\\"), target.replace("/", "\\"))):
@@ -828,47 +861,197 @@ class BackupManager:
         if self.validator:
             self.validator(stage / "skill", stage / "runtime")
 
-    def _apply(self, stage, rollback):
-        moves = []
+    def _restore_roots(self):
+        return {"skill": str(self.skill_root), "runtime": str(self.runtime_root),
+                "app": str(self.app_data.resolve()) if self.app_root else None}
+
+    def _restore_volume_workspace(self, work, scope):
+        if scope == "skill":
+            root = self.skill_root
+        elif scope == "app" and self.app_root:
+            root = self.app_data.resolve()
+        else:
+            raise BackupError("导入恢复记录包含未知的分盘暂存区。")
+        return root / ("." + work.name), root
+
+    @staticmethod
+    def _restore_volume(path):
+        for candidate in (path, *path.parents):
+            try:
+                return candidate.stat().st_dev
+            except FileNotFoundError:
+                continue
+        raise BackupError("无法核对导入目标所在的磁盘。")
+
+    def _restore_paths(self, work, scope, relative, relocated=()):
+        parts = safe_name(relative)
+        if scope == "skill" and relative in SKILL_PATHS:
+            base = root = self.skill_root
+        elif scope == "app" and relative in APP_PATHS and self.app_root:
+            base = root = self.app_data.resolve()
+        elif (scope == "runtime" and len(parts) == 1 and parts[0].casefold() not in RUNTIME_EXCLUDED | RUNTIME_PRIVATE
+              and not parts[0].endswith(("-wal", "-shm"))):
+            base = root = self.runtime_root
+        else:
+            raise BackupError("导入恢复记录包含超出范围的路径。")
+        workspace, boundary = self._restore_volume_workspace(work, scope) if scope in relocated else (work, self.transfer_root)
+        return ((base.joinpath(*parts), root), (workspace.joinpath("incoming", scope, *parts), boundary),
+                (workspace.joinpath("rollback", scope, *parts), boundary))
+
+    @staticmethod
+    def _restore_identity(path, root):
+        current = root
+        for part in path.relative_to(root).parts:
+            current /= part
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                return None
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise BackupError(f"导入恢复路径中存在链接：{current.name}")
+        return [info.st_dev, info.st_ino]
+
+    def _rollback_restore(self, work, entries, relocated=()):
+        steps = []
+        seen = set()
+        for scope, relative, old, new in reversed(entries):
+            paths = self._restore_paths(work, scope, relative, relocated)
+            live, incoming, previous = (path for path, _ in paths)
+            if live in seen or old == new:
+                raise BackupError("导入恢复记录包含重复对象。")
+            seen.add(live)
+            state = tuple(self._restore_identity(*path) for path in paths)
+            if state not in ((old, new, None), (None, new, old), (new, None, old)):
+                raise BackupError(f"导入路径的内容已经变化，请保留恢复包：{live.name}")
+            if new is not None and state == (new, None, old):
+                steps.append((live, incoming))
+            if old is not None and state[2] == old:
+                steps.append((previous, live))
+        # Atomic renames and file identities make rollback safe to repeat after another interruption.
+        for source, target in steps:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, target)
+
+    def _discard_restore_workspace(self, work, relocated=()):
+        no_links(work, self.transfer_root)
+        if work.resolve().parent != self.transfer_root or not work.name.startswith("restore-"):
+            raise BackupError("导入恢复工作目录超出允许范围。")
+        for scope in relocated:
+            workspace, root = self._restore_volume_workspace(work, scope)
+            if workspace.exists() or workspace.is_symlink():
+                no_links(workspace, root)
+                if workspace.resolve().parent != root:
+                    raise BackupError("分盘导入暂存区超出允许范围。")
+                shutil.rmtree(workspace)
+        for name in ("incoming", "rollback"):
+            directory = work / name
+            if directory.exists():
+                no_links(directory, self.transfer_root)
+                shutil.rmtree(directory)
+        shutil.rmtree(work)
+
+    def recover_interrupted_restores(self):
+        if not self.transfer_root.exists():
+            return
+        workspaces = sorted(self.transfer_root.glob("restore-*"))
+        if not workspaces:
+            return
+        with self.operation_lock():
+            for work in workspaces:
+                journal = work / "transaction.json"
+                if not journal.exists():
+                    if (work / "rollback").exists():
+                        raise RestoreRecoveryError(f"发现旧版未完成的导入，请检查导入前恢复包与目录 {work.name}。", 503)
+                    continue
+                try:
+                    no_links(journal, self.transfer_root)
+                    value = _json(journal.read_text(encoding="utf-8"))
+                    if (value["schema"] != 1 or value["roots"] != self._restore_roots()
+                            or value["state"] not in {"preparing", "applying", "committed", "rolled_back"}):
+                        raise ValueError("Unexpected restore journal")
+                    relocated = value.get("relocated", [])
+                    if not isinstance(relocated, list) or any(scope not in {"skill", "app"} for scope in relocated):
+                        raise ValueError("Unexpected restore volumes")
+                    if value["state"] == "applying":
+                        self._rollback_restore(work, value["entries"], relocated)
+                        durable_json(journal, {**value, "state": "rolled_back"})
+                    self._discard_restore_workspace(work, relocated)
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    raise RestoreRecoveryError(f"未能恢复上次导入，请保留恢复包并检查 {work.name}：{exc}", 503) from exc
+
+    def _apply(self, work, recovery_path):
+        stage = work / "incoming"
+        runtime_new = {path.name for path in (stage / "runtime").iterdir() if path.name.casefold() not in RUNTIME_PRIVATE}
+        selections = [("skill", name) for name in SKILL_PATHS]
+        if self.app_root:
+            selections.extend(("app", name) for name in APP_PATHS)
+        elif (stage / "app").exists():
+            raise BackupError("这个备份包含图文素材，导入时需要配置工作台目录。")
+        selections.extend(("runtime", name) for name in sorted(set(self._runtime_entries()) | runtime_new))
+        volume = self._restore_volume(work)
+        relocated = [scope for scope in ("skill", "app") if (scope != "app" or self.app_root)
+                     and self._restore_volume(self._restore_volume_workspace(work, scope)[1]) != volume]
+        journal = work / "transaction.json"
+        record = {"schema": 1, "roots": self._restore_roots(), "state": "preparing",
+                  "recovery_path": recovery_path, "relocated": relocated}
+        if relocated:
+            durable_json(journal, record)
+        entries = []
+        seen = set()
         try:
-            runtime_new = [path.name for path in (stage / "runtime").iterdir() if path.name.casefold() not in RUNTIME_PRIVATE]
-            selections = [(self.skill_root / relative, stage / "skill" / relative, rollback / "skill" / relative) for relative in SKILL_PATHS]
-            if self.app_root:
-                selections.extend((self.app_root / relative, stage / "app" / relative, rollback / "app" / relative) for relative in APP_PATHS)
-            elif (stage / "app").exists():
-                raise BackupError("这个备份包含图文素材，导入时需要配置工作台目录。")
-            selections.extend((self.runtime_root / relative, stage / "runtime" / relative, rollback / "runtime" / relative)
-                for relative in sorted(set(self._runtime_entries()) | set(runtime_new)))
-            for live, incoming, previous in selections:
-                root = self.skill_root if live.is_relative_to(self.skill_root) else self.runtime_root if live.is_relative_to(self.runtime_root) else self.app_root
-                if live.exists():
-                    no_links(live, root)
+            for scope in relocated:
+                workspace, _ = self._restore_volume_workspace(work, scope)
+                workspace.mkdir(parents=True)
+                if (stage / scope).is_dir():
+                    shutil.copytree(stage / scope, workspace / "incoming" / scope)
+            for scope, relative in selections:
+                live, incoming, _ = self._restore_paths(work, scope, relative, relocated)
+                if live[0] in seen:
+                    raise BackupError(f"导入目录存在大小写冲突：{relative}")
+                seen.add(live[0])
+                old, new = self._restore_identity(*live), self._restore_identity(*incoming)
+                if old is not None or new is not None:
+                    entries.append([scope, relative, old, new])
+            record.update(state="applying", entries=entries)
+            durable_json(journal, record)
+        except Exception as exc:
+            self._finish_restore_workspace(work, relocated)
+            raise BackupError(f"导入暂存未完成，原数据尚未替换：{exc}", 500) from exc
+        try:
+            for scope, relative, old, new in entries:
+                paths = self._restore_paths(work, scope, relative, relocated)
+                if tuple(self._restore_identity(*path) for path in paths) != (old, new, None):
+                    raise BackupError(f"导入期间资料已经变化：{relative}")
+                live, incoming, previous = (path for path, _ in paths)
+                if old is not None:
                     previous.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(live, previous)
-                    moves.append(("old", live, previous))
-                if incoming.exists():
+                if new is not None:
                     live.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(incoming, live)
-                    moves.append(("new", live, incoming))
+            durable_json(journal, {**record, "state": "committed"})
         except Exception as exc:
-            failures = []
-            for kind, live, saved in reversed(moves):
-                try:
-                    saved.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(live, saved) if kind == "new" else os.replace(saved, live)
-                except OSError as rollback_error:
-                    failures.append(str(rollback_error))
-            if failures:
-                raise BackupError("导入失败，自动回滚未完全完成；请保留导入前恢复包，并检查：" + str(rollback), 500) from exc
-            if rollback.exists():
-                shutil.rmtree(rollback)
-            raise BackupError("导入失败，已自动恢复原数据。", 500) from exc
+            try:
+                self._rollback_restore(work, entries, relocated)
+                durable_json(journal, {**record, "state": "rolled_back"})
+            except (OSError, BackupError) as recovery_error:
+                raise RestoreRecoveryError(f"导入回滚未完成，请保留恢复包并重启工作台：{recovery_error}", 503) from exc
+            self._finish_restore_workspace(work, relocated)
+            raise BackupError(f"导入失败，已自动恢复原数据：{exc}", 500) from exc
+        return relocated
+
+    def _finish_restore_workspace(self, work, relocated=()):
+        try:
+            self._discard_restore_workspace(work, relocated)
+        except (OSError, BackupError) as exc:
+            logging.getLogger(__name__).warning("Restore workspace cleanup pending for %s: %s", work.name, exc)
 
     def restore_archive(self, path, recovery_directory, recovery_preferences=None):
         path = Path(path).resolve()
         with self.operation_lock():
             temporary = Path(tempfile.mkdtemp(prefix="restore-", dir=self.transfer_root))
             completed = False
+            relocated = ()
             recovery = None
             try:
                 stage = temporary / "incoming"
@@ -877,17 +1060,17 @@ class BackupManager:
                 self._remap(stage, manifest)
                 self._validate(stage)
                 recovery = self._create_archive(recovery_directory, "pre-import", recovery_preferences, business_locked=True)
-                self._apply(stage, temporary / "rollback")
+                relocated = self._apply(temporary, recovery["path"])
                 completed = True
                 return {**self._summary(manifest, path), "recovery_path": recovery["path"],
                     "preferences": manifest.get("preferences", {}), "restored": True,
                     "extra_source_roots": [str(self.runtime_root / "restored-assets" / Path(*PurePosixPath(target).parts[1:]))
                         for target in manifest.get("extra_source_roots", {}).values()] +
-                        [str({"skill": self.skill_root, "runtime": self.runtime_root, "app": self.app_root}[PurePosixPath(target).parts[0]] /
+                        [str(_app_place(PurePosixPath(target).parts, self.app_root) if PurePosixPath(target).parts[0] == "app" else
+                             {"skill": self.skill_root, "runtime": self.runtime_root}[PurePosixPath(target).parts[0]] /
                              Path(*PurePosixPath(target).parts[1:])) for target in manifest.get("included_source_roots", {}).values()]}
             except (OSError, sqlite3.Error) as exc:
                 raise BackupError(f"导入未完成，原数据保持不变：{exc}", 500) from exc
             finally:
-                # Failed rollback retains original directory copies for manual recovery.
-                if completed or not (temporary / "rollback").exists():
-                    shutil.rmtree(temporary)
+                if temporary.exists() and (completed or not (temporary / "transaction.json").exists()):
+                    self._finish_restore_workspace(temporary, relocated)

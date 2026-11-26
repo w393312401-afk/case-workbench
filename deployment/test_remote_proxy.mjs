@@ -196,7 +196,13 @@ test('password login, session, protected requests and logout use a private revoc
   const resource = await request(port, { path: '/api/state', headers: { ...plain, cookie: `${cookie}; CF_Authorization=private; other=kept` } });
   assert.equal(resource.body, 'protected-workbench');
   assert.equal(seen[0].cookie.trim(), 'other=kept');
-  assert.equal((await request(port, { path: '/api/remote-account', headers: { ...plain, cookie } })).status, 403);
+  for (const path of ['/api/remote-account', '/api/keys', '/api/ai/antigravity']) {
+    assert.equal((await request(port, { path, headers: { ...plain, cookie } })).status, 403);
+  }
+  for (const path of ['/api/keys/remove', '/api/ai/antigravity/check', '/api/ai/claude/logout']) {
+    assert.equal((await request(port, { path, method: 'POST', headers: { ...post, cookie }, body: '{}' })).status, 403);
+  }
+  assert.equal(seen.length, 1);
   const logout = await request(port, { path: '/auth/logout', method: 'POST', headers: { ...post, cookie } });
   assert.equal(logout.status, 200);
   assert.match(logout.headers['set-cookie'][0], /Max-Age=0/);
@@ -557,6 +563,7 @@ test('HTTP forwarding authenticates every route and protects origins and local-o
   assert.equal(forwarded.headers.host, `127.0.0.1:${upstreamPort}`);
   assert.equal(forwarded.headers.origin, `http://127.0.0.1:${upstreamPort}`);
   assert.equal(forwarded.headers['x-workbench-token'], 'real-local-token');
+  assert.equal(forwarded.headers['x-workbench-remote'], '1');
   assert.equal(forwarded.bytes, 11);
   assert.equal(forwarded.headers.cookie, 'app=value');
   for (const name of ['x-forwarded-host', 'x-forwarded-for', 'forwarded', 'cf-access-jwt-assertion', 'cf-access-authenticated-user-email', 'x-remove-me']) assert.equal(forwarded.headers[name], undefined);

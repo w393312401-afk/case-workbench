@@ -84,7 +84,8 @@ class NoiseContentTests(unittest.TestCase):
         # The newer version of the produced family only sees the order made from another script.
         self.assertEqual([order["id"] for order in rows["script:SCR-old"]["same_title_orders"]], ["PRD-else"])
         self.assertEqual([order["id"] for order in rows["script:SCR-other"]["same_title_orders"]], ["PRD-own", "PRD-else"])
-        self.assertTrue(rows["script:SCR-other"]["needs_attention"])
+        # A saved copy nobody opened an order for is listed in 全部 but is not a to-do.
+        self.assertFalse(rows["script:SCR-other"]["needs_attention"] or rows["script:SCR-other"]["history"])
 
     def test_raw_persisted_task_uses_frozen_video_without_requiring_public_context(self):
         row = self.task("retrospective")

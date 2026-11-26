@@ -134,7 +134,11 @@ class PublicStatsRefreshBrowserTests(unittest.TestCase):
                 for key, label in labels.items():
                     expect(self.fact(drawer, label)).to_have_text(f"{first[key]:,}")
                     if not floating:
-                        expect(self.table_metric(page, label)).to_have_text(f"{first[key]:,}")
+                        # Likes, comments, shares and saves share the 互动 column; each count is in its hover text.
+                        if key == "views":
+                            expect(self.table_metric(page, label)).to_have_text(f"{first[key]:,}")
+                        else:
+                            expect(self.table_metric(page, "互动")).to_have_attribute("title", re.compile(re.escape(f"{label} {first[key]:,}")))
                 self.assert_public_time(drawer, observed)
                 # The fixture contains three saved comments. That library count
                 # must remain separate from the video's 91 public-page comments.
@@ -163,7 +167,10 @@ class PublicStatsRefreshBrowserTests(unittest.TestCase):
                         expected = "—" if counts[key] is None else f"{counts[key]:,}"
                         expect(self.fact(drawer, label)).to_have_text(expected)
                         if not floating:
-                            expect(self.table_metric(page, label)).to_have_text(expected)
+                            if key == "views":
+                                expect(self.table_metric(page, label)).to_have_text(expected)
+                            else:
+                                expect(self.table_metric(page, "互动")).to_have_attribute("title", re.compile(re.escape(f"{label} {expected}")))
                     self.assert_public_time(drawer, observed)
                     expect(note).to_have_value(draft)
                     expect(drawer.locator("[data-feedback-reference]")).to_have_value("weak")

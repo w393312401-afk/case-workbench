@@ -1,11 +1,13 @@
 /* platform campaign calendar (data board) and the review's campaign note */
-.perf-campaign-filter{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:-4px 0 18px;font-size:var(--font-meta);color:var(--muted)}
+/* The activity picker sits in the toolbar row; what it changes is said on its own line below. */
+.perf-campaign-filter{display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0;font-size:var(--font-meta);color:var(--muted)}
 .perf-campaign-filter label{color:var(--ink)}
-.perf-campaign-filter select{width:460px;max-width:calc(100% - 60px);min-width:0;padding:8px 30px 8px 12px;border:1px solid var(--line);border-radius:10px;background:var(--fill);color:var(--ink);font-size:13px;text-overflow:ellipsis}
+.perf-campaign-filter select{width:260px;max-width:100%;min-width:0;padding:8px 30px 8px 12px;border:1px solid var(--line);border-radius:10px;background:var(--fill);color:var(--ink);font-size:13px;text-overflow:ellipsis}
 .perf-campaign-filter select.is-set{border-color:var(--accent);background:var(--surface-tint)}
-.perf-campaign-filter p{flex-basis:100%;margin:0;line-height:1.6;font-size:var(--font-meta);color:var(--muted)}
+.perf-campaign-note:empty{display:none}
+.perf-campaign-note p{margin:-6px 0 16px;line-height:1.6;font-size:var(--font-meta);color:var(--muted)}
 @media(max-width:850px){#content .perf-toolbar .perf-date{grid-column:1/-1;justify-self:start;min-width:0;max-width:100%}}
-@media(max-width:570px){.perf-campaign-filter select{width:0;flex:1}.perf-campaign-filter{gap:8px 6px}}
+@media(max-width:570px){.perf-campaign-filter{flex:1 1 100%}.perf-campaign-filter select{width:0;flex:1}.perf-campaign-filter{gap:8px 6px}}
 .perf-campaigns .campaign-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
 .campaign-row{padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
 .campaign-row.is-live{border-color:var(--accent);background:var(--surface-tint)}
@@ -73,6 +75,7 @@
    gives up --runway-space for it. The full summary stays in the link's title and aria-label. */
 @media(max-width:760px){
   body:has(#campaign-runway:not([hidden])){--runway-space:63px}
+  body.topbar-crowded .campaign-runway{display:none}
   .campaign-runway{flex:none;height:var(--btn-h-lg);padding:0 8px;background:var(--fill);border-radius:var(--btn-radius);container:none}
   .campaign-runway:active{background:var(--surface-tint)}
   .campaign-runway .runway-body{gap:3px;height:100%}
@@ -82,3 +85,19 @@
   .campaign-runway .runway-words strong{display:block;width:2.4em;font-size:10px;font-weight:600}
   .campaign-runway .runway-words small,.campaign-runway .runway-days{display:none}
 }
+
+/* The calendar folded to one line on the board: the summary names the live and next activity. */
+.perf-calendar-fold>summary small{color:var(--muted)}
+.perf-calendar-fold .perf-campaigns{margin:0;padding:0;border:0;background:none;box-shadow:none}
+.perf-calendar-fold .perf-campaigns>.perf-card-head h2{display:none}
+
+/* One period control: the date button and the activity dropdown joined, the activities also listed in the picker. */
+.perf-period-group{display:inline-flex;align-items:center;gap:0;min-width:0}
+.perf-period-group .perf-date-trigger{border-top-right-radius:0;border-bottom-right-radius:0}
+.perf-period-group .perf-campaign-filter select,.perf-period-group .perf-campaign-filter .workbench-select>button{border-top-left-radius:0;border-bottom-left-radius:0;margin-left:-1px;width:200px}
+.perf-date-presets-label{margin:10px 0 4px;font-size:11px;color:var(--muted-soft)}
+.perf-date-presets .perf-date-campaign{display:flex;flex-direction:column;align-items:flex-start;gap:0;text-align:left}
+.perf-date-presets .perf-date-campaign small{font-size:11px;color:var(--muted-soft)}
+@media(max-width:570px){.perf-period-group{flex-wrap:wrap;gap:6px}.perf-period-group .perf-date-trigger,.perf-period-group .perf-campaign-filter select{border-radius:10px;margin-left:0}}
+/* Narrow toolbars: the date + activity pair takes its own row and the date box grows with its label. */
+@media(max-width:850px){#content .perf-toolbar .perf-period-group{grid-column:1/-1;justify-self:start;max-width:100%;flex-wrap:wrap;gap:6px}#content .perf-period-group .perf-date{flex:0 0 auto;max-width:100%}#content .perf-period-group .perf-date-trigger{max-width:100%;overflow:hidden;text-overflow:ellipsis}#content .perf-period-group .perf-date-trigger,#content .perf-period-group .perf-campaign-filter select{border-radius:10px;margin-left:0}}

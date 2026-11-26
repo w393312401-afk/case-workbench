@@ -43,17 +43,33 @@ class CompareTests(unittest.TestCase):
                        ["keep the same angle steady today then make a pass"])
         self.assertEqual([item["after"] for item in plan["changes"]], ["keep the same angle steady today"])
 
-    def test_words_the_script_lacks_are_kept_because_they_may_be_on_screen_text(self):
+    def test_a_whole_subtitle_the_script_lacks_is_kept_because_it_may_be_on_screen_text(self):
         plan = compare([row(0, 40, "Looks like overkill."), row(40, 80, "keep the angle steady today and make a pass with the guide")],
                        ["keep the angle steady today and make a pass with the guide"])
         self.assertEqual(plan["changes"], [])
         self.assertEqual(plan["review"][0]["wrote"], "Looks like overkill")
 
-    def test_word_missing_between_subtitles_goes_to_review(self):
-        plan = compare([row(0, 40, "keep the angle"), row(50, 80, "steady for every pass on the stone")],
-                       ["keep the angle very steady for every pass on the stone"])
-        self.assertEqual(plan["changes"], [])
-        self.assertEqual([item["expected"] for item in plan["review"]], ["very"])
+    def test_word_missing_between_subtitles_continues_the_one_before(self):
+        plan = compare([row(0, 40, "there's 30 days of free"), row(50, 80, "So try it with every pass on the stone")],
+                       ["there's 30 days of free thing. So try it with every pass on the stone"])
+        self.assertEqual([item["after"] for item in plan["changes"]], ["there's 30 days of free thing"])
+        self.assertEqual(plan["review"], [])
+
+    def test_word_missing_after_a_clause_end_starts_the_next_subtitle(self):
+        plan = compare([row(0, 40, "keep the angle steady."), row(50, 80, "every pass on the stone counts")],
+                       ["keep the angle steady. Then every pass on the stone counts"])
+        self.assertEqual([item["after"] for item in plan["changes"]], ["Then every pass on the stone counts"])
+
+    def test_word_missing_at_the_end_is_added_to_the_last_subtitle(self):
+        plan = compare([row(0, 40, "keep the angle steady"), row(50, 80, "for every pass on the")],
+                       ["keep the angle steady for every pass on the stone."])
+        self.assertEqual([item["after"] for item in plan["changes"]], ["for every pass on the stone"])
+
+    def test_extra_word_is_removed_and_punctuation_stays(self):
+        plan = compare([row(0, 40, "keep the same angle, steady today"), row(40, 80, "So then make a pass thing.")],
+                       ["keep the angle, steady today then make a pass."])
+        self.assertEqual([item["after"] for item in plan["changes"]], ["keep the angle, steady today", "then make a pass."])
+        self.assertEqual(plan["review"], [])
 
     def test_missing_opening_is_not_reported(self):
         plan = compare([row(110, 134, "You want that edge"), row(134, 179, "cutting cleanly today"), row(179, 209, "with every single stroke")],

@@ -89,7 +89,7 @@ class LibraryCategoriesBrowserTests(unittest.TestCase):
         page = self.open_page()
         expect(page.locator("#global-product")).to_have_value("202H")
         expect(page.locator("#library-product-filter")).to_have_value("")
-        expect(self.category(page, "reference-all")).to_contain_text("全部产品")
+        expect(self.category(page, "reference-all")).to_contain_text("全部")
         expect(self.category(page, "reference-all")).to_have_attribute("aria-pressed", "true")
         self.assertEqual(set(self.ids(page)), {self.identifier, self.own, self.other})
         self.assertEqual(page.locator("[data-library-preset]").count(), 0)

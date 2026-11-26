@@ -50,3 +50,5 @@
 button.global-search-result { width: 100%; text-align: left; background: none; font: inherit; cursor: pointer; }
 .global-search-result.is-command{align-items:center;padding-top:7px;padding-bottom:7px;min-height:38px}
 .global-search-result.is-command .global-search-result-icon{padding-top:0}
+/* 触屏手机没有方向键和 Esc，底部的键盘提示不显示。 */
+@media (max-width: 760px) and (hover: none) and (pointer: coarse) { .global-search-footer { display: none; } }

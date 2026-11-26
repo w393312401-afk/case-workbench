@@ -28,7 +28,7 @@ class NoiseSettingsTests(unittest.TestCase):
 
     def test_direct_settings_read_hydrates_paths_without_replacing_unsaved_form(self):
         page = self.open_page({"/api/settings/paths": {"deferred_fixture": True}})
-        page.evaluate("state.paths={};WorkbenchSettings.render()")
+        page.evaluate("state.paths={};WorkbenchSettings.render();document.querySelectorAll('[data-settings-section]').forEach(s=>s.hidden=s.dataset.settingsSection==='overview')")
         page.wait_for_function("window.deferredRequests.length === 2")
         self.assertEqual(page.locator('[data-location][data-state="loading"]').count(), 5)
         self.assertNotIn("读取失败", page.locator(".settings-locations").inner_text())
@@ -47,7 +47,7 @@ class NoiseSettingsTests(unittest.TestCase):
         page = self.open_page({"/api/settings/paths": {"paths": {**PATHS, "creation": None}}})
         self.assertEqual(page.locator('[data-location="creation"]').get_attribute("data-state"), "unconfigured")
         self.assertIn("未配置", page.locator('[data-location="creation"]').inner_text())
-        page.evaluate("state.paths={};window.responses['/api/settings/paths']={error_fixture:'fixture unavailable'};WorkbenchSettings.render()")
+        page.evaluate("state.paths={};window.responses['/api/settings/paths']={error_fixture:'fixture unavailable'};WorkbenchSettings.render();document.querySelectorAll('[data-settings-section]').forEach(s=>s.hidden=s.dataset.settingsSection==='overview')")
         self.assertEqual(page.locator('[data-location][data-state="failed"]').count(), 5)
         self.assertIn("fixture unavailable", page.locator("[data-location-error]").inner_text())
         page.evaluate("paths=>window.responses['/api/settings/paths']={paths}", PATHS)
@@ -57,7 +57,7 @@ class NoiseSettingsTests(unittest.TestCase):
 
     def test_complete_cached_paths_can_survive_api_failure(self):
         page = self.open_page({"/api/settings/paths": {"paths": PATHS}})
-        page.evaluate("paths=>{state.paths=paths;window.responses['/api/settings/paths']={error_fixture:'offline'};WorkbenchSettings.render()}", PATHS)
+        page.evaluate("paths=>{state.paths=paths;window.responses['/api/settings/paths']={error_fixture:'offline'};WorkbenchSettings.render();document.querySelectorAll('[data-settings-section]').forEach(s=>s.hidden=s.dataset.settingsSection==='overview')}", PATHS)
         self.assertEqual(page.locator('[data-location][data-state="ready"]').count(), 5)
         self.assertTrue(page.locator("[data-location-error]").is_hidden())
 
@@ -90,6 +90,9 @@ class NoiseOpportunityTests(unittest.TestCase):
         original = "A verified buyer asks about the clamp. " * 80
         self.item["evidence"][0].update(text=original, url="https://example.test/review/abc", role_label="试用/有激励买家")
         self.render()
+        self.page.locator(".opportunity-detail>summary").first.click()
+        self.page.locator(".opportunity-quotes-fold>summary").first.click()
+        self.page.locator(".opportunity-evidence>summary").first.click()
         self.assertIn("试用/有激励买家", self.page.locator(".opportunity-evidence>summary").inner_text())
         self.assertLessEqual(self.page.locator(".opportunity-excerpt").bounding_box()["height"], 75)
         capture_fixture(self.page,"opportunity-mobile-fixture.png","#review-opportunities")
@@ -134,7 +137,7 @@ class NoiseCaseReadingTests(unittest.TestCase):
           const kindNames={editorial:'内容判断'},assetLabels={video:'视频'};
           window.item={case_id:'PVR-123456abcdef',product:'202H',updated_at:'2026-10-23',created_at:'2026-10-01',original:{text:'original source'},events:[],current:{title:'A synthetic reference',category:'待验证与整理',conclusion:'历史播放 100',metrics:{video_id:'7000000000000000001'},transcript:{text:'spoken words',status:'未人工听校'}}};
         ''')
-        for name in ("library.js", "detail.js", "native.js"):
+        for name in ("navigation.js", "library.js", "detail.js", "native.js"):
             self.page.add_script_tag(path=str(ROOT/"static"/name))
 
     def test_selection_column_exists_only_in_selection_mode(self):
@@ -206,6 +209,52 @@ class NoiseCaseReadingTests(unittest.TestCase):
         self.page.locator("[data-comparison-common]").click()
         self.assertEqual(self.page.locator("[data-comparison-common-row][hidden]").count(),0)
         self.assertTrue(self.page.evaluate("beforeComparison===JSON.stringify(state.cases)"))
+
+
+class CaseBreakdownModelSelectionTests(unittest.TestCase):
+    """An isolated case view exercises retry and per-run model choices."""
+    setUpClass = classmethod(NoiseCaseReadingTests.setUpClass.__func__)
+    tearDownClass = classmethod(NoiseCaseReadingTests.tearDownClass.__func__)
+
+    def test_service_switch_and_retry_never_submit_an_unselected_or_missing_model(self):
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        page.set_content('<div id="detail-panel-script"></div>')
+        page.add_script_tag(content=r'''
+          window.state={detail:{case_id:'PVR-TEST'}};
+          window.esc=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+          window.toast=()=>{}; window.refresh=async()=>{}; window.requests=[];
+          window.job={status:'failed',model:'claude-fable-5-2',reasoning_effort:'high'};
+          window.api=async(url,opts)=>{
+            if(opts?.method==='POST'){requests.push(opts.body);return {job};}
+            if(url==='/api/ai/options') return {default_settings:{model:'claude-opus'},models:[
+              {id:'claude-opus',name:'Opus',provider:'claude',available:true,reasoning_efforts:['high']},
+              {id:'claude-fable-5-2',name:'Fable',provider:'claude',available:true,reasoning_efforts:['high']},
+              {id:'gpt-test',name:'GPT',provider:'codex',available:true,reasoning_efforts:['low']}]};
+            if(url.endsWith('/auto-breakdown')) return {job};
+            if(url.includes('/insights')) return {insights:{}};
+            return {stats:{}};
+          };
+        ''')
+        page.add_script_tag(path=str(ROOT/"static"/"auto-breakdown.js"))
+        page.evaluate("CaseAutoBreakdown.mount({case_id:'PVR-TEST'})")
+        page.wait_for_selector('[data-run-provider]')
+        self.assertEqual(page.locator('[data-run-provider="claude"]').get_attribute('aria-pressed'), 'true')
+        self.assertEqual(page.locator('[data-run-model]').input_value(), 'claude-fable-5-2')
+        self.assertEqual(page.locator('[data-run-effort]').input_value(), 'high')
+        page.locator('[data-run-provider="codex"]').click()
+        self.assertEqual(page.locator('[data-run-model]').input_value(), '')
+        self.assertTrue(page.locator('[data-run-start]').is_disabled())
+        self.assertEqual(page.locator('[data-run-model] option[value="claude-opus"]').count(), 0)
+        page.locator('[data-run-model]').select_option('gpt-test')
+        page.locator('[data-run-effort]').select_option('low')
+        page.locator('[data-run-start]').click()
+        self.assertEqual(page.evaluate('requests[0].model'), 'gpt-test')
+        self.assertEqual(page.evaluate('requests[0].reasoning_effort'), 'low')
+        page.evaluate("job={status:'failed',model:'claude-removed-1'}; CaseAutoBreakdown.mount({case_id:'PVR-TEST'})")
+        page.wait_for_function("document.querySelector('[data-run-model]')?.value === 'claude-removed-1'")
+        self.assertTrue(page.locator('[data-run-start]').is_disabled())
+        self.assertIn('当前不可用', page.locator('[data-run-model]').inner_text())
 
 
 if __name__ == "__main__":

@@ -74,6 +74,9 @@ def content_title(row, kind, *, direction="", script=None, task=None):
     originals += [row.get("title"), context.get("title"), row.get("case_title")]
     parsed = [_clean(value, direction) for value in originals]
     topic = next((value for value, _ in parsed if value), "")
+    if kind == "task" and row.get("title_source") and _text(row.get("title")):
+        # A task's own name (task_naming.py) is shown whole, direction code included.
+        topic = _text(row["title"])
     variant = next((label for _, label in parsed if label), "")
     if not variant:
         # variant_index is a candidate array index, not a user-facing number.

@@ -58,7 +58,7 @@ class PendingEditTests(unittest.TestCase):
         return body
 
     def start_pending(self, build, **values):
-        body = {"request_id": uuid4().hex, "timeline_request_id": build["request_id"], "mode": "sync",
+        body = {"request_id": uuid4().hex, "timeline_request_id": build["request_id"], "mode": "explain",
                 "materials": ["原素材时间线"], "instruction": "原来的剪辑要求", **values}
         return body, self.bench.start_edit(self.job["id"], body)
 
@@ -278,6 +278,29 @@ class PendingEditTests(unittest.TestCase):
         finally:
             self.bench.resolve.lock.release()
 
+
+    def share_key(self, creator):
+        from workbench_editing import project_key
+        config = self.bench.production.product_settings(self.bench.production.records(), self.job["product"])
+        return project_key({"project": config["project"], "creator": creator})
+
+    def test_build_takes_a_turn_in_its_projects_edit_share_instead_of_waiting_for_the_edits(self):
+        shares, cancel = self.bench._resolve_shares(), threading.Event()
+        with shares.session(self.share_key("Lab"), "EDT-running", cancel=cancel, timeout=5) as share:
+            self.assertTrue(self.bench.resolve.busy())
+            with patch("workbench_production.QUEUE_GRACE", 0):
+                result = self.bench.build_timeline(self.job["id"], {"request_id": uuid4().hex, "creator": "Lab"})
+            self.assertFalse(result.get("queued"))
+            self.assertEqual(share.users, 1)  # the build left the share; the edit still holds DaVinci
+            self.assertTrue(self.bench.resolve.busy())
+        self.assertFalse(self.bench.resolve.busy())
+
+    def test_build_of_another_creator_still_waits_for_the_whole_share(self):
+        shares, cancel = self.bench._resolve_shares(), threading.Event()
+        with shares.session(self.share_key("Zack"), "EDT-running", cancel=cancel, timeout=5):
+            build = self.queue_build()
+            self.assertEqual(self.operation(build)["state"], "prepared")
+        self.until(lambda: self.operation(build)["state"] == "committed")
 
 if __name__ == "__main__":
     unittest.main()

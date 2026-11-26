@@ -1,6 +1,8 @@
 """Apify scrape: targets and the suggested start come from the library, only in-range comments are kept and imported."""
+from contextlib import closing
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import time
 from types import SimpleNamespace
@@ -64,10 +66,38 @@ class ScrapeTests(unittest.TestCase):
         self.assertEqual(rows["tiktok_video"]["latest"], "2026-10-20")
         self.assertEqual(rows["tiktok_video"]["targets"], ["https://www.tiktok.com/@maker/video/7600000000000000001"])
         self.assertEqual(rows["amazon"]["targets"], ["https://www.amazon.com/dp/B0FS7ZPGCV"])
-        self.assertEqual(rows["reddit"]["targets"], [])
+        self.assertEqual(rows["reddit"]["targets"], ["sharpal 202H"])
+        self.assertFalse(rows["tiktok_video"]["suggested"])
         # Earliest of the platforms' newest dates, so no platform is left with a gap.
         self.assertEqual(data["recommended_start"], "2026-09-15")
         self.assertTrue(data["token"])
+
+    def test_product_without_library_sources_starts_from_sales_data(self):
+        database = Path(self.temp.name) / "performance.sqlite"
+        name = "SHARPAL 198H Electric Kitchen Knife Sharpener"
+        with closing(sqlite3.connect(database)) as connection:
+            for table in ("periods", "creator_periods"):
+                connection.execute(f"CREATE TABLE {table} (video_id TEXT, account TEXT, products TEXT, comments REAL)")
+            connection.execute("CREATE TABLE daily (video_id TEXT, account TEXT, products TEXT, comments REAL)")
+            connection.execute("CREATE TABLE photo_periods (product_id TEXT, product TEXT)")
+            connection.executemany("INSERT INTO periods VALUES (?,?,?,?)", [
+                ("71", "own", f"{name}(1729474345501823917)", 5), ("71", "own", f"{name}(1729474345501823917)", 9),
+                ("72", "own", f"{name}(1729474345501823917)", 0),
+                ("73", "own", "SHARPAL 202H Precision Kit(1732157836537861037)", 50)])
+            connection.execute("INSERT INTO creator_periods VALUES (?,?,?,?)", ("81", "maker", f"SHARPAL 129N Tool(1729625961805091757),{name}(1729474345501823917)", 40))
+            connection.execute("INSERT INTO daily VALUES (?,?,?,?)", ("71", "own", name, 3))
+            connection.execute("INSERT INTO photo_periods VALUES (?,?)", ("1729474345501823917", name))
+            connection.commit()
+        self.app.performance = SimpleNamespace(database=database)
+        rows = {row["platform"]: row for row in self.scraper.overview("198H")["platforms"]}
+        self.assertEqual(rows["tiktok_video"]["targets"], ["https://www.tiktok.com/@maker/video/81", "https://www.tiktok.com/@own/video/71"])
+        self.assertEqual(rows["tiktok_shop"]["targets"], ["https://www.tiktok.com/view/product/1729474345501823917"])
+        self.assertTrue(rows["tiktok_video"]["suggested"] and rows["tiktok_shop"]["suggested"])
+        self.assertEqual(rows["reddit"]["targets"], ["sharpal 198H"])
+        self.assertEqual(rows["amazon"]["targets"], [])
+        # A product the library already has sources for keeps following the library.
+        self.assertEqual({row["platform"]: row for row in self.scraper.overview("202H")["platforms"]}["tiktok_video"]["targets"],
+                         ["https://www.tiktok.com/@maker/video/7600000000000000001"])
 
     def test_scrape_keeps_only_in_range_and_imports(self):
         self.fake.items = {"clockworks~tiktok-comments-scraper": [tiktok("b", "2026-10-20"), tiktok("c", "2026-11-02"), tiktok("d", "2026-08-01")],

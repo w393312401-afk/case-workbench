@@ -17,6 +17,8 @@ class NoiseMaterialSaveTests(unittest.TestCase):
         self.card(page,'That’s a lot of wobble').get_by_role('button',name='摘录').click()
         self.card(page,'That’s a lot of wobble').get_by_role('button',name='已摘录').wait_for()
         page.locator('#rev-basket-toggle').click()
+        # One line per item; the opened row holds the note and actions.
+        page.locator('[data-material-expand]').click()
         field=page.locator('[data-material-note]')
         field.wait_for()
         page.evaluate('''() => {
@@ -41,6 +43,8 @@ class NoiseMaterialSaveTests(unittest.TestCase):
         self.card(page,'That’s a lot of wobble').get_by_role('button',name='已摘录').wait_for()
         page.locator('#rev-basket-toggle').click()
         basket=page.locator('#material-basket-dialog')
+        # One line per item; the opened row holds the note and actions.
+        basket.locator('[data-material-expand]').click()
         basket.locator('[data-material-theme]').click()
         page.locator('#material-theme-dialog[open]').wait_for()
         self.assertFalse(basket.evaluate('node=>node.open'))

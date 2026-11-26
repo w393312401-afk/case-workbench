@@ -491,6 +491,8 @@
     const statusEl = controls.querySelector(".segment-range-state");
     if (statusEl.textContent !== status) statusEl.textContent = status;
     controls.querySelector(".segment-speed").value = String(video.playbackRate);
+    // TikTok 播放器不能调倍速，用它播放时收起倍速选项。
+    controls.querySelector(".segment-speed-label").hidden = video.dataset?.noRate === "true";
     controls.querySelectorAll("[data-segment-jump]").forEach(button => { button.disabled = !segments().length; });
     const active = segmentKind() === "native" ? nativeActiveIndex(segments(), video.currentTime) : activeIndex(segments(), video.currentTime);
     controls.querySelectorAll(".segment-marker").forEach((marker, i) => marker.classList.toggle("is-active", i === active));

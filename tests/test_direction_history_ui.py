@@ -1,7 +1,9 @@
-"""Historical variant records stay inspectable without adding first-screen noise.
+"""Historical variant records no longer list under each angle on the direction page.
 
-The HTTP server, case library, and browser are disposable fixtures. Only the
-progress response is mocked; no live case or production service is contacted.
+Since 2026-11-22 an angle shows its structure, change and orders only; scripts,
+production orders and videos are read on their own pages (the related-content
+fold still lists the direction's scripts and videos). The HTTP server, case
+library and browser are disposable fixtures; only the progress response is mocked.
 """
 import unittest
 
@@ -56,67 +58,17 @@ class DirectionHistoryBrowserTests(unittest.TestCase):
         self.wait_for_progress(page)
         return page, notes
 
-    def expand_history(self, page):
-        details = page.locator('details.dir-variant[data-variant-index="0"]')
-        self.assertIsNone(details.get_attribute("open"))
-        details.locator(":scope > summary").click()
-        records = details.locator('[data-variant-records="0"]')
-        records.wait_for()
-        return records
-
-    def test_linked_historical_video_without_sales_stays_and_explains(self):
-        page, _ = self.history_page(width=390)
-        # Only the stages that need you or are under way speak in the folded row.
-        flow = page.locator('[data-variant-state="0"]')
-        self.assertIn("已关联 1 条视频", flow.text_content())
-        self.assertIn("制作中", flow.text_content())
-        self.assertNotIn("已登记 1 条发布", flow.text_content())
-        records = self.expand_history(page)
-        video = records.get_by_role("link", name="7664986913497009439", exact=True)
-        self.assertEqual(video.get_attribute("href"), "#/202H/videos?video=7664986913497009439")
-        self.assertEqual(records.get_by_text("发布登记 · 1", exact=True).count(), 0)
-        self.assertFalse(page.evaluate("document.documentElement.scrollWidth>document.documentElement.clientWidth"))
-        # No sales rows in this library: the reader stays on the direction and is told why.
-        video.click()
-        page.locator("#toast .toast-item").get_by_text("这条帖子还没有销售数据", exact=False).wait_for()
-        self.assertEqual(page.evaluate("location.hash"), "#/202H/directions/202H-S1")
-
-    def test_each_record_has_its_own_collapsed_evidence_and_preserves_plain_text(self):
-        page, notes = self.history_page()
-        records = self.expand_history(page)
-        disclosure = records.locator("details.dir-record-association")
-        self.assertEqual(disclosure.count(), 3)
-        for index, kind in enumerate(("scripts", "productions", "videos")):
-            with self.subTest(kind=kind):
-                item = disclosure.nth(index)
-                self.assertIsNone(item.get_attribute("open"))
-                self.assertFalse(item.locator("p").is_visible())
-                summary = item.locator(":scope > summary")
-                summary.focus()
-                summary.press("Enter")
-                self.assertIsNotNone(item.get_attribute("open"))
-                self.assertEqual(item.locator("p").inner_text(), notes[kind])
-                self.assertEqual(item.locator("p > *").count(), 0, "Evidence notes must be rendered as text")
-                summary.press("Enter")
-                self.assertIsNone(item.get_attribute("open"))
-
-    def test_inherited_production_explains_ownership_and_links_to_source_script(self):
-        page, _ = self.history_page(width=390)
-        records = self.expand_history(page)
-        production = records.locator("li").filter(has=page.get_by_role("link", name="历史制作单", exact=True))
-        self.assertEqual(production.count(), 1)
-        self.assertEqual(production.get_by_role("link", name="历史制作单", exact=True).get_attribute("href"),
-                         "#/202H/production/PRD-history-ui")
-        evidence = production.locator("details.dir-record-association")
-        self.assertIn("沿用文案归属", evidence.locator(":scope > summary").inner_text())
-        self.assertFalse(evidence.get_by_role("link", name="查看来源采用稿", exact=True).is_visible())
-        evidence.locator(":scope > summary").click()
-        source = evidence.get_by_role("link", name="查看来源采用稿", exact=True)
-        self.assertTrue(source.is_visible())
-        self.assertEqual(source.get_attribute("href"), "#/202H/content/SCR-history-ui")
-        self.assertEqual(records.get_by_role("link", name="历史已采用文案", exact=True).get_attribute("href"),
-                         source.get_attribute("href"))
-        self.assertFalse(page.evaluate("document.documentElement.scrollWidth>document.documentElement.clientWidth"))
+    def test_angle_rows_keep_orders_and_leave_record_lists_and_evidence_to_their_pages(self):
+        for width in (1280, 390):
+            with self.subTest(width=width):
+                page, notes = self.history_page(width=width)
+                details = page.locator('details.dir-variant[data-variant-index="0"]')
+                details.locator(":scope > summary").click()
+                self.assertEqual(page.locator("[data-variant-records], details.dir-record-association, [data-variant-state]").count(), 0)
+                for note in notes.values():
+                    self.assertNotIn(note, page.locator("#direction-variants").text_content())
+                self.assertFalse(page.evaluate("document.documentElement.scrollWidth>document.documentElement.clientWidth"))
+                page.context.close()
 
 
 if __name__ == "__main__":

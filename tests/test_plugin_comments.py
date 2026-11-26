@@ -144,6 +144,30 @@ class PluginCommentsTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertEqual(self.push(comment(), products={VIDEO: ""})["saved"], 1)
 
+    def test_avatar_link_is_kept_for_download_and_only_replaced_once_expired(self):
+        def link(name, expires):
+            return f"https://p16-sign-va.tiktokcdn.com/tos-maliva-avt-0068/{name}~tplv-tiktokx-cropcenter:100:100.jpeg?x-expires={expires}&x-signature=s"
+        first, fresh = link("a", 4102444800), link("b", 4102444800)
+        self.assertEqual(self.push(comment(authorHandle="knife.friend", avatar=first))["saved"], 1)
+        stored = lambda: {row["cid"]: row for row in json.loads(self.path.read_text(encoding="utf-8"))}[CID].get("avatarThumbnail")
+        self.assertEqual(stored(), first)
+        wanted = self.store.avatars.wanted_from_sources(self.store.sources, None, {"tiktok_video": __import__("review_store").PARSERS["tiktok_video"]})
+        self.assertIn(first, wanted.values(), "the avatar downloader finds the plugin's link")
+        self.assertEqual(self.push(comment(authorHandle="knife.friend", avatar=fresh))["unchanged"], 1, "a re-read does not rewrite a live link")
+        self.assertEqual(self.push(comment(authorHandle="knife.friend"))["unchanged"], 1)
+        self.assertEqual(stored(), first)
+        rows = json.loads(self.path.read_text(encoding="utf-8"))
+        rows[0]["avatarThumbnail"] = link("a", 1700000000)
+        self.path.write_text(json.dumps(rows), encoding="utf-8")
+        self.store.sync()
+        self.assertEqual(self.push(comment(authorHandle="knife.friend", avatar=fresh))["updated"], 1)
+        self.assertEqual(stored(), fresh)
+        for bad in ("secret", "http://p16.tiktokcdn.com/a.jpeg", "https://evil.example/a.jpeg", "https://tiktokcdn.com.evil.example/a.jpeg", 7):
+            with self.subTest(bad=bad):
+                result = self.push(comment(REPLY, text="Another question", avatar=bad))
+                self.assertEqual(result["invalid"], 0)
+        self.assertNotIn("avatarThumbnail", {row["cid"]: row for row in json.loads(self.path.read_text(encoding="utf-8"))}[REPLY])
+
     def test_bad_comments_do_not_block_valid_comments_or_write_private_fields(self):
         bad = [comment(id="not-cid"), comment(videoId=OTHER), comment(text=""), comment(text="x" * 10001),
                comment(likes=True), comment(likes=-1), comment(parentId=CID), comment(createdAt="yesterday"),

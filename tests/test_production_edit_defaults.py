@@ -62,6 +62,18 @@ class EditingGlobalDefaultsTests(unittest.TestCase):
                 self.assertEqual((edit["model"], edit["effort"]), (model, effort))
                 self.assertEqual((self.editor.calls[0]["model"], self.editor.calls[0]["reasoning_effort"]), (model, effort))
 
+    def test_new_claude_alias_reaches_native_edit_client(self):
+        model = "claude-alias:fable"
+        self.catalog.entries.append({"id": model, "provider": "claude", "available": True,
+                                     "reasoning_efforts": ["medium"]})
+        self.save(model, "medium")
+        job = self.timeline_job()
+        self.start(job)
+        edit = self.wait(job["id"])
+        self.assertEqual((edit["provider"], edit["model"], edit["effort"]), ("claude", model, "medium"))
+        self.assertEqual((self.editor.calls[0]["model"], self.editor.calls[0]["reasoning_effort"]), (model, "medium"))
+        self.assertEqual(self.codex.calls, [])
+
     def test_unavailable_global_model_fails_before_touching_resolve_or_starting_editor(self):
         job = self.timeline_job()
         before = len(self.bench.runner.calls)

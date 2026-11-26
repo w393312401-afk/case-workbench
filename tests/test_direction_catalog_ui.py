@@ -9,6 +9,13 @@ import test_server as fixture
 import test_ui_regressions as browser
 
 
+def show_direction(page, route="#/202H/directions/202H-S1"):
+    """Open a direction and wait for its fresh render. On a wide window the direction already on screen stays until
+    the new data arrives, so its presence alone says nothing; the stale mark goes away with the re-render."""
+    page.evaluate("""route=>{document.querySelector('#direction-definition')?.setAttribute('data-stale','');location.hash=route;}""", route)
+    page.locator("#direction-definition:not([data-stale])").wait_for()
+
+
 class DirectionCatalogBrowserTests(unittest.TestCase):
     setUpClass = classmethod(browser.WorkbenchBrowserTests.setUpClass.__func__)
     tearDownClass = classmethod(browser.WorkbenchBrowserTests.tearDownClass.__func__)
@@ -52,16 +59,36 @@ class DirectionCatalogBrowserTests(unittest.TestCase):
         self.addCleanup(lambda: self.assertEqual(errors, []))
         page.goto(f"http://127.0.0.1:{self.server.server_port}/{route}")
         page.locator("#direction-filters" if "/directions/" not in route else "#direction-definition").wait_for()
+        if "/directions/" not in route:
+            # On a wide window a direction opens beside the list by itself. Let it finish reading (its per-angle
+            # sales and tasks arrive after the first paint) before a test starts holding or counting requests.
+            page.wait_for_function("""()=>{
+                const pane=document.querySelector('#direction-pane');
+                if(!pane||getComputedStyle(pane).display==='none'||(!pane.firstElementChild&&!pane.hasAttribute('aria-busy')))return true;
+                return !pane.hasAttribute('aria-busy')&&!!pane.querySelector('.direction-variant-list.has-progress')
+                    &&pane.querySelector('#direction-tasks-panel')?.getAttribute('aria-busy')!=='true';
+            }""")
         return page
 
     def edit_point(self, page, point_id):
-        page.locator(f'[data-point-id="{point_id}"] .dir-menu summary').click()
-        page.locator(f'[data-edit-point="{point_id}"]').click()
-        dialog = page.locator("#selling-point-dialog[open]")
-        dialog.wait_for()
-        return dialog
+        # A selling point is edited in place: its form opens under its row in the table.
+        page.locator(f'#dir-points [data-edit-point="{point_id}"]').click()
+        form = page.locator("#dir-points form.px-edit")
+        form.wait_for()
+        self.assertEqual(page.locator("dialog[open]").count(), 0)
+        return form
+
+    def point_form_closed(self, page):
+        page.locator("form.px-edit").wait_for(state="detached")
+
+    def save_point(self, point, **changes):
+        status, _, data = self.request("POST", "/api/selling-points", {
+            "revision": self.catalog()["revision"], "request_id": uuid4().hex, "point": {**point, **changes}})
+        self.assertEqual(status, 200, data)
 
     def test_point_editor_picks_codes_renumbers_and_deletes_in_place(self):
+        # 同一产品事实 is no longer edited in the dialog (2026-11-22); a value saved earlier rides along untouched.
+        self.save_point(self.point_b, same_fact_as=["A8"])
         page = self.open_page("#/202H/directions?tab=points")
         dialog = self.edit_point(page, self.point_b["id"])
         self.assertFalse(dialog.locator("[data-merge-field]").is_visible())
@@ -69,34 +96,31 @@ class DirectionCatalogBrowserTests(unittest.TestCase):
         self.assertEqual(dialog.locator('[name="merged_into"] option').all_inner_texts()[1:], ["S1 定角结构让整段推磨保持角度", "A8 一次准备，两面继续"])
         dialog.locator('[name="status"]').select_option("testing")
         self.assertFalse(dialog.locator("[data-merge-field]").is_visible())
-        dialog.locator(".point-fact-choice").filter(has_text="A8").click()
+        self.assertEqual(dialog.locator('.point-fact-choice, [name="motive_difference"]').count(), 0)
         dialog.locator('[name="code"]').fill("b12")
         dialog.get_by_role("button", name="保存卖点", exact=True).click()
-        page.locator("#selling-point-dialog").wait_for(state="hidden")
+        self.point_form_closed(page)
         point = next(item for item in self.catalog()["selling_points"] if item["id"] == self.point_b["id"])
         self.assertEqual((point["code"], point["same_fact_as"], point["former_codes"]), ("B12", ["A8"], ["B9"]))
-        page.locator(f'[data-point-id="{point["id"]}"]').get_by_text("B12", exact=True).wait_for()
+        page.locator(f'[data-point-id="{point["id"]}"]').get_by_text("B12", exact=True).wait_for(state="attached")
         dialog = self.edit_point(page, self.point_s["id"])
         dialog.get_by_role("button", name="删除卖点", exact=True).click()
         dialog.get_by_role("button", name="确认删除 S1", exact=True).click()
         dialog.locator("[role=alert]").get_by_text("202H-S1", exact=False).wait_for()
         dialog.get_by_role("button", name="取消", exact=True).click()
-        page.locator("#selling-point-dialog").wait_for(state="hidden")
+        self.point_form_closed(page)
         dialog = self.edit_point(page, self.point_a["id"])
-        dialog.locator(".point-fact-choice").first.wait_for()
         dialog.get_by_role("button", name="删除卖点", exact=True).click()
         dialog.get_by_role("button", name="确认删除 A8", exact=True).click()
         dialog.locator("[role=alert]").get_by_text("B12 写它是同一产品事实", exact=False).wait_for()
         dialog.get_by_role("button", name="取消", exact=True).click()
-        page.locator("#selling-point-dialog").wait_for(state="hidden")
-        dialog = self.edit_point(page, self.point_b["id"])
-        dialog.locator(".point-fact-choice").filter(has_text="A8").click()
-        dialog.get_by_role("button", name="保存卖点", exact=True).click()
-        page.locator("#selling-point-dialog").wait_for(state="hidden")
+        self.point_form_closed(page)
+        self.save_point(next(item for item in self.catalog()["selling_points"] if item["id"] == self.point_b["id"]), same_fact_as=[])
+        page.evaluate("async()=>await route(true,true)")
         dialog = self.edit_point(page, self.point_a["id"])
         dialog.get_by_role("button", name="删除卖点", exact=True).click()
         dialog.get_by_role("button", name="确认删除 A8", exact=True).click()
-        page.locator("#selling-point-dialog").wait_for(state="hidden")
+        self.point_form_closed(page)
         page.wait_for_function(f"()=>!document.querySelector('[data-point-id=\"{self.point_a['id']}\"]')")
         self.assertNotIn(self.point_a["id"], {item["id"] for item in self.catalog()["selling_points"]})
 
@@ -104,35 +128,42 @@ class DirectionCatalogBrowserTests(unittest.TestCase):
         before = self.store.read_case(self.identifier)
         page = self.open_page("#/202H/directions?tab=points", width=390)
         page.locator("#new-selling-point").click()
-        page.locator('#selling-point-dialog [name="code"]').fill("B10")
-        page.locator('#selling-point-dialog [name="title"]').fill("保留明确使用边界")
-        page.locator('#selling-point-dialog [name="evidence"]').fill("隔离测试出处")
-        page.locator('#selling-point-dialog [name="status"]').select_option("testing")
+        # A new point is filled in above the table, without a dialog.
+        page.locator('#dir-point-new [name="code"]').fill("B10")
+        page.locator('#dir-point-new [name="title"]').fill("保留明确使用边界")
+        page.locator('#dir-point-new [name="evidence"]').fill("隔离测试出处")
+        page.locator('#dir-point-new [name="status"]').select_option("testing")
         page.get_by_role("button", name="保存卖点", exact=True).click()
-        page.locator("#selling-point-dialog").wait_for(state="hidden")
-        page.locator(".dir-list").get_by_text("保留明确使用边界", exact=True).wait_for()
+        self.point_form_closed(page)
+        page.locator(".dir-list").get_by_text("保留明确使用边界", exact=True).wait_for(state="attached")
         page.locator('[data-tier-filter="A"]').click()
         page.wait_for_function("()=>document.querySelectorAll('[data-point-id]').length===1")
         self.assertIn("A8", page.locator(".dir-list").inner_text())
-        page.locator(".dir-row .dir-menu summary").click()
-        page.locator("[data-use-point]").click()
+        # A point below S can still lead a direction, from its own form and with a reason.
+        page.locator(".dir-row .px-open").click()
+        page.locator("form.px-edit [data-lead-point]").click()
         page.locator("#direction-create-dialog[open]").wait_for()
         self.assertEqual(page.locator("#direction-generated-id").inner_text(), "202H-A8")
-        page.get_by_role("button", name="下一步", exact=True).click()
+        # One page: everything is filled in place and checked on save.
+        page.locator('#direction-create-dialog [name="concern"]').fill("准备麻烦吗")
+        page.locator('#direction-create-dialog [name="closing"]').fill("x")
+        page.get_by_role("button", name="保存方向", exact=True).click()
         page.locator("#direction-create-dialog [role=alert]").get_by_text("不是 S 级卖点", exact=False).wait_for()
         page.locator('#direction-create-dialog [name="lead_reason"]').fill("隔离测试：只测准备环节")
-        page.get_by_role("button", name="下一步", exact=True).click()
-        page.locator('#direction-create-dialog [name="concern"]').fill("准备麻烦吗")
+        page.locator('#direction-create-dialog .direction-suggestions:has([data-chain-point]) > summary').click()
+        page.locator('#direction-create-dialog [name="concern"]').focus()
         page.locator('#direction-create-dialog [data-chain-point]').filter(has_text="B9").click()
         self.assertEqual(page.locator('[name="concern"]').input_value(), "准备麻烦吗 → B9 检查接触后再决定")
-        page.get_by_role("button", name="下一步", exact=True).click()
+        page.locator('#direction-create-dialog [name="closing"]').fill("")
+        page.locator('#direction-create-dialog [name="closing"]').focus()
         page.locator('#direction-create-dialog [data-chain-point]').filter(has_text="B9").click()
+        self.assertEqual(page.locator('[name="closing"]').input_value(), "B9 检查接触后再决定")
         self.assertFalse(page.evaluate("document.documentElement.scrollWidth>document.documentElement.clientWidth"))
         page.get_by_role("button", name="保存方向", exact=True).click()
         page.locator("#direction-definition").wait_for()
         self.assertIn("/202H/directions/202H-A8", page.url)
         # A new direction has no related records yet, so the related-records card stays hidden.
-        self.assertTrue(page.locator(".dir-related").is_hidden())
+        page.locator(".dir-related").wait_for(state="hidden")  # once its (empty) task list has arrived
         page.locator("#direction-edit").click()
         page.locator('#direction-edit-dialog [name="concern"]').fill("更新后的默认顾虑")
         page.locator('#direction-edit-dialog [name="status"]').select_option("paused")
@@ -149,30 +180,32 @@ class DirectionCatalogBrowserTests(unittest.TestCase):
             })
         self.assertEqual(status, 200, linked)
         page.locator("#navigate-up").click()  # phones return through the pinned top-bar arrow
-        card = page.locator('[data-direction-id="202H-A8"]')
-        card.wait_for()
-        self.assertIn("1 条视频", card.locator(".dir-sub").inner_text())
+        # Back where it was opened from, the table; paused now, the direction sits under 已暂停 at the foot of the list.
+        page.locator("#dir-points").wait_for()
+        page.locator('[data-dx-tab="directions"]').click()
+        page.locator('#dir-list .dx-list.is-paused [data-direction-id="202H-A8"]').wait_for()
         self.assertEqual(self.store.read_case(self.identifier), before)
 
     def test_existing_direction_keeps_short_main_and_old_execution_while_draft_guard_preserves_input(self):
         before = self.store.read_case(self.identifier)
         page = self.open_page("#/202H/directions/202H-S1")
         page.locator("#direction-add-variant").click()
-        page.get_by_role("button", name="下一步", exact=True).click()
         page.locator('[name="concern"]').fill("新的执行顾虑")
-        page.get_by_role("button", name="下一步", exact=True).click()
-        page.locator("#direction-create-dialog [role=alert]").get_by_text("请选择推进结构", exact=False).wait_for()
-        page.locator('[name="progression"]').select_option("结果倒叙")
+        page.locator('[name="closing"]').fill("新的执行收口")
+        page.get_by_role("button", name="保存角度", exact=True).click()
+        page.locator("#direction-create-dialog [role=alert]").get_by_text("改了什么", exact=False).wait_for()
+        page.locator('[name="progression"]').fill("结果倒叙")
         page.locator('[name="execution_change"]').fill("先给结果再倒回原因")
         page.evaluate("location.hash='#/202H/library'")
         page.locator("#direction-discard-dialog[open]").wait_for()
         page.get_by_role("button", name="继续编辑", exact=True).click()
         self.assertEqual(page.locator('[name="concern"]').input_value(), "新的执行顾虑")
         self.assertIn("/202H/directions/202H-S1", page.url)
-        page.get_by_role("button", name="下一步", exact=True).click()
-        page.locator('[name="closing"]').fill("新的执行收口")
-        page.get_by_role("button", name="保存方向", exact=True).click()
+        self.assertEqual(page.locator('[name="closing"]').input_value(), "新的执行收口")
+        page.get_by_role("button", name="保存角度", exact=True).click()
         page.locator("#direction-create-dialog").wait_for(state="hidden")
+        # The direction on screen stays until its fresh data arrives, so wait for the added angle itself.
+        page.wait_for_function("document.querySelectorAll('details.dir-variant').length===2")
         new_variant = page.locator("details.dir-variant").last
         new_variant.locator("summary").click()
         new_variant.get_by_text("新的执行顾虑", exact=False).wait_for()

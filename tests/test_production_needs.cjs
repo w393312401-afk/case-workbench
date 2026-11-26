@@ -57,3 +57,15 @@ test('pending build leads directly to editing and a submitted continuation needs
   record.edits[0].status='cancelled';record.edits[0].error='建线已取消';
   assert.equal(collect(record)[0].detail,'建线已取消');assert.match(collect(record)[0].href,/run=edit-one/);
 });
+
+test('each timeline marked complete by hand drops its own material gaps',()=>{
+  const record=job();record.status='approved';
+  record.timelines=[{unique_id:'first',name:'202-1',take_id:'TAK-current',fps:'30',manual_completion:{at:'2026-11-17T06:18',take_id:'TAK-current',timeline_uid:'first'}},
+    {unique_id:'second',name:'202-2',take_id:'TAK-current',fps:'30',manual_completion:{at:'2026-11-17T05:29',take_id:'TAK-current',timeline_uid:'second'}}];
+  record.manual_completion={at:'2026-11-17T05:29',take_id:'TAK-current',timeline_uid:'second'};
+  record.edits=[{id:'edit-first',timeline_uid:'first',status:'needs_material',completion_policy:'skill_delivery',report:{gaps:[{start:0,end:30,need:'first gap'}]}},
+    {id:'edit-second',timeline_uid:'second',status:'needs_material',completion_policy:'skill_delivery',report:{gaps:[{start:0,end:30,need:'second gap'}]}}];
+  assert.equal(collect(record).length,0);
+  record.timelines[0].manual_completion=null;
+  const needs=collect(record);assert.equal(needs.length,1);assert.equal(needs[0].detail,'first gap · 202-1');
+});

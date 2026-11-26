@@ -99,7 +99,7 @@ class ProductionEditConcurrencyBrowserTests(unittest.TestCase):
             content_type="application/json", body=json.dumps({"ok": False, "busy": True,
                 "error": "达芬奇正在执行另一项工作台操作"})))
         page.reload()
-        page.locator('.production-steps [data-step="edit"]').click()
+        page.locator('.production-steps [data-step~="edit"]').click()
         form = page.locator("#edit-panel #edit-form")
         expect(form.locator('[name="material_text"]')).to_have_value("蓝点折刀成品素材")
         form.get_by_role("button", name="开始 AI 剪辑", exact=True).click()
@@ -128,12 +128,31 @@ class ProductionEditConcurrencyBrowserTests(unittest.TestCase):
             content_type="application/json", body=json.dumps({"ok": False, "busy": True,
                 "error": "达芬奇正在执行另一项工作台操作"})))
         page.reload()
-        page.locator('.production-steps [data-step="edit"]').click()
+        page.locator('.production-steps [data-step~="edit"]').click()
         form = page.locator("#edit-panel #edit-form")
         expect(form.locator('[name="material_text"]')).to_have_value("")
         expect(form.locator("[data-materials]")).to_contain_text("「Zack-202H」")
         form.get_by_role("button", name="开始 AI 剪辑", exact=True).click()
         self.assertEqual(self.calls, [])
+
+    def test_busy_resolve_offers_the_projects_recent_material_picks(self):
+        # Short-named footage was not recorded at build time; this project's recent edits still name it.
+        self.payload["job"]["timelines"][0].update(project="Zack-202H", materials=[],
+            material_hints=["绿蜘蛛折", "绿-冷刚猎", "水果刀"], material_last=["绿蜘蛛折", "绿-冷刚猎"])
+        page = self.open_page()
+        page.route("**/api/production/resolve", lambda route: route.fulfill(status=200,
+            content_type="application/json", body=json.dumps({"ok": False, "busy": True,
+                "error": "达芬奇正在执行另一项工作台操作"})))
+        page.reload()
+        page.locator('.production-steps [data-step~="edit"]').click()
+        form = page.locator("#edit-panel #edit-form")
+        expect(form.locator("[data-material-hint]")).to_contain_text("「Zack-202H」最近剪辑用过的素材时间线")
+        expect(form.locator('[name="material_text"]')).to_have_count(0)
+        expect(form.locator('input[name="material"][value="绿蜘蛛折"]')).to_be_checked()
+        expect(form.locator('input[name="material"][value="水果刀"]')).not_to_be_checked()
+        form.get_by_role("button", name="开始 AI 剪辑", exact=True).click()
+        expect(page.locator("#toast")).to_contain_text("已加入剪辑任务")
+        self.assertEqual(self.calls[0]["body"]["materials"], ["绿蜘蛛折", "绿-冷刚猎"])
 
 
 if __name__ == "__main__":

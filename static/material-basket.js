@@ -2,15 +2,16 @@
 
 // One persisted basket shared by the review, expression and video pages.
 window.MaterialBasket = (() => {
-  const kinds = { review: "用户评论", expression: "案例表达", hook: "视频钩子" };
+  const kinds = { review: "用户评论", ai_comment: "AI 编评论", expression: "案例表达", hook: "视频钩子" };
   const sourceLabel = item => ({tiktok_video:"TikTok 视频评论",tiktok_shop:"TikTok Shop 评价",amazon:"亚马逊评价",reddit:"Reddit 讨论",facebook:"Facebook 评论"}[item.source_label] || item.source_label || item.source_id);
   const authorLabel = item => {
+    if (item.type === 'ai_comment') return String(item.author_handle || item.title || '');
     if (item.type !== 'review') return '';
     const name = String(item.author_name || '').trim(), handle = String(item.author_handle || '').trim().replace(/^@+/, '');
     return [name, handle ? `@${handle}` : ''].filter(Boolean).join(' · ') || '评论者未记录';
   };
   // data is what the dialog shows; deferred holds a newer read that arrived while a note had focus.
-  const basket = { data: null, deferred: null, stale: false, request: 0, busy: false, error: "", drafts: new Map(), excluded: new Set(), undo: null, filter: { type: "", query: "" } };
+  const basket = { data: null, deferred: null, stale: false, request: 0, busy: false, error: "", drafts: new Map(), excluded: new Set(), included: new Set(), expanded: new Set(), undo: null, filter: { type: "", use: "", query: "" } };
   // The note text and item version each textarea started from; a draft keeps that version until it is saved.
   const baselines = new Map();
   const product = () => window.WorkbenchShell?.product() || "";
@@ -34,9 +35,21 @@ window.MaterialBasket = (() => {
   const chars = count => count >= 10000 ? `${(count / 10000).toFixed(1)} 万字符` : `${count} 字符`;
   // The task freezes these items as JSON, so this is close to what the selection adds to the writing context.
   const contextSize = items => items.reduce((sum, item) => sum + JSON.stringify(item, null, 2).length, 0);
-  const filtering = () => Boolean(basket.filter.type || basket.filter.query.trim());
+  const filtering = () => Boolean(basket.filter.type || basket.filter.use || basket.filter.query.trim());
+  // Quotes that already went out in a 图文 or video; they sit below the unused ones and start unticked.
+  const usesOf = item => item.type === "review" && Array.isArray(item.used) ? item.used.filter(use => use && typeof use === "object") : [];
+  const lastUse = item => usesOf(item).reduce((last, use) => String(use.at || "") > last ? String(use.at || "") : last, "");
+  const shortDate = at => { const day = at ? new Date(at) : null; return day && !Number.isNaN(day.getTime()) ? `${day.getMonth() + 1}/${day.getDate()}` : ""; };
+  // A used quote is ticked only when ticked by hand; anything else is ticked unless unticked by hand.
+  const picked = item => usesOf(item).length ? basket.included.has(item.id) : !basket.excluded.has(item.id);
+  function setPicked(item, on) {
+    if (usesOf(item).length) { if (on) basket.included.add(item.id); else basket.included.delete(item.id); }
+    else if (on) basket.excluded.delete(item.id); else basket.excluded.add(item.id);
+  }
+  // Unused first in basket order, then used ones by their latest use.
+  const ordered = rows => [...rows.filter(item => !usesOf(item).length), ...rows.filter(item => usesOf(item).length).sort((a, b) => lastUse(b).localeCompare(lastUse(a)))];
   // Controls whose focus survives a row being rebuilt; a note textarea is never rebuilt while it has focus.
-  const focusKeys = ["data-material-save", "data-material-remove", "data-material-theme", "data-material-select", "data-theme-remove", "data-material-filter", "data-material-all", "data-material-undo", "data-material-clear", "data-material-copy", "data-material-write", "data-material-retry", "data-material-close"];
+  const focusKeys = ["data-material-save", "data-material-remove", "data-material-theme", "data-material-select", "data-theme-remove", "data-material-filter", "data-material-use", "data-material-expand", "data-material-all", "data-material-undo", "data-material-clear", "data-material-copy", "data-material-write", "data-material-retry", "data-material-close"];
   let pointerAt = 0, pointerSave = false, backdropDown = false, undoTimer = 0;
   // Undo outlives closing the basket for this long, so a quick close is not the end of it.
   const UNDO_MS = 60000;
@@ -56,9 +69,11 @@ window.MaterialBasket = (() => {
     return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
   }
   // Unticked items stay unticked across reloads in this browser; ids are unique across products.
-  const excludedKey = "workbench-material-excluded-v1";
-  try { const saved = JSON.parse(localStorage.getItem(excludedKey) || "[]"); if (Array.isArray(saved)) saved.forEach(id => typeof id === "string" && basket.excluded.add(id)); } catch { /* Selection then starts fully ticked. */ }
-  function saveExcluded() { try { localStorage.setItem(excludedKey, JSON.stringify([...basket.excluded])); } catch { /* Kept for this page only. */ } }
+  const excludedKey = "workbench-material-excluded-v1", includedKey = "workbench-material-included-v1";
+  for (const [key, set] of [[excludedKey, basket.excluded], [includedKey, basket.included]]) {
+    try { const saved = JSON.parse(localStorage.getItem(key) || "[]"); if (Array.isArray(saved)) saved.forEach(id => typeof id === "string" && set.add(id)); } catch { /* Selection then starts from the defaults. */ }
+  }
+  function saveExcluded() { try { localStorage.setItem(excludedKey, JSON.stringify([...basket.excluded])); localStorage.setItem(includedKey, JSON.stringify([...basket.included])); } catch { /* Kept for this page only. */ } }
   function writeBlock(items = selection()) {
     if (new Set(items.map(item => String(item.product || "").toLocaleLowerCase())).size > 1) return "所选素材来自不同产品，请先选择一个具体产品再带入写稿。";
     const limit = basket.data?.limits?.prompt_chars;
@@ -67,7 +82,8 @@ window.MaterialBasket = (() => {
   function shown(item) {
     const query = basket.filter.query.trim().toLocaleLowerCase();
     if (basket.filter.type && item.type !== basket.filter.type) return false;
-    return !query || [item.text, noteOf(item), sourceLabel(item), authorLabel(item), item.source_id].some(value => String(value || "").toLocaleLowerCase().includes(query));
+    if (basket.filter.use && (basket.filter.use === "used") !== Boolean(usesOf(item).length)) return false;
+    return !query || [item.text, item.type === "review" ? item.zh || window.ReviewZh?.text(item.source_id) : "", noteOf(item), sourceLabel(item), authorLabel(item), item.source_id, ...usesOf(item).map(use => use.label)].some(value => String(value || "").toLocaleLowerCase().includes(query));
   }
   function updateFooter(modal) {
     const items = selection(), block = writeBlock(items), size = contextSize(items), limit = basket.data?.limits?.prompt_chars;
@@ -89,6 +105,9 @@ window.MaterialBasket = (() => {
       count += show;
     });
     modal.querySelectorAll("[data-material-filter]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.materialFilter === basket.filter.type)));
+    modal.querySelectorAll("[data-material-use]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.materialUse === basket.filter.use)));
+    const head = modal.querySelector(".material-table-head");
+    if (head) head.hidden = !count;
     const none = modal.querySelector("[data-material-nomatch]");
     if (none) none.hidden = count > 0;
     updateFooter(modal);
@@ -117,7 +136,7 @@ window.MaterialBasket = (() => {
     else if (prior || field.value !== baseline.note) basket.drafts.set(id, { ...prior, note: field.value, base: prior?.base ?? baseline.revision });
   }
   function collectVisibleDrafts() { dialog()?.querySelectorAll("[data-material-note]").forEach(keepDraft); }
-  function selection() { return visible().filter(item => !basket.excluded.has(item.id)).map(item => ({ ...item, note: noteOf(item) })); }
+  function selection() { return visible().filter(picked).map(item => ({ ...item, note: noteOf(item) })); }
   function updateCount() {
     const count = visible().length;
     document.querySelectorAll("[data-material-count]").forEach(node => { node.textContent = basket.data ? String(count) : "—"; });
@@ -126,6 +145,7 @@ window.MaterialBasket = (() => {
   function sourceURL(item) {
     if (item.type === "expression") return pageURL(`#case/${encodeURIComponent(item.source_id)}/script`, item.product);
     if (item.type === "hook") return pageURL(`#videos?tab=list&video=${encodeURIComponent(item.source_id)}`, item.product);
+    if (item.type === "ai_comment") return "";
     return safeURL(item.source_url) || pageURL(`#reviews?q=${encodeURIComponent(item.text?.slice(0, 60) || "")}`, item.product);
   }
   function markdown(items = selection()) {
@@ -138,6 +158,7 @@ window.MaterialBasket = (() => {
         lines.push(`- ${item.text || "（原内容暂不可用）"}`, `  - 来源：${sourceLabel(item)}${authorLabel(item) ? `｜${authorLabel(item)}` : ""}｜编号 ${item.source_id}${item.source_url ? `｜${item.source_url}` : ""}`);
         if (item.note) lines.push(`  - 备注：${item.note}`);
         if (item.unverified) lines.push("  - 真实性：未经核实，不作为产品事实或亲历证明。");
+        if (item.type === "ai_comment") lines.push(`  - 真实性：AI 按要求编的观众评论（${item.zh || "无中文"}），不是真实评论，只能用作开头评论贴纸。`);
       }
       lines.push("");
     }
@@ -145,16 +166,38 @@ window.MaterialBasket = (() => {
   }
   // The frame is built once per opening; renders then patch it, so scrolling, focus and unchanged rows survive.
   function frame() {
-    return `<div class="dialog-heading"><div><h2 id="material-basket-title">摘录篮 <small data-material-total></small></h2><p data-material-scope></p></div><button type="button" class="icon-button" data-material-close aria-label="关闭摘录篮">${icon("close")}</button></div><div class="material-basket-body"><details class="material-note"><summary>摘录与备注说明</summary><p>勾选本次写稿素材。备注离开输入框后自动保存；评论、参考表达与钩子保留来源，未经核实内容不能当作商品事实。</p></details><div id="material-basket-error" class="data-warning" role="alert" hidden><span data-material-error></span> <button type="button" class="subtle" data-material-retry>重新读取</button></div><div data-material-undo-host></div><div data-material-toolbar></div><div class="material-list"></div></div><div class="dialog-footer material-basket-footer"><span id="material-selection-count" aria-live="polite" aria-atomic="true"></span><div><button type="button" class="subtle" data-material-clear>清空当前产品</button><button type="button" class="secondary" data-material-copy>${icon("copy")}复制所选</button><button type="button" class="primary" data-material-write>带入写稿</button></div></div>`;
+    return `<div class="dialog-heading"><div><h2 id="material-basket-title">摘录篮 <small data-material-total></small></h2><p data-material-scope></p></div><button type="button" class="icon-button" data-material-close aria-label="关闭摘录篮">${icon("close")}</button></div><div class="material-basket-body"><details class="material-note"><summary>摘录与备注说明</summary><p>勾选本次写稿素材。备注离开输入框后自动保存；评论、参考表达与钩子保留来源，未经核实内容不能当作商品事实。</p></details><div class="material-ai" data-material-ai>${aiMarkup()}</div><div id="material-basket-error" class="data-warning" role="alert" hidden><span data-material-error></span> <button type="button" class="subtle" data-material-retry>重新读取</button></div><div data-material-undo-host></div><div data-material-toolbar></div><div class="material-list"></div></div><div class="dialog-footer material-basket-footer"><span id="material-selection-count" aria-live="polite" aria-atomic="true"></span><div><button type="button" class="subtle" data-material-clear>清空当前产品</button><button type="button" class="secondary" data-material-copy>${icon("copy")}复制所选</button><button type="button" class="primary" data-material-write>带入写稿</button></div></div>`;
   }
+  // Glyphs the shared icon set lacks, drawn on the same 24 grid.
+  const glyph = { image: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2.5"/><circle cx="9.5" cy="9.5" r="1.7"/><path d="m5 18 5-5 3.5 3.5 2.5-2.5 3.5 3.5"/></svg>', chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>' };
+  function useChips(item) {
+    const uses = usesOf(item);
+    if (item.type !== "review") return `<span class="material-chip">${esc(kinds[item.type] || item.type)}</span>`;
+    if (!uses.length) return '<span class="material-chip material-chip-new">还没用</span>';
+    const video = uses.filter(use => use.kind === "video").length, photo = uses.length - video;
+    return `${photo ? `<span class="material-chip material-chip-photo" title="用在 ${photo} 个图文">${glyph.image}图文 ${photo}</span>` : ""}${video ? `<span class="material-chip material-chip-video" title="用在 ${video} 条视频">${icon("video")}视频 ${video}</span>` : ""}`;
+  }
+  // A table row: the quote and its Chinese on one line each; a click opens source, uses, note and actions below it.
   function row(item) {
-    const links = linksOf(item), draft = basket.drafts.get(item.id), quote = esc(excerpt(item));
-    return `<article class="material-item" data-material-id="${esc(item.id)}"><div class="material-item-heading"><label><input type="checkbox" data-material-select="${esc(item.id)}" aria-label="带入写稿：${esc(kinds[item.type] || item.type)} · ${quote}" ${basket.excluded.has(item.id) ? "" : "checked"}> <span>${esc(kinds[item.type] || item.type)}</span></label><button type="button" class="subtle" data-material-remove="${esc(item.id)}" aria-label="移出摘录篮：${quote}">移出摘录篮</button></div>${String(item.text || "").length > 240 || String(item.text || "").split("\n").length > 4 ? `<details class="material-full"><summary><span class="material-quote-summary">${esc(String(item.text || "").replace(/\s+/g," ").slice(0,240))}…</span><span>展开原文</span></summary><blockquote>${esc(item.text)}</blockquote></details>` : `<blockquote class="material-excerpt">${esc(item.text || "原内容暂不可用，请检查来源。")}</blockquote>`}<div class="material-source"><a href="${esc(sourceURL(item))}" ${/^https?:/i.test(sourceURL(item)) ? 'target="_blank" rel="noopener noreferrer"' : ""}>${esc(sourceLabel(item))}</a>${authorLabel(item) ? `<span data-material-author>${esc(authorLabel(item))}</span>` : ""}${item.unverified ? '<span>未经核实</span>' : ""}</div><label class="material-note-field"><span>写稿备注<span class="material-unsaved" data-material-unsaved="${esc(item.id)}" ${draft ? "" : "hidden"}>${draft?.conflictAt ? "备注冲突，未保存" : "未保存"}</span></span><textarea data-material-note="${esc(item.id)}" rows="1"${maxLength("note")} placeholder="记下用途、画面或使用边界">${esc(noteOf(item))}</textarea></label><div class="material-item-actions"><button type="button" class="subtle" data-material-save="${esc(item.id)}" aria-label="保存备注：${quote}" ${draft ? "" : "hidden"}>${draft?.conflictAt ? "核对后覆盖保存" : "保存备注"}</button>${item.type === "review" ? `<button type="button" class="subtle" data-material-theme="${esc(item.source_id)}" aria-label="关联卖点或顾虑：${quote}">关联卖点或顾虑</button>` : ""}</div>${links.length ? `<div class="material-themes">${links.map(link => `<span>${esc(themeLabel(link))}<button type="button" class="material-theme-remove" data-theme-remove="${esc(link.id)}" aria-label="删除主题关联：${esc(themeLabel(link))}">×</button></span>`).join("")}</div>` : ""}</article>`;
+    const links = linksOf(item), draft = basket.drafts.get(item.id), quote = esc(excerpt(item)), open = basket.expanded.has(item.id), id = esc(item.id);
+    const uses = [...usesOf(item)].sort((a, b) => String(b.at || "").localeCompare(String(a.at || ""))), note = noteOf(item);
+    return `<article class="material-item${open ? " is-open" : ""}${uses.length ? " is-used" : ""}" data-material-id="${id}"><div class="material-row"><input type="checkbox" data-material-select="${id}" aria-label="带入写稿：${esc(kinds[item.type] || item.type)} · ${quote}" ${picked(item) ? "checked" : ""}><div class="material-row-text" data-material-toggle="${id}"><blockquote class="material-excerpt">${esc(item.text || "原内容暂不可用，请检查来源。")}</blockquote>${item.type === "review" ? window.ReviewZh?.markup({ id: item.source_id, text: item.text }, "material-zh") || "" : item.type === "ai_comment" ? `<p class="review-zh material-zh"><span class="material-chip material-chip-ai">AI 编</span>${esc(authorLabel(item))} · ${esc(item.zh || "")}</p>` : ""}${note.trim() ? `<p class="material-row-note">备注：${esc(note)}</p>` : ""}</div><div class="material-row-uses">${useChips(item)}</div><span class="material-row-date">${esc(shortDate(lastUse(item)))}</span><button type="button" class="icon-button material-expand" data-material-expand="${id}" aria-expanded="${open}" aria-label="${open ? "收起" : "展开"}：${quote}">${glyph.chevron}</button></div><div class="material-row-detail" ${open ? "" : "hidden"}><div class="material-source">${item.type === "ai_comment" ? `<span>${esc(sourceLabel(item))}</span>` : `<a href="${esc(sourceURL(item))}" ${/^https?:/i.test(sourceURL(item)) ? 'target="_blank" rel="noopener noreferrer"' : ""}>${esc(sourceLabel(item))}</a>`}${authorLabel(item) ? `<span data-material-author>${esc(authorLabel(item))}</span>` : ""}${item.unverified ? '<span>未经核实</span>' : ""}${item.type === "ai_comment" ? '<span>不是真实评论，只用作开头评论贴纸</span>' : ""}</div>${uses.length ? `<ul class="material-used" data-material-used aria-label="用过">${uses.map(use => `<li><span>${esc(shortDate(use.at))}</span>${esc(use.label || use.version || "图文")}</li>`).join("")}</ul>` : ""}<label class="material-note-field"><span>写稿备注<span class="material-unsaved" data-material-unsaved="${id}" ${draft ? "" : "hidden"}>${draft?.conflictAt ? "备注冲突，未保存" : "未保存"}</span></span><textarea data-material-note="${id}" rows="1"${maxLength("note")} placeholder="记下用途、画面或使用边界">${esc(note)}</textarea></label><div class="material-item-actions"><button type="button" class="subtle" data-material-save="${id}" aria-label="保存备注：${quote}" ${draft ? "" : "hidden"}>${draft?.conflictAt ? "核对后覆盖保存" : "保存备注"}</button>${item.type === "review" ? `<button type="button" class="subtle" data-material-theme="${esc(item.source_id)}" aria-label="关联卖点或顾虑：${quote}">关联卖点或顾虑</button>` : ""}<button type="button" class="subtle" data-material-remove="${id}" aria-label="移出摘录篮：${quote}">移出摘录篮</button></div>${links.length ? `<div class="material-themes">${links.map(link => `<span>${esc(themeLabel(link))}<button type="button" class="material-theme-remove" data-theme-remove="${esc(link.id)}" aria-label="删除主题关联：${esc(themeLabel(link))}">×</button></span>`).join("")}</div>` : ""}</div></article>`;
+  }
+  function toggleRow(id) {
+    const node = dialog()?.querySelector(`.material-item[data-material-id="${CSS.escape(id)}"]`);
+    if (!node) return;
+    const open = !basket.expanded.has(id);
+    if (open) basket.expanded.add(id); else basket.expanded.delete(id);
+    node.classList.toggle("is-open", open);
+    node.querySelector(".material-row-detail").hidden = !open;
+    const button = node.querySelector("[data-material-expand]");
+    button.setAttribute("aria-expanded", String(open));
+    button.setAttribute("aria-label", button.getAttribute("aria-label").replace(/^(展开|收起)/, open ? "收起" : "展开"));
   }
   // Everything a row shows; a row is rebuilt only when this changes.
   function rowSignature(item) {
     const draft = basket.drafts.get(item.id);
-    return JSON.stringify([item, noteOf(item), Boolean(draft), Boolean(draft?.conflictAt), basket.excluded.has(item.id), linksOf(item).map(link => [link.id, themeLabel(link)]), basket.data?.limits?.note]);
+    return JSON.stringify([item, noteOf(item), Boolean(draft), Boolean(draft?.conflictAt), picked(item), linksOf(item).map(link => [link.id, themeLabel(link)]), basket.data?.limits?.note]);
   }
   function patchList(modal, rows) {
     const list = modal.querySelector(".material-list");
@@ -190,10 +233,10 @@ window.MaterialBasket = (() => {
   function patchToolbar(modal, rows) {
     const host = modal.querySelector("[data-material-toolbar]");
     const types = Object.keys(kinds).map(type => [type, rows.filter(item => item.type === type).length]).filter(([, count]) => count);
-    const signature = JSON.stringify([rows.length, types]);
+    const used = rows.filter(item => usesOf(item).length).length, signature = JSON.stringify([rows.length, types, used]);
     if (host.dataset.signature === signature) return;
     host.dataset.signature = signature;
-    host.innerHTML = rows.length ? `<div class="material-toolbar"><div class="material-filters" ${types.length > 1 ? "" : "hidden"} role="group" aria-label="按类型筛选"><button type="button" class="subtle" data-material-filter="" aria-pressed="${!basket.filter.type}">全部 ${rows.length}</button>${types.map(([type, count]) => `<button type="button" class="subtle" data-material-filter="${type}" aria-pressed="${basket.filter.type === type}">${kinds[type]} ${count}</button>`).join("")}</div><input type="search" class="material-search" data-material-search value="${esc(basket.filter.query)}" placeholder="搜索原文、备注或来源" aria-label="搜索素材"><div class="material-bulk" title="只作用于当前显示的素材"><button type="button" class="subtle" data-material-all="1">全选</button><button type="button" class="subtle" data-material-all="0">全不选</button></div></div><p class="material-nomatch" data-material-nomatch hidden>没有符合筛选的素材。</p>` : "";
+    host.innerHTML = rows.length ? `<div class="material-toolbar"><div class="material-filters" ${types.length > 1 ? "" : "hidden"} role="group" aria-label="按类型筛选"><button type="button" class="subtle" data-material-filter="" aria-pressed="${!basket.filter.type}">全部 ${rows.length}</button>${types.map(([type, count]) => `<button type="button" class="subtle" data-material-filter="${type}" aria-pressed="${basket.filter.type === type}">${kinds[type]} ${count}</button>`).join("")}</div>${used ? `<div class="material-filters material-use-filter" role="group" aria-label="按是否用过筛选"><button type="button" class="subtle" data-material-use="" aria-pressed="${!basket.filter.use}">全部 ${rows.length}</button><button type="button" class="subtle" data-material-use="unused" aria-pressed="${basket.filter.use === "unused"}">还没用 ${rows.length - used}</button><button type="button" class="subtle" data-material-use="used" aria-pressed="${basket.filter.use === "used"}">用过 ${used}</button></div>` : ""}<input type="search" class="material-search" data-material-search value="${esc(basket.filter.query)}" placeholder="搜索原文、备注或来源" aria-label="搜索素材"><div class="material-bulk" title="只作用于当前显示的素材"><button type="button" class="subtle" data-material-all="1">全选</button><button type="button" class="subtle" data-material-all="0">全不选</button></div></div><p class="material-nomatch" data-material-nomatch hidden>没有符合筛选的素材。</p><div class="material-table-head" aria-hidden="true"><span></span><span>素材（点一行展开）</span><span>用过</span><span>最近</span><span></span></div>` : "";
   }
   function patchUndo(modal) {
     const host = modal.querySelector("[data-material-undo-host]"), message = basket.undo?.message || "";
@@ -222,7 +265,7 @@ window.MaterialBasket = (() => {
     error.querySelector("[data-material-error]").textContent = basket.error;
     patchUndo(modal);
     patchToolbar(modal, rows);
-    patchList(modal, rows);
+    patchList(modal, ordered(rows));
     const clear = modal.querySelector("[data-material-clear]");
     clear.disabled = !rows.length || basket.busy || !scoped();
     if (scoped()) clear.removeAttribute("title"); else clear.title = "请先选择一个具体产品再清空";
@@ -236,9 +279,12 @@ window.MaterialBasket = (() => {
     basket.data = value;
     basket.deferred = null;
     const existing = new Set(value.items.map(item => item.id)), excluded = basket.excluded.size;
+    const included = basket.included.size;
     for (const id of basket.excluded) if (!existing.has(id)) basket.excluded.delete(id);
+    for (const id of basket.included) if (!existing.has(id)) basket.included.delete(id);
+    for (const id of basket.expanded) if (!existing.has(id)) basket.expanded.delete(id);
     for (const id of basket.drafts.keys()) if (!existing.has(id)) basket.drafts.delete(id);
-    if (basket.excluded.size !== excluded) saveExcluded();
+    if (basket.excluded.size !== excluded || basket.included.size !== included) saveExcluded();
   }
   function accept(data) {
     const value = { ...data, items: Array.isArray(data.items) ? data.items : [] };
@@ -469,6 +515,51 @@ window.MaterialBasket = (() => {
     render();
     await refresh().catch(() => {});
   }
+  // 「AI 编一条评论」 (2026-11-18): a few words of meaning, tone or name -> an English comment and commenter to edit and keep.
+  // Kept as its own kind: the writing request is told it is not a real comment, and only the opening sticker may use it.
+  const aiState = { open: false, busy: false, made: null };
+  function aiMarkup() {
+    if (!aiState.open) return `<button type="button" class="secondary compact" data-material-ai-open title="没有合适的真实评论时，让 AI 编一条观众评论和评论者，放进摘录篮后可带入写稿当开头评论贴纸">✨ AI 编一条评论</button>`;
+    const made = aiState.made, off = aiState.busy ? "disabled" : "";
+    return `<div class="material-ai-form"><div class="material-ai-row"><input type="text" maxlength="500" data-material-ai-hint aria-label="让 AI 编评论的要求" placeholder="意思、语气、用户名，给一部分就行，比如：怀疑能不能磨锯齿刀，半信半疑" ${off}><button type="button" class="secondary compact" data-material-ai-run ${off}>${aiState.busy ? "AI 编写中…" : made ? "重新编" : "AI 编一条"}</button><button type="button" class="subtle compact" data-material-ai-close>收起</button></div>${made ? `<div class="material-ai-row"><input type="text" maxlength="25" data-material-ai-name aria-label="评论用户名" value="${esc(made.username)}"><input type="text" maxlength="300" data-material-ai-text aria-label="评论原文" value="${esc(made.text)}"><button type="button" class="primary compact" data-material-ai-save ${off}>放进摘录篮</button></div><p class="material-ai-zh">${esc(made.zh || "")}</p>` : ""}<p class="material-ai-note">${scoped() ? `放进「${esc(product())}」的摘录篮，标成 AI 编；写稿时只当开头评论贴纸的引子，不当真实评论或证据。` : "先在顶部选一个产品，AI 编的评论会放进这个产品的摘录篮。"}</p></div>`;
+  }
+  function paintAI(focus) {
+    const host = dialog()?.querySelector("[data-material-ai]");
+    if (!host) return;
+    const hint = host.querySelector("[data-material-ai-hint]")?.value || "";
+    host.innerHTML = aiMarkup();
+    const field = host.querySelector("[data-material-ai-hint]");
+    if (field) field.value = hint;
+    if (focus) host.querySelector(focus)?.focus();
+  }
+  function toggleAI(on) { aiState.open = on; if (!on) aiState.made = null; paintAI(on ? "[data-material-ai-hint]" : "[data-material-ai-open]"); }
+  async function composeComment() {
+    const host = dialog()?.querySelector("[data-material-ai]"), hint = host?.querySelector("[data-material-ai-hint]")?.value.trim() || "";
+    if (!hint) { toast("先写几个字：评论的意思、语气或用户名。", true); host?.querySelector("[data-material-ai-hint]")?.focus(); return; }
+    aiState.busy = true; paintAI();
+    try { aiState.made = await post("/api/materials/ai-comment", { hint, product: product() }); }
+    catch (error) { toast(error.message || "AI 没编出来，请重试。", true); }
+    finally { aiState.busy = false; paintAI(aiState.made ? "[data-material-ai-text]" : "[data-material-ai-hint]"); }
+  }
+  async function saveComment() {
+    const host = dialog()?.querySelector("[data-material-ai]");
+    if (!scoped()) { toast("先在顶部选一个产品，再放进摘录篮。", true); return; }
+    const name = host.querySelector("[data-material-ai-name]").value.trim(), words = host.querySelector("[data-material-ai-text]").value.trim();
+    if (!name || !words) { toast("用户名和评论都要有。", true); return; }
+    aiState.busy = true; paintAI();
+    const done = await add({ type: "ai_comment", product: product(), author_handle: name, text: words, zh: aiState.made?.zh || "", note: "" });
+    aiState.busy = false;
+    if (done) { aiState.made = null; aiState.open = false; }
+    paintAI(done ? "[data-material-ai-open]" : null);
+  }
+  // From elsewhere (the comment library's empty search): open the basket with the AI form ready, the hint filled in.
+  async function makeComment(hint = "") {
+    aiState.open = true; aiState.made = null;
+    await open();
+    paintAI("[data-material-ai-hint]");
+    const field = dialog()?.querySelector("[data-material-ai-hint]");
+    if (field && hint) field.value = hint;
+  }
   async function write() {
     // Check before closing so a mixed-product selection stays visible for the user to fix.
     if (writeBlock()) return;
@@ -496,10 +587,15 @@ window.MaterialBasket = (() => {
     else if (hit("data-material-retry")) void refresh().catch(() => {});
     else if (hit("data-material-undo")) void undo();
     else if ((node = hit("data-material-filter"))) { basket.filter.type = node.dataset.materialFilter; applyFilter(modal); }
+    else if ((node = hit("data-material-use"))) { basket.filter.use = node.dataset.materialUse; applyFilter(modal); }
+    else if ((node = hit("data-material-expand"))) toggleRow(node.dataset.materialExpand);
+    // The quote itself opens the row, unless the click was on a control in it or ended a text selection.
+    else if ((node = hit("data-material-toggle")) && !event.target.closest?.("button, a, input, textarea") && !String(window.getSelection?.() || "")) toggleRow(node.dataset.materialToggle);
     else if ((node = hit("data-material-all"))) {
       const tick = node.dataset.materialAll === "1";
-      for (const item of visible().filter(shown)) { if (tick) basket.excluded.delete(item.id); else basket.excluded.add(item.id); }
-      modal.querySelectorAll("[data-material-select]").forEach(field => { field.checked = !basket.excluded.has(field.dataset.materialSelect); });
+      for (const item of visible().filter(shown)) setPicked(item, tick);
+      const byId = new Map(visible().map(item => [item.id, item]));
+      modal.querySelectorAll("[data-material-select]").forEach(field => { const item = byId.get(field.dataset.materialSelect); if (item) field.checked = picked(item); });
       saveExcluded();
       updateFooter(modal);
     } else if ((node = hit("data-material-save"))) {
@@ -517,7 +613,11 @@ window.MaterialBasket = (() => {
     } else if ((node = hit("data-theme-remove"))) {
       const link = (latest()?.theme_links || []).find(entry => entry.id === node.dataset.themeRemove);
       if (link) void removeTheme(link).catch(error => { basket.error = error.message || "删除未完成，请重试。"; render(); });
-    } else if (hit("data-material-copy")) copyText(markdown(), `已复制 ${selection().length} 条素材`);
+    } else if (hit("data-material-ai-open")) toggleAI(true);
+    else if (hit("data-material-ai-close")) toggleAI(false);
+    else if (hit("data-material-ai-run")) void composeComment();
+    else if (hit("data-material-ai-save")) void saveComment();
+    else if (hit("data-material-copy")) copyText(markdown(), `已复制 ${selection().length} 条素材`);
     // One click clears; the undo bar restores everything exactly, so no second confirmation.
     else if (hit("data-material-clear")) { if (scoped()) void removeItems([...visible()], true); } else if (hit("data-material-write")) void write();
     // Leaving for another page closes the basket rather than leaving it open over that page.
@@ -529,7 +629,8 @@ window.MaterialBasket = (() => {
   function onChange(event) {
     const field = event.target.closest?.("[data-material-select]");
     if (!field) return;
-    if (field.checked) basket.excluded.delete(field.dataset.materialSelect); else basket.excluded.add(field.dataset.materialSelect);
+    const item = visible().find(entry => entry.id === field.dataset.materialSelect);
+    if (item) setPicked(item, field.checked);
     saveExcluded();
     updateFooter(dialog());
   }
@@ -614,7 +715,7 @@ window.MaterialBasket = (() => {
     initialized = true;
     const modal = document.createElement("dialog"); modal.id = "material-basket-dialog"; modal.setAttribute("aria-labelledby", "material-basket-title"); document.body.append(modal);
     // Esc, the backdrop and close() all end here; the next opening builds a fresh frame. Undo is kept (see offerUndo).
-    modal.addEventListener("close", () => { basket.filter = { type: "", query: "" }; modal.innerHTML = ""; document.documentElement.classList.remove("basket-docked"); warnConflicts(); });
+    modal.addEventListener("close", () => { basket.filter = { type: "", use: "", query: "" }; modal.innerHTML = ""; document.documentElement.classList.remove("basket-docked"); warnConflicts(); });
     // A docked basket is not modal, so Esc only closes it while focus is inside; elsewhere Esc keeps its page meaning.
     modal.addEventListener("keydown", event => { if (event.key === "Escape" && !modal.matches(":modal")) { event.preventDefault(); close(); } });
     modal.addEventListener("pointerdown", event => { pointerAt = event.timeStamp; pointerSave = Boolean(event.target.closest?.("[data-material-save]")); backdropDown = event.target === modal && outside(event); }, true);
@@ -638,5 +739,5 @@ window.MaterialBasket = (() => {
     window.addEventListener("beforeunload", event => { if (basket.drafts.size) { event.preventDefault(); event.returnValue = ""; } });
     void refresh().catch(() => {});
   }
-  return { initialize, open, close, add, has, count, refresh, selection, markdown, openTheme, openHook, saveDrafts, modalOpen: () => Boolean(dialog()?.matches(":modal") || document.querySelector("#material-theme-dialog")?.open || document.querySelector("#material-hook-dialog")?.open), hasUnsavedInput: () => basket.drafts.size > 0 || [...hookDrafts.values()].some(item => item.text.trim() || item.note.trim()) };
+  return { initialize, open, close, add, has, count, refresh, selection, markdown, openTheme, openHook, saveDrafts, makeComment, modalOpen: () => Boolean(dialog()?.matches(":modal") || document.querySelector("#material-theme-dialog")?.open || document.querySelector("#material-hook-dialog")?.open), hasUnsavedInput: () => basket.drafts.size > 0 || [...hookDrafts.values()].some(item => item.text.trim() || item.note.trim()) };
 })();

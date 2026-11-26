@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
+import re
 import unittest
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -12,6 +13,8 @@ from playwright.sync_api import expect, sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 ACTIVE = {"queued", "running", "cancelling", "recovering"}
 NOW = "2026-10-11T04:00:00Z"
+# What a browser that never opened the panel starts with: the 要处理 tab, no week strip.
+DEFAULT_PREFS = {"state": "needs", "dates": False}
 
 
 class TaskActivityBrowserTests(unittest.TestCase):
@@ -174,8 +177,11 @@ class TaskActivityBrowserTests(unittest.TestCase):
         ''')
         if public:
             page.evaluate("window.PublicTextMode = {}")
-        if activity_prefs is not None:
-            page.evaluate("prefs => localStorage.setItem('workbench-activity-prefs-v1', JSON.stringify(prefs))", activity_prefs)
+        # Most tests read runs on the record's week strip, which the panel opens on request; they start there.
+        # The panel's own default (要处理, no dates) is asked for with DEFAULT_PREFS; False stores nothing, as in a browser new to the panel.
+        if activity_prefs is not False:
+            stored = {"state": "history", "dates": True, **(activity_prefs or {})}
+            page.evaluate("([prefs, force]) => { if (force || localStorage.getItem('workbench-activity-prefs-v1') === null) localStorage.setItem('workbench-activity-prefs-v1', JSON.stringify(prefs)); }", [stored, activity_prefs is not None])
         page.add_script_tag(path=str(ROOT / "static/activity.js"))
         if initialize:
             page.evaluate("TaskActivity.initialize()")
@@ -210,12 +216,14 @@ class TaskActivityBrowserTests(unittest.TestCase):
         self.assertEqual(self.read, set())
         self.pick_product(page, "")
         expect(page.locator(".activity-row")).to_have_count(2)
-        # 全部已读 shows only while something is unread, with the count on its corner.
-        read_all = page.get_by_role("button", name="全部已读", exact=True)
+        # 全部已读 sits in the 更多 menu with the unread count, and is greyed out once nothing is unread.
+        page.locator("[data-activity-menu]").click()
+        read_all = page.locator("#activity-read-all")
         expect(read_all.locator("small")).to_have_text("2")
         read_all.click()
+        expect(page.locator("#activity-menu")).to_be_hidden()
         expect(page.locator(".activity-row.is-unread")).to_have_count(0)
-        expect(read_all).to_be_hidden()
+        expect(read_all).to_be_disabled()
         self.assertEqual(self.read, {1, 2})
 
     def claim_requests(self):
@@ -502,15 +510,18 @@ class TaskActivityBrowserTests(unittest.TestCase):
         expect(page.locator("[data-log-more]")).to_have_count(0)
         self.assertEqual(self.read, {1})
 
-    def test_opening_panel_previews_newest_run_without_reading_it(self):
+    def test_opening_the_panel_reads_nothing_until_a_run_is_opened(self):
         self.add_run(status="completed", notify=True)
         page = self.page(activity_prefs={"mode": "all"})
         self.open_all(page)
-        expect(page.locator(".activity-row.is-selected")).to_have_count(1)
-        expect(page.locator("#activity-detail-title")).to_have_text("202H 写稿第 1 轮")
-        expect(page.locator(".activity-log-lines li")).to_have_count(2)
+        # No log is previewed: the list has the whole panel, and nothing is selected or read.
+        expect(page.locator(".activity-row.is-unread")).to_have_count(1)
+        expect(page.locator(".activity-row.is-selected")).to_have_count(0)
+        expect(page.locator("#activity-detail")).to_be_hidden()
         self.assertEqual(self.read, set())
         page.locator("[data-activity-log='ai:one']").click()
+        expect(page.locator("#activity-detail-title")).to_have_text("202H 写稿第 1 轮")
+        expect(page.locator(".activity-log-lines li")).to_have_count(2)
         page.wait_for_function("activityApiActive === 0")
         self.assertEqual(self.read, {1})
 
@@ -542,10 +553,39 @@ class TaskActivityBrowserTests(unittest.TestCase):
         expect(week).to_be_visible()
         expect(page.locator("#task-activity-dialog")).to_be_visible()
 
+    def test_the_panel_is_one_column_and_widens_only_while_a_log_is_open(self):
+        self.add_run("run:a", status="completed", message="完成")
+        page = self.page()
+        page.locator("#task-activity-open").click()
+        width = "document.querySelector('#task-activity-dialog').getBoundingClientRect().width"
+        self.assertLessEqual(page.evaluate(width), 520)
+        # There is no wide mode to switch to: 更多 holds 置顶, 我的筛选 and 全部已读.
+        page.locator("[data-activity-menu]").click()
+        expect(page.locator("#activity-menu button")).to_have_count(3)
+        expect(page.locator("#activity-menu [data-activity-expand]")).to_have_count(0)
+        page.keyboard.press("Escape")
+        # Opening a log widens the panel; the log sits left of the list, which keeps the right edge.
+        page.locator("[data-activity-log='run:a']").click()
+        expect(page.locator("#activity-detail-title")).to_be_visible()
+        page.wait_for_function(f"{width} > 800")
+        log, runs = page.locator("#activity-detail").bounding_box(), page.locator(".activity-runs").bounding_box()
+        self.assertLess(log["x"], runs["x"])
+        page.locator(".activity-detail-close").click()
+        page.wait_for_function(f"{width} <= 520")
+        expect(page.locator("#activity-detail")).to_be_hidden()
+        # A narrow window shows the log in the list's place, with a way back.
+        page.set_viewport_size({"width": 700, "height": 800})
+        page.locator("[data-activity-log='run:a']").click()
+        expect(page.locator(".activity-runs")).to_be_hidden()
+        expect(page.locator(".activity-detail-close")).to_be_hidden()
+        page.locator(".activity-back").click()
+        expect(page.locator(".activity-runs")).to_be_visible()
+        expect(page.locator("#activity-detail")).to_be_hidden()
+
     def set_times(self, run_id, started, finished):
         self.runs[run_id].update(started_at=started, finished_at=finished, updated_at=finished or started)
 
-    def test_week_strip_marks_each_day_and_keeps_open_work_pinned_below(self):
+    def test_week_strip_marks_each_day_and_open_work_waits_in_its_own_tab(self):
         self.add_run("ai:wait", status="needs_attention", notify=True)["owner_id"] = "AIT-wait"
         self.add_run("ai:busy", status="running")["owner_id"] = "AIT-busy"
         self.add_run("ai:old", status="completed")["owner_id"] = "AIT-old"
@@ -557,7 +597,7 @@ class TaskActivityBrowserTests(unittest.TestCase):
         expect(page.locator(".activity-week-label")).to_have_text("10 月 5–11 日")
         today = page.locator('[data-activity-date][aria-pressed="true"]')
         expect(today).to_contain_text("今天")
-        # Each day shows its count, a yellow mark while something waits on you and a blue one while something runs.
+        # Each day shows its count, a yellow mark while something waits on you and an accent one while something runs.
         marks = lambda day: day.locator(".activity-week-count i").evaluate_all("nodes => nodes.map(node => node.className)")
         expect(today.locator(".activity-week-count")).to_have_text("2 项")
         self.assertEqual(marks(today), ["is-warning", "is-active"])
@@ -565,13 +605,14 @@ class TaskActivityBrowserTests(unittest.TestCase):
         self.assertEqual(marks(days.nth(3)), [])
         expect(page.locator(".activity-row")).to_have_count(2)
         expect(page.locator("[data-activity-week='1']")).to_be_disabled()
-        # Another day of the week is already loaded; the open work stays pinned below it.
+        # Another day of the week is already loaded. It lists that day only: what still waits is counted on its own tab.
         feeds = lambda: sum(1 for row in self.requests if row["params"].get("filter"))
         before = feeds()
         days.nth(3).click()
         expect(page.locator(".activity-section").first).to_contain_text("10 月 8 日 周四")
-        expect(page.locator(".activity-section.is-pending")).to_contain_text("等你处理")
-        expect(page.locator(".activity-row")).to_have_count(3)
+        expect(page.locator(".activity-row")).to_have_count(1)
+        expect(page.locator('[data-activity-filter="needs"] small')).to_have_text("1")
+        expect(page.locator('[data-activity-filter="running"] small')).to_have_text("1")
         self.assertEqual(feeds(), before)
         expect(page.locator("[data-activity-today]")).to_be_visible()
         # Another week is read from the service; the weekday is kept.
@@ -583,6 +624,13 @@ class TaskActivityBrowserTests(unittest.TestCase):
         expect(page.locator('[data-activity-date][aria-pressed="true"]')).to_contain_text("1")
         page.locator("[data-activity-today]").click()
         expect(page.locator('[data-activity-date][aria-pressed="true"]')).to_contain_text("今天")
+        # 要处理 and 进行中 list the open runs whatever day they started.
+        page.locator('[data-activity-filter="needs"]').click()
+        expect(page.locator("#activity-week")).to_be_hidden()
+        expect(page.locator(".activity-row")).to_have_count(1)
+        expect(page.locator("[data-run-id='ai:wait']")).to_have_count(1)
+        page.locator('[data-activity-filter="running"]').click()
+        expect(page.locator("[data-run-id='ai:busy']")).to_have_count(1)
         self.assertEqual(self.read, set())
 
     def test_waiting_work_comes_from_the_content_views_and_names_the_next_step(self):
@@ -593,21 +641,100 @@ class TaskActivityBrowserTests(unittest.TestCase):
             {"id": "script:SCR-new", "title": "S1 #2 新稿", "product": "202H", "stage_label": "已采纳", "next_label": "开始制作",
              "next_hash": "#content/SCR-new", "updated_at": "2026-10-08T03:00:00Z"}]
         self.content["publish"] = [{"id": "video:PRD-cut", "title": "重复的同一单", "next_label": "登记发布", "production_ids": ["PRD-cut"]}]
-        page = self.page()
+        page = self.page(activity_prefs=DEFAULT_PREFS)
         page.locator("#task-activity-open").click()
-        # The order on today's page says what to do next instead of its last run's outcome.
+        # 要处理 lists each to-do once, whatever day its order last ran, under a heading that names the next step.
+        rows = page.locator(".activity-work-row")
+        expect(rows).to_have_count(2)
+        expect(page.locator(".activity-bucket")).to_have_text(["核对剪辑结果 · 1", "开始制作 · 1"])
+        cut = rows.filter(has_text="Lab-1 · S2 变体待核对")
+        expect(cut.locator("a")).to_have_attribute("href", "#production/PRD-cut?step=edit")
+        expect(rows.filter(has_text="S1 #2 新稿").locator("a")).to_have_attribute("href", "#content/SCR-new")
+        # A to-do with nothing more to read has no arrow.
+        expect(rows.filter(has_text="S1 #2 新稿").locator("[data-activity-peek]")).to_have_count(0)
+        # In the record, the order still says what to do next instead of its last run's outcome.
+        page.locator('[data-activity-filter="history"]').click()
         row = page.locator("[data-run-id='edit:cut']")
         expect(row.locator(".activity-status")).to_have_text("核对剪辑结果")
+        expect(page.locator(".activity-work-row")).to_have_count(0)
+        page.locator("[data-activity-dates]").click()
         expect(page.locator('[data-activity-date][aria-pressed="true"] .activity-week-count i')).to_have_class("is-warning")
-        # Waiting work not on the open day is pinned below it, once per order, linking to where it is done.
-        pinned = page.locator(".activity-work-row")
-        expect(pinned).to_have_count(1)
-        expect(pinned).to_contain_text("S1 #2 新稿")
-        expect(pinned.locator("a")).to_have_attribute("href", "#content/SCR-new")
-        page.locator("[data-activity-date]").nth(3).click()
-        expect(page.locator(".activity-section.is-pending")).to_contain_text("2 项")
-        expect(page.locator(".activity-work-row")).to_have_count(2)
-        expect(page.locator(".activity-work-row").first).to_contain_text("Lab-1 · S2 变体待核对")
+
+    def test_a_writing_run_showing_its_orders_next_step_opens_that_order(self):
+        # The draft became an order that still needs a voice-over: the writing run says 制作配音, so it opens the order.
+        run = self.add_run("ai:write", status="completed")
+        run.update(owner_id="AIT-w", url="#/202H/ai/AIT-w?round=AIR-1")
+        self.content["attention"] = [
+            {"id": "video:PRD-v", "title": "第 2 稿｜视频", "product": "202H", "stage_label": "待配音", "next_label": "制作配音",
+             "next_hash": "#production/PRD-v?step=voice", "updated_at": "2026-10-11T00:00:12Z",
+             "production_ids": ["PRD-v"], "task_ids": ["AIT-w"]}]
+        page = self.page()
+        page.locator("#task-activity-open").click()
+        row = page.locator("[data-run-id='ai:write']")
+        expect(row.locator(".activity-status")).to_have_text("制作配音")
+        go = row.locator("[data-activity-result]")
+        expect(go).to_have_attribute("title", "制作配音")
+        go.click()
+        page.wait_for_function("location.hash === '#production/PRD-v?step=voice'")
+        # Clicking the row itself also opens the order, not the writing log.
+        page.evaluate("history.replaceState(null, '', '#ai')")
+        page.locator("#task-activity-open").click()
+        page.locator("[data-run-id='ai:write'] [data-activity-log]").click()
+        page.wait_for_function("location.hash === '#production/PRD-v?step=voice'")
+
+    def test_a_writing_task_with_several_rounds_opens_its_order_from_the_row(self):
+        # Two rounds group under the task; its draft's order waits for review, so the row opens the order's edit step.
+        for run_id in ("ai:r1", "ai:r2"):
+            self.add_run(run_id, status="completed")["owner_id"] = "AIT-w"
+        self.content["attention"] = [
+            {"id": "video:PRD-c", "title": "第 3 稿｜视频", "product": "202H", "stage_label": "待人工审查", "next_label": "核对剪辑结果",
+             "next_hash": "#production/PRD-c?step=edit", "updated_at": "2026-10-11T00:00:12Z",
+             "production_ids": ["PRD-c"], "task_ids": ["AIT-w"]}]
+        page = self.page()
+        page.locator("#task-activity-open").click()
+        row = page.locator("[data-activity-group='AIT-w']")
+        expect(row).to_contain_text("核对剪辑结果")
+        row.click()
+        page.wait_for_function("location.hash === '#production/PRD-c?step=edit'")
+
+    def test_a_writing_task_whose_order_has_its_own_row_opens_the_writing_task(self):
+        # The order already shows 核对剪辑结果 on its own row; the writing task reads as itself and opens the writing task.
+        write = self.add_run("ai:write", status="completed")
+        write.update(owner_id="AIT-w", url="#/202H/ai/AIT-w?round=AIR-1")
+        self.add_run("edit:cut", status="completed")["owner_id"] = "PRD-c"
+        self.content["attention"] = [
+            {"id": "video:PRD-c", "title": "第 3 稿｜视频", "product": "202H", "stage_label": "待人工审查", "next_label": "核对剪辑结果",
+             "next_hash": "#production/PRD-c?step=edit", "updated_at": "2026-10-11T00:00:12Z",
+             "production_ids": ["PRD-c"], "task_ids": ["AIT-w"]}]
+        page = self.page()
+        page.locator("#task-activity-open").click()
+        expect(page.locator("[data-run-id='edit:cut'] .activity-status")).to_have_text("核对剪辑结果")
+        row = page.locator("[data-run-id='ai:write']")
+        expect(row.locator(".activity-status")).not_to_have_text("核对剪辑结果")
+        expect(row.locator("[data-activity-log]")).to_have_attribute("title", "打开写稿任务")
+        row.locator("[data-activity-log]").click()
+        page.wait_for_function("location.hash === '#/202H/ai/AIT-w?round=AIR-1'")
+
+    def test_an_orders_own_row_still_opens_its_log(self):
+        self.add_run("edit:cut", status="completed")["owner_id"] = "PRD-cut"
+        self.content["attention"] = [
+            {"id": "video:PRD-cut", "title": "剪辑单", "product": "202H", "stage_label": "待人工审查", "next_label": "核对剪辑结果",
+             "next_hash": "#production/PRD-cut?step=edit", "updated_at": "2026-10-11T00:00:12Z", "production_ids": ["PRD-cut"]}]
+        page = self.page()
+        page.locator("#task-activity-open").click()
+        main = page.locator("[data-run-id='edit:cut'] [data-activity-log]")
+        expect(main).not_to_have_attribute("data-activity-next", re.compile(".*"))
+        main.click()
+        expect(page.locator("[data-activity-visit]")).to_have_text("核对剪辑结果")
+
+    def test_a_run_with_nothing_waiting_still_opens_its_own_result(self):
+        self.add_run("ai:write", status="completed")
+        page = self.page()
+        page.locator("#task-activity-open").click()
+        go = page.locator("[data-run-id='ai:write'] [data-activity-result]")
+        expect(go).to_have_attribute("title", "查看结果")
+        go.click()
+        page.wait_for_function("location.hash === '#/202H/ai/AIT-one?round=ai:write'")
 
     def test_empty_today_opens_on_the_latest_day_with_runs(self):
         self.add_run("ai:old", status="completed")["owner_id"] = "AIT-old"
@@ -643,13 +770,11 @@ class TaskActivityBrowserTests(unittest.TestCase):
             route.fulfill(json={"state": "finished"})
         original = self.photos["items"]
         self.context.route("**/api/production/jobs/PRD-pic/photo-decision", decision)
-        page = self.page()
+        page = self.page(activity_prefs=DEFAULT_PREFS)
         page.locator("#task-activity-open").click()
-        # The order's own run row (another timeline) no longer borrows this timeline's to-do.
-        run_row = page.locator(".activity-row:not(.activity-work-row)").filter(has_text="Lab-2｜图文单")
-        expect(run_row).not_to_contain_text("继续做图文")
         row = page.locator(".activity-work-row").filter(has_text="Lab-9 · 图文单")
-        expect(row).to_contain_text("继续做图文")
+        expect(page.locator(".activity-bucket").filter(has_text="继续做图文")).to_have_text("继续做图文 · 1")
+        expect(row).to_have_count(1)
         row.hover()
         row.locator("[data-activity-work-finish]").click()
         expect(page.locator(".activity-work-row").filter(has_text="Lab-9")).to_have_count(0)
@@ -659,44 +784,71 @@ class TaskActivityBrowserTests(unittest.TestCase):
         expect(page.locator(".activity-finished-note")).to_have_count(0)
         self.assertEqual([post["decision"] for post in posts], ["finish", "reopen"])
         self.assertEqual(posts[0]["timeline"], "u9")
-        row = page.locator(".activity-work-row").filter(has_text="Lab-9")
-        row.hover()
-        expect(row.locator("[data-activity-work-delete]")).to_be_visible()
+        # Permanent delete is left to 内容进程 and 成片与发布, where it asks first.
+        expect(page.locator("#task-activity-dialog").get_by_text("删除", exact=True)).to_have_count(0)
+        # In the record, the order's own run (another timeline) does not borrow this timeline's to-do.
+        page.locator('[data-activity-filter="history"]').click()
+        run_row = page.locator(".activity-row").filter(has_text="Lab-2｜图文单")
+        expect(run_row).to_have_count(1)
+        expect(run_row).not_to_contain_text("继续做图文")
 
-    def test_filter_buttons_narrow_the_day_and_list_photo_work(self):
+    def test_tabs_and_type_chips_narrow_the_list(self):
         self.add_kinds()
         self.photos = {"counts": {"pending": 4, "doing": 1}, "items": [
             {"job_id": "PRD-old", "job_title": "旧单", "timeline_uid": "u9", "timeline_name": "Lab-9", "product": "202H", "state": "doing", "since": "2026-10-09T03:00:00Z"},
             {"job_id": "PRD-new", "job_title": "新单", "timeline_uid": "u8", "timeline_name": "Lab-8", "product": "202H", "state": "pending", "since": "2026-10-09T03:00:00Z"}]}
         self.stuck = {"items": [{"kind": "preview", "kind_label": "预览导出失败", "job_id": "PRD-prev", "job_title": "预览单", "timeline_uid": "u7", "timeline_name": "Lab-7",
                                  "product": "202H", "message": "素材离线", "since": "2026-10-10T03:00:00Z", "hash": "#production/PRD-prev?step=publish"}]}
-        page = self.page()
+        page = self.page(activity_prefs=DEFAULT_PREFS)
         page.locator("#task-activity-open").click()
-        chips = page.locator("[data-activity-filter]")
-        expect(chips).to_have_text(["全部5", "等你处理3", "进行中", "出错1", "视频2", "图文3", "写稿1"])
-        # Under 全部 the 图文 to-do in progress is listed; undecided videos are not.
-        expect(page.locator(".activity-work-row")).to_have_count(2)
-        expect(page.locator(".activity-work-row").filter(has_text="Lab-9 · 旧单")).to_contain_text("继续做图文")
-        expect(page.locator(".activity-work-row").filter(has_text="Lab-7 · 预览单")).to_contain_text("预览导出失败")
-        page.locator('[data-activity-filter="photo"]').click()
-        expect(page.locator('[data-activity-filter="photo"]')).to_have_attribute("aria-pressed", "true")
-        day = page.locator(".activity-row:not(.activity-work-row)")
-        expect(day).to_have_count(1)
-        expect(day).to_contain_text("Lab-2｜图文单")
-        expect(day).to_contain_text("图文逐张表：3 版逐张表已写好")
-        work = page.locator(".activity-work-row")
-        expect(work).to_have_count(2)
-        expect(work.nth(1)).to_contain_text("4 条成片还没决定做不做图文")
-        expect(work.nth(1).locator("a")).to_have_attribute("href", "#content?view=carousel")
-        # The week strip and the timeline follow the filter too.
+        # Three tabs, 要处理 first with its count; 出错 only shows while chosen (the content list's failure card opens it).
+        tabs = page.locator("[data-activity-filter]")
+        expect(tabs).to_have_text(["要处理3", "进行中", "记录"])
+        kind = page.locator("[data-activity-kind]")
+        expect(kind.first).to_have_text("全部")
+        expect(kind.first).to_have_attribute("aria-pressed", "true")
+        # Only kinds with something listed get a chip; nothing here is a 口播审查 or a backup, and no 写稿 waits.
+        expect(kind).to_have_text(["全部", "视频2", "图文2"])
+        # The 图文 in progress, the stuck export and the failed edit each sit under what they ask for, the newest first.
+        expect(page.locator(".activity-bucket")).to_have_text(["AI 剪辑失败 · 1", "预览导出失败 · 1", "继续做图文 · 1"])
+        rows = page.locator(".activity-work-row")
+        expect(rows).to_have_count(3)
+        expect(rows.filter(has_text="Lab-7 · 预览单")).to_contain_text("素材离线")
+        expect(rows.filter(has_text="Lab-9 · 旧单")).to_have_count(1)
+        # A failure's row opens its log, where the reason is.
+        expect(rows.filter(has_text="Lab-1｜剪辑单").locator("[data-activity-log='edit:cut']")).to_have_count(1)
+        page.locator('[data-activity-kind="photo"]').click()
+        expect(page.locator('[data-activity-kind="photo"]')).to_have_attribute("aria-pressed", "true")
+        # Videos nobody decided on are one line, only under 图文.
+        expect(rows).to_have_count(2)
+        digest = rows.filter(has_text="4 条成片还没决定做不做图文")
+        expect(digest.locator("a")).to_have_attribute("href", "#content?view=carousel")
+        # A second click on the chosen chip goes back to every kind.
+        page.locator('[data-activity-kind="photo"]').click()
+        expect(page.locator('[data-activity-kind="all"]')).to_have_attribute("aria-pressed", "true")
+        expect(rows).to_have_count(3)
+        page.locator('[data-activity-kind="photo"]').click()
+        # 记录 lists runs, not to-dos; the chosen type goes with it.
+        page.locator('[data-activity-filter="history"]').click()
+        record = page.locator(".activity-row")
+        expect(record).to_have_count(1)
+        expect(record).to_contain_text("Lab-2｜图文单")
+        expect(record).to_contain_text("图文逐张表：3 版逐张表已写好")
+        expect(page.locator(".activity-work-row")).to_have_count(0)
+        # 按日期 opens the week strip and the timeline, which follow the type too.
+        expect(page.locator("#activity-week")).to_be_hidden()
+        page.locator("[data-activity-dates]").click()
         expect(page.locator('[data-activity-date][aria-pressed="true"] .activity-week-count')).to_have_text("1 项")
         page.get_by_role("button", name="时间轴", exact=True).click()
         expect(page.locator(".activity-block")).to_have_count(1)
         page.get_by_role("button", name="清单", exact=True).click()
         page.locator('[data-activity-filter="running"]').click()
-        expect(page.locator("#activity-list .activity-empty")).to_have_text("这天没有「进行中」的任务")
-        # The chosen filter is remembered.
-        page.locator('[data-activity-filter="failed"]').click()
+        expect(page.locator("#activity-list .activity-empty")).to_have_text("没有「图文 · 进行中」的任务")
+        expect(page.locator("[data-activity-dates]")).to_have_count(0)
+        # The chosen tab and type are remembered.
+        page.locator('[data-activity-kind="all"]').click()
+        page.evaluate("window.TaskActivity.open({state: 'failed'})")
+        expect(page.locator('[data-activity-filter="failed"]')).to_have_attribute("aria-pressed", "true")
         page.close()
         page = self.page()
         page.locator("#task-activity-open").click()
@@ -710,25 +862,179 @@ class TaskActivityBrowserTests(unittest.TestCase):
                   "next_hash": "#production/PRD-post?step=publish", "production_ids": ["PRD-post"], "updated_at": "2026-10-09T03:00:00Z"}
         self.content["attention"] = [{**posted, "next_label": "核对剪辑结果"}]
         self.content["calendar_pending"] = {"total": 3, "items": [posted]}
-        page = self.page()
+        page = self.page(activity_prefs=DEFAULT_PREFS)
         page.locator("#task-activity-open").click()
         rows = page.locator(".activity-work-row")
         expect(rows).to_have_count(3)
-        mark = rows.filter(has_text="标记已上传发布日历")
+        expect(page.locator(".activity-bucket").filter(has_text="标记已上传发布日历")).to_have_text("标记已上传发布日历 · 1")
+        mark = rows.filter(has_text="发布于 2026-10-09")
         expect(mark).to_contain_text("Lab-5 · 已发布单")
         expect(mark).to_contain_text("发布于 2026-10-09 · 还没上传到发布日历")
         expect(mark.locator("a")).to_have_attribute("href", "#production/PRD-post?step=publish")
         more = rows.filter(has_text="另有 2 条已发布、还没上传到发布日历")
         expect(more.locator("a")).to_have_attribute("href", "#content?view=all")
-        # They belong to 视频, not to 图文.
-        page.locator('[data-activity-filter="photo"]').click()
-        expect(page.locator(".activity-work-row")).to_have_count(0)
+        # They belong to 视频, not to 图文. With a single type listed there is nothing to pick, so no type row at all.
+        expect(page.locator("[data-activity-kind]")).to_have_count(0)
 
-    def test_custom_filters_are_made_changed_hidden_and_removed_in_place(self):
+    def test_waiting_work_is_sorted_by_reason_and_a_backlog_folds_into_one_card(self):
+        old, new = "2026-09-30T03:00:00Z", "2026-10-10T03:00:00Z"
+        self.photos = {"counts": {"exported": 5}, "items": [
+            {"job_id": f"PRD-{n}", "job_title": f"单 {n}", "timeline_uid": f"u{n}", "timeline_name": f"Lab-{n}", "product": "202H", "state": "exported",
+             "since": old if n < 3 else new} for n in range(5)]}
+        pick = lambda n, title, subtitle: {"id": f"script:SCR-{n}", "title": title, "subtitle": subtitle, "product": "202H", "stage_label": "待选稿",
+                                           "next_label": "查看并选择候选", "next_hash": f"#content/SCR-{n}", "updated_at": new}
+        self.content["attention"] = [pick(1, "未关联方向", "Hook A"), pick(2, "未关联方向", "Hook B"),
+                                     pick(3, "Same Title", "First hook"), pick(4, "Same Title", "Second hook"),
+                                     pick(6, "Twin", "Same hook"), pick(7, "Twin", "Same hook"),
+                                     {**pick(5, "变体 #1`；`main_difference：S", ""), "next_label": "开始制作"}]
+        posts = []
+        self.context.route("**/api/production/jobs/*/photo-decision", lambda route: (posts.append(route.request.post_data_json), route.fulfill(json={"state": "finished"})))
+        page = self.page(activity_prefs=DEFAULT_PREFS)
+        page.locator("#task-activity-open").click()
+        # The week strip and 按日期 belong to 记录.
+        expect(page.locator("#activity-week")).to_be_hidden()
+        expect(page.locator("[data-activity-dates]")).to_have_count(0)
+        # One heading per next step, with every row of it in view.
+        heading = page.locator(".activity-bucket").filter(has_text="查看并选择候选")
+        expect(heading).to_contain_text("查看并选择候选 · 6")
+        rows = page.locator(".activity-work-row")
+        # Drafts with no direction are named by their opening line; the others carry theirs as a quiet hint.
+        untitled = rows.filter(has_text="Hook A")
+        expect(untitled.locator(".activity-row-title")).to_have_text("Hook A")
+        expect(untitled.locator(".activity-row-hint")).to_have_text("未关联方向")
+        first = rows.filter(has_text="First hook")
+        expect(first.locator(".activity-row-title")).to_have_text("Same Title")
+        expect(rows.filter(has_text="Second hook").locator(".activity-row-title")).to_have_text("Same Title")
+        # Rows that would still read the same are numbered.
+        self.assertEqual(rows.filter(has_text="Same hook").locator(".activity-row-title").all_text_contents(), ["Twin（1）", "Twin（2）"])
+        expect(rows.filter(has_text="main_difference")).to_have_count(0)
+        expect(rows.filter(has_text="变体 #1")).to_have_count(1)
+        # Five 图文 waiting for Notion become one card below the rest; three of them are over a week old.
+        card = page.locator(".activity-bulk")
+        expect(card).to_contain_text("上传图文到 Notion · 5 条")
+        expect(rows.filter(has_text="Lab-1")).to_have_count(0)
+        card.get_by_role("button", name="逐条看").click()
+        expect(rows.filter(has_text="Lab-")).to_have_count(5)
+        page.get_by_role("button", name="收起").last.click()
+        page.once("dialog", lambda dialog: dialog.accept())
+        self.photos = {"counts": {"exported": 2}, "items": self.photos["items"][3:]}
+        card.get_by_role("button", name="超过 7 天的都完结（3）").click()
+        expect(page.locator(".activity-bulk")).to_have_count(0)
+        self.assertEqual(sorted(post["timeline"] for post in posts), ["u0", "u1", "u2"])
+        self.assertEqual({post["decision"] for post in posts}, {"finish"})
+
+    def test_a_long_group_folds_after_its_first_rows(self):
+        self.content["attention"] = [{"id": f"script:SCR-{n}", "title": f"稿 {n}", "product": "202H", "next_label": "开始制作",
+                                      "next_hash": f"#content/SCR-{n}", "updated_at": f"2026-10-10T03:{n:02}:00Z"} for n in range(11)]
+        page = self.page(activity_prefs=DEFAULT_PREFS)
+        page.locator("#task-activity-open").click()
+        rows = page.locator(".activity-work-row")
+        expect(rows).to_have_count(8)
+        # The newest comes first.
+        expect(rows.first).to_contain_text("稿 10")
+        page.get_by_role("button", name="还有 3 条").click()
+        expect(rows).to_have_count(11)
+        page.get_by_role("button", name="收起").click()
+        expect(rows).to_have_count(8)
+
+    def test_the_panel_opens_on_to_dos_and_shows_a_log_only_on_request(self):
+        self.add_run(status="completed")
+        # A browser that never opened the panel has nothing stored at all.
+        page = self.page(activity_prefs=False)
+        self.assertIsNone(page.evaluate("localStorage.getItem('workbench-activity-prefs-v1')"))
+        page.locator("#task-activity-open").click()
+        expect(page.locator('[data-activity-filter="needs"]')).to_have_attribute("aria-pressed", "true")
+        expect(page.locator("#activity-list .activity-empty")).to_have_text("现在没有要你处理的事")
+        expect(page.locator("#activity-detail")).to_be_hidden()
+        expect(page.locator("#activity-week")).to_be_hidden()
+        # Only what is still open was read: no week of history until 记录 is asked for.
+        feeds = [row["params"]["filter"] for row in self.requests if row["params"].get("filter")]
+        self.assertEqual(set(feeds), {"current"})
+        # 记录 lists every run by day, newest first. A finished run's log shows as soon as it is opened.
+        page.locator('[data-activity-filter="history"]').click()
+        expect(page.locator("[data-activity-day]")).to_contain_text("今天")
+        expect(page.locator("[data-activity-dates]")).to_have_attribute("aria-pressed", "false")
+        page.locator("[data-activity-log='ai:one']").click()
+        expect(page.locator("#activity-detail-title")).to_have_text("202H 写稿第 1 轮")
+        expect(page.locator("#activity-log-body .activity-log-lines li").first).to_be_visible()
+        expect(page.locator("[data-log-toggle]")).to_have_count(0)
+        reading = re.compile(r"\bis-reading\b")
+        expect(page.locator("#task-activity-dialog")).to_have_class(reading)
+        # Closing the log gives the panel back to the list.
+        page.locator("[data-activity-back]:visible").click()
+        expect(page.locator("#activity-detail")).to_be_hidden()
+        expect(page.locator("#task-activity-dialog")).not_to_have_class(reading)
+
+    def test_a_to_do_row_goes_to_the_work_and_its_arrow_shows_the_specifics(self):
+        job = "PRD-0123456789ab"
+        run = self.add_run("edit:one", status="needs_attention", notify=True)
+        run.update(kind="edit", owner_id=job, source_id="EDT-0123456789ab", title="AI 剪辑 · Lab-1｜玩刀的都懂。", url=f"#/202H/production/{job}?step=edit")
+        self.changes[-1]["run"] = deepcopy(run)
+        self.content["attention"] = [{"id": f"video:{job}", "title": "S2 #4 结构", "subtitle": "玩刀的都懂。", "timeline_name": "Lab-1", "product": "202H",
+                                      "stage_label": "待补素材", "next_label": "补齐素材", "next_hash": f"#production/{job}?step=edit",
+                                      "updated_at": "2026-10-11T00:00:12Z", "production_ids": [job]}]
+        record = {"id": job, "product": "202H", "selected_take": "TAK-one", "takes": [{"id": "TAK-one", "groups": []}],
+                  "timelines": [{"unique_id": "timeline", "take_id": "TAK-one", "fps": "30"}],
+                  "edits": [{"id": "EDT-0123456789ab", "timeline_uid": "timeline", "status": "needs_material",
+                             "report": {"gaps": [{"start": 30, "end": 60, "need": "桌面上零散的旧磨石"}]}}]}
+        reads = []
+        self.context.route("**/api/production/jobs/**", lambda route: (reads.append(route.request.method), route.fulfill(json={"job": deepcopy(record)})))
+        page = self.page(activity_prefs=DEFAULT_PREFS)
+        page.add_script_tag(content="window.esc=value=>String(value??'').replace(/</g,'&lt;'); WorkbenchShell.matchesProduct=(a,b)=>a===b; WorkbenchShell.url=hash=>hash;")
+        page.add_script_tag(path=str(ROOT / "static/production-needs.js"))
+        page.locator("#task-activity-open").click()
+        row = page.locator(".activity-work-row")
+        expect(row).to_have_count(1)
+        # The heading says what to do; the row says which one, on one line, and links straight to where it is done.
+        expect(page.locator(".activity-bucket")).to_have_text("补齐素材 · 1")
+        expect(row.locator(".activity-row-title")).to_have_text("Lab-1 · S2 #4 结构")
+        expect(row.locator(".activity-row-hint")).to_have_text("玩刀的都懂。")
+        expect(row.locator(".activity-status")).to_have_count(0)
+        link = row.locator("a.activity-row-main")
+        expect(link).to_have_attribute("href", f"#production/{job}?step=edit")
+        self.assertLess(row.bounding_box()["height"], 40)
+        # Nothing about the order is read until its row is opened.
+        self.assertEqual(reads, [])
+        expect(page.locator(".activity-peek")).to_have_count(0)
+        row.locator("[data-activity-peek]").click()
+        need = page.locator(".activity-peek [data-need-key]")
+        expect(need).to_contain_text("缺素材")
+        expect(need).to_contain_text("桌面上零散的旧磨石")
+        expect(page.locator(".activity-peek a.primary")).to_have_text("补齐素材")
+        self.assertEqual(reads, ["GET"])
+        # A background refresh repaints the list from what was read, without asking again.
+        self.refresh(page)
+        expect(need).to_contain_text("桌面上零散的旧磨石")
+        self.assertEqual(reads, ["GET"])
+        self.assertEqual(self.read, set())
+        # The arrow closes it again.
+        row.locator("[data-activity-peek]").click()
+        expect(page.locator(".activity-peek")).to_have_count(0)
+        # Going where the work is done reads the order's run once the page has arrived.
+        link.click()
+        page.wait_for_function(f"location.hash === '#production/{job}?step=edit'")
+        self.assertEqual(self.read, set())
+        page.evaluate("TaskActivity.didNavigate(location.hash)")
+        page.wait_for_function("activityApiActive === 0")
+        self.assertEqual(self.read, {run["event_id"]})
+        # 看日志, inside the opened row, shows the order's log beside the list.
+        page.locator("#task-activity-open").click()
+        page.locator("[data-activity-peek]").click()
+        page.locator(".activity-peek").get_by_role("button", name="看日志").click()
+        expect(page.locator("#activity-detail-title")).to_have_text("AI 剪辑 · Lab-1｜玩刀的都懂。")
+        expect(page.locator(".activity-work-row.is-selected")).to_have_count(1)
+
+    def edit_filters(self, page):
+        page.locator("[data-activity-menu]").click()
+        page.locator("[data-chip-edit]").click()
+        expect(page.locator("#activity-menu")).to_be_hidden()
+
+    def test_custom_filters_are_made_changed_and_removed_in_place(self):
         self.add_kinds()
         page = self.page()
         page.locator("#task-activity-open").click()
-        page.locator("[data-chip-edit]").click()
+        self.edit_filters(page)
+        expect(page.locator(".activity-chip-empty")).to_have_text("还没有自己的筛选。")
         page.locator("[data-chip-new]").click()
         form = page.locator("[data-chip-form]")
         # Nothing chosen yet: the form says what is missing instead of saving an empty filter.
@@ -738,36 +1044,36 @@ class TaskActivityBrowserTests(unittest.TestCase):
         form.locator('[data-chip-kind="edit"]').click()
         form.locator('[data-chip-state="done"]').click()
         form.get_by_role("button", name="保存").click()
-        # Named after its conditions when no name is given, and chosen at once.
+        # Named after its conditions when no name is given, and chosen at once in the type picker.
         made = page.locator(".activity-chip.is-custom [data-chip-open]")
         expect(made).to_have_text("剪辑/图文·已完成1")
         expect(page.locator("[data-chip-form]")).to_have_count(0)
         page.locator("[data-chip-done]").click()
-        expect(page.locator(".activity-chip.is-custom [data-activity-filter]")).to_have_attribute("aria-pressed", "true")
+        kind = page.locator("[data-activity-kind].is-custom")
+        expect(kind).to_have_count(1)
+        expect(kind).to_contain_text("剪辑/图文·已完成")
+        expect(kind).to_have_attribute("aria-pressed", "true")
+        expect(page.locator('[data-activity-filter="history"]')).to_have_attribute("aria-pressed", "true")
+        self.assertTrue(kind.get_attribute("data-activity-kind").startswith("c-"))
         expect(page.locator(".activity-row")).to_have_count(1)
         expect(page.locator(".activity-row")).to_contain_text("图文单")
-        # Edit mode: rename it, hide a built-in one, then bring the built-ins back.
-        page.locator("[data-chip-edit]").click()
+        # Rename it; the choice survives a fresh visit.
+        self.edit_filters(page)
         page.locator(".activity-chip.is-custom [data-chip-open]").click()
         page.locator('[data-chip-form] [name="label"]').fill("做完的图文")
         page.locator('[data-chip-form] [name="label"]').press("Enter")
         expect(page.locator(".activity-chip.is-custom")).to_contain_text("做完的图文")
-        page.get_by_role("button", name="隐藏「写稿」").click()
-        expect(page.locator('[data-activity-filter="writing"], [data-chip-remove="writing"]')).to_have_count(0)
         page.locator("[data-chip-done]").click()
         page.close()
         page = self.page()
         page.locator("#task-activity-open").click()
-        expect(page.locator('[data-activity-filter="writing"]')).to_have_count(0)
-        expect(page.locator(".activity-chip.is-custom")).to_contain_text("做完的图文")
-        page.locator("[data-chip-edit]").click()
-        page.locator("[data-chip-reset]").click()
-        expect(page.locator('[data-chip-remove="writing"]')).to_have_count(1)
-        # Removing the chosen filter falls back to 全部.
+        expect(page.locator('[data-activity-kind][aria-pressed="true"]')).to_contain_text("做完的图文")
+        # Removing the chosen filter falls back to 全部类型.
+        self.edit_filters(page)
         page.get_by_role("button", name="删除「做完的图文」").click()
         expect(page.locator(".activity-chip.is-custom")).to_have_count(0)
         page.locator("[data-chip-done]").click()
-        expect(page.locator('[data-activity-filter="all"]')).to_have_attribute("aria-pressed", "true")
+        expect(page.locator('[data-activity-kind="all"]')).to_have_attribute("aria-pressed", "true")
         expect(page.locator(".activity-row")).to_have_count(3)
 
     def test_timeline_merges_back_to_back_steps_of_one_order(self):
@@ -870,6 +1176,7 @@ class TaskActivityBrowserTests(unittest.TestCase):
 
         page.locator("#task-activity-open").click()
         expect(page.locator("[data-run-id='timeline:one'] .activity-status")).to_have_text("排队")
+        page.locator("[data-activity-log='timeline:one']").click()
         expect(page.locator(".activity-detail-status")).to_have_text("排队")
         task("edit:one", "edit", "running")
         self.refresh(page)
@@ -899,9 +1206,40 @@ class TaskActivityBrowserTests(unittest.TestCase):
         expect(page.locator("#owner-log .activity-strip-text")).to_have_text("进行中：时间线、AI 剪辑")
         expect(page.locator("#task-log .activity-strip-status")).to_have_text("进行中")
         page.locator("#task-activity-open").click()
+        # On a phone, opening an order only lists its runs; a run's log opens from its own line.
         page.locator("[data-activity-group]").click()
         expect(page.locator("[data-run-id='timeline:one'] .activity-status")).to_have_text("进行中")
+        expect(page.locator("#activity-detail")).to_be_hidden()
+        page.locator("[data-run-id='timeline:one'] [data-activity-log]").click()
         expect(page.locator(".activity-detail-status")).to_have_text("进行中")
+
+    def test_opening_folded_identical_runs_reads_every_run_it_stands_for(self):
+        # Four identical failed retries of one draft fold into one ×4 line; it shows unread while any of them is.
+        for index in range(4):
+            self.add_run(f"ai:retry{index}", status="failed", notify=True, message="模型无响应")
+        page = self.page()
+        self.open_all(page)
+        page.locator("[data-activity-group]").click()
+        folded = page.locator(".activity-sub", has=page.locator("[data-activity-unfold]"))
+        expect(folded).to_have_count(1)
+        expect(folded.locator(".activity-sub-repeat")).to_have_text("×4")
+        folded.locator(".activity-row-main").click()
+        expect(page.locator(".activity-row.is-unread")).to_have_count(0)
+        self.assertEqual(self.read, {1, 2, 3, 4})
+        expect(page.locator("#task-activity-open")).to_have_attribute("aria-label", "任务，0 项进行中，0 条未读")
+
+    def test_opening_an_order_reads_every_run_in_it_not_just_the_lead(self):
+        # Two different finished runs of one order: the order shows unread, and opening it must clear both,
+        # not only the lead it selects, or its unread dot stays after the user has looked.
+        self.add_run("ai:first", status="completed", notify=True, message="第 1 张已改好")
+        self.add_run("ai:second", status="completed", notify=True, message="第 2 张已改好")
+        page = self.page()
+        self.open_all(page)
+        page.locator("[data-activity-group]").click()
+        expect(page.locator(".activity-sub")).to_have_count(2)
+        expect(page.locator(".activity-row.is-unread")).to_have_count(0)
+        self.assertEqual(self.read, {1, 2})
+        expect(page.locator("#task-activity-open")).to_have_attribute("aria-label", "任务，0 项进行中，0 条未读")
 
     def test_legacy_resource_waits_display_as_queued_without_queue_counts(self):
         original_counts = self.counts
@@ -1055,7 +1393,8 @@ class TaskActivityBrowserTests(unittest.TestCase):
         try:
             page.locator("#task-activity-open").click()
             expect(page.locator(".activity-row")).to_have_count(1)
-            # The selected run's log finishes while the background poll is still waiting.
+            # The opened run's log finishes while the background poll is still waiting.
+            page.locator("[data-activity-log='ai:one']").click()
             expect(page.locator("[data-log-mode]")).to_contain_text("2+ 行")
             page.wait_for_function("activityApiActive === 1")
             self.assertEqual(page.evaluate("blockedCalls.length"), 1)
@@ -1128,6 +1467,7 @@ class TaskActivityBrowserTests(unittest.TestCase):
         self.context.route("**/api/activity/ai%3Aone/logs**", lambda route: held.append(route))
         page.locator("#task-activity-open").click()
         expect(page.locator(".activity-row")).to_have_count(1)
+        page.locator("[data-activity-log='ai:one']").click()
         page.wait_for_function("activityApiActive === 1")
         self.assertEqual(len(held), 1)
         self.add_run(status="completed")
@@ -1141,7 +1481,7 @@ class TaskActivityBrowserTests(unittest.TestCase):
 
     def test_old_waiting_work_cannot_replace_a_newer_load_after_switching_back(self):
         self.add_run()
-        page = self.page()
+        page = self.page(activity_prefs=DEFAULT_PREFS)
         held = []
         fresh = {"id": "script:new", "title": "最新待处理稿", "product": "202H", "next_label": "开始制作"}
 
@@ -1157,7 +1497,7 @@ class TaskActivityBrowserTests(unittest.TestCase):
 
         self.context.route("**/api/content?**", waiting_work)
         page.locator("#task-activity-open").click()
-        expect(page.locator('[data-run-id="ai:one"]')).to_have_count(1)
+        expect(page.locator("#task-activity-dialog")).to_be_visible()
         page.wait_for_function("activityApiActive === 1")
         self.pick_product(page, "129N")
         page.wait_for_function("activityApiActive === 1")
@@ -1189,6 +1529,44 @@ class TaskActivityBrowserTests(unittest.TestCase):
         page.evaluate("() => {delete window.Notification;document.querySelector('#content').innerHTML=TaskActivity.settingsMarkup();TaskActivity.mountSettings(document.querySelector('#content'));}")
         expect(page.locator("#settings-activity-enable")).to_be_disabled()
         expect(page.locator("#settings-activity-status")).to_contain_text("此浏览器不支持")
+
+    def test_photo_work_opens_its_drawer_without_leaving_the_page(self):
+        self.add_kinds()
+        self.photos = {"counts": {"doing": 1}, "items": [
+            {"job_id": "PRD-pic", "job_title": "图文单", "timeline_uid": "u9", "timeline_name": "Lab-9", "product": "202H", "state": "doing", "since": "2026-10-09T03:00:00Z"}]}
+        page = self.page(activity_prefs=DEFAULT_PREFS)
+        page.evaluate("() => {window.opened = [];window.PhotoCarousel = {open: args => window.opened.push([args.job.id, args.uid, args.timelineName])};}")
+        before = page.evaluate("location.hash")
+        page.locator("#task-activity-open").click()
+        link = page.locator(".activity-work-row").filter(has_text="Lab-9 · 图文单").locator("[data-activity-work]")
+        self.assertIn("photo=u9", link.get_attribute("href"))  # Ctrl / middle click still opens the order page in a new tab
+        link.click()
+        self.assertEqual(page.evaluate("window.opened"), [["PRD-pic", "u9", "Lab-9"]])
+        self.assertEqual(page.evaluate("location.hash"), before)
+
+    def test_photo_task_result_opens_its_drawer_without_leaving_the_page(self):
+        run = self.add_run("photo:plan:bbbbbbbbbbbb", status="completed", notify=True)
+        run.update(kind="photo", owner_id="PRD-pic", source_id="PHS-aaaaaaaaaaaa", title="图文逐张表 · Lab-8",
+                   url="#/202H/production/PRD-pic?step=cut&run=PHS-aaaaaaaaaaaa")
+        self.events[-1]["url"] = run["url"]
+        page = self.page()
+        page.evaluate("""() => {window.opened = [];window.PhotoCarousel = {open: () => {}, openFor: async args => {window.opened.push([args.jobId, args.source]);return true;}};}""")
+        before = page.evaluate("location.hash")
+        self.open_all(page)
+        with page.expect_response("**/api/activity/read"):
+            page.locator("[data-activity-result]").click()
+        self.assertEqual(page.evaluate("window.opened"), [["PRD-pic", "PHS-aaaaaaaaaaaa"]])
+        self.assertEqual(page.evaluate("location.hash"), before)
+        self.assertEqual(self.read, {run["event_id"]})
+
+    def test_photo_task_whose_timeline_is_gone_falls_back_to_the_order(self):
+        run = self.add_run("photo:textless:aaaaaaaaaaaa", status="completed")
+        run.update(kind="photo", owner_id="PRD-pic", source_id="gone", url="#/202H/production/PRD-pic?step=cut&run=gone")
+        page = self.page()
+        page.evaluate("() => {window.PhotoCarousel = {open: () => {}, openFor: async () => false};}")
+        self.open_all(page)
+        page.locator("[data-activity-result]").click()
+        page.wait_for_function("location.hash.includes('production/PRD-pic')")
 
 
 if __name__ == "__main__":

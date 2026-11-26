@@ -76,14 +76,29 @@ def plain(line):
     return str(line or "").replace("*", "").strip()
 
 
-def crop_fit(image, crop_y=0.5, crop_x=0.5, w=W, h=H):
-    """Scale to cover a w×h window (the whole 3:4 canvas by default), then place the crop window: crop_y 0 = keep the top,
-    1 = keep the bottom; crop_x 0 = keep the left, 1 = keep the right. Same rule as CSS object-fit: cover with object-position in %."""
-    scale = max(w / image.width, h / image.height)
-    image = image.resize((max(w, round(image.width * scale)), max(h, round(image.height * scale))), Image.LANCZOS)
-    x = int((image.width - w) * min(1.0, max(0.0, float(crop_x))))
-    y = int((image.height - h) * min(1.0, max(0.0, float(crop_y))))
-    return image.crop((x, y, x + w, y + h))
+MAX_ZOOM = 3.0
+
+
+def zoom_of(value):
+    """How far the picture is blown up past just covering its window: 1 (cover, the default) to MAX_ZOOM."""
+    try:
+        return min(MAX_ZOOM, max(1.0, float(value if value is not None else 1.0)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def crop_fit(image, crop_y=0.5, crop_x=0.5, w=W, h=H, zoom=1.0):
+    """Scale to cover a w×h window (the whole 3:4 canvas by default), times zoom, then place the crop window: crop_y 0 = keep
+    the top, 1 = keep the bottom; crop_x 0 = keep the left, 1 = keep the right. Same rule as CSS object-fit: cover with
+    object-position in %, with the picture scaled up by zoom. Only the part that ends up in the window is resampled."""
+    scale = max(w / image.width, h / image.height) * zoom_of(zoom)
+    sw, sh = max(w, round(image.width * scale)), max(h, round(image.height * scale))
+    x = int((sw - w) * min(1.0, max(0.0, float(crop_x))))
+    y = int((sh - h) * min(1.0, max(0.0, float(crop_y))))
+    if (sw, sh) == image.size:
+        return image.crop((x, y, x + w, y + h))
+    fx, fy = image.width / sw, image.height / sh
+    return image.resize((w, h), Image.LANCZOS, box=(x * fx, y * fy, (x + w) * fx, (y + h) * fy))
 
 
 def layout_of(slide):
@@ -108,7 +123,11 @@ def compose(slide, images):
         x0, y0, x1, y1 = box
         try:
             base = image if isinstance(image, Image.Image) else Image.open(image)
-            canvas.paste(crop_fit(base.convert("RGB"), crop.get("crop_y", 0.5), crop.get("crop_x", 0.5), x1 - x0, y1 - y0), (x0, y0))
+            if base.format == "JPEG":  # a cell much smaller than the frame: let the decoder skip pixels the cell never uses
+                scale = max((x1 - x0) / base.width, (y1 - y0) / base.height) * zoom_of(crop.get("zoom"))
+                if scale <= 0.5:
+                    base.draft("RGB", (round(base.width * scale + 0.4999), round(base.height * scale + 0.4999)))
+            canvas.paste(crop_fit(base.convert("RGB"), crop.get("crop_y", 0.5), crop.get("crop_x", 0.5), x1 - x0, y1 - y0, crop.get("zoom", 1.0)), (x0, y0))
         except (OSError, ValueError) as exc:
             raise RenderError("这张底图读不出来，请换一张。") from exc
     if len(boxes) > 1:
@@ -229,9 +248,91 @@ def flower_block(layer, y, slide, k=1.0):
     return y
 
 
+# ---------- quoted user comment ----------
+COMMENT_LABEL = "@viewer"  # a comment saved without any name
+GREY = (138, 138, 138)
+
+
+def _wrap(text, f, width):
+    rows, row = [], ""
+    for word in str(text or "").split():
+        trial = f"{row} {word}".strip()
+        if row and text_w(trial, f) > width:
+            rows.append(row)
+            row = word
+        else:
+            row = trial
+    return rows + ([row] if row else [])
+
+
+def comment_label(username):
+    """The grey line next to the avatar: only the commenter's name (2026-11-18, no more "Reply to …'s comment")."""
+    return re.sub(r"\s+", " ", str(username or "")).strip() or COMMENT_LABEL
+
+
+def _avatar(path, side, name):
+    """The commenter's picture cut round, or their initial on grey when there is none."""
+    mask = Image.new("L", (side * 4, side * 4), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, side * 4 - 1, side * 4 - 1), fill=255)
+    mask = mask.resize((side, side), Image.LANCZOS)
+    face = None
+    if path:
+        try:
+            with Image.open(path) as picture:
+                picture = picture.convert("RGBA")
+                edge = min(picture.size)
+                box = ((picture.width - edge) // 2, (picture.height - edge) // 2)
+                face = picture.crop((*box, box[0] + edge, box[1] + edge)).resize((side, side), Image.LANCZOS)
+        except (OSError, ValueError):
+            face = None
+    if face is None:
+        face = Image.new("RGBA", (side, side), (158, 171, 184, 255))
+        letter = str(name or "").lstrip("@")[:1].upper()
+        if letter:
+            f = font(FACT, int(side * 0.5))
+            ImageDraw.Draw(face).text((side / 2, side / 2), letter, font=f, fill=WHITE, anchor="mm")
+    face.putalpha(Image.composite(face.getchannel("A"), Image.new("L", (side, side), 0), mask))
+    return face
+
+
+def comment_bubble(d, y, text, k=1.0, username="", avatar=None, layer=None):
+    """TikTok's comment sticker: a white rounded bubble with a small tail at the bottom left, the commenter's round
+    picture and name in grey, and the comment in bold black under it."""
+    label = comment_label(username)
+    left, width = 60, W - 120
+    label_f = font(FACT, int(30 * k))
+    px = int(46 * k)
+    while True:
+        f = font(FACT, px)
+        rows = _wrap(text, f, width - 64)
+        if len(rows) <= 4 or px <= 28:
+            break
+        px -= 2
+    r = label_f.size // 2 + 8
+    widest = max([text_w(row, f) for row in rows] + [text_w(label, label_f) + 2 * r + 12])
+    right = left + min(width, widest + 64)
+    asc, desc = f.getmetrics()
+    line_h = asc + desc + 4
+    top, label_y = y, y + 26
+    text_y = label_y + label_f.getmetrics()[0] + 22
+    bottom = text_y + line_h * len(rows) + 14
+    if d:
+        d.rounded_rectangle((left, top, right, bottom), 28, fill=(255, 255, 255, 245))
+        d.polygon([(left + 34, bottom - 2), (left + 34, bottom + 30), (left + 70, bottom - 2)], fill=(255, 255, 255, 245))
+        cx, cy = left + 32 + r, label_y + label_f.getmetrics()[0] // 2 + 4
+        if layer is not None and (username or avatar):
+            layer.alpha_composite(_avatar(avatar, 2 * r, username), (cx - r, cy - r))
+        else:
+            d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(205, 205, 205, 255))
+        d.text((cx + r + 12, label_y), label, font=label_f, fill=GREY)
+        for n, row in enumerate(rows):
+            d.text((left + 32, text_y + line_h * n), row, font=f, fill=INK)
+    return bottom + 30
+
+
 # ---------- slide ----------
 def render(slide, image, style, number, total):
-    """slide: title_lines, body_lines, cta (optional), crop_y, crop_x, layout ('single' default, 'lr', 'tb', 'grid') with
+    """slide: title_lines, body_lines, cta (optional), crop_y, crop_x, zoom (1–3), layout ('single' default, 'lr', 'tb', 'grid') with
     cells (crop_x/crop_y of cells 2…), text_position: 'split' (title top, facts bottom; default), 'top', 'middle' or
     'bottom' (everything together), text_size: 'l' (default), 'm', 's'. image: path or PIL image, or a list with one per cell."""
     if style not in STYLES:
@@ -241,6 +342,12 @@ def render(slide, image, style, number, total):
     d = ImageDraw.Draw(layer)
     position = slide.get("text_position") or "split"
     k = SIZES.get(slide.get("text_size") or "l", SIZES["l"])[1]
+    quoted = slide.get("comment") or {}
+    comment = plain(quoted.get("text"))
+    if comment:  # the quoted comment takes the top; the answer goes under it
+        comment_bubble(d, TOP + 40, comment, username=quoted.get("username") or "", avatar=quoted.get("avatar_path"), layer=layer)
+        if position in ("split", "top"):
+            position = "bottom"
     head = {"title_lines": slide.get("title_lines") or []}
     tail = {"body_lines": slide.get("body_lines") or [], "cta": slide.get("cta") or ""}
     groups = [(slide, position)] if position in ("top", "middle", "bottom") else [(head, "top"), (tail, "bottom")]

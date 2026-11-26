@@ -193,6 +193,33 @@ class MarkUsageTests(unittest.TestCase):
         self.assertEqual({item["timeline_name"] for item in listing["used"]}, {"Lab261000-202-1"})
 
 
+class ShortNamedMaterialTests(unittest.TestCase):
+    """Material timelines named without 「素材」 (日本菊, 迷你刀) are known from the picks the workbench passes."""
+
+    def setUp(self):
+        self.first, self.second = Item("mat-1", A, 0, 60, 100), Item("mat-2", A, 60, 120, 900)
+        self.resolve = Resolve([Timeline("日本菊", [self.first]), Timeline("迷你刀", [self.second]),
+                                Timeline("Lab261000-202-1", [Item("s", A, 0, 20, 120)])])
+
+    def test_without_the_names_nothing_is_marked(self):
+        result = resolve_worker.mark_usage(self.resolve, {"project": "202H"})
+        self.assertEqual((result["clips"], self.first.color), (0, ""))
+
+    def test_picked_names_are_marked_and_never_count_as_finished(self):
+        result = resolve_worker.mark_usage(self.resolve, {"project": "202H", "material_names": ["日本菊", "迷你刀"]})
+        self.assertEqual((result["clips"], result["used"], result["finished"]), (2, 1, 1))
+        self.assertEqual((self.first.color, self.second.color), ("Orange", ""))
+        self.assertEqual(result["timelines"], ["Lab261000-202-1"])
+
+    def test_other_material_timelines_are_not_uses_of_the_picked_one(self):
+        self.second.source_start = 110  # The same footage sits on both material timelines.
+        request = {"project": "202H", "materials": ["日本菊"], "count_usage": True}
+        loose = resolve_worker.candidates(self.resolve, request)
+        self.assertEqual({item["timeline_name"] for item in loose["used"]}, {"迷你刀", "Lab261000-202-1"})
+        listing = resolve_worker.candidates(self.resolve, {**request, "material_names": ["日本菊", "迷你刀"]})
+        self.assertEqual({item["timeline_name"] for item in listing["used"]}, {"Lab261000-202-1"})
+
+
 class CandidateUsageTests(unittest.TestCase):
     def test_candidates_list_use_counts_least_used_first_and_keep_every_clip(self):
         resolve, *_ = project(2)

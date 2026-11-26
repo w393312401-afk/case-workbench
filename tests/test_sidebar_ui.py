@@ -232,7 +232,7 @@ class SidebarBrowserTests(unittest.TestCase):
         trigger_box = trigger.bounding_box()
         gap_x = (rail["x"] + rail["width"] + popup["x"]) / 2
         page.mouse.move(gap_x, trigger_box["y"] + trigger_box["height"] / 2)
-        page.wait_for_timeout(175)
+        page.wait_for_timeout(60)
         self.assertTrue(page.locator("html").evaluate("node => node.classList.contains('sidebar-peek')"))
         page.mouse.move(target_box["x"] + target_box["width"] / 2,
                         target_box["y"] + target_box["height"] / 2)

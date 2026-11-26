@@ -31,6 +31,8 @@ class ShellBrowserTests(unittest.TestCase):
 
     def open_page(self, route="#library", *, width=1280, navigation=None):
         context = self.browser.new_context(viewport={"width": width, "height": 900})
+        # 这些用例测的是本地视频播放器；TikTok 播放器另有 test_case_tiktok_player_ui。
+        context.add_init_script("try { localStorage.setItem('case-video-source', 'local'); } catch {}")
         self.addCleanup(context.close)
         if navigation is not None:
             context.add_init_script("localStorage.setItem('case-library-navigation-v1', " + json.dumps(navigation) + ");")
@@ -79,6 +81,16 @@ class ShellBrowserTests(unittest.TestCase):
         page.locator("#add-top").click()
         page.locator("#ai-create-dialog[open]").wait_for()
         self.assertIn("空白写稿", page.locator("#ai-create-case").inner_text())
+        # The heading says 空白写稿 once, and the button that sends it says 开始写稿 like the one that opened it.
+        self.assertEqual(page.locator("#ai-create-version").inner_text(), "")
+        self.assertEqual(page.locator("#submit-ai-create").inner_text(), "开始写稿")
+        page.locator("#cancel-ai-create").click()
+        # Under 全部产品 the product is picked in a small window instead of a toast.
+        page.evaluate("CaseAI.startBlank('')")
+        page.locator(".ai-product-pick[open]").wait_for()
+        page.locator('.ai-product-pick [data-pick-product="202H"]').click()
+        page.locator("#ai-create-dialog[open]").wait_for()
+        self.assertIn("202H", page.locator("#ai-create-case").inner_text())
         page.locator("#cancel-ai-create").click()
         page.locator('[data-ai-start="case"]').click()
         page.locator(f'#writing-case-dialog[open] [data-case-id="{self.identifier}"]').click()
@@ -115,7 +127,7 @@ class ShellBrowserTests(unittest.TestCase):
                 page.locator("#rev-count").get_by_text("0 条", exact=False).wait_for()
                 self.assertEqual(page.locator(".rev-card").count(), 0)
             if name == "directions":
-                page.get_by_text("当前产品还没有卖点", exact=True).wait_for()
+                page.get_by_text("当前产品还没有方向", exact=True).wait_for()
                 self.assertNotIn("202H-S1", page.locator("#content").inner_text())
         page.reload()
         page.locator("#case-search").wait_for()
@@ -159,9 +171,10 @@ class ShellBrowserTests(unittest.TestCase):
             {"id": "all", "label": "全部资料", "icon": "grid", "visible": True},
             {"id": "positive", "label": "暂时隐藏", "visible": False},
         ], ensure_ascii=False)
-        page = self.open_page("#files", width=390, navigation=legacy)
+        # Saved views live in the 工具与偏好 section; the old #files address still reaches it.
+        page = self.open_page("#files/views", width=390, navigation=legacy)
         page.locator(".settings-page").wait_for()
-        self.assert_route(page, "settings")
+        self.assert_route(page, "settings", tail="/views")
         self.assert_no_overflow(page)
         page.get_by_role("button", name="管理保存的视图").click()
         page.locator("#library-view-manager[open]").wait_for()

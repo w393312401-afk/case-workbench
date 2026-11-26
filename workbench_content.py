@@ -363,11 +363,19 @@ class ContentWorkbenchMixin:
         # Posted videos whose publish-calendar mark is still 未上传, oldest post first; independent of the list filters.
         calendar = sorted((item for item in items if item.get("calendar_pending")),
                           key=lambda item: (item.get("published_on", ""), item["id"]))
+        # Adopted scripts nobody has started an order for: not a to-do, but 待处理 lists them as backlog so they are not forgotten.
+        idle = [item for item in items if item.get("kind") == "script" and item.get("stage") == "adopted"
+                and not item.get("archived") and not item.get("history")]
+        idle_dates = sorted(str(item.get("updated_at") or "") for item in idle if item.get("updated_at"))
+        deletable, blocked = self._archived_deletable([item for item in selected if item.get("archived")])
         return {"items": selected[(page - 1) * size:page * size], "total": total, "page": page,
                 "pages": pages, "page_size": size, "counts": counts, "finished_hidden": finished if fold else 0, "view_counts": view_counts, "groups": groups, "revision": management["revision"],
                 "calendar_pending": {"total": len(calendar), "items": calendar[:8]},
+                "idle_scripts": {"total": len(idle), "oldest": idle_dates[0] if idle_dates else ""},
                 # Archived rows in view that 删除已归档 can remove.
-                "archived_deletable": len(self._archived_deletable([item for item in selected if item.get("archived")])[0]),
+                "archived_deletable": len(deletable),
+                # Scripts held by a posted video, a case, a plan or an order; running rows are only skipped for now.
+                "archived_kept": sum(key.startswith("script:") and reason != "还在运行，这次跳过。" for key, reason in blocked.items()),
                 "product": product_key(product) if product else "", "stale": stale}
 
     def _script_family_blocker(self, family, creation, production):
@@ -418,7 +426,32 @@ class ContentWorkbenchMixin:
                 activity.delete_owner(identifier)
             except Exception:
                 pass  # The task log is secondary; the deletion itself is complete.
+        forget = getattr(self, "forget_script_reviews", None)
+        if forget:
+            forget([f"script:{identifier}" for identifier in ids])
         return {**result, "warnings": warnings}
+
+    def _delete_order_script(self, plan, request_id):
+        """Delete the adopted script family behind a just-deleted order (the user ticked it) and free its draft."""
+        family = plan["family_id"]
+        try:
+            self._delete_script_family(family, "order-script-" + fingerprint([request_id, family])[:40])
+        except CreationError as exc:
+            return {"deleted": False, "warnings": [f"制作单已删除，但采用稿没有删：{exc}"]}
+        warnings, task = [], None
+        task_id = plan.get("task_id")
+        if task_id and getattr(self, "ai", None) is not None:
+            try:
+                with self.lock:
+                    scripts = self.creation_catalog(include_usage=False)["scripts"]
+                    if not any((row.get("source") or {}).get("task_id") == task_id and not (row.get("archived") or row.get("status") == "archived")
+                               for row in scripts):
+                        self.ai.release_adoption(task_id)
+                    task = self.ai.settle_variant_choices(task_id, made_variants(scripts))
+                    self.state_cache = None
+            except Exception as exc:
+                warnings.append(f"采用稿已删除，但写稿任务里的采用标记没有更新：{exc}")
+        return {"deleted": True, "warnings": warnings, "task": task}
 
     def _draft_of(self, script_id):
         """(script family, writing task) behind an order, or empty when the script did not come from a candidate."""
@@ -447,6 +480,8 @@ class ContentWorkbenchMixin:
             kept = self._draft_keeper(family, identifier) if family else "这条稿不是从候选稿来的。"
             return {**summary, "draft_returned": not kept, "draft_kept": kept}
         result = self.delete_job_order(identifier, body)
+        if result.get("script_deleted"):
+            return {**result, "draft_returned": True}
         family, task_id = self._draft_of(result.get("script_id", ""))
         if not task_id:
             return {**result, "draft_returned": False}
@@ -519,6 +554,8 @@ class ContentWorkbenchMixin:
             except AITaskError as exc:
                 outcome = {"deleted": [], "failed": [{"task_id": entry["task_id"], "error": str(exc)} for entry in known]}
             results.extend({"id": tasks[task_id], "ok": True, "warnings": []} for task_id in outcome["deleted"])
+            if outcome["deleted"] and hasattr(self, "forget_script_reviews"):
+                self.forget_script_reviews([f"candidate:{task_id}:" for task_id in outcome["deleted"]])
             results.extend({"id": tasks[entry["task_id"]], "ok": False, "error": entry["error"]} for entry in outcome["failed"])
         token = secrets.token_hex(8)
         # Orders before scripts, so a script is judged after the orders in this same batch are gone.

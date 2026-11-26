@@ -32,7 +32,7 @@ def test_unpublished_timeline_can_be_previewed_played_and_downloaded(stations, p
                     page.locator('#username').fill('fixture-admin');page.locator('#password').fill('temporary-import-pass')
                     page.locator('#login-submit').click();page.wait_for_url(origin+'/')
                 page.goto(origin+f'/#production/{identifier}')
-                page.locator('.production-steps [data-step="publish"]').click()
+                page.locator('.production-steps [data-step~="cut"]').click()
                 page.get_by_text('轻量 MP4 预览', exact=True).click()
                 portable = page.locator('[data-video-preview]')
                 button = portable.locator('[data-preview-generate]')

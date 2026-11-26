@@ -4,7 +4,7 @@ also be a 2- or 4-cell collage, each cell with its own picture and crop) → fre
 
 Only the copy is written by AI. Pictures are real frames or the user's own photos, laid out by carousel_render;
 swapping a picture never calls AI. Data lives in <runtime>/production/photo-sets/<PHS-id>/set.json; a frozen
-version is copied to <project>/图文成品/<case>-<date>-<version>/ and never changed afterwards.
+version is copied to <project>/工作台数据/图文成品/<case>-<date>-<version>/ and never changed afterwards.
 """
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ from uuid import uuid4
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageStat
 
 import carousel_render as render
+import markets
+from release_naming import parse_timeline, release_filename
+import photo_comments
 from resolve_bridge import render_recovery_message
 from task_activity import activity_label, record_activity
 
@@ -34,18 +37,58 @@ SHEET_GRID = (8, 3)
 MAX_SHEETS = 8
 MAX_SLIDES = 8
 MAX_HISTORY = 60
+_RENDER_GUARD = threading.Lock()
+_RENDER_LOCKS = {}
 SET_ID = re.compile(r"PHS-[0-9a-f]{12}")
 APP_ROOT = Path(__file__).resolve().parent
-EXPORT_ROOT = APP_ROOT / "图文成品"
+# Moved into the data folder 2026-11-15. A directory link at the old <project>/图文成品 keeps the absolute
+# folders stored in older sets, Notion receipts and order records readable.
+EXPORT_ROOT = APP_ROOT / "工作台数据" / "图文成品"
 SKILL = "tiktok-photo-commerce"
 # Each of the 3 versions is written one way (2026-11-06 user decision, replacing "big title + fact label").
 # The photo skill states the same rules; both prompts read them from here.
-WRITINGS = {"self": "达人自述", "qa": "顾虑问答", "list": "理由清单"}
-WRITING_ORDER = ("self", "qa", "list")
+# 2026-11-19 user decision: the 8 photo posts with 2+ orders (shop export to 11-15) all lay the kit out piece by piece
+# ("for knife guys" + what is in the case); none is a question chain or a numbered list. 顾虑问答 and 理由清单 are no
+# longer written: every plan writes A 达人自述 and B 整套配置, and recommends B. Versions written the old ways keep
+# their names here and their rules below, so they still show and their slides can still be reworded.
+# 2026-11-24 user decision (方案三): 198H is a $50 countertop electric sharpener (not a multi-plate kit in a hard case),
+# so 198H keeps A 达人自述 and routes B by video material: rescue (钝刀救回, when the video has a before/after dull-to-sharp
+# contrast or S2) vs slots (三槽一机, when the video demos the 3 stages / marker check / effortless pull-through or S1/S3).
+WRITINGS = {"self": "达人自述", "kit": "整套配置", "rescue": "钝刀救回", "slots": "三槽一机", "qa": "顾虑问答", "list": "理由清单"}
+WRITING_ORDER = ("self", "kit")
+WRITING_ORDER_198H = ("self", "198h_b")
+ROUTED_WRITINGS = {"198h_b": ("rescue", "slots")}
+WRITING_KEYS = {"self": "A", "kit": "B", "rescue": "B", "slots": "B", "qa": "B", "list": "C"}
+DEFAULT_WRITING = "kit"
+RECOMMENDED_WRITINGS = ("kit", "rescue", "slots")
 WRITING_RULES = {
     "self": ("达人自述：第一人称分享自己的发现和经历。标题给结论（I found… / Now I… / I don't… anymore），第二行用让步转折讲原因"
              "（老办法能做到什么，但做不到我想要的），如“I FOUND THE *NEXT LEVEL* FOR MY STONE. / One stone gets it sharp, just not "
              "the finish I'm after.”。只说视频或资料里有的经历，不新增亲历、数字和效果；视频口播不是第一人称时，gaps_zh 写“待核：出镜人需有此经历”。"),
+    "kit": ("整套配置：把这套东西给谁、里面有什么、怎么调，一张张摆出来；不讲故事、不提问、不写第一人称经历。"
+            "首张标题点名人群加整套（如“KNIFE GUYS. / THIS KIT'S *FOR YOU.*”“YOUR KNIVES DESERVE / *THE FULL KIT.*”），"
+            "第二行报核心配置（如“6 abrasives + leather strop.”）。"
+            "中段每张一个部件或功能（磨料和目数、夹具、角度范围、导向），标题是两行对仗短句，每行 2–4 个词"
+            "（如“FOUR DIAMOND GRITS. / *MORE WAYS TO REFINE.*”“SET YOUR ANGLE. / *SHARPEN WITH CONTROL.*”），"
+            "第二行是规格标签：数字或名词短语（如“220 · 325 · 600 · 1000”“10°–35° adjustable sharpening setup.”“Two repositionable clamps.”）。"
+            "末张收到整套一箱带走加购买入口（如“YOUR WHOLE SETUP. / *ONE HARD CASE.*”，第二行“Store it together. Get your 202H below.”）。"
+            "例子是 202H 的；配置、件数、目数和范围只写这个产品资料里有的，别的产品按它自己的资料摆。"),
+    "rescue": ("钝刀救回：围绕「钝刀不用扔、插电拉过救回来」的前后反差来写，不讲长故事、不提问。"
+               "首张用磨前钝刀翻车钩子直戳痛点（可用左右/上下前后对比拼图，如“DON'T REPLACE / *DULL KNIVES.*”，"
+               "第二行“This blade couldn't even slice a tomato.”）；"
+               "中段 1–2 张讲插电拉过、约每侧 20° 导向与三槽分工（不念目数，只说修刃/磨利/手动陶瓷槽修光，如“PLUG IT IN. / *PULL IT THROUGH.*”）；"
+               "末张落到磨后利落切开的结果加一个 198H 下单理由和入口（如 30 天免费退货或 3 年质保）。"
+               "只写画面看得见的磨前失败和磨后结果；没有同一把刀的磨前失败画面时不要选这版。"),
+    "slots": ("三槽一机：把「给谁用、三个槽各自替你干什么、怎么导向、磨完什么结果」一张张摆出来；不讲故事、不提问、不写第一人称经历。"
+              "首张标题点名家庭厨师人群加一台搞定（如“HOME COOKS. / ONE *COUNTERTOP* FIX.”），"
+              "第二行报核心结构（如“3 stages. Guided at about 20° per side.”）。"
+              "中段每张一个槽位或核心机制（1 槽修刃、2 槽磨利、3 槽手动陶瓷 V 槽修光去毛刺、约每侧 20° 导向或记号笔检查），"
+              "标题是两行对仗短句，每行 2–4 个词（如“SLOT 1 REPAIRS. / *SLOT 2 SHARPENS.*”“GUIDED SLOTS. / *NO GUESSING.*”），"
+              "第二行是极简功能标签（短语说明这槽替观众干什么，不念枯燥目数，如“Two electric diamond wheels do the work.”"
+              "“Manual ceramic V-slot smooths the edge.”）。"
+              "末张收到磨后切纸或切食材结果加 3 年质保或 30 天免费退货和入口（如“SHARP AGAIN. / *READY TO COOK.*”，"
+              "第二行“3-year warranty. Check out the 198H below.”）。"),
+    # 顾虑问答 and 理由清单: retired 2026-11-19, kept for versions already written this way.
     "qa": ("顾虑问答：每张标题是买家买之前会问的一个问题，用观众自己的话（如“ALREADY OWN A *WHETSTONE?*”“WHAT IF ONE *WEARS OUT?*”），"
            "第二行用口语回答，落到观众得到什么（如“Nope. All 7 plates come in one case.”）。问题按顾虑链排；首张的问题圈出目标人群、"
            "说中他们的处境，不把产品摆到主打卖点的反面。"),
@@ -54,16 +97,34 @@ WRITING_RULES = {
 }
 SECOND_LINE_RULE = ("第二行是一句口语（约 6–14 个英文词，排版最多两行），接着标题往下说：给原因、回答或结果。能带具体数字（件数、目数、年限、范围）"
                     "就放进这句里说，信息量靠它；不写成规格标签，不描述画面拍到了什么（“… shown”“with the knife clamped behind it”“pictured” 都不算）。")
+# 整套配置 is written its own way; these stand in for the three-part chain and the spoken second line.
+KIT_SECOND_LINE_RULE = ("第二行是规格标签：数字或名词短语（如“220 · 325 · 600 · 1000”“10°–35° adjustable sharpening setup.”"
+                        "“Two repositionable clamps.”），最多两小句，只写产品资料里有的配置和数字；不描述画面拍到了什么。")
+KIT_PLAN_RULE = ("整套配置版不按上面三段和第二行的规则写，以它自己的写法为准：首张直接说给谁、是整套，中段逐件摆配置（一张一个部件或功能），"
+                 "第二行用规格标签，末张用整套一箱带走收口、不另给质保或退换理由；4–6 张；"
+                 "motive_zh 写「人群：…｜配置：…｜收口：…」。画面证明文案、价格、帧时间和排版的规则照旧。")
+SLOTS_SECOND_LINE_RULE = ("第二行是极简功能标签：短语或一句短说明（如“3 stages. Guided at about 20° per side.”"
+                          "“Manual ceramic V-slot smooths the edge.”），最多两小句，说清这个槽位或结构替观众干什么，"
+                          "不念枯燥目数，不描述画面拍到了什么。")
+ROUTED_198H_PLAN_RULE = ("198H 的 B 版按这条视频的画面和方向二选一（不要两版都出，只出 1 个 B 版，writing 填 rescue 或 slots）：\n"
+                         "  ① 只要视频里有同一把刀「磨前切不动/撕纸/压番茄 → 过槽 → 磨后利落切开」的前后对比画面（或方向主打钝刀救回 S2），"
+                         "B 版选 rescue（钝刀救回），writing 填 \"rescue\"，4 张，motive_zh 写「磨前：…｜过程：…｜磨后与收口：…」。\n"
+                         "  ② 若视频没有磨前失败画面，以三槽演示、记号笔测角或插电省力为主（或方向主打 S1/S3），"
+                         "B 版选 slots（三槽一机），writing 填 \"slots\"，不按上面三段和第二行规则写，以它自己的写法为准，4–5 张，"
+                         "motive_zh 写「人群：…｜三槽与导向：…｜结果与收口：…」。\n"
+                         "  ③ 198H 事实红线：角度只说约每侧 20°（about 20° per side，不写 constant/exact/locked）；"
+                         "第 3 槽是手动陶瓷 V 槽（不是电动轮，不写镜面抛光）；质保说 3 年（不是 4 年），退货说 30 天免费退货；"
+                         "不写未核实的静音/<65 dB、过热保护、磁吸铁屑盒；不写固定拉几次或几秒搞定。画面证明文案、价格、帧时间和排版的规则照旧。")
 # 2026-11-06 user: closings read like a contract ("3-year limited warranty, covering materials and workmanship",
 # "buy the full 202H at today's price"). Product-file wording and rule wording are for checking, not for the copy.
 # 2026-11-06 user: any B-tier reason that fits the copy can close (4-year warranty, 30-day returns, carry-case), not only 3-year warranty/price.
 CLOSING_REASON_RULE = ("理由从产品卖点分级表 B 类里选和这一版文案最搭的一项，回答观众下单前最后一个顾虑：质保（出问题怎么办）、"
-                       "退换（买了不合适怎么办）、价格（值不值）、整箱带走（前文讲帮朋友磨刀、带去别处用时）等；3 版尽量各用不同的理由。"
+                       "退换（买了不合适怎么办）、价格（值不值）、整箱带走（前文讲帮朋友磨刀、带去别处用时）等；几版尽量各用不同的理由。"
                        "只说“有收纳箱、硬壳”不算理由；整套要说出观众因此避开什么（不用一件件凑、不会买错配件）。")
 CLOSING_VOICE_RULE = ("下单理由和入口用达人顺口说话的口吻，不念产品资料的条款原文，也不把规则里的中文要求翻进文案："
-                      "质保按资料能说到的最长年限，202H 注册后 4 年，如“It even comes with a 4-year warranty once you register it.”，"
+                      "质保按产品资料写明的说法，202H 直接说 4 年质保，如“It even comes with a 4-year warranty.”，不带注册，"
                       "不写 limited、covering materials and workmanship 这类条款词，不说终身、无条件；"
-                      "退换说“You've got 30 days to send it back.”，挂车页没写免费就不说 free；"
+                      "退换按产品资料写明的说法，202H 说“You get free returns for 30 days.”（30 天免费退货），不说无条件；"
                       "入口短，如“Check out the full 202H set below.”（下方看看整套 202H）；没给今天挂车价就不提价格，"
                       "不写 at today's price、today's product page；不把理由、价格、整套、品牌全名塞进同一句。")
 
@@ -130,8 +191,10 @@ def fill_cells(slide):
 
 
 def slide_cells(slide):
-    """Every cell of the slide's layout as {image, crop_x, crop_y}; cell 1 is the slide's own picture."""
+    """Every cell of the slide's layout as {image, crop_x, crop_y[, zoom]}; cell 1 is the slide's own picture."""
     first = {"image": slide.get("image") or {}, "crop_x": slide.get("crop_x", 0.5), "crop_y": slide.get("crop_y", 0.5)}
+    if render.zoom_of(slide.get("zoom")) > 1:
+        first["zoom"] = render.zoom_of(slide.get("zoom"))
     return [first] + list(fill_cells(copy.deepcopy(slide))["cells"])[:cell_count(slide) - 1]
 
 
@@ -181,6 +244,104 @@ def parse_options(output, cta=""):
     return options
 
 
+# Target market of one plan (2026-11-23 fly: 图文 in German and British English too). The set remembers the market of
+# the video's production job; the user can change it before each plan. Every version and every work carries the market
+# it was written for, so rewording one slide and exporting stay in that language. What the market changes in the words
+# lives in the writing skill's 「目标市场」 section; this only names it.
+SPEAKERS = {"us": "美国", "uk": "英国", "de": "德国", "es": "西班牙"}
+ORAL = {"us": "美式口语", "uk": "英式口语", "de": "德语口语", "es": "西班牙本土西语口语"}
+EXPORT_MARKET = {"us": ("US", "en"), "uk": ("UK", "en-GB"), "de": ("DE", "de"), "es": ("ES", "es")}
+
+
+def language(market):
+    """What the slide text is written in: 英文 for America (the prompts' long-standing word), else the market's language."""
+    market = markets.stored(market)
+    return "英文" if market == markets.DEFAULT else markets.MARKETS[market]["language"]
+
+
+def speaker(market):
+    return f"{SPEAKERS.get(markets.stored(market), SPEAKERS['us'])} TikTok 达人"
+
+
+def market_rule(market):
+    """Only for non-American plans: write straight in that language, examples are structure only, no US-only terms."""
+    market = markets.stored(market)
+    if market == markets.DEFAULT:
+        return ""
+    item = markets.MARKETS[market]
+    words = item["language"]
+    return (f"\n本轮目标市场：{item['label']}。图上的标题和第二行、发布标题和发布正文都直接用{words}构思和写（按写稿技能写作参考「目标市场」），"
+            "不要先写英文再翻译；title_zh、body_zh、titles_zh、caption_zh 仍写中文对照。caption_en 这个字段名不变，内容写" + words + "。"
+            "下面规则和 JSON 示例里的英文句子只示范结构、句位和口吻，不照搬用词；“约 N 个英文词”按同样的阅读长度控制"
+            + ("（德语词长，宁可少几个词）" if market == "de" else "") + "。"
+            "质保、退换、价格、运费、活动只写产品资料里本市场的说法或补充说明给的，没有就换成不依赖条款的下单理由；"
+            "hashtag 用这门语言的常用词加品牌型号，不照搬美区标签。视频脚本是什么语言都一样，按它的意思用"
+            + words + "重新说。")
+
+
+# 外语版 (2026-11-24 fly 选方案 C)：已定稿的版本在内容进程「图文」标签里批量改成另一个市场的语言（默认德语）。画面、裁切、
+# 拼图、放大、排版风格都照搬，只重写图上的字和发布文案；评论贴纸一律去掉（真实评论不能翻译后挂原作者的名字，也没人在旁边挑）。
+# 外语版是同一图文组里的新一版，键是「原版字母-地区」（如 A-DE），记着 source 和 market，单独定稿、单独上传 Notion。
+WORK_KEY = r"[A-Z](?:-(?:US|UK|DE|ES))?"
+
+
+def foreign_key(source_key, market):
+    return f"{source_key}-{EXPORT_MARKET[markets.stored(market)][0]}"
+
+
+def translatable(work):
+    """A finalized version written from the video (not itself a translation) can be turned into another language."""
+    return work.get("status") == "done" and not work.get("source")
+
+
+def foreign_slides(slides):
+    """The slides a translated version starts from, without comment stickers: the cover keeps its picture and title
+    (which goes back to its own place), a slide that only quoted a comment is left out."""
+    out = []
+    for slide in slides or []:
+        quoted = slide.get("comment") or {}
+        if quoted and not quoted.get("cover"):
+            continue
+        slide = copy.deepcopy(slide)
+        slide.pop("comment", None)
+        slide["id"] = uuid4().hex[:10]
+        out.append(slide)
+    return out
+
+
+def parse_translation(output, slides, work):
+    """The translated words for every slide (same count and order as the source) plus the publish copy."""
+    data = _json_answer(output, "AI 没按约定格式交回外语版，可以再试一次。")
+    items = data.get("slides") if isinstance(data.get("slides"), list) else []
+    if len(items) != len(slides):
+        raise PhotoSetError(502, f"AI 交回 {len(items)} 张，原版是 {len(slides)} 张，可以再试一次。")
+    words = []
+    for slide, item in zip(slides, items):
+        item = item if isinstance(item, dict) else {}
+        title = clean_lines(item.get("title_lines"), 3, 60)
+        if slide.get("title_lines") and not title:
+            raise PhotoSetError(502, "AI 交回的外语版有一张没有标题，可以再试一次。")
+        body = [render.plain(line) for line in clean_lines(item.get("body_lines"), 2)] if slide.get("body_lines") else []
+        words.append({"title_lines": title, "body_lines": body,
+                      "title_zh": str(item.get("title_zh") or "")[:200], "body_zh": str(item.get("body_zh") or "")[:200]})
+    caption = str(data.get("caption_en") or "")[:1200]
+    if not caption and work.get("caption_en"):
+        raise PhotoSetError(502, "AI 交回的外语版没有发布正文，可以再试一次。")
+    return {"slides": words, "caption_en": caption, "caption_zh": str(data.get("caption_zh") or "")[:800],
+            "titles": publish_titles(data.get("titles")), "titles_zh": [str(t or "")[:200] for t in (data.get("titles_zh") or [])[:3]],
+            "cta": str(data.get("cta") or "")[:120] if work.get("cta") else ""}
+
+
+def foreign_work(work, market, slides, words):
+    """The new version: the source's pictures and layout, the translated words, nothing of its history or exports."""
+    out = {k: copy.deepcopy(v) for k, v in work.items() if k not in ("history", "future", "exports", "basket_comments", "slides")}
+    out.update(key=foreign_key(work["key"], market), source=work["key"], market=markets.stored(market), status="todo",
+               history=[], exports=[], cta=words["cta"], caption_en=words["caption_en"], caption_zh=words["caption_zh"],
+               titles=words["titles"], titles_zh=words["titles_zh"],
+               slides=[{**slide, **text} for slide, text in zip(copy.deepcopy(slides), words["slides"])])
+    return out
+
+
 HASHTAG = re.compile(r"#[^\s#]+")
 
 
@@ -207,8 +368,39 @@ def fallback_titles(caption):
     return publish_titles([first + " ".join(HASHTAG.findall(text))]) if first else []
 
 
-def parse_plan(output):
+def _times(values, limit=2):
+    """Backup frame times the AI gave for one slide; anything that is not a time is dropped."""
+    out = []
+    for value in (values if isinstance(values, list) else [])[:limit]:
+        number = _number(value, -1.0, -1.0)
+        if number >= 0:
+            out.append(round(number, 2))
+    return out
+
+
+def _allowed_writings(order):
+    allowed = []
+    for slot in order:
+        for name in ROUTED_WRITINGS.get(slot, (slot,)):
+            if name not in allowed:
+                allowed.append(name)
+    return tuple(allowed)
+
+
+def _slot_writing(slot, claimed, allowed):
+    if slot in ROUTED_WRITINGS:
+        choices = ROUTED_WRITINGS[slot]
+        return claimed if claimed in choices else choices[-1]
+    return claimed if claimed in allowed else slot
+
+
+def parse_plan(output, writings=None):
+    """writings: the writings asked for, in order (a routed slot like '198h_b' accepts any writing in ROUTED_WRITINGS[slot]);
+    a version without its own valid writing takes the one at its place.
+    With writings given (every plan since 2026-11-15) the B-side recommended writing (整套配置 / 钝刀救回 / 三槽一机) is recommended."""
     data = _json_answer(output, "AI 没按约定格式交回逐张表，可以再点一次。")
+    order = list(writings or WRITING_ORDER)
+    allowed = _allowed_writings(order)
     versions = []
     for index, item in enumerate((data.get("versions") or [])[:3]):
         slides = []
@@ -237,13 +429,16 @@ def parse_plan(output):
                 "picture_zh": str(slide.get("picture_zh") or "")[:200], "frame_time": round(time, 2), "crop_y": round(crop, 3),
                 "text_position": slide.get("text_position") if slide.get("text_position") in render.POSITIONS else "split",
                 "text_size": slide.get("text_size") if slide.get("text_size") in render.SIZES else "l",
-                "layout": layout, "cells": cells,
+                "layout": layout, "cells": cells, "alt_times": _times(slide.get("alt_times")),
             })
         if not slides:
             continue
-        writing = item.get("writing") if item.get("writing") in WRITINGS else WRITING_ORDER[index]
+        slot = order[index] if index < len(order) else order[index % len(order)]
+        writing = _slot_writing(slot, item.get("writing"), allowed)  # a retired writing in the answer is not taken
+        used = {v["key"] for v in versions}
+        key = WRITING_KEYS[writing] if WRITING_KEYS[writing] not in used else next(k for k in "ABC" if k not in used)
         versions.append({
-            "key": "ABC"[index], "writing": writing, "name_zh": str(item.get("name_zh") or f"第 {index + 1} 版")[:40],
+            "key": key, "writing": writing, "name_zh": str(item.get("name_zh") or f"第 {index + 1} 版")[:40],
             "buyer_zh": str(item.get("buyer_zh") or "")[:200], "motive_zh": str(item.get("motive_zh") or "")[:200],
             "recommended": bool(item.get("recommended")), "cta": clean_lines([item.get("cta")], 1, 60)[0] if item.get("cta") else "",
             "caption_en": str(item.get("caption_en") or "")[:1200], "caption_zh": str(item.get("caption_zh") or "")[:800],
@@ -252,6 +447,10 @@ def parse_plan(output):
         })
     if not versions:
         raise PhotoSetError(502, "AI 交回的逐张表是空的，可以再点一次。")
+    if writings and any(v["writing"] in RECOMMENDED_WRITINGS for v in versions):
+        first = next(v for v in versions if v["writing"] in RECOMMENDED_WRITINGS)
+        for v in versions:
+            v["recommended"] = v is first
     if sum(v["recommended"] for v in versions) != 1:
         for v in versions:
             v["recommended"] = v is versions[0]
@@ -260,14 +459,17 @@ def parse_plan(output):
 
 
 def new_work(version):
+    # 末张不再默认带收口文案（fly 2026-11-20）；要加就在「收口（末张）」里自己填。
     return {"key": version["key"], "name_zh": version.get("name_zh", ""), "writing": version.get("writing") or "", "status": "todo", "style": "bar",
-            "cta": version.get("cta") or "", "caption_en": version.get("caption_en", ""), "caption_zh": version.get("caption_zh", ""),
+            "market": markets.stored(version.get("market")),
+            "cta": "", "caption_en": version.get("caption_en", ""), "caption_zh": version.get("caption_zh", ""),
             "titles": list(version.get("titles") or []), "titles_zh": list(version.get("titles_zh") or []),
             "slides": [{**{k: s.get(k) for k in ("title_lines", "body_lines", "title_zh", "body_zh", "picture_zh", "crop_y",
                                                 "text_position", "text_size")},
                         "body_lines": [render.plain(line) for line in s.get("body_lines") or []
                                        if render.plain(line) != render.plain(version.get("cta"))],
                         "image": {"kind": "frame", "t": s["frame_time"]}, "layout": s.get("layout") or "single",
+                        **({"alternates": [s["frame_time"], *s["alt_times"]]} if s.get("alt_times") else {}),
                         "cells": [{"image": {"kind": "frame", "t": c["frame_time"]}, "crop_x": 0.5, "crop_y": c.get("crop_y", 0.5)}
                                   for c in s.get("cells") or []]} for s in version.get("slides") or []],
             "history": [], "exports": []}
@@ -336,6 +538,7 @@ class PhotoCarousels:
         self.export_root = Path(export_root or EXPORT_ROOT)
         self.lock = threading.RLock()
         self._cancel = {}
+        self._translate_gate = threading.Lock()  # 外语版一条一条写，不同批次也排在一起
         self.root.mkdir(parents=True, exist_ok=True)
         self._interrupt_stale()
 
@@ -350,7 +553,7 @@ class PhotoCarousels:
             label = str(job.get("title") or job.get("id") or "")
         record_activity(self.app, run_id, kind="photo", owner_id=str(job.get("id") or ""), source_id=set_id or "",
                         product=job.get("product", ""), case_id=(job.get("replica") or {}).get("case_id") or job.get("case_id") or "",
-                        title=f"{head} · {label}", step="publish", status="running", phase=head, message=message)
+                        title=f"{head} · {label}", step="cut", status="running", phase=head, message=message)
         return run_id
 
     def _settle(self, run_id, status, message):
@@ -388,9 +591,9 @@ class PhotoCarousels:
     def _interrupt_stale(self):
         """Work cut off by a restart is reported, never silently resumed."""
         for data in self._all():
-            for key in ("frames_job", "ai", "slide_ai"):
+            for key in ("frames_job", "ai", "slide_ai", "comment_ai", "translate"):
                 job = data.get(key) or {}
-                if job.get("status") == "running":
+                if job.get("status") == "running" or (key == "translate" and job.get("status") == "queued"):
                     job.update(status="failed", error="工作台重启打断了这一步，请再点一次。", finished_at=_now())
                     self._save(data)
         for path in (self.root / "resolve-imports").glob("*/job.json"):
@@ -455,11 +658,22 @@ class PhotoCarousels:
                 out[(job_id, uid)] = {"state": state, "set_id": (data or {}).get("id"),
                                       "decided_at": choice.get("at"), "reason": choice.get("reason", ""),
                                       "finished_at": choice.get("finished_at", "")}
+                if data:
+                    out[(job_id, uid)].update(self._foreign_view(data))
+                # Before a set exists, a 达芬奇 无字版 export still running or just failed is the row's news.
+                try:
+                    task = None if data else self._resolve_import(job_id, uid)
+                except (OSError, ValueError):
+                    task = None
+                if task and task.get("status") == "running":
+                    out[(job_id, uid)]["importing"] = True
+                elif task and task.get("status") == "failed":
+                    out[(job_id, uid)]["import_error"] = str(task.get("error") or "导出失败")[:200]
             return out
 
     def failures(self):
         """Sets whose last frame extraction or AI step failed: [{job_id, timeline_uid, step, error, at}], for the needs-you list."""
-        labels = {"frames_job": "抽帧", "ai": "写逐张表", "slide_ai": "改写单张"}
+        labels = {"frames_job": "抽帧", "ai": "写逐张表", "slide_ai": "改写单张", "translate": "出外语版"}
         with self.lock:
             try:
                 decided = self._decisions()
@@ -500,7 +714,8 @@ class PhotoCarousels:
 
     def _running(self, job_id, timeline_uid, data):
         return (self._resolve_import(job_id, timeline_uid) or {}).get("status") == "running" or any(
-            ((data or {}).get(key) or {}).get("status") == "running" for key in ("frames_job", "ai", "slide_ai"))
+            ((data or {}).get(key) or {}).get("status") == "running" for key in ("frames_job", "ai", "slide_ai")) or (
+            ((data or {}).get("translate") or {}).get("status") in {"queued", "running"})
 
     def _set_finished(self, job_id, timeline_uid, finished):
         """完结 only stops the reminders and locks editing; the set, its exports and any Notion pages stay as they are."""
@@ -613,12 +828,18 @@ class PhotoCarousels:
         out = {key: data.get(key) for key in ("id", "job_id", "timeline_uid", "timeline_name", "case_id", "product", "created_at",
                                               "updated_at", "video", "frames_job", "ai", "slide_ai", "versions", "gaps", "current")}
         out["exists"] = True
+        out["market"] = self._set_market(data)
+        out["markets"] = markets.public()
         out.update(self._finish_view(data.get("job_id"), data.get("timeline_uid"), data))
         out["slide_ai"] = {k: v for k, v in data["slide_ai"].items() if k != "snapshot"} if data.get("slide_ai") else None
+        task = self._comment_task(data)
+        out["comment_ai"] = {k: v for k, v in task.items() if k != "note_in"} or None
+        out["comments_archived"] = photo_comments.ARCHIVED
         out["works"] = [{"key": w["key"], "name_zh": w.get("name_zh", ""), "status": w["status"], "exports": len(w.get("exports") or []),
                          "openable": self._openable(data, w["key"])} for w in data.get("works") or []]
         work = self._work(data, required=False)
         out["work"] = ({key: work.get(key) for key in ("key", "name_zh", "writing", "status", "slides", "style", "cta", "caption_en", "caption_zh", "exports")}
+                       | {"market": markets.stored(work.get("market"))}
                        | {"titles": work.get("titles") or fallback_titles(work.get("caption_en")), "titles_zh": work.get("titles_zh") or []}
                        | {"can_undo": bool(work.get("history")), "can_redo": bool(work.get("future")),
                           "undo_label": (work.get("history") or [{}])[-1].get("label", ""),
@@ -632,6 +853,15 @@ class PhotoCarousels:
         out["max_slides"] = MAX_SLIDES
         out["sizes"] = {key: label for key, (label, _) in render.SIZES.items()}
         return out
+
+    def _set_market(self, data):
+        """The market the next plan is written for: what the user last picked, else the video's production job."""
+        if data.get("market") in markets.MARKETS:
+            return data["market"]
+        try:
+            return markets.stored(self.app.production.job(data["job_id"]).get("market"))
+        except Exception:
+            return markets.DEFAULT
 
     def detail(self, job_id, timeline_uid):
         with self.lock:
@@ -673,7 +903,9 @@ class PhotoCarousels:
 
     def busy(self):
         with self.lock:
-            if any((data.get(key) or {}).get("status") == "running" for data in self._all() for key in ("frames_job", "ai", "slide_ai")):
+            if any((data.get(key) or {}).get("status") == "running" for data in self._all() for key in ("frames_job", "ai", "slide_ai", "comment_ai")):
+                return True
+            if any((data.get("translate") or {}).get("status") in {"queued", "running"} for data in self._all()):
                 return True
             return any(json.loads(path.read_text(encoding="utf-8")).get("status") == "running"
                        for path in (self.root / "resolve-imports").glob("*/job.json"))
@@ -710,7 +942,7 @@ class PhotoCarousels:
             data = {
                 "id": set_id, "job_id": job_id, "timeline_uid": uid, "timeline_name": timeline.get("name") or "",
                 "case_id": (job.get("replica") or {}).get("case_id") or "", "product": job.get("product") or "",
-                "created_at": _now(), "video": {"name": str(name)[:200], "file": target.name,
+                "market": markets.stored(job.get("market")), "created_at": _now(), "video": {"name": str(name)[:200], "file": target.name,
                                                  "bytes": target.stat().st_size},
                 "frames_job": {"status": "running", "started_at": _now(),
                                "run": self._track("frames", "图文抽帧", job, set_id, f"正在从「{timeline.get('name') or '成片'}」抽画面")},
@@ -749,6 +981,34 @@ class PhotoCarousels:
             threading.Thread(target=self._import_resolve, args=(job_id, uid, task),
                              daemon=True, name=f"photo-resolve-{task['run_id']}").start()
             return reply
+
+    def import_resolve_many(self, body):
+        """按天批量导出：把一批时间线的无字版依次排进达芬奇（共用同一个占用队列，一条导完再导下一条），导完各自自动抽帧。
+        只收还没开始做图文、没选不做、没完结的；其余和失败的原样报回 skipped，不影响其他条。"""
+        items = body.get("items") if isinstance(body, dict) and set(body) == {"items"} else None
+        if not isinstance(items, list) or not items or len(items) > 60 or not all(
+                isinstance(item, dict) and set(item) == {"job_id", "timeline_uid"}
+                and all(isinstance(item[key], str) and item[key] for key in item) for item in items):
+            raise PhotoSetError(400, "请选择要导出的视频（一次最多 60 条）。")
+        pairs = list(dict.fromkeys((item["job_id"], item["timeline_uid"]) for item in items))
+        states = self.states(pairs)
+        started, skipped = [], []
+        for job_id, uid in pairs:
+            state = states[(job_id, uid)]
+            if state.get("importing"):
+                started.append({"job_id": job_id, "timeline_uid": uid})
+                continue
+            if state["state"] not in {"pending", "want"}:
+                reason = {"skip": "已选不做", "finished": "已完结"}.get(state["state"], "已经在做图文")
+                skipped.append({"job_id": job_id, "timeline_uid": uid, "error": reason})
+                continue
+            try:
+                self.import_resolve(job_id, {"timeline_uid": uid})
+            except Exception as exc:
+                skipped.append({"job_id": job_id, "timeline_uid": uid, "error": str(exc)})
+            else:
+                started.append({"job_id": job_id, "timeline_uid": uid})
+        return {"started": started, "skipped": skipped}
 
     def _import_resolve(self, job_id, uid, task):
         folder = self._import_folder(job_id, uid)
@@ -863,9 +1123,34 @@ class PhotoCarousels:
                 draw.text((x + 4, y + 2), f"{items[index]['t']:.1f}", fill="yellow", font=label)
             canvas.save(folder / "sheets" / f"sheet{sheet + 1:02d}.jpg", quality=85)
 
-    # ---------- step 2: AI writes three versions ----------
+    def _model_settings(self, body):
+        """The model for one AI run: the one picked in the request, else what 图文 last used, else the global default."""
+        picked = ({"model": body.get("model"), "reasoning_effort": body.get("reasoning_effort")}
+                  if isinstance(body, dict) and "model" in body else {})
+        try:
+            return self.app.ai.resolve_default_settings(picked, kind="carousel")
+        except Exception as exc:
+            if picked:
+                raise PhotoSetError(400, str(exc)[:200] or "模型选择无效。")
+            try:
+                settings = self.app.ai.preferences()
+                return {"model": settings.get("model"), "reasoning_effort": settings.get("reasoning_effort")}
+            except Exception:
+                return {"model": None, "reasoning_effort": None}
+
+    # ---------- step 2: AI writes the versions ----------
+    def _writings(self, body=None, product=None):
+        """Every plan writes 2 versions: A 达人自述 and B (整套配置 by default; for 198H routed by video material to 钝刀救回 or 三槽一机)."""
+        if str(product or "").strip().upper() == "198H":
+            return list(WRITING_ORDER_198H)
+        return list(WRITING_ORDER)
+
     @_open_only
     def plan(self, set_id, body=None):
+        settings = self._model_settings(body)
+        picked = (body or {}).get("market")
+        if picked is not None and (not isinstance(picked, str) or picked not in markets.MARKETS):
+            raise PhotoSetError(400, "不支持这个语言。")
         with self.lock:
             data = self._read(set_id)
             if (self._resolve_import(data["job_id"], data["timeline_uid"]) or {}).get("status") == "running":
@@ -878,12 +1163,16 @@ class PhotoCarousels:
                 job = self.app.production.job(data["job_id"])
             except Exception:
                 job = {"id": data["job_id"], "product": data.get("product", "")}
+            writings = self._writings(body, product=data.get("product") or job.get("product"))
+            data["market"] = picked or self._set_market(data)
             data["ai"] = {"status": "running", "started_at": _now(), "progress": "正在准备脚本、产品资料和画面…",
-                          "run": self._track("plan", "图文逐张表", job, set_id, f"AI 正在给「{data.get('timeline_name') or '成片'}」写 3 版逐张表")}
+                          "model": settings["model"], "reasoning_effort": settings["reasoning_effort"], "writings": writings,
+                          "market": data["market"],
+                          "run": self._track("plan", "图文逐张表", job, set_id, f"AI 正在给「{data.get('timeline_name') or '成片'}」写 {len(writings)} 版{'' if data['market'] == markets.DEFAULT else markets.MARKETS[data['market']]['language']}逐张表（模型：{settings['model'] or '本机默认'}）")}
             self._save(data)
             event = threading.Event()
             self._cancel[set_id] = event
-        threading.Thread(target=self._plan, args=(set_id, event, str((body or {}).get("note") or "")[:1000]),
+        threading.Thread(target=self._plan, args=(set_id, event, str((body or {}).get("note") or "")[:1000], settings, writings),
                          daemon=True, name=f"photo-plan-{set_id}").start()
         return self.public(data)
 
@@ -918,6 +1207,21 @@ class PhotoCarousels:
         path = root.parent / SKILL / "SKILL.md"
         return [{"name": SKILL, "path": str(path)}] if path.is_file() else []
 
+    @staticmethod
+    def _api_references(folder, refs, skills):
+        references = []
+        for name in refs:
+            path = (folder / name).resolve()
+            if path.parent != (folder / "refs").resolve():
+                raise PhotoSetError(400, "本轮产品资料路径无效。")
+            references.append({"label": name, "path": str(path)})
+        if skills:
+            root = Path(skills[0]["path"]).parent
+            # Only copywriting/selection references apply; rendering stays in the workbench.
+            for name in ("references/quality-standards.md", "../product-video-script-writing/references/writing-and-native.md"):
+                references.append({"label": name, "path": str((root / name).resolve())})
+        return references
+
     def _video_brief(self, data, job):
         """What the video already settled for this timeline: its on-screen hook and the direction it tests (audience,
         main selling point, concern chain, closing). The carousel opens on the same viewer and closes the same way."""
@@ -942,12 +1246,30 @@ class PhotoCarousels:
         return "\n".join(f"{line.get('number')}. {line.get('spoken')}｜{line.get('zh') or ''}"
                          + (f"｜画面：{line['proof']}" if line.get("proof") else "") for line in job.get("lines") or [])
 
-    def prompt(self, data, job, refs, note=""):
+    def prompt(self, data, job, refs, note="", writings=None):
+        writings = list(writings or self._writings(product=data.get("product") or (job or {}).get("product")))
+        count = len(writings)
+        style_lines = []
+        for key in writings:
+            if key == "198h_b":
+                style_lines.append("- B 版（按这条视频的画面和方向二选一，只出 1 个 B 版）：\n"
+                                   f"  · 选 rescue（钝刀救回）：{WRITING_RULES['rescue']}\n"
+                                   f"  · 选 slots（三槽一机）：{WRITING_RULES['slots']}")
+            else:
+                style_lines.append(f"- {WRITING_KEYS[key]} 版 {WRITING_RULES[key]}")
+        styles = "\n".join(style_lines)
+        kit = "kit" in writings
+        routed_198h = "198h_b" in writings
+        writing_names = "、".join("rescue 或 slots（B 版二选一）" if key == "198h_b" else key for key in writings)
+        exempt_prefix = "除整套配置版外，" if kit else ("除三槽一机（slots）版外，" if routed_198h else "")
+        extra_plan_rule = ((chr(10) + "- " + KIT_PLAN_RULE) if kit else "") + ((chr(10) + "- " + ROUTED_198H_PLAN_RULE) if routed_198h else "")
         lines = self._script(job)
         duration = (data.get("video") or {}).get("duration") or 0
         sheets = sorted((self.root / data["id"] / "sheets").glob("*.jpg"))
         brief = self._video_brief(data, job)
-        return f"""按 tiktok-photo-commerce 技能，把这条带货视频做成 TikTok 挂车图文，先出 3 版逐张表。
+        market = markets.stored(data.get("market"))
+        voice, words = speaker(market), language(market)
+        return f"""按 tiktok-photo-commerce 技能，把这条带货视频做成 TikTok 挂车图文，先出 {count} 版逐张表（只出这 {count} 版，技能里说的版数以这里为准）。{market_rule(market)}
 
 附图是这条视频的无字幕版抽帧总览（共 {len(sheets)} 张，每格左上角黄字是秒数，全片约 {duration} 秒）。
 产品型号：{data.get('product') or '未登记'}。产品资料（只读，事实以它为准）：{'、'.join(refs) or '没有找到，请只写画面里看得见、脚本里说过的事实'}。
@@ -956,21 +1278,20 @@ class PhotoCarousels:
 {lines}
 {('这条视频已定的开头和方向（图文沿用同一群人、同一个收口）：' + chr(10) + brief) if brief else '这条视频没有登记方向，人群和卖点从脚本里读。'}
 
-3 版各用一种写法，按顺序（同一条视频、同一份事实，区别就是写法），都用美国 TikTok 达人对着镜头说话的口吻（口语、短、有节奏，不要翻译腔、说明书腔和广告腔）：
-- A 版 {WRITING_RULES["self"]}
-- B 版 {WRITING_RULES["qa"]}
-- C 版 {WRITING_RULES["list"]}
+{count} 版各用一种写法，按下面的顺序（同一条视频、同一份事实，区别就是写法），都用{voice}对着镜头说话的口吻（口语、短、有节奏，不要翻译腔、说明书腔和广告腔）：
+{styles}
 - 视频口播里已经说过、放在这一张合适的句子，优先缩短原话来用，不另起炉灶；口播里收窄过的主张不放宽。
 
-每版都按三段走（技能「卖货理由链」；开头和收口的句位规则以写稿技能「开头、中段与收口」为准）：
+{exempt_prefix}每版都按三段走（技能「卖货理由链」；开头和收口的句位规则以写稿技能「开头、中段与收口」为准）：
 1. 首张说到心里：用观众自己的处境或烦恼开场（如角度一直靠猜、磨刀配件一直在买），不懂这个品类的人也认得出；首张不介绍产品、不报配置，型号最多放在第二行。至少 1 版首张沿用视频开头的意思（按这一版的写法改说法）。
 2. 中段只讲 1–2 个卖点：每个卖点都回答首张那个烦恼，标题和第二行说观众得到什么、为什么，画面里看得见效果；一个卖点可以占一到两张。不把配件、磨板、箱子逐件列成清单，和首张烦恼无关的卖点不写。
 3. 末张给下单理由：一个理由加购买入口。{CLOSING_REASON_RULE}脚本收口里已经说过的理由可以直接用。
    {CLOSING_VOICE_RULE}
-- 3 版不是换一种买家；不默认做送礼版，除非补充说明要求。每版 3–5 张，不为凑张数加页。
+- 各版不是换一种买家；不默认做送礼版，除非补充说明要求。每版 3–5 张，不为凑张数加页。
 - motive_zh 写这一版的三段：「烦恼：…｜卖点：…｜下单理由：…」。
-- 每张三层：大标题 1–2 短行（不懂这个品类的人 2 秒能懂，重点词用 *星号* 包起来），第二行 body_lines 一句（{SECOND_LINE_RULE}），页码由排版自动加。
+- 每张三层：大标题 1–2 短行（不懂这个品类的人 2 秒能懂，重点词用 *星号* 包起来），第二行 body_lines 一句（{SECOND_LINE_RULE}），页码由排版自动加。{extra_plan_rule}
 - 每张选一个帧时间 frame_time（秒，必须是总览里看得到、画面能证明标题和第二行的那一格，优先清楚不糊的）；画面负责证明文案，文案不描述画面；没有能证明的画面就收窄文案，不编。
+- 每张再给 alt_times：1–2 个备选帧时间，同样能证明这张文案，但和 frame_time 是不同的镜头、角度或时刻（不是前后几帧），用户会在里面一键换图；拼图时是第 1 格的备选；找不到就给空列表。
 - 价格数字、优惠、活动期限只用下面补充说明给的；不写资料里列为无依据的说法。
 - 字尽量不挡主体（刀身、刃口、刀柄、磨刀架、夹具、磨板、箱子），缩成缩略图也要一眼认出拍的是什么；字放在桌面、墙、背景这类空处，其次手臂和杂物。
 - crop_y：成图是 3:4，竖屏视频要上下裁掉一截，0 保留顶部、1 保留底部、0.5 居中；按主体位置给，尽量把主体推到一侧，空出另一侧放字。
@@ -981,36 +1302,44 @@ class PhotoCarousels:
 
 只输出一个 JSON 对象，不要别的文字：
 {{"versions":[{{"writing":"self","name_zh":"不用再猜角度","buyer_zh":"卖给谁","motive_zh":"烦恼：…｜卖点：…｜下单理由：…","recommended":true,
-"cta":"GET YOUR *202H* BELOW.",
 "titles":["🔴I Found the Next Level for My Stone#SHARPAL202H #knifesharpening #knifesharpener #whetstone #guidedsharpening #sharpeningkit #tooltok #knifetok"],
 "titles_zh":["我找到了磨石的进阶方案（只写标题中文，不含标签）"],"caption_en":"发布正文英文 1–3 句，不带标签","caption_zh":"正文中文对照",
 "slides":[{{"title_lines":["I FOUND THE *NEXT LEVEL*","FOR MY STONE."],"body_lines":["One stone gets it sharp, just not the finish I'm after."],
-"title_zh":"中文标题","body_zh":"第二行的中文","frame_time":34.0,"picture_zh":"这张画面里看得到什么","crop_y":0.5,"text_position":"split","text_size":"l","layout":"single","cells":[]}}]}}],
+"title_zh":"中文标题","body_zh":"第二行的中文","frame_time":34.0,"alt_times":[12.4,41.0],"picture_zh":"这张画面里看得到什么","crop_y":0.5,"text_position":"split","text_size":"l","layout":"single","cells":[]}}]}}],
 "gaps_zh":["缺什么画面、哪些说法因为没证据没写"]}}
-writing 依次是 self、qa、list。recommended 只给 1 版设 true。
-发布文案和视频一样（写稿技能「交付」的 3 行「🔴主题+tags」格式）：每版 titles 给 3 行，每行 = 🔴 + 英文标题 + 紧跟标题、不加空格的 hashtag 串（标签之间一个空格），产品型号标签放第一位，约 8–10 个相关标签，3 行标题切入角度不同、和这一版的写法与首张一致；titles_zh 是这 3 行标题的中文（不含标签）。caption_en 是发布正文 1–3 句、不带标签，caption_zh 是它的中文。"""
+versions 只放这 {count} 版，writing 依次是 {writing_names}。recommended 只给 1 版设 true。
+发布文案和视频一样（写稿技能「交付」的 3 行「🔴主题+tags」格式）：每版 titles 给 3 行，每行 = 🔴 + {words}标题 + 紧跟标题、不加空格的 hashtag 串（标签之间一个空格），产品型号标签放第一位，约 8–10 个相关标签，3 行标题切入角度不同、和这一版的写法与首张一致；titles_zh 是这 3 行标题的中文（不含标签）。caption_en 是{words}发布正文 1–3 句、不带标签，caption_zh 是它的中文。"""
 
-    def _plan(self, set_id, event, note):
+    def _plan(self, set_id, event, note, settings=None, writings=None):
         folder = self.root / set_id
         try:
             data = self._read(set_id)
             job = self.app.production.job(data["job_id"])
             refs = self._references(folder, data.get("product"))
             images = [(f"抽帧总览第 {n} 张", path) for n, path in enumerate(sorted((folder / "sheets").glob("*.jpg")), 1)]
-            try:
-                settings = self.app.ai.preferences()
-            except Exception:
-                settings = {}
-            self._progress(set_id, "AI 正在看画面、写 3 版逐张表…")
-            output = self.app.ai.bridge.run(self.prompt(data, job, refs, note), cwd=str(folder), cancel_event=event,
+            if settings is None:
+                settings = self._model_settings(None)
+            skills = self._skill()
+            api_options = ({"references": self._api_references(folder, refs, skills)}
+                           if str(settings.get("model") or "").startswith("antigravity:") else {})
+            self._progress(set_id, f"AI 正在看画面、写 {len(writings or WRITING_ORDER)} 版逐张表…")
+            output = self.app.ai.bridge.run(self.prompt(data, job, refs, note, writings), cwd=str(folder), cancel_event=event,
                                             on_progress=lambda text: self._progress(set_id, text),
                                             model=settings.get("model"), reasoning_effort=settings.get("reasoning_effort"),
-                                            skills=self._skill(), images=images)
-            versions, gaps = parse_plan(output)
+                                            skills=skills, images=images, **api_options)
+            versions, gaps = parse_plan(output, writings)
+            for version in versions:
+                version["market"] = markets.stored(data.get("market"))
             items = self.frames(set_id)["items"]
             for version in versions:
                 for slide in version["slides"]:
                     slide["frame_time"] = self.sharpest(items, slide["frame_time"])
+                    alternates = []
+                    for time in slide.get("alt_times") or []:
+                        time = self.sharpest(items, time)
+                        if all(abs(time - other) >= 0.5 for other in [slide["frame_time"], *alternates]):
+                            alternates.append(time)
+                    slide["alt_times"] = alternates
                     for cell in slide.get("cells") or []:
                         cell["frame_time"] = self.sharpest(items, cell["frame_time"])
             with self.lock:
@@ -1020,6 +1349,11 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                 data["ai"] = {"status": "done", "finished_at": _now(), "run": run}
                 self._save(data)
             self._settle(run, "completed", f"{len(versions)} 版逐张表已写好，去选一版")
+            if not photo_comments.ARCHIVED:
+                try:
+                    self.suggest_comments(set_id, auto=True, settings=settings)
+                except Exception:
+                    pass
         except Exception as exc:
             cancelled = event.is_set()
             with self.lock:
@@ -1046,26 +1380,59 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
     # ---------- one slide: AI offers three ways to say it, the user picks one ----------
     def rewrite_prompt(self, data, job, work, number, refs, pictures, note="", zh=""):
         slides = work.get("slides") or []
+        market = markets.stored(work.get("market"))
+        words = language(market)
         slide = slides[number - 1]
         rows = "\n".join(f"{i}. {' / '.join(s.get('title_lines') or [])}｜{' / '.join(s.get('body_lines') or [])}"
                          + ("　← 要改的这一张" if i == number else "") for i, s in enumerate(slides, 1))
         brief = self._video_brief(data, job)
+        # 末张默认不带收口；用户填了收口才告诉 AI 画面上会自动加、别重复。
+        cta_note = f"画面上会自动加收口「{render.plain(work.get('cta'))}」，" if work.get("cta") else ""
+        cta_tail = "，不重复收口原话" if work.get("cta") else ""
         where = ("这是第 1 张：用观众自己的处境或烦恼开场，不懂这个品类的人也认得出；标题不介绍产品、不报配置。" if number == 1 else
-                 f"这是最后一张：画面上会自动加收口「{render.plain(work.get('cta'))}」，标题和第二行给下单理由，不重复收口原话。{CLOSING_REASON_RULE}{CLOSING_VOICE_RULE}"
-                 if number == len(slides) and work.get("cta") else "这是中段：只讲一个卖点，标题说观众得到的好处，第二行说为什么。")
-        writing = WRITING_RULES.get(work.get("writing") or "")
+                 f"这是最后一张：{cta_note}标题和第二行给下单理由{cta_tail}。{CLOSING_REASON_RULE}{CLOSING_VOICE_RULE}"
+                 if number == len(slides) else "这是中段：只讲一个卖点，标题说观众得到的好处，第二行说为什么。")
+        writing_key = work.get("writing") or ""
+        kit = writing_key == "kit"
+        slots = writing_key == "slots"
+        rescue = writing_key == "rescue"
+        structured = kit or slots
+        if kit:  # 整套配置 opens on who the kit is for, shows one part per slide and closes on the case
+            where = ("这是第 1 张：标题点名人群加整套，第二行报核心配置。" if number == 1 else
+                     f"这是最后一张：{cta_note}标题和第二行说整套一箱带走{cta_tail}。"
+                     if number == len(slides) else "这是中段：只讲一个部件或功能，标题是两行对仗短句，第二行是它的规格。")
+        elif slots:  # 198H 三槽一机 opens on home cooks + one machine, shows one stage/mechanism per slide, closes on sharp result + 198H reason
+            where = ("这是第 1 张：标题点名家庭厨师人群加一台搞定，第二行报核心结构（如三槽、约每侧 20° 导向）。" if number == 1 else
+                     f"这是最后一张：{cta_note}标题和第二行落到磨后切纸或切食材结果，并给一个 198H 下单理由（3 年质保或 30 天免费退货）{cta_tail}。"
+                     if number == len(slides) else "这是中段：只讲一个槽位或核心机制，标题是两行对仗短句，第二行用极简功能标签说明这槽替观众干什么（不念枯燥目数）。")
+        elif rescue:  # 198H 钝刀救回 opens on dull-knife failure, shows effortless pull-through/3 stages, closes on clean cut + 198H reason
+            where = ("这是第 1 张：用磨前钝刀翻车的痛点直戳观众（如切不动番茄/撕纸、别扔钝刀），不报配置参数。" if number == 1 else
+                     f"这是最后一张：{cta_note}标题和第二行落到磨后利落切开的结果，并给一个 198H 下单理由（30 天免费退货或 3 年质保）{cta_tail}。"
+                     if number == len(slides) else "这是中段：只讲一个极简动作或三槽分工（插电拉过、约每侧 20° 导向、修刃/磨利/手动陶瓷槽修光，不念目数）。")
+        writing = WRITING_RULES.get(writing_key)
         collage = f"这一张是{render.LAYOUTS[render.layout_of(slide)][0]}拼图，附图按格子顺序给出。" if pictures > 1 else ""
         meaning = (f"""用户用中文写了这一张要说的话（每行一句）：
 {zh}
 3 种说法按顺序这样分工，用户的意思优先于下面其他规则：
-1. 第 1 种「照你的意思」：严格按用户的意思和分行——用户第 1 行做标题，第 2 行做第二行（只有一行时整句做标题，第二行按规则补一句）。用户写到的每个信息点都要在，不加、不删、不换成别的卖点，只把说法变成地道的美式口语；这一种不受这一版写法的限制。
+1. 第 1 种「照你的意思」：严格按用户的意思和分行——用户第 1 行做标题，第 2 行做第二行（只有一行时整句做标题，第二行按规则补一句）。用户写到的每个信息点都要在，不加、不删、不换成别的卖点，只把说法变成地道的{ORAL[market]}；这一种不受这一版写法的限制。
 2. 第 2、3 种「贴着意思发散」：还是用户这几个信息点、这个意思，只换说法、语气或先后顺序（如先说结果、换成问句、说成自己的经历），尽量贴这一版的写法。不引入用户没提到的卖点、部件或功能。"""
                    if zh else f"这一张现在：{' / '.join(slide.get('title_lines') or [])}｜{' / '.join(slide.get('body_lines') or [])}（中文：{slide.get('title_zh') or ''}｜{slide.get('body_zh') or ''}）。意思不变，写得更抓人、更具体。")
-        spread = ("" if zh else "\n- 3 种说法讲同一个卖点，但整张都要不一样：标题换开头写法（如问句戳痛点、结果先给、让步反差、一句吐槽），"
+        spread = ("" if zh else "\n- 3 种说法讲同一个部件或功能，但整张都要不一样：标题换一组对仗短句，第二行换一种标法（短语、结果短标、一句短说明）。"
+                  "3 种的第二行不能相同，也不能只差几个词。" if structured else
+                  "\n- 3 种说法讲同一个卖点，但整张都要不一样：标题换开头写法（如问句戳痛点、结果先给、让步反差、一句吐槽），"
                   "第二行换说法角度（带上数字规格、说用完的结果、和老办法比）。3 种的第二行不能相同，也不能只差几个词。")
-        check = ("第 1 种的回译和用户写的中文一句一句对得上、信息点一个不少；第 2、3 种没有用户没说的卖点、部件或功能，第二行两两不同；标题读出来像人说话。"
-                 if zh else "3 种的第二行两两不同；第二行没有描述画面（没有 shown、pictured、in the photo）；标题读出来像人说话。")
-        return f"""按 tiktok-photo-commerce 技能，给这组 TikTok 挂车图文的第 {number} 张（共 {len(slides)} 张）出 3 种英文说法，其他张不动。用户会从 3 种里选一种。
+        voice = ("标题是两行对仗短句，每行 2–4 个词，祈使句或名词句，不用问句、不写第一人称；用日常词，不要翻译腔和广告腔。"
+                 + ("对比：“SLOT 1 REPAIRS. / *SLOT 2 SHARPENS.*” 可以；“THREE-STAGE ELECTRIC DIAMOND WHEEL SYSTEM” 是说明书腔。" if slots
+                    else "对比：“SET YOUR ANGLE. / *SHARPEN WITH CONTROL.*” 可以；“PRECISION ANGLE ADJUSTMENT SYSTEM” 是说明书腔。")
+                 if structured else
+                 f"标题用{speaker(market)}对着镜头说话的口吻："
+                 "口语、短、有节奏，用缩写和日常词，像跟朋友吐槽或安利，不要翻译腔、说明书腔和广告腔。"
+                 "对比：“SHARP ISN'T THE *FINISH LINE.*”“SHARP? COOL. NOW MAKE IT *SHINE.*” 是达人腔；“I FOUND A GUIDED WAY TO REFINE THE EDGE” 是翻译腔。")
+        second = KIT_SECOND_LINE_RULE if kit else (SLOTS_SECOND_LINE_RULE if slots else SECOND_LINE_RULE)
+        sound = "标题两行对得上、读得顺" if structured else "标题读出来像人说话"
+        check = (f"第 1 种的回译和用户写的中文一句一句对得上、信息点一个不少；第 2、3 种没有用户没说的卖点、部件或功能，第二行两两不同；{sound}。"
+                 if zh else f"3 种的第二行两两不同；第二行没有描述画面（没有 shown、pictured、in the photo）；{sound}。")
+        return f"""按 tiktok-photo-commerce 技能，给这组 TikTok 挂车图文的第 {number} 张（共 {len(slides)} 张）出 3 种{words}说法，其他张不动。用户会从 3 种里选一种。{market_rule(market)}
 
 附图是这一张现在用的底图（没有字）。{collage}
 产品型号：{data.get('product') or '未登记'}。产品资料（只读，事实以它为准）：{'、'.join(refs) or '没有找到，请只写画面里看得见、脚本里说过的事实'}。
@@ -1083,11 +1450,11 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
 
 规则（技能「卖货理由链」；句位规则以写稿技能「开头、中段与收口」为准）：
 - {where}{spread}{(chr(10) + '- 这一版的写法（这一张也照它写）：' + writing) if writing else ''}
-- 标题用美国 TikTok 达人对着镜头说话的口吻：口语、短、有节奏，用缩写和日常词，像跟朋友吐槽或安利，不要翻译腔、说明书腔和广告腔。对比：“SHARP ISN'T THE *FINISH LINE.*”“SHARP? COOL. NOW MAKE IT *SHINE.*” 是达人腔；“I FOUND A GUIDED WAY TO REFINE THE EDGE” 是翻译腔。
-- 大标题 1–2 短行（不懂这个品类的人 2 秒能懂，重点词用 *星号* 包起来）；第二行 body_lines 一句：{SECOND_LINE_RULE}
+- {voice}
+- 大标题 1–2 短行（不懂这个品类的人 2 秒能懂，重点词用 *星号* 包起来）；第二行 body_lines 一句：{second}
 - 文案必须是这张底图看得见、能证明的；底图证明不了就收窄说法，不编（用户自己写的话除外）。
 - 价格数字、优惠、活动期限只用用户写给的；不写资料里列为无依据的说法。
-- title_zh、body_zh 按你写的英文回译成中文，让用户核对意思有没有跑偏；不要抄用户写的中文。
+- title_zh、body_zh 按你写的{words}回译成中文，让用户核对意思有没有跑偏；不要抄用户写的中文。
 - 交回前自查：{check}
 
 只输出一个 JSON 对象，不要别的文字：
@@ -1099,6 +1466,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
         replaced until the user picks one; pictures, crops and layout never change. Runs in the background."""
         body = body or {}
         note, zh = str(body.get("note") or "")[:500], str(body.get("zh") or "").strip()[:500]
+        settings = self._model_settings(body)
         with self.lock:
             data = self._read(set_id)
             work = self._work(data)
@@ -1111,9 +1479,10 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                 job = self.app.production.job(data["job_id"])
             except Exception:
                 job = {"id": data["job_id"], "product": data.get("product", "")}
-            run = self._track("slide", f"改写第 {number} 张", job, set_id, f"AI 正在给第 {number} 张出 3 种说法")
+            run = self._track("slide", f"改写第 {number} 张", job, set_id, f"AI 正在给第 {number} 张出 3 种说法（模型：{settings['model'] or '本机默认'}）")
             data["slide_ai"] = {"status": "running", "key": work["key"], "number": number, "slide_id": slide_id(slides[number - 1]), "run": run,
                                 "note": note, "zh": zh, "started_at": _now(),
+                                "model": settings["model"], "reasoning_effort": settings["reasoning_effort"],
                                 "progress": f"AI 正在给第 {number} 张出 3 种说法…", "snapshot": copy.deepcopy(slides[number - 1])}
             self._save(data)
             event = threading.Event()
@@ -1137,10 +1506,11 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             number = task["number"]
             pictures = self._bases(set_id, task["snapshot"])
             refs = self._references(folder, data.get("product"))
-            try:
-                settings = self.app.ai.preferences()
-            except Exception:
-                settings = {}
+            settings = ({"model": task.get("model"), "reasoning_effort": task.get("reasoning_effort")}
+                        if "model" in task else self._model_settings(None))
+            skills = self._skill()
+            api_options = ({"references": self._api_references(folder, refs, skills)}
+                           if str(settings.get("model") or "").startswith("antigravity:") else {})
             def progress(text):
                 with self.lock:
                     current = self._read(set_id)
@@ -1151,8 +1521,8 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             output = self.app.ai.bridge.run(self.rewrite_prompt(data, job, work, number, refs, len(pictures), task.get("note", ""), task.get("zh", "")),
                                             cwd=str(folder), cancel_event=event, on_progress=progress,
                                             model=settings.get("model"), reasoning_effort=settings.get("reasoning_effort"),
-                                            skills=self._skill(), images=[(f"第 {number} 张底图" + (f" 第 {i} 格" if len(pictures) > 1 else ""), path)
-                                                                          for i, path in enumerate(pictures, 1)])
+                                            skills=skills, images=[(f"第 {number} 张底图" + (f" 第 {i} 格" if len(pictures) > 1 else ""), path)
+                                                                  for i, path in enumerate(pictures, 1)], **api_options)
             if event.is_set():
                 raise PhotoSetError(409, "已停止。")
             options = parse_options(output, work.get("cta"))
@@ -1211,6 +1581,218 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             task.update(picked=index, number=number)
             return self.public(self._save(data))
 
+    # ---------- user comments: the AI suggests search words at 选版, the words search every synced comment, the user picks ----------
+    def _comment_search(self, data, keywords):
+        """Run the search words over every usable comment. No AI. Returns the fields to keep in comment_ai."""
+        reviews = getattr(self.app, "reviews", None)
+        if reviews is not None and hasattr(reviews, "sync"):
+            try:
+                reviews.sync()
+            except Exception:
+                pass
+        pool = photo_comments.candidates(self.app, data)
+        matches, found = {}, {}
+        for slot in photo_comments.SLOTS:
+            matches[slot], found[slot] = photo_comments.search(pool, [k["word"] for k in keywords.get(slot) or []], slot)
+        return {"keywords": keywords, "matches": matches, "found": found, "pool": len(pool),
+                "own": sum(1 for item in pool if item["same_video"]), "searched_at": _now()}
+
+    @staticmethod
+    def _comment_task(data):
+        task = data.get("comment_ai") or {}
+        return task if task.get("version") == 3 else {}
+
+    @_open_only
+    def suggest_comments(self, set_id, body=None, auto=False, settings=None):
+        """Ask the AI for search words (two groups: cover hooks, real-use feedback), then search with them. With no usable
+        comment in the library it says so and calls no AI. Runs in the background. After a plan (auto) it uses the plan's
+        model. Words the user typed are replaced; comments already picked stay."""
+        if photo_comments.ARCHIVED:
+            raise PhotoSetError(409, "图文的用户评论模块已归档。")
+        body = body or {}
+        settings = settings or self._model_settings(body)
+        with self.lock:
+            data = self._read(set_id)
+            if not data.get("versions"):
+                raise PhotoSetError(409, "先出逐张表，再找评论。")
+            if self._comment_task(data).get("status") == "running":
+                return self.public(data)
+        pool = photo_comments.candidates(self.app, data)
+        with self.lock:
+            data = self._read(set_id)
+            old = self._comment_task(data)
+            keep = {k: old.get(k) for k in ("picks", "chosen", "keywords", "matches", "found") if old.get(k)}
+            if not pool:
+                data["comment_ai"] = {"version": 3, "status": "empty", "finished_at": _now(), "picks": [], "chosen": [], "pool": 0, **keep,
+                                      "note": "评论库里没有这个产品能用的 TikTok 视频评论（英文、不带 @、有内容的）。先在评论页同步或从 Apify 抓评论。"}
+                return self.public(self._save(data))
+            try:
+                job = self.app.production.job(data["job_id"])
+            except Exception:
+                job = {"id": data["job_id"], "product": data.get("product", "")}
+            run = self._track("comments", "图文评论关键词", job, set_id, f"AI 正在想搜评论用的关键词（模型：{settings['model'] or '本机默认'}）")
+            data["comment_ai"] = {"picks": [], "chosen": [], **keep, "version": 3, "status": "running", "started_at": _now(), "run": run,
+                                  "pool": len(pool), "auto": bool(auto), "model": settings["model"], "reasoning_effort": settings["reasoning_effort"],
+                                  "note_in": str(body.get("note") or "")[:500], "progress": "AI 正在想搜评论用的关键词…"}
+            self._save(data)
+            event = threading.Event()
+            self._cancel[f"{set_id}:comments"] = event
+        threading.Thread(target=self._suggest_comments, args=(set_id, event, pool), daemon=True, name=f"photo-comments-{set_id}").start()
+        return self.public(data)
+
+    def stop_comments(self, set_id):
+        event = self._cancel.get(f"{set_id}:comments")
+        if event:
+            event.set()
+        return self.public(self._read(set_id))
+
+    def _suggest_comments(self, set_id, event, pool):
+        folder = self.root / set_id
+        try:
+            data = self._read(set_id)
+            task = data["comment_ai"]
+            job = self.app.production.job(data["job_id"])
+            refs = self._references(folder, data.get("product"))
+            settings = {"model": task.get("model"), "reasoning_effort": task.get("reasoning_effort")}
+            skills = self._skill()
+            api_options = ({"references": self._api_references(folder, refs, skills)}
+                           if str(settings.get("model") or "").startswith("antigravity:") else {})
+            versions = data.get("versions") or []
+            output = self.app.ai.bridge.run(photo_comments.keyword_prompt(data, versions, pool, refs, self._script(job), task.get("note_in", "")),
+                                            cwd=str(folder), cancel_event=event, on_progress=lambda text: None,
+                                            model=settings.get("model"), reasoning_effort=settings.get("reasoning_effort"),
+                                            skills=skills, **api_options)
+            if event.is_set():
+                raise PhotoSetError(409, "已停止。")
+            keywords = photo_comments.parse_keywords(output)
+            found = self._comment_search(data, keywords)
+            with self.lock:
+                data = self._read(set_id)
+                data["comment_ai"].update(status="done", finished_at=_now(), **found)
+                data["comment_ai"].pop("progress", None)
+                self._save(data)
+            self._settle(data["comment_ai"].get("run"), "completed",
+                         f"关键词搜到首图 {found['found']['cover']} 条、中间 {found['found']['middle']} 条评论，去选版那一步挑")
+        except Exception as exc:
+            cancelled = event.is_set()
+            with self.lock:
+                data = self._read(set_id)
+                task = data.get("comment_ai") or {}
+                task.update(status="cancelled" if cancelled else "failed", finished_at=_now(),
+                            error="已停止。" if cancelled else (str(exc) or "AI 没有完成，请再点一次。")[:400])
+                task.pop("progress", None)
+                data["comment_ai"] = task
+                self._save(data)
+            self._settle(task.get("run"), "cancelled" if cancelled else "failed", task["error"])
+        finally:
+            self._cancel.pop(f"{set_id}:comments", None)
+
+    @_open_only
+    def search_comments(self, set_id, body):
+        """Search with the user's own words: {"keywords": {"cover": [...], "middle": [...]}}. A word the AI gave keeps its
+        Chinese meaning."""
+        if photo_comments.ARCHIVED:
+            raise PhotoSetError(409, "图文的用户评论模块已归档。")
+        given = body.get("keywords")
+        if not isinstance(given, dict):
+            raise PhotoSetError(400, "要搜哪些关键词？")
+        with self.lock:
+            data = self._read(set_id)
+            task = self._comment_task(data)
+            if task.get("status") == "running":
+                raise PhotoSetError(409, "AI 还在想关键词，等它好了再改。")
+            known = {k["word"]: k.get("zh", "") for slot in photo_comments.SLOTS for k in (task.get("keywords") or {}).get(slot) or []}
+            keywords = {slot: [{"word": w, "zh": known.get(w, "")} for w in photo_comments.clean_words(given.get(slot))]
+                        for slot in photo_comments.SLOTS}
+        found = self._comment_search(data, keywords)
+        with self.lock:
+            data = self._read(set_id)
+            task = self._comment_task(data)
+            task = {"picks": [], "chosen": [], **task, "version": 3, **found}
+            if task.get("status") in (None, "empty"):
+                task["status"] = "done"
+            task.pop("note", None)
+            data["comment_ai"] = task
+            return self.public(self._save(data))
+
+    @_open_only
+    def pick_comments(self, set_id, body):
+        """The user's pick for one place: {"slot": "cover"|"middle", "id": a comment from the search, or null to clear}.
+        One comment per place. Versions started after this get them."""
+        if photo_comments.ARCHIVED:
+            raise PhotoSetError(409, "图文的用户评论模块已归档。")
+        slot, wanted = body.get("slot"), body.get("id")
+        if slot not in photo_comments.SLOTS:
+            raise PhotoSetError(400, "放首图还是中间？")
+        with self.lock:
+            data = self._read(set_id)
+            task = self._comment_task(data)
+            picks = [p for p in task.get("picks") or [] if p.get("slot") != slot]
+            if wanted:
+                pool = [m for s in photo_comments.SLOTS for m in (task.get("matches") or {}).get(s) or []] + list(task.get("picks") or [])
+                source = next((m for m in pool if m["id"] == str(wanted)), None)
+                if not source:
+                    raise PhotoSetError(400, "这条评论不在搜索结果里，重新搜一次。")
+                if any(p["id"] == source["id"] for p in picks):
+                    raise PhotoSetError(400, "这条评论已经放在另一个位置了。")
+                picks.append({k: v for k, v in source.items() if k != "matched"} | {"slot": slot})
+            picks.sort(key=lambda pick: pick["slot"] != "cover")
+            task.update(picks=picks, chosen=[p["id"] for p in picks], version=3)
+            task.setdefault("status", "done")
+            data["comment_ai"] = task
+            return self.public(self._save(data))
+
+    def _put_comments(self, data, work):
+        """Insert the chosen comments into one version. Returns how many went in and how many did not fit."""
+        if photo_comments.ARCHIVED:
+            return 0, 0
+        picks = [p for p in self._comment_task(data).get("picks") or [] if p.get("slot")]
+        if not picks:
+            return 0, 0
+        try:
+            items = self.frames(data["id"])["items"]
+        except (OSError, ValueError, KeyError, PhotoSetError):
+            items = []
+        slides, placed, skipped = photo_comments.place(work.get("slides") or [], picks, work["key"], items, MAX_SLIDES)
+        avatars = getattr(getattr(self.app, "reviews", None), "avatars", None)
+        for slide in slides:
+            quoted = slide.get("comment")
+            if not quoted:
+                continue
+            slide_id(slide)
+            # The commenter's picture is kept with the set: platform links expire and the export must not change later.
+            if quoted.get("avatar") and not quoted.get("avatar_file") and avatars is not None:
+                try:
+                    source = avatars.file(quoted["avatar"])
+                except Exception:
+                    source = None
+                if source:
+                    folder = self.root / data["id"] / "avatars"
+                    folder.mkdir(exist_ok=True)
+                    shutil.copy2(source, folder / source.name)
+                    quoted["avatar_file"] = source.name
+        work["slides"] = slides
+        return len(placed), len(skipped)
+
+    @_open_only
+    def apply_comments(self, set_id, body):
+        """Put the chosen comments into a version already in the queue (not finalized). Can be undone."""
+        if photo_comments.ARCHIVED:
+            raise PhotoSetError(409, "图文的用户评论模块已归档。")
+        with self.lock:
+            data = self._read(set_id)
+            work = self._work(data, body.get("key"))
+            if work["status"] == "done":
+                raise PhotoSetError(409, "这一版已经定稿，撤销定稿后才能加评论。")
+            before = copy.deepcopy(work)
+            self._remember(work, 1, f"{work['key']} 版：放进用户评论")
+            placed, skipped = self._put_comments(data, work)
+            if not placed:
+                work.clear()
+                work.update(before)
+                raise PhotoSetError(409, f"一组最多 {MAX_SLIDES} 张，放不下评论了，先删掉一张。" if skipped else "选的评论已经在这一版里了。")
+            return self.public(self._save(data))
+
     # ---------- step 3/4: a queue of chosen versions, made one after another ----------
     @staticmethod
     def _work(data, key=None, required=True):
@@ -1259,7 +1841,9 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             have = {w["key"] for w in works}
             for key in dict.fromkeys(keys):
                 if key not in have:
-                    works.append(new_work(versions[key]))
+                    work = new_work(versions[key])
+                    self._put_comments(data, work)
+                    works.append(work)
             current = self._work(data, required=False)
             if not current or current["status"] == "done":
                 nxt = self._next_todo(data)
@@ -1297,6 +1881,61 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                 elif data["works"]:
                     data["current"] = data["works"][-1]["key"]
             return self.public(self._save(data))
+
+    def _own_exports(self, data, work):
+        """The export folders this version made: directly inside 图文成品 and claimed by no other version of any set."""
+        from workbench_order_delete import _safe_folder
+        others = {str(item.get("folder")) for other in self._all() for w in other.get("works") or []
+                  if not (other.get("id") == data["id"] and w["key"] == work["key"])
+                  for item in w.get("exports") or [] if isinstance(item, dict) and item.get("folder")}
+        folders = []
+        for item in work.get("exports") or []:
+            folder = Path(str(item.get("folder") or "")) if isinstance(item, dict) and item.get("folder") else None
+            if folder and folder not in folders and str(folder) not in others and _safe_folder(folder, self.export_root):
+                folders.append(folder)
+        return folders
+
+    @_open_only
+    def unfinalize(self, set_id, body):
+        """撤销定稿: the version goes back to being worked on, keeping its slides and edits, and the folders it exported to
+        图文成品 are permanently removed. A page already on Notion stays there; uploading this version again updates that
+        page. preview=true only reports what would go. The record changes first, then files; leftovers are reported."""
+        if not isinstance(body, dict) or set(body) - {"key", "preview"} or not isinstance(body.get("preview", False), bool):
+            raise PhotoSetError(400, "撤销定稿参数无效。")
+        from workbench_order_delete import _tree
+        notion = getattr(self.app, "notion_uploads", None)
+        with self.lock:
+            data = self._read(set_id)
+            work = self._work(data, body.get("key") or None)
+            if work["status"] != "done":
+                raise PhotoSetError(409, "这一版还没定稿，不用撤销。")
+            if self._running(data.get("job_id"), data.get("timeline_uid"), data):
+                raise PhotoSetError(409, "图文还在处理，等它跑完或先停止，再撤销定稿。")
+            if notion is not None and notion.photo_busy({set_id}):
+                raise PhotoSetError(409, "这条图文正在上传 Notion，请等它结束再撤销定稿。")
+            folders = self._own_exports(data, work)
+            if body.get("preview"):
+                trees = [_tree(folder) for folder in folders]
+                page = (notion.photo_latest(set_id, work["key"]) or {}).get("page_id") if notion is not None else ""
+                return {"key": work["key"], "exports": len(folders), "files": sum(count for _, count in trees),
+                        "bytes": sum(size for size, _ in trees), "notion_page": bool(page)}
+            work["exports"] = []
+            work["status"] = "doing"
+            data["current"] = work["key"]
+            self._save(data)
+            warnings = []
+
+            def unlock(function, path, _):
+                os.chmod(path, 0o700)
+                function(path)
+            for folder in folders:
+                try:
+                    shutil.rmtree(folder, onerror=unlock)
+                except OSError:
+                    pass
+                if folder.exists():
+                    warnings.append(f"有文件还没删掉，可能正被占用，可手动删除：{folder}")
+            return {**self.public(data), "warnings": warnings}
 
     @_open_only
     def set_style(self, set_id, body):
@@ -1389,6 +2028,16 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                         raise PhotoSetError(400, "裁切位置无效。") from None
                     if "裁切" not in changed:
                         changed.append("裁切")
+            if "zoom" in body:
+                try:
+                    zoom = round(min(render.MAX_ZOOM, max(1.0, float(body["zoom"]))), 2)
+                except (TypeError, ValueError):
+                    raise PhotoSetError(400, "放大倍数无效。") from None
+                if zoom > 1:
+                    target["zoom"] = zoom
+                else:
+                    target.pop("zoom", None)
+                changed.append("放大")
             if "text_position" in body:
                 if body["text_position"] not in render.POSITIONS:
                     raise PhotoSetError(400, "文字位置无效。")
@@ -1411,6 +2060,9 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             for key in ("title_zh", "body_zh"):
                 if key in body:
                     slide[key] = str(body[key] or "")[:200]
+            if "comment" in body and body["comment"] is None and slide.get("comment"):  # the cover's sticker comes off; the slide stays
+                slide.pop("comment")
+                changed.append("去掉评论贴纸")
             if not changed and slide == slides[number - 1]:
                 return self.public(data)
             where = f"第 {number} 张第 {cell} 格" if cell > 1 else f"第 {number} 张"
@@ -1526,12 +2178,16 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             raise PhotoSetError(404, "这张的底图找不到了，请换一张。")
         return path
 
-    @staticmethod
-    def _spec(work, number):
+    def _spec(self, work, number, set_id=None):
         slides = work.get("slides") or []
         slide = dict(slides[number - 1])
         if number == len(slides) and work.get("cta"):
             slide["cta"] = work["cta"]
+        quoted = slide.get("comment") or {}
+        if set_id and quoted.get("avatar_file"):
+            path = self.root / set_id / "avatars" / Path(quoted["avatar_file"]).name
+            if path.is_file():
+                slide["comment"] = {**quoted, "avatar_path": str(path)}
         return slide
 
     def base_path(self, set_id, key, number, cell=1):
@@ -1546,42 +2202,264 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
         return self._base(set_id, cells[cell - 1])
 
     def rendered(self, set_id, key, style, number, width=None):
-        """Render on demand; cached by the exact inputs so an unchanged slide is never drawn twice."""
+        """Render on demand; cached by the exact inputs so an unchanged slide is never drawn twice. The slide is laid out
+        once at full size (kept as `<key>-full.jpg`) and each preview width is a resize of that, so the strip thumbnail and
+        the big preview asked for together after an edit cost one layout, not two."""
         data = self._read(set_id)
         work = self._work(data, key, required=False) or {}
         slides = work.get("slides") or []
         if style not in render.STYLES or not 1 <= number <= len(slides):
             raise PhotoSetError(404, "这一张不存在。")
-        spec = self._spec(work, number)
+        spec = self._spec(work, number, set_id)
         bases = self._bases(set_id, spec)
         width = int(width) if width and 120 <= int(width) <= render.W else render.W
-        key = hashlib.sha256(json.dumps([spec, [(str(b), b.stat().st_size) for b in bases], style, number, len(slides), width],
+        key = hashlib.sha256(json.dumps([spec, [(str(b), b.stat().st_size) for b in bases], style, number, len(slides)],
                                         sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:24]
         cache = self.root / set_id / "renders"
-        cache.mkdir(exist_ok=True)
-        path = cache / f"{key}.jpg"
-        if not path.is_file():
-            image = render.render(spec, bases, style, number, len(slides))
+        path = cache / (f"{key}-full.jpg" if width == render.W else f"{key}-{width}.jpg")
+        if path.is_file():
+            return path
+        with self._render_lock(f"{set_id}/{key}"):
+            if path.is_file():
+                return path
+            cache.mkdir(exist_ok=True)
+            full = cache / f"{key}-full.jpg"
+            image = None
+            if full.is_file():
+                try:
+                    with Image.open(full) as done:
+                        image = done.convert("RGB")
+                except OSError:
+                    image = None
+            if image is None:
+                image = render.render(spec, bases, style, number, len(slides))
+                self._save_jpeg(image, full, 92)
             if width != render.W:
-                image = image.resize((width, round(width * render.H / render.W)), Image.LANCZOS)
-            tmp = path.with_suffix(".part")
-            image.save(tmp, "JPEG", quality=90)
-            os.replace(tmp, path)
+                self._save_jpeg(image.resize((width, round(width * render.H / render.W)), Image.LANCZOS), path, 90)
         return path
+
+    @staticmethod
+    def _save_jpeg(image, path, quality):
+        tmp = path.with_name(f"{path.stem}.{uuid4().hex[:6]}.part")
+        image.save(tmp, "JPEG", quality=quality)
+        os.replace(tmp, path)
+
+    def _render_lock(self, key):
+        # Its own small guard, not self.lock: an export or an edit holding self.lock must not hold up previews.
+        with _RENDER_GUARD:
+            if len(_RENDER_LOCKS) > 200:
+                _RENDER_LOCKS.clear()
+            return _RENDER_LOCKS.setdefault(key, threading.Lock())
+
+    # ---------- 外语版：批量把已定稿的版本改成另一个市场的语言 ----------
+    def _translate_sources(self, data, market):
+        """Finalized versions of this set that do not have a version in this market yet (and are not in it already)."""
+        have = {w["key"] for w in data.get("works") or []}
+        return [w for w in data.get("works") or [] if translatable(w) and markets.stored(w.get("market")) != market
+                and foreign_key(w["key"], market) not in have]
+
+    def _foreign_view(self, data):
+        """For the 图文 overview: can this set be translated, which translated versions it has, and the batch task's state."""
+        works = data.get("works") or []
+        foreign = {}
+        for work in works:
+            if work.get("source"):
+                item = foreign.setdefault(markets.stored(work.get("market")), {"keys": [], "done": 0})
+                item["keys"].append(work["key"])
+                item["done"] += work.get("status") == "done"
+        task = data.get("translate") or {}
+        view = {"translatable": any(translatable(w) for w in works),
+                "foreign": [{"market": market, "label": EXPORT_MARKET[market][0], **item} for market, item in foreign.items()]}
+        if task.get("status") in {"queued", "running", "failed"}:
+            view["translating"] = {key: task.get(key) for key in ("status", "market", "progress", "error") if task.get(key) is not None}
+        return view
+
+    def translate_many(self, body):
+        """批量出外语版（内容进程「图文」标签，2026-11-24）：勾选的每条图文，把还没有这个语言版本的已定稿版本交给 AI 改写，
+        一条写完再写下一条；写完可自动定稿导出。跳过的原样报回 skipped。已完结的图文也能出（不改原版本）。"""
+        if not isinstance(body, dict) or set(body) - {"items", "market", "export", "model", "reasoning_effort"}:
+            raise PhotoSetError(400, "出外语版参数无效。")
+        items = body.get("items")
+        if not isinstance(items, list) or not items or len(items) > 60 or not all(
+                isinstance(item, dict) and set(item) == {"job_id", "timeline_uid"}
+                and all(isinstance(item[key], str) and item[key] for key in item) for item in items):
+            raise PhotoSetError(400, "请选择要出外语版的图文（一次最多 60 条）。")
+        market = body.get("market", "de")
+        if not isinstance(market, str) or market not in markets.MARKETS:
+            raise PhotoSetError(400, "不支持这个语言。")
+        export = body.get("export", True)
+        if not isinstance(export, bool):
+            raise PhotoSetError(400, "出外语版参数无效。")
+        settings = self._model_settings(body)
+        words = markets.MARKETS[market]["language"]
+        started, skipped, queued = [], [], []
+        with self.lock:
+            for job_id, uid in dict.fromkeys((item["job_id"], item["timeline_uid"]) for item in items):
+                row = {"job_id": job_id, "timeline_uid": uid}
+                data = self.find(job_id, uid)
+                task = (data or {}).get("translate") or {}
+                if data and task.get("status") in {"queued", "running"}:
+                    started.append(row)
+                    continue
+                reason = ("还没做图文" if not data else
+                          "图文还在处理，等它跑完再出" if any((data.get(key) or {}).get("status") == "running" for key in ("frames_job", "ai", "slide_ai")) else
+                          "还没有定稿的版本" if not any(translatable(w) for w in data.get("works") or []) else
+                          f"已经有{words}版" if not self._translate_sources(data, market) else "")
+                if reason:
+                    skipped.append({**row, "error": reason})
+                    continue
+                data["translate"] = {"status": "queued", "market": market, "export": export, "queued_at": _now(),
+                                     "model": settings["model"], "reasoning_effort": settings["reasoning_effort"],
+                                     "progress": f"排队出{words}版"}
+                self._save(data)
+                queued.append(data["id"])
+                started.append(row)
+        if queued:
+            threading.Thread(target=self._translate_queue, args=(queued,), daemon=True, name="photo-translate").start()
+        return {"started": started, "skipped": skipped}
+
+    def _translate_queue(self, set_ids):
+        for set_id in set_ids:
+            with self._translate_gate:
+                try:
+                    self._translate_one(set_id)
+                except Exception:
+                    pass
+
+    def _translate_task(self, set_id, **values):
+        with self.lock:
+            data = self._read(set_id)
+            task = data.setdefault("translate", {})
+            task.update(values)
+            self._save(data)
+            if values.get("progress"):
+                self._note(task.get("run"), values["progress"])
+            return data
+
+    def translate_prompt(self, data, job, work, slides, market, refs):
+        source = markets.stored(work.get("market"))
+        words, item = language(market), markets.MARKETS[market]
+        rows = "\n".join(f"{n}. 画面：{s.get('picture_zh') or '（没有说明）'}\n   标题：{' / '.join(s.get('title_lines') or []) or '（无）'}"
+                         f"\n   第二行：{' / '.join(s.get('body_lines') or []) or '（无，这张也不加）'}"
+                         f"\n   中文意思：{s.get('title_zh') or ''}｜{s.get('body_zh') or ''}" for n, s in enumerate(slides, 1))
+        titles = "\n".join(work.get("titles") or fallback_titles(work.get("caption_en"))) or "（无）"
+        cta = f"\n原版末张收口：{render.plain(work.get('cta'))}（cta 字段写它的{words}说法）" if work.get("cta") else ""
+        brief = self._video_brief(data, job)
+        return f"""按 tiktok-photo-commerce 技能，把这组已经定稿的 TikTok 挂车图文（原版是{language(source)}，共 {len(slides)} 张）改成{item['label']}版。画面、张数、顺序和排版都不变，只重写图上的字和发布文案。{market_rule(market)}
+
+产品型号：{data.get('product') or '未登记'}。产品资料（只读，事实以它为准）：{'、'.join(refs) or '没有找到，只用原版里已有的事实'}。
+{('这条视频已定的开头和方向：' + chr(10) + brief) if brief else ''}
+
+原版逐张（画面说明、标题、第二行、中文意思）：
+{rows}{cta}
+
+原版发布标题：
+{titles}
+
+原版发布正文：
+{work.get('caption_en') or '（无）'}
+
+规则：
+- 每张讲的意思、卖点和先后顺序跟原版一样，不加卖点、不删信息；用{speaker(market)}对着镜头说话的{ORAL[market]}重新说，不逐词翻译，不要翻译腔、说明书腔。
+- 标题保持原版的行数和节奏（每张 1–2 短行），重点词用 *星号* 包起来，强调和原版同一个意思。图上地方有限：标题每行尽量不比原版长，宁可换更短的说法{'（德语词长：优先短词，少用长复合词）' if market == 'de' else ''}；第二行一句，原版没有第二行的那张也不加。
+- 原版提到的价格、优惠、活动（如 Black Friday）、质保、退换、运费：本市场的产品资料里有才保留，没有就换成不依赖条款的说法。
+- 品牌名和型号原样保留。
+- title_zh、body_zh 按你写的{words}回译成中文，让用户核对意思有没有跑偏。
+- 发布标题 3 条，格式和原版一样：🔴 + {words}标题，紧跟 hashtag（第一个 # 前不空格），hashtag 用这门语言常用的词加品牌型号；titles_zh 是中文意思。发布正文写在 caption_en（字段名不变，内容写{words}），caption_zh 是中文意思。
+- 交回前自查：slides 正好 {len(slides)} 张、顺序和原版一致；每张回译和原版中文意思对得上。
+
+只输出一个 JSON 对象，不要别的文字：
+{{"slides":[{{"number":1,"title_lines":["…","…*…*"],"body_lines":["…"],"title_zh":"…","body_zh":"…"}}],"cta":"","titles":["🔴…#…"],"titles_zh":["…"],"caption_en":"…","caption_zh":"…"}}"""
+
+    def _translate_one(self, set_id):
+        event = threading.Event()
+        run = None
+        try:
+            with self.lock:
+                data = self._read(set_id)
+                task = data.get("translate") or {}
+                if task.get("status") != "queued":
+                    return
+                market, export = task["market"], task.get("export", True)
+                words = markets.MARKETS[market]["language"]
+                try:
+                    job = self.app.production.job(data["job_id"])
+                except Exception:
+                    job = {"id": data["job_id"], "product": data.get("product", "")}
+                sources = self._translate_sources(data, market)
+                if not sources:
+                    task.update(status="done", finished_at=_now(), progress="")
+                    self._save(data)
+                    return
+                run = self._track("translate", f"图文{words}版", job, set_id,
+                                  f"AI 正在把 {'、'.join(w['key'] for w in sources)} 版改成{words}（模型：{task.get('model') or '本机默认'}）")
+                task.update(status="running", started_at=_now(), run=run, progress=f"AI 正在把 {sources[0]['key']} 版改成{words}…")
+                self._save(data)
+            folder = self.root / set_id
+            refs = self._references(folder, data.get("product"))
+            settings = {"model": task.get("model"), "reasoning_effort": task.get("reasoning_effort")}
+            skills = self._skill()
+            api_options = ({"references": self._api_references(folder, refs, skills)}
+                           if str(settings.get("model") or "").startswith("antigravity:") else {})
+            made = []
+            for work in sources:
+                self._translate_task(set_id, progress=f"AI 正在把 {work['key']} 版改成{words}…")
+                slides = foreign_slides(work.get("slides"))
+                if not slides:
+                    continue
+                output = self.app.ai.bridge.run(self.translate_prompt(data, job, work, slides, market, refs), cwd=str(folder),
+                                                cancel_event=event, on_progress=lambda text: self._translate_task(set_id, progress=str(text)[:200]),
+                                                model=settings.get("model"), reasoning_effort=settings.get("reasoning_effort"),
+                                                skills=skills, **api_options)
+                new = foreign_work(work, market, slides, parse_translation(output, slides, work))
+                with self.lock:
+                    fresh = self._read(set_id)
+                    if self._work(fresh, new["key"], required=False):
+                        continue
+                    fresh.setdefault("works", []).append(new)
+                    current = self._work(fresh, required=False)
+                    if not export and (not current or current["status"] == "done"):
+                        nxt = self._next_todo(fresh)
+                        if nxt:
+                            self._start(fresh, nxt["key"])
+                    self._save(fresh)
+                if export:
+                    self._translate_task(set_id, progress=f"正在定稿导出 {new['key']} 版…")
+                    self._export(set_id, new["key"])
+                made.append(new["key"])
+            done = f"{'、'.join(made)} 版{words}已" + ("定稿导出" if export else "写好，去图文里看一眼再定稿") if made else f"没有要改成{words}的版本"
+            self._translate_task(set_id, status="done", finished_at=_now(), progress="", error=None, made=made)
+            self._settle(run, "completed", done)
+        except Exception as exc:
+            message = (str(exc) or "AI 没有完成，请再点一次。")[:400]
+            try:
+                self._translate_task(set_id, status="failed", finished_at=_now(), progress="", error=message)
+            except Exception:
+                pass
+            self._settle(run, "failed", message)
 
     # ---------- freeze ----------
     @_open_only
     def export(self, set_id):
+        return self._export(set_id)
+
+    def _export(self, set_id, key=None):
+        """Freeze one version (the current one unless key is given) into a new 图文成品 folder."""
         with self.lock:
             data = self._read(set_id)
-            work = self._work(data)
-            slides, style, chosen = work.get("slides") or [], work.get("style"), work["key"]
+            work = self._work(data, key)
+            slides, style, chosen = work.get("slides") or [], work.get("style"), work.get("source") or work["key"]
             if not slides or style not in render.STYLES:
                 raise PhotoSetError(409, "先选一版文案和排版风格。")
-            version = next((v for v in data["versions"] if v["key"] == chosen), {})
+            version = next((v for v in data.get("versions") or [] if v["key"] == chosen), {})
             stamp = datetime.now().strftime("%Y%m%d")
             label = re.sub(r'[\\/:*?"<>|\s]+', "", version.get("name_zh") or work.get("name_zh") or chosen)[:20]
-            base_name = f"{data.get('case_id') or data['job_id']}-{stamp}-{chosen}{label}"
+            market = markets.stored(work.get("market"))
+            region, image_language = EXPORT_MARKET.get(market, EXPORT_MARKET[markets.DEFAULT])
+            base_name = f"{data.get('case_id') or data['job_id']}-{stamp}-{chosen}{label}" + ("" if market == markets.DEFAULT else f"-{region}")
+            if parse_timeline(data.get("timeline_name")):
+                # 成品统一命名（2026-11-24）：DE-198-Zack-1124-2B，与 Notion 页面名同一套。
+                base_name = release_filename(data["timeline_name"], market, chosen)
             folder = self.export_root / base_name
             suffix = 2
             while folder.exists():
@@ -1592,7 +2470,7 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             (folder / "source").mkdir()
             sources = {}
             for number in range(1, len(slides) + 1):
-                spec = self._spec(work, number)
+                spec = self._spec(work, number, set_id)
                 bases = self._bases(set_id, spec)
                 image = render.render(spec, bases, style, number, len(slides))
                 image.save(folder / "无损PNG" / f"{number:02d}.png")
@@ -1607,15 +2485,17 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
                 "content_type": "photo_carousel", "product": data.get("product"), "source_case_id": data.get("case_id"),
                 "source_production": f"{data['job_id']} / 时间线 {data.get('timeline_name')}", "photo_set": set_id,
                 "variant": f"{chosen} {version.get('name_zh', '')}：{version.get('motive_zh', '')}",
+                **({"translated_from": work["source"]} if work.get("source") else {}),
                 "buyer_zh": version.get("buyer_zh", ""), "chosen_layout": render.STYLES[style],
                 "slides": [{"number": n, "title_lines": [render.plain(t) for t in s["title_lines"]], "body": " / ".join(s.get("body_lines") or []),
                             "title_zh": s.get("title_zh", ""), "body_zh": s.get("body_zh", ""), "picture_zh": s.get("picture_zh", ""),
-                            "source": sources[str(n)], "crop_y": s.get("crop_y"), "crop_x": s.get("crop_x", 0.5), "text_position": s.get("text_position"),
-                            "layout": render.LAYOUTS[render.layout_of(s)][0]}
+                            "source": sources[str(n)], "crop_y": s.get("crop_y"), "crop_x": s.get("crop_x", 0.5), "zoom": render.zoom_of(s.get("zoom")), "text_position": s.get("text_position"),
+                            "layout": render.LAYOUTS[render.layout_of(s)][0],
+                            **({"comment": {k: s["comment"].get(k) for k in ("review_id", "text", "zh", "username")}} if s.get("comment") else {})}
                            for n, s in enumerate(slides, 1)],
                 "cta": render.plain(work.get("cta")), "caption_en": work.get("caption_en", ""), "caption_zh": work.get("caption_zh", ""),
                 "titles": work.get("titles") or fallback_titles(work.get("caption_en")), "titles_zh": work.get("titles_zh") or [],
-                "market": "US", "image_language": "en", "dimensions": [render.W, render.H], "aspect_ratio": "3:4",
+                "market": region, "image_language": image_language, "dimensions": [render.W, render.H], "aspect_ratio": "3:4",
                 "gaps_zh": data.get("gaps") or [], "version": folder.name, "exported_at": _now(),
                 "method": "满版原图（视频帧或用户上传图，拼图时每格一张）等比裁切铺满，文字直接叠加；未调用生图模型，未改背景、手或产品。",
             }
@@ -1626,7 +2506,65 @@ writing 依次是 self、qa、list。recommended 只给 1 版设 true。
             work.setdefault("exports", []).append({"at": _now(), "folder": str(folder), "name": folder.name, "style": style})
             work["status"] = "done"
             self._save(data)
-            return {**self.public(data), "export": {"folder": str(folder), "name": folder.name}}
+            basket = self._comments_to_basket(data, work)
+            return {**self.public(data), "export": {"folder": str(folder), "name": folder.name}, "basket": basket}
+
+    # ---------- used comments → 摘录篮 ----------
+    @staticmethod
+    def _used_comments(data, work):
+        """(review id, where it was used) for every comment sticker in a finalized version."""
+        name = work.get("name_zh") or next((v.get("name_zh") for v in data.get("versions") or [] if v.get("key") == work["key"]), "") or ""
+        found = []
+        for number, slide in enumerate(work.get("slides") or [], 1):
+            comment = slide.get("comment") or {}
+            if not comment.get("review_id"):
+                continue
+            slot = "首图贴纸" if comment.get("cover") else f"第 {number} 张评论页"
+            exports = work.get("exports") or []
+            found.append((comment["review_id"], {
+                "key": f"photo:{data['id']}:{work['key']}", "kind": "photo", "photo_set": data["id"], "version": work["key"],
+                "version_name": name, "case_id": data.get("case_id") or "", "job_id": data.get("job_id") or "",
+                "product": data.get("product") or "", "slot": slot, "export": exports[-1]["name"] if exports else "",
+                "label": f"图文 {data.get('case_id') or data.get('job_id') or data['id']} · {work['key']} 版{(' ' + name) if name else ''} · {slot}",
+                "at": _now()}))
+        return found
+
+    def _comments_to_basket(self, data, work):
+        """After 定稿, put the version's comment stickers into the 摘录篮 with where they were used. Each version hands a
+        comment over once (remembered in work["basket_comments"]), so taking it out of the basket by hand sticks even if
+        the version is exported again. Never fails the export."""
+        reviews = getattr(self.app, "reviews", None)
+        uses = [(rid, source) for rid, source in self._used_comments(data, work) if rid not in (work.get("basket_comments") or [])]
+        if reviews is None or not hasattr(reviews, "note_used") or not uses:
+            return {"added": 0, "kept": 0}
+        try:
+            outcome = reviews.note_used(uses)
+        except Exception:
+            return {"added": 0, "kept": 0, "error": True}
+        done = outcome["added"] + outcome["kept"] + outcome.get("handed", [])
+        if done:
+            with self.lock:
+                fresh = self._read(data["id"])
+                target = self._work(fresh, work["key"], required=False)
+                if target is not None:
+                    target["basket_comments"] = list(dict.fromkeys([*(target.get("basket_comments") or []), *done]))
+                    self._save(fresh)
+        return {"added": len(outcome["added"]), "kept": len(outcome["kept"])}
+
+    def collect_used_comments(self):
+        """Hand over the comment stickers of versions finalized before this existed (and any a failed write missed).
+        Safe to run again: each version only hands a comment over once."""
+        reviews = getattr(self.app, "reviews", None)
+        if reviews is None:
+            return 0
+        pending = [(data, work) for data in list(self._all()) for work in data.get("works") or []
+                   if work.get("status") == "done"
+                   and any(rid not in (work.get("basket_comments") or []) for rid, _ in self._used_comments(data, work))]
+        if not pending:
+            return 0
+        if callable(getattr(reviews, "sync", None)):
+            reviews.sync()  # cheap when nothing changed; builds the library if it is not there yet
+        return sum(self._comments_to_basket(data, work).get("added", 0) for data, work in pending)
 
     def export_folder(self, set_id, name):
         data = self._read(set_id)

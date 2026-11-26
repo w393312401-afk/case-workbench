@@ -7,6 +7,7 @@ import math
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +20,22 @@ MAX_TEXT = 10000
 
 class CommentIntakeError(ValueError):
     pass
+
+
+# The commenter's avatar as the plugin read it from TikTok (2026-11-19): a signed CDN link that expires within days. It is
+# kept as avatarThumbnail, the field the Apify export uses, so review_avatars.py downloads the picture on the next sync.
+AVATAR_LINK = re.compile(r"https://[a-z0-9.-]+\.(?:tiktokcdn(?:-[a-z]+)?\.com|ibyteimg\.com|byteimg\.com|muscdn\.com)/[^\s\"'<>]{1,1900}", re.I)
+
+
+def _avatar(value):
+    """A usable avatar link, or "": anything else is dropped without refusing the comment."""
+    return value if isinstance(value, str) and len(value) <= 2000 and AVATAR_LINK.fullmatch(value) else ""
+
+
+def _expired(link):
+    """Whether a signed link is past its x-expires time; a link without one is kept."""
+    found = re.search(r"[?&]x-expires=(\d{9,11})(?:&|$)", link)
+    return bool(found) and int(found.group(1)) <= time.time()
 
 
 def _text(value, limit, *, required=False):
@@ -139,6 +156,9 @@ def ingest(path, videos, products, existing):
                 if comment.get("videoId") not in (None, "", video_id):
                     raise CommentIntakeError("评论与视频编号不匹配。")
                 previous = current.get(identifier)
+                kept = (stored.get(identifier) or {}).get("avatarThumbnail") or ""
+                if previous is not None and kept:
+                    previous = {**previous, "avatarThumbnail": kept}
                 if previous and not re.search(r"/video/" + re.escape(video_id) + r"(?:[/?#]|$)", previous["videoWebUrl"]):
                     raise CommentIntakeError("评论编号已属于另一条视频。")
                 text = _text(comment.get("text"), MAX_TEXT, required=True)
@@ -164,6 +184,10 @@ def ingest(path, videos, products, existing):
                         candidate[key] = value
                 if likes is not None:
                     candidate["diggCount"] = likes
+                # A fresh link replaces a kept one only once that has expired, so re-reading a video does not rewrite it.
+                avatar = _avatar(comment.get("avatar"))
+                if avatar and (not kept or _expired(kept)):
+                    candidate["avatarThumbnail"] = avatar
             except CommentIntakeError:
                 result["invalid"] += 1
                 continue

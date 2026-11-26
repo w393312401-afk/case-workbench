@@ -19,7 +19,8 @@ class BackNavigationBrowserTests(unittest.TestCase):
     create_point = catalog_ui.DirectionCatalogBrowserTests.create_point
     open_page = catalog_ui.DirectionCatalogBrowserTests.open_page
 
-    filtered_list = "#/202H/directions?q=%E5%AE%9A%E8%A7%92&tier=S&status=testing&archive=all"
+    # The directions list narrowed by a search; a tier filter belongs to the selling-point table, the other tab.
+    filtered_list = "#/202H/directions?q=%E5%AE%9A%E8%A7%92&archive=all"
     detail_route = "#/202H/directions/202H-S1"
 
     def assert_hash(self, page, expected):
@@ -39,10 +40,11 @@ class BackNavigationBrowserTests(unittest.TestCase):
 
     def scroll_list_to_direction(self, page):
         # Keep the real list and card link; only increase spacing so restoration
-        # can be observed even with this deliberately small temporary catalog.
+        # can be observed even with this deliberately small temporary catalog. The list
+        # itself stays in view beside the open direction, so the room goes around both.
         page.evaluate("""() => {
             const sheet = document.styleSheets[0];
-            sheet.insertRule('.dir-list { padding-top: 850px !important; padding-bottom: 1500px !important; }', sheet.cssRules.length);
+            sheet.insertRule('.dx { padding-top: 850px !important; padding-bottom: 1500px !important; }', sheet.cssRules.length);
         }""")
         link = page.locator('.dir-row[data-direction-id="202H-S1"] .direction-card-link')
         link.scroll_into_view_if_needed()
@@ -61,8 +63,7 @@ class BackNavigationBrowserTests(unittest.TestCase):
         self.assert_hash(page, list_hash)
         page.wait_for_function("expected => Math.abs(window.scrollY - expected) <= 2", arg=scroll_before)
         self.assertEqual(page.locator('[name="q"]').input_value(), "定角")
-        self.assertEqual(page.locator('[data-tier-filter="S"]').get_attribute("aria-pressed"), "true")
-        self.assertEqual(page.locator('#direction-filters [name="status"]').input_value(), "testing")
+        self.assertEqual(page.locator('[data-dx-tab="directions"]').get_attribute("aria-selected"), "true")
         self.assertEqual(page.locator('[name="archive"]').input_value(), "all")
         # The breadcrumb no longer repeats the sidebar's way home.
         self.assertEqual(page.locator("#breadcrumb").get_by_role("link", name="工作空间", exact=True).count(), 0)
@@ -122,7 +123,7 @@ class BackNavigationBrowserTests(unittest.TestCase):
         page.wait_for_function("expected => Math.abs(window.scrollY - expected) <= 2", arg=scroll_before)
         self.assertEqual(page.locator("#global-product").input_value(), "")
         self.assertEqual(page.locator('[name="q"]').input_value(), "定角")
-        self.assertEqual(page.locator('[data-tier-filter="S"]').get_attribute("aria-pressed"), "true")
+        self.assertEqual(page.locator('[data-dx-tab="directions"]').get_attribute("aria-selected"), "true")
         self.assertEqual(page.locator('[name="archive"]').input_value(), "all")
 
         # A fresh profile receiving an all-products deep link should offer the

@@ -83,8 +83,13 @@ const state = {
   direction: "",
   variantType: "all",
   archiveCategory: "all",
+  salesStatus: "all",
+  salesStatuses: [],
+  quickFilters: [],
+  libraryCreator: "",
   archiveStatus: "active",
   contentOrigin: "all",
+  textForm: "all",
   sourceType: "all",
   sort: "updated",
   sortDir: "desc",
@@ -217,9 +222,14 @@ function libraryHash() {
   if (state.variantType !== "all") params.set("variant", state.variantType);
   if (state.archiveCategory !== "all")
     params.set("category", state.archiveCategory);
+  const statuses = libraryStatusList(state.salesStatuses?.length ? state.salesStatuses : state.salesStatus);
+  if (statuses.length) params.set("salesStatus", statuses.join(","));
+  if (state.quickFilters?.length) params.set("quick", state.quickFilters.join(","));
+  if (state.libraryCreator) params.set("creator", state.libraryCreator);
   if (state.sourceType !== "all") params.set("source", state.sourceType);
   if (state.archiveStatus !== "active") params.set("archive", state.archiveStatus);
   if (state.contentOrigin !== "all") params.set("origin", state.contentOrigin);
+  if (state.textForm !== "all") params.set("textform", state.textForm);
   if (state.sort !== "updated") params.set("sort", state.sort);
   if (state.sortDir !== "desc") params.set("dir", state.sortDir);
   const hash = "#library" + (params.size ? "?" + params.toString() : "");
@@ -240,6 +250,10 @@ function readLibraryHash(hash = location.hash) {
   )
     ? params.get("category")
     : "all";
+  state.salesStatuses = libraryStatusList(params.get("salesStatus"));
+  state.salesStatus = state.salesStatuses.length === 1 ? state.salesStatuses[0] : "all";
+  state.quickFilters = [...new Set((params.get("quick") || "").split(",").filter(key => Object.hasOwn(libraryQuickFilterNames, key)))];
+  state.libraryCreator = (params.get("creator") || "").slice(0,120).trim().replace(/^@+/, "").toLocaleLowerCase();
   state.sourceType = Object.hasOwn(sourceTypeNames, params.get("source"))
     ? params.get("source")
     : "all";
@@ -247,11 +261,19 @@ function readLibraryHash(hash = location.hash) {
     ? params.get("archive") : navigationContent(state.view) === "archived" ? "archived" : "active";
   state.contentOrigin = Object.hasOwn(contentOriginNames, params.get("origin"))
     ? params.get("origin") : "all";
-  state.sort = ["updated", "views", "ctor", "sold"].includes(params.get("sort"))
+  state.textForm = params.get("textform") === "screen_only" ? "screen_only" : "all";
+  state.sort = Object.hasOwn(librarySortNames, params.get("sort"))
     ? params.get("sort")
     : "updated";
   state.sortDir = params.get("dir") === "asc" ? "asc" : "desc";
   window.LibraryViews?.applyRouteFilters();
+  // A saved category can be combined with explicit quick filters in the URL.
+  if (params.has("salesStatus")) {
+    state.salesStatuses = libraryStatusList(params.get("salesStatus"));
+    state.salesStatus = state.salesStatuses.length === 1 ? state.salesStatuses[0] : "all";
+  }
+  if (params.has("quick")) state.quickFilters = [...new Set(params.get("quick").split(",").filter(key => Object.hasOwn(libraryQuickFilterNames, key)))];
+  if (params.has("creator")) state.libraryCreator = params.get("creator").slice(0,120).trim().replace(/^@+/, "").toLocaleLowerCase();
 }
 function rememberLibraryPosition() {
   state.libraryHash = libraryHash();
@@ -281,8 +303,25 @@ const pendingApiReads = new Map();
 let initialWorkbenchLoad = null;
 // These pages read their own records while the case-library snapshot loads.
 // Home fills its case-dependent tab separately when that snapshot arrives.
-const independentStartupPages = new Set(["home", "content", "scripts", "production", "videos", "reviews", "settings"]);
-async function requestApi(path, options = {}) {
+const independentStartupPages = new Set(["home", "content", "scripts", "production", "videos", "reviews", "settings", "hooks"]);
+// Most recent answers by path, newest last; bounded so a long session cannot grow without limit.
+const heldAnswers = new Map();
+const HELD_ANSWER_LIMIT = 24 * 1024 * 1024;
+let heldAnswerSize = 0;
+function holdAnswer(path, etag, text) {
+  const previous = heldAnswers.get(path);
+  if (previous) { heldAnswerSize -= previous.text.length; heldAnswers.delete(path); }
+  if (text.length > HELD_ANSWER_LIMIT / 4) return;
+  heldAnswers.set(path, { etag, text });
+  heldAnswerSize += text.length;
+  for (const [key, entry] of heldAnswers) {
+    if (heldAnswerSize <= HELD_ANSWER_LIMIT) break;
+    heldAnswers.delete(key);
+    heldAnswerSize -= entry.text.length;
+  }
+}
+// asText: hand back the answer's text unparsed, for api() to parse once per reader.
+async function requestApi(path, options = {}, asText = false) {
   const headers = { ...options.headers };
   if (options.method === "POST") {
     // A fast page may become interactive before the initial library read has
@@ -300,9 +339,22 @@ async function requestApi(path, options = {}) {
   }
   const bootstrap = path === "/api/state" && !Object.keys(options).length ? window.WorkbenchBootstrap?.state : null;
   if (bootstrap) delete window.WorkbenchBootstrap.state;
+  // Reads send the tag of the answer this page already holds; an unchanged answer comes back
+  // as an empty 304 and is rebuilt from the kept text. Memory only: nothing is written to disk.
+  const reading = !bootstrap && (options.method || "GET") === "GET" && !options.body;
+  const held = reading ? heldAnswers.get(path) : null;
+  if (held && headers["If-None-Match"] === undefined) headers["If-None-Match"] = held.etag;
   const response = await (bootstrap || fetch(path, { ...options, headers }));
-  const result = await response.json();
+  if (held && response.status === 304) {
+    heldAnswers.delete(path);
+    heldAnswers.set(path, held);
+    return asText ? held.text : JSON.parse(held.text);
+  }
+  const text = await response.text();
+  const etag = response.ok && (reading || bootstrap) ? response.headers.get("ETag") : null;
+  if (etag) holdAnswer(path, etag, text);
   if (!response.ok) {
+    const result = JSON.parse(text);
     const error = new Error(result.error || "操作失败");
     error.status = response.status;
     error.maintenance = result.maintenance === true;
@@ -310,7 +362,7 @@ async function requestApi(path, options = {}) {
     if (dataMaintenanceError(error)) updateDataMaintenance({busy:true,operation:error.operation},error.message);
     throw error;
   }
-  return result;
+  return asText ? text : JSON.parse(text);
 }
 const dataOperationLabels = {export:"导出",backup:"备份",inspect:"检查备份文件",restore:"恢复"};
 let maintenanceCheck = null;
@@ -336,7 +388,7 @@ function updateDataMaintenance(result, message = "") {
     banner = document.createElement("div");banner.id = "data-maintenance-banner";banner.className = "banner";
     banner.setAttribute("role","status");banner.setAttribute("aria-live","polite");
     const note = document.createElement("span");note.dataset.maintenanceText = "";
-    const link = document.createElement("a");link.href = window.WorkbenchShell?.url("#settings") || "#settings";link.textContent = " 在设置查看状态";
+    const link = document.createElement("a");link.href = window.WorkbenchShell?.url("#settings/data") || "#settings/data";link.textContent = " 在设置查看状态";
     banner.append(note,link);$("#error-banner").before(banner);
   }
   $("[data-maintenance-text]",banner).textContent = result.progress || message || `总数据正在${dataOperationLabels[operation] || "处理"}，请等待完成。`;
@@ -371,8 +423,12 @@ async function api(path, options = {}) {
   if (Object.keys(options).length) {
     if (!["GET", "HEAD"].includes(options.method || "GET")) {
       pendingApiReads.clear();
+      // Opening a timeline starts DaVinci first when it is closed, which takes about a minute.
+      const slowOpen = /^\/api\/production\/jobs\/[^/?]+\/open$/.test(path) &&
+        setTimeout(() => toast("达芬奇没开的话会先替你打开，再进入这条时间线，大约要一分钟，请稍等…"), 2500);
       try { return await requestApi(path, options); }
       finally {
+        clearTimeout(slowOpen);
         // A poll begun during a save may still contain the previous snapshot.
         // The caller's post-save refresh must issue a new read as well.
         pendingApiReads.clear();
@@ -382,15 +438,15 @@ async function api(path, options = {}) {
   }
   let request = pendingApiReads.get(path);
   if (!request) {
-    request = requestApi(path);
+    request = requestApi(path, {}, true);
     pendingApiReads.set(path, request);
     void request.finally(() => {
       if (pendingApiReads.get(path) === request) pendingApiReads.delete(path);
     }).catch(() => {});
   }
-  const result = await request;
-  // Page modules decorate and filter their data; each reader owns its copy.
-  return structuredClone(result);
+  // Page modules decorate and filter their data; each reader owns its copy, parsed from the shared text
+  // (a second copy of a parsed megabyte-sized answer cost more than parsing it did).
+  return JSON.parse(await request);
 }
 // Each service start issues a new write token, and a hidden tab skips the state refresh that carries it.
 // The small unchanged-digest reply is enough to pick the current token up.
@@ -853,6 +909,7 @@ function clearDeletedDetail(identifier) {
   state.archiveCategory = "all";
   state.archiveStatus = "archived";
   state.contentOrigin = "all";
+  state.textForm = "all";
   state.sourceType = "all";
   state.detailTab = "current";
   if (state.editor?.item?.case_id === identifier) {
@@ -965,8 +1022,10 @@ async function refresh(quiet = false) {
         $(".detail-heading")
       ) {
         const summary = data.cases.find((item) => item.case_id === openedId);
-        if (summary.revision !== state.detail.revision || JSON.stringify(summary.resolved_direction) !== JSON.stringify(state.detail.resolved_direction)) promptCaseUpdate();
-        else if (JSON.stringify(summary.sales_data) !== JSON.stringify(state.detail.sales_data))
+        // The list carries slim copies of the direction and sales data; their digests say whether the full ones changed.
+        const changed = (key, digest) => summary[digest] && state.detail[digest] ? summary[digest] !== state.detail[digest] : JSON.stringify(summary[key]) !== JSON.stringify(state.detail[key]);
+        if (summary.revision !== state.detail.revision || changed("resolved_direction", "direction_digest")) promptCaseUpdate();
+        else if (changed("sales_data", "sales_digest"))
           refreshDetailSalesData(summary);
       } else if (
         quiet &&
@@ -1085,6 +1144,7 @@ const routeTable = {
   videos: async () => window.CasePerformance?.route(),
   directions: async ({ force }) => window.CaseDirections?.route(force),
   reviews: async () => window.CaseReviews?.route(),
+  hooks: async () => window.HookBank?.route(),
   settings: async () => window.WorkbenchSettings?.render(),
 };
 async function route(keepScroll = false, force = false) {
@@ -1517,39 +1577,50 @@ async function checkServiceFresh() {
       banner.remove();
     };
     if (restart) restart.onclick = async () => {
+      banner.dataset.restarting = "1";
       restart.disabled = true;
       restart.textContent = "正在重启…";
-      try {
-        await api("/api/service/restart", { method: "POST", body: {} });
-      } catch (error) {
+      const attempt = new AbortController();
+      const finish = message => {
+        clearTimeout(deadline);
+        attempt.abort();
+        delete banner.dataset.restarting;
         restart.disabled = false;
         restart.textContent = restartLabel;
-        text.textContent = error?.status === 403 && /local workbench/i.test(error?.message || "")
+        text.textContent = message;
+      };
+      const deadline = setTimeout(() => finish(keepsTasks
+        ? "尚未等到网页服务就绪，请稍后重试。"
+        : "没有等到新服务就绪，请用桌面快捷方式重启工作台。"), 60000);
+      let previousPid = status.pid;
+      try {
+        const accepted = await api("/api/service/restart", { method: "POST", body: {}, signal: attempt.signal });
+        if (Number.isSafeInteger(accepted?.pid)) previousPid = accepted.pid;
+      } catch (error) {
+        if (!attempt.signal.aborted) finish(error?.status === 403 && /local workbench/i.test(error?.message || "")
           ? "从公网地址打开时不能重启工作台。请在工作台电脑上双击桌面「TK工作台」，或在那台电脑上打开 http://127.0.0.1:8767 再点重启。"
-          : `暂时不能重启：${error?.message || "请稍后重试"}`;
+          : `暂时不能重启：${error?.message || "请稍后重试"}`);
         return;
       }
-      banner.dataset.restarting = "1";
+      if (attempt.signal.aborted) return;
       text.textContent = keepsTasks ? "正在重启网页服务，后台任务继续运行；完成后页面会自动刷新…" : "正在重启工作台，完成后页面会自动刷新…";
-      const started = Date.now();
-      const wait = setInterval(async () => {
+      while (!attempt.signal.aborted) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        if (attempt.signal.aborted) return;
         try {
-          const response = await fetch("/api/service/status", { cache: "no-store" });
+          const response = await fetch("/api/service/status", { cache: "no-store", signal: AbortSignal.timeout(4000) });
           const next = response.ok ? await response.json() : null;
-          if (next && Number.isSafeInteger(next.pid) && next.pid !== status.pid && !next.shutting_down && !next.code_stale) {
-            clearInterval(wait);
+          if (attempt.signal.aborted) return;
+          if (next && Number.isSafeInteger(next.pid) && next.pid !== previousPid && !next.shutting_down && !next.code_stale) {
+            clearTimeout(deadline);
             location.reload();
             return;
           }
+          if (next?.restart_failed && next.pid === previousPid && !next.shutting_down) {
+            finish("网页服务重启失败，可以重试。具体原因见工作台目录中的 launcher-error.log。");
+          }
         } catch {}
-        if (Date.now() - started > 60000) {
-          clearInterval(wait);
-          delete banner.dataset.restarting;
-          restart.disabled = false;
-          restart.textContent = restartLabel;
-          text.textContent = keepsTasks ? "尚未等到网页服务就绪，请稍后重试。" : "没有等到新服务就绪，请用桌面快捷方式重启工作台。";
-        }
-      }, 1500);
+      }
     };
     const topbar = document.querySelector('.topbar');
     keepReadingPlace(() => { if (topbar) topbar.insertAdjacentElement('afterend', banner); else document.body.prepend(banner); });

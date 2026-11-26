@@ -76,6 +76,8 @@ class WritingLifecycleBrowserTests(unittest.TestCase):
         first = self.catalog()["scripts"][0]
         page.locator("#script-more-actions > summary").click()
         page.locator("#script-derive").click()
+        # 逐句编辑里的「整段改」打开原来的整段编辑框。
+        page.locator(".adopted-line-edit [data-edit-whole]").click()
         dialog.locator('[name="text"]').fill("Set your angle once. Keep it steady.")
         dialog.get_by_role("button", name="保存采用稿", exact=True).click()
         page.locator(".adopted-copy").get_by_text("Set your angle once. Keep it steady.", exact=True).wait_for()

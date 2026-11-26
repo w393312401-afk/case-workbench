@@ -355,7 +355,7 @@ test('scripts, tasks, production orders and selling points are searchable within
   await h.search('paper');
   const routes = h.list.options.map(node => node.href);
   assert.deepEqual(routes, [
-    '#/202H/directions?q=Paper+thin+edge&product=202H', '#/202H/content/SCR-aaaaaaaaaaaa', '#/202H/ai/AIT-aaaaaaaaaaaa',
+    '#/202H/directions?tab=points&q=Paper+thin+edge&product=202H', '#/202H/content/SCR-aaaaaaaaaaaa', '#/202H/ai/AIT-aaaaaaaaaaaa',
     '#/202H/production/PRD-aaaaaaaaaaaa',
   ]);
   assert.doesNotMatch(h.list.innerHTML, /other product|elsewhere/);

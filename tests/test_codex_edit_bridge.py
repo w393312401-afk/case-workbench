@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from codex_bridge import BridgeCancelled, BridgeError, CodexBridge
 from codex_edit_bridge import CodexEditBridge, EDIT_TIMEOUT
-from codex_stills_bridge import DISABLED_FEATURES
+from codex_stills_bridge import CodexStillsBridge, DISABLED_FEATURES
 from test_codex_bridge import agent
 import test_codex_stills_bridge as support
 
@@ -110,6 +110,23 @@ class CodexEditBridgeTests(unittest.TestCase):
         session = next(event for event in self.events if event["type"] == "session")
         self.assertIsNone(session["model"])
         self.assertIsNone(session["reasoning_effort"])
+
+    def test_actual_editing_profile_allows_frame_viewers_in_isolated_session(self):
+        from workbench_editing import FILE_TOOLS, RESOLVE_TOOLS
+
+        self.profile["allowed"] = [*FILE_TOOLS, *(f"mcp__resolve__{name}" for name in RESOLVE_TOOLS)]
+        self.run_bridge(self.bridge())
+        configured = self.processes[-1].config["mcp_servers"]["pvr_edit_resolve"]["enabled_tools"]
+        self.assertEqual(set(configured), set(RESOLVE_TOOLS))
+        self.assertTrue({"get_thumbnails", "get_image"} <= set(configured))
+        self.assertNotIn("run_script_unsafe", configured)
+        self.assertTrue(self.requests("turn/start"))
+        self.assert_closed()
+
+    def test_frame_viewers_do_not_expand_stills_allowlist(self):
+        for name in ("get_thumbnails", "get_image"):
+            with self.subTest(name=name), self.assertRaises(BridgeError):
+                CodexStillsBridge._profile({**self.profile, "allowed": [*self.profile["allowed"], f"mcp__resolve__{name}"]})
 
     def test_file_relay_reads_writes_edits_and_searches_only_the_job(self):
         project = str(self.job / "Lab.json")

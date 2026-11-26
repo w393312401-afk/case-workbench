@@ -2,103 +2,109 @@
 .activity-trigger svg { width: 16px; height: 16px; }
 .activity-count { padding: 2px 6px; border-radius: 12px; font-size: 11px; font-variant-numeric: tabular-nums; background: var(--surface-tint); color: var(--blue-ink); }
 .activity-count[data-activity-unread] { background: var(--surface-warm); color: var(--warm-ink); }
-
-/* Task panel: docked beside the page on wide screens (opened with show()), an overlay sheet elsewhere. */
+/* Task panel: one column. Docked beside the page on wide screens (opened with show()), an overlay sheet elsewhere.
+   Opening a log widens it: the log sits left of the list, which stays where it was. */
 :root { --activity-dock: min(520px, 38vw); }
-#task-activity-dialog { container: activity / inline-size; width: min(1000px, calc(100vw - 24px)); max-width: none; height: calc(100dvh - 24px); max-height: none; margin: 12px 12px 12px auto; padding: 0; overflow: hidden; background: var(--surface); border-radius: 14px; }
+#task-activity-dialog { container: activity / inline-size; width: min(520px, calc(100vw - 24px)); max-width: none; height: calc(100dvh - 24px); max-height: none; margin: 12px 12px 12px auto; padding: 0; overflow: hidden; background: var(--surface); border-radius: 14px; }
 #task-activity-dialog[open] { display: flex; flex-direction: column; }
-#task-activity-dialog.is-expanded:modal { width: calc(100vw - 24px); }
+#task-activity-dialog.is-reading:modal { width: min(1100px, calc(100vw - 24px)); }
 @media (min-width: 1200px) {
-  html.activity-docked:not(.activity-expanded) body > main { margin-right: var(--activity-dock); }
-  html.activity-docked:not(.activity-expanded) .activity-notices { right: calc(var(--activity-dock) + 20px); }
+  html.activity-docked body > main { margin-right: var(--activity-dock); }
+  html.activity-docked .activity-notices { right: calc(var(--activity-dock) + 20px); }
   #task-activity-dialog:not(:modal) { position: fixed; inset: 0 0 0 auto; z-index: 25; width: var(--activity-dock); height: 100vh; margin: 0; border: 0; border-left: 1px solid var(--line); border-radius: 0; box-shadow: -12px 0 32px #0000001f; }
-  #task-activity-dialog.is-expanded:not(:modal) { width: min(1440px, calc(100vw - 64px)); }
+  #task-activity-dialog.is-reading:not(:modal) { width: min(1240px, calc(100vw - 88px)); }
 }
 /* The page beside a docked panel is narrower than the window, so the top bar compacts as it would on a smaller screen. */
 @media (min-width: 1200px) and (max-width: 1700px) {
-  html.activity-docked:not(.activity-expanded) .topbar { padding-left: 24px; padding-right: 24px; }
-  html.activity-docked:not(.activity-expanded) .topbar-right { gap: 7px; }
-  html.activity-docked:not(.activity-expanded) .global-search-trigger kbd { display: none; }
+  html.activity-docked .topbar { padding-left: 24px; padding-right: 24px; }
+  html.activity-docked .topbar-right { gap: 7px; }
+  html.activity-docked .global-search-trigger kbd { display: none; }
 }
 @media (min-width: 1200px) and (max-width: 1500px) {
-  html.activity-docked:not(.activity-expanded) .global-search-trigger .search-label { display: none; }
+  html.activity-docked .global-search-trigger .search-label { display: none; }
 }
 /* The docked panel leaves the page scrollable; only a real modal locks it. */
 body:has(#task-activity-dialog[open]:not(:modal)):not(:has(dialog:modal)) { overflow: auto; }
 
-.activity-heading { display: flex; align-items: center; gap: 10px; padding: 12px 10px 12px 16px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.activity-heading { display: flex; align-items: center; gap: 10px; padding: 10px 10px 2px 16px; flex-shrink: 0; }
 .activity-heading h2 { font-size: 15px; margin: 0; flex-shrink: 0; }
 .activity-connection { flex: 1; min-width: 0; font-size: 12px; color: var(--warm-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-heading-actions { margin-left: auto; display: flex; align-items: center; gap: 2px; }
-
-.activity-heading-actions .activity-icon { position: relative; width: 30px; height: 30px; padding: 0; border-radius: 8px; color: var(--muted); }
+.activity-heading-actions .activity-icon { position: relative; width: 30px; height: 30px; padding: 0; border-radius: 8px; color: var(--muted-soft); }
 .activity-heading-actions .activity-icon:hover:not(:disabled) { color: var(--ink); }
 /* One outline set: grey at rest, accent only while a toggle is on. */
 .activity-heading-actions .activity-icon[aria-pressed="true"] { color: var(--accent-text); background: var(--surface-tint); }
 .activity-heading-actions .activity-icon[hidden] { display: none; }
 .activity-icon svg { width: 16px; height: 16px; }
-.activity-heading-divider { width: 1px; height: 18px; margin: 0 4px; background: var(--line-strong); }
-.activity-read-all small { position: absolute; top: -3px; right: -5px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: var(--warn); color: var(--surface); font-size: 10px; font-weight: 600; line-height: 15px; text-align: center; font-variant-numeric: tabular-nums; }
+.activity-heading-actions [data-activity-search].is-on { color: var(--accent-text); }
 
+/* The list has the whole panel. A log, once opened, takes its place on a narrow panel and sits beside it on a wide one. */
 .activity-layout { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.activity-runs { flex: 0 0 auto; min-height: 0; max-height: min(48vh, 420px); display: flex; flex-direction: column; border-bottom: 1px solid var(--line); }
-.activity-detail { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.activity-runs { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.activity-detail { flex: 1 1 auto; min-width: 0; min-height: 0; display: none; flex-direction: column; }
+.activity-back { display: none; }
+#task-activity-dialog.is-reading .activity-detail { display: flex; }
+#task-activity-dialog.is-reading .activity-runs { display: none; }
+#task-activity-dialog.is-reading .activity-back { display: flex; align-items: center; gap: 4px; flex: none; min-height: 38px; padding: 0 12px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--surface); color: var(--accent-text); font-size: 13px; font-weight: 500; text-align: left; }
+#task-activity-dialog.is-reading .activity-back svg { width: 16px; height: 16px; }
+.activity-detail-actions .activity-detail-close { display: none; }
 @container activity (min-width: 820px) {
-  .activity-layout { flex-direction: row; }
-  .activity-runs { flex: 0 0 min(380px, 38%); max-height: none; border-bottom: 0; border-right: 1px solid var(--line); }
+  #task-activity-dialog.is-reading .activity-layout { flex-direction: row-reverse; }
+  #task-activity-dialog.is-reading .activity-runs { display: flex; flex: 0 0 min(var(--activity-dock), 46%); border-left: 1px solid var(--line); }
+  #task-activity-dialog.is-reading .activity-back { display: none; }
+  .activity-detail-actions .activity-detail-close { display: grid; }
 }
 
-.activity-controls { padding: 12px; display: grid; gap: 12px; border-bottom: 1px solid var(--line); }
-.activity-filters { display: flex; border: 1px solid var(--line); padding: 2px; border-radius: 8px; background: var(--surface-alt); }
-.activity-search-field { position: relative; min-width: 0; }
+/* Controls: state tabs, then types, then (in 记录 with dates) the week. Each is one row and shows only when it has a job. */
+.activity-controls { display: grid; flex-shrink: 0; }
+.activity-chips { display: grid; }
+.activity-chips[hidden] { display: none; }
+.activity-filter-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 12px 0 4px; border-bottom: 1px solid var(--line); }
+.activity-tabs { display: flex; min-width: 0; }
+.activity-kinds { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; }
+.activity-kind small { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--muted-soft); }
+.activity-kind.is-waiting small { color: var(--warm-ink); font-weight: 600; }
+.activity-kind[aria-pressed="true"] small { color: inherit; }
+.activity-kind.is-custom { outline: 1px dashed var(--line-strong); outline-offset: -1px; }
+.activity-search-field { position: relative; min-width: 0; margin: 8px 12px 0; }
 .activity-search-field[hidden] { display: none; }
 .activity-search-field > svg { position: absolute; left: 11px; top: 50%; width: 16px; height: 16px; margin-top: -8px; color: var(--muted-soft); pointer-events: none; }
 .activity-search-field input { min-width: 0; width: 100%; height: var(--btn-h-lg); padding: 0 10px 0 34px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--surface-alt); font-size: 13px; }
 .activity-search-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.activity-heading-actions [data-activity-search].is-on { color: var(--accent-text); }
-.activity-scope { display: flex; align-items: center; gap: 6px; padding: 2px 2px 2px 8px; border-radius: 7px; background: var(--surface-tint); color: var(--blue-ink); font-size: 12px; }
+.activity-scope { display: flex; align-items: center; gap: 6px; margin: 8px 12px 0; padding: 2px 2px 2px 10px; border-radius: 8px; background: var(--surface-alt); color: var(--muted); font-size: 12px; }
+.activity-scope[hidden] { display: none; }
 .activity-scope span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.activity-scope .subtle { padding: 2px 6px; font-size: 12px; color: var(--blue-ink); }
 
-.activity-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
-.activity-day { position: sticky; top: 0; z-index: 1; margin: 0; padding: 0; font-size: 11px; font-weight: 550; color: var(--muted-soft); background: var(--surface-alt); border-bottom: 1px solid var(--line); }
-.activity-day button { width: 100%; display: flex; align-items: center; gap: 5px; padding: 3px 12px; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
+.activity-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 12px; }
+.activity-day, .activity-section { position: sticky; top: 0; z-index: 1; margin: 0; font-size: 12px; font-weight: 500; color: var(--muted-soft); background: var(--surface); }
+.activity-day button { width: 100%; display: flex; align-items: center; gap: 5px; padding: 10px 14px 4px; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; text-align: left; }
 .activity-day button:hover { color: var(--ink); }
 .activity-day svg { width: 11px; height: 11px; flex-shrink: 0; transition: transform .12s; }
 .activity-day button[aria-expanded="true"] svg { transform: rotate(90deg); }
-.activity-day small { margin-left: auto; font-size: 11px; font-weight: 400; }
-/* 当前 lists what needs the reader first, then what is still running. */
-.activity-section { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 6px; margin: 0; padding: 3px 12px; font-size: 11px; font-weight: 550; color: var(--muted-soft); background: var(--surface-alt); border-bottom: 1px solid var(--line); }
-.activity-section small { margin-left: auto; font-size: 11px; font-weight: 400; }
-.activity-section.is-pending { color: var(--warm-ink); }
+.activity-day small, .activity-section small { margin-left: auto; font-size: 11px; font-weight: 400; }
+.activity-section { display: flex; align-items: center; gap: 6px; padding: 10px 14px 4px; }
 
-/* Week strip: seven days, one dot per kind of state the day holds. */
-.activity-week { display: grid; gap: 6px; }
+/* Week strip: seven days, one dot per kind of state the day holds. The chosen day is a grey cell, not an accent one. */
+.activity-week { display: grid; gap: 6px; padding: 8px 12px 0; }
 .activity-week[hidden] { display: none; }
 .activity-week-head { display: flex; align-items: center; gap: 2px; min-width: 0; }
-.activity-week-head .activity-icon { width: 28px; height: 28px; padding: 0; }
-.activity-week-head .activity-icon:disabled { opacity: .35; }
+.activity-week-head .icon-button:disabled { opacity: .35; }
 .activity-week-label { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; padding: 0 2px; }
-.activity-week-today { padding: 2px 8px; font-size: 12px; color: var(--accent-text); }
 .activity-view-switch { margin-left: auto; flex: 0 0 auto; }
-.activity-view-switch > button { padding: 2px 10px; font-size: 12px; }
 .activity-week-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
 .activity-week-days button { min-width: 0; display: grid; justify-items: center; gap: 1px; padding: 4px 0 5px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted-soft); font-weight: 400; }
 .activity-week-days button:hover:not(:disabled) { background: var(--surface-alt); }
 .activity-week-days button:disabled { opacity: .4; cursor: default; }
 .activity-week-days small { font-size: 11px; line-height: 1.2; }
-.activity-week-days b { font-size: 15px; line-height: 1.25; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
-.activity-week-days .is-today small { color: var(--accent-text); font-weight: 600; }
-.activity-week-days button[aria-pressed="true"] { background: var(--surface-tint); border-color: var(--accent); }
-.activity-week-days button[aria-pressed="true"] b { color: var(--blue-ink); }
-.activity-week-count { display: flex; align-items: center; gap: 3px; min-height: 14px; font-size: 11px; line-height: 14px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.activity-week-days b { font-size: 13px; line-height: 1.35; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.activity-week-days .is-today small { color: var(--ink); font-weight: 600; }
+.activity-week-days button[aria-pressed="true"] { background: var(--surface-alt); border-color: var(--line-strong); }
+.activity-week-count { display: flex; align-items: center; gap: 3px; min-height: 14px; font-size: 11px; line-height: 14px; color: var(--muted-soft); font-variant-numeric: tabular-nums; }
 .activity-week-count i { width: 6px; height: 6px; border-radius: 50%; }
 .activity-week-count .is-warning { background: var(--warn); }
 .activity-week-count .is-active { background: var(--accent); }
-.activity-day-note { margin: 0; padding: 4px 12px; font-size: 12px; color: var(--muted-soft); border-bottom: 1px solid var(--line); }
+.activity-day-note { margin: 0; padding: 2px 14px 4px; font-size: 12px; color: var(--muted-soft); }
 a.activity-row-main { color: inherit; text-decoration: none; }
-/* On narrow screens the timeline gets more of the panel than a list does. */
-@container activity (max-width: 819px) { #task-activity-dialog.is-timeline .activity-runs { max-height: min(62vh, 560px); } }
 
 /* Timeline: the open day's runs placed by clock time; overlapping runs share the row side by side. */
 .activity-timeline { position: relative; margin: 10px 10px 14px 0; }
@@ -119,10 +125,12 @@ a.activity-row-main { color: inherit; text-decoration: none; }
 .activity-block.is-unread b { text-decoration: underline 2px var(--accent); text-underline-offset: 3px; }
 .activity-now { position: absolute; left: -6px; right: 0; height: 0; border-top: 2px solid var(--danger); pointer-events: none; }
 .activity-now::before { content: ""; position: absolute; left: -3px; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }
-.activity-row { position: relative; display: flex; align-items: stretch; border-bottom: 1px solid var(--line); }
+
+/* Rows have no rules between them: groups are set apart by their headings, the pointed-at and the open row by a grey fill. */
+.activity-row { position: relative; display: flex; align-items: stretch; margin: 0 6px; border-radius: 8px; }
 .activity-row:hover { background: var(--surface-alt); }
-.activity-row.is-selected { background: var(--surface-tint); }
-.activity-row-main { flex: 1; min-width: 0; display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 9px 6px 9px 14px; background: transparent; color: inherit; text-align: left; font-weight: 400; }
+.activity-row.is-selected { background: var(--fill-hover); }
+.activity-row-main { flex: 1; min-width: 0; display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 7px 6px 7px 8px; border-radius: 8px; background: transparent; color: inherit; text-align: left; font-weight: 400; }
 .activity-row-text { min-width: 0; display: grid; }
 .activity-row-title { font-size: 13px; line-height: 1.45; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-row.is-unread .activity-row-title { font-weight: 650; }
@@ -130,28 +138,55 @@ a.activity-row-main { color: inherit; text-decoration: none; }
 .activity-row-meta > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-row-side { display: grid; justify-items: end; font-size: 11px; line-height: 1.5; color: var(--muted-soft); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .activity-row-side small { font-size: 11px; }
-.activity-row-go { flex-shrink: 0; width: 30px; display: grid; place-items: center; padding: 0; background: transparent; color: var(--muted-soft); }
-.activity-row-go:hover { color: var(--accent-text); background: var(--surface-alt); }
+.activity-row-go, .activity-row-peek { flex-shrink: 0; width: 28px; display: grid; place-items: center; padding: 0; border-radius: 8px; background: transparent; color: var(--muted-soft); }
+.activity-row-go:hover, .activity-row-peek:hover { color: var(--ink); background: var(--fill-hover); }
 .activity-row-go svg { width: 14px; height: 14px; }
-.activity-work-row { position: relative; }
-.activity-work-actions { position: absolute; top: 50%; right: 8px; transform: translateY(-50%); display: flex; gap: 4px; }
+.activity-unread-dot { position: absolute; left: -4px; top: 50%; width: 5px; height: 5px; margin-top: -2.5px; border-radius: 50%; background: var(--accent); }
+
+/* 要处理: one line per to-do under a heading that says what to do. The row goes where it is done; the arrow opens its specifics. */
+.activity-bucket { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0; padding: 12px 14px 3px; font-size: 12px; font-weight: 500; color: var(--muted-soft); }
+.activity-bucket small { font-size: 11px; font-weight: 400; }
+.activity-bucket-foot { padding: 0 14px 2px 25px; }
+.activity-work-row .activity-row-main { padding-block: 6px; }
+.activity-work-row:not(:has(.activity-row-peek)) .activity-row-main { padding-right: 34px; }
+.activity-work-row .activity-row-text { display: flex; align-items: baseline; gap: 8px; }
+.activity-work-row .activity-row-title { flex: 0 1 auto; min-width: 0; }
+.activity-row-hint { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.45; color: var(--muted-soft); }
+.activity-work-row time { font-size: 11px; color: var(--muted-soft); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.activity-row-peek svg { width: 13px; height: 13px; transform: rotate(90deg); transition: transform .12s; }
+.activity-row-peek[aria-expanded="true"] svg { transform: rotate(-90deg); }
+.activity-peek { display: grid; gap: 8px; margin: 2px 6px 6px 21px; padding: 9px 10px; border-radius: 8px; background: var(--surface-alt); }
+.activity-peek-needs { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.activity-peek-needs a { display: grid; gap: 1px; margin: -2px -4px; padding: 2px 4px; border-radius: 6px; color: inherit; text-decoration: none; }
+.activity-peek-needs a:hover { background: var(--fill-hover); }
+.activity-peek-needs b { font-size: 12px; font-weight: 600; color: var(--ink); }
+.activity-peek-needs span, .activity-peek-note { margin: 0; font-size: 12px; line-height: 1.55; color: var(--muted); overflow-wrap: anywhere; }
+.activity-peek-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.activity-work-actions { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); display: flex; gap: 4px; }
 .activity-work-finish { padding: 3px 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--ink); font-size: var(--font-micro); opacity: 0; }
 .activity-work-finish:hover { background: var(--surface-alt); }
-.activity-work-finish.is-danger { color: var(--danger-ink); }
 .activity-work-row:hover .activity-work-finish, .activity-work-actions:focus-within .activity-work-finish { opacity: 1; }
 @media (hover: none) { .activity-work-finish { opacity: 1; } }
-.activity-finished-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 12px; color: var(--muted); font-size: var(--font-micro); }
-.activity-unread-dot { position: absolute; left: 3px; top: 50%; width: 5px; height: 5px; margin-top: -2.5px; border-radius: 50%; background: var(--accent); }
-/* One row per order; opening it lists that order's runs as single lines beneath. */
+.activity-finished-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 14px; color: var(--muted); font-size: var(--font-micro); }
+/* A long backlog of one kind is one card the reader opens on purpose. */
+.activity-bulk { margin: 10px 12px 4px; padding: 10px 12px; border-radius: 10px; display: grid; gap: 6px; background: var(--surface-warm); }
+.activity-bulk.is-danger { background: var(--surface-danger); }
+.activity-bulk-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.activity-bulk-head strong { font-size: 13px; font-weight: 600; color: var(--warm-ink); }
+.activity-bulk.is-danger .activity-bulk-head strong { color: var(--danger-ink); }
+.activity-bulk-head small { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.activity-bulk p { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.activity-bulk-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* 进行中 and 记录: one row per order; opening it lists that order's runs as single lines beneath. */
 .activity-group-count { display: inline-flex; align-items: center; gap: 1px; }
 .activity-group-count svg { width: 11px; height: 11px; transition: transform .12s; }
 .activity-group-row [aria-expanded="true"] .activity-group-count svg { transform: rotate(90deg); }
-.activity-group-runs { border-bottom: 1px solid var(--line); padding: 1px 0 3px; }
-.activity-sub .activity-row-main { grid-template-columns: 6px minmax(0, 1fr) auto; gap: 8px; padding: 2px 4px 2px 30px; }
-.activity-list > .activity-sub .activity-row-main { padding-left: 12px; }
-.activity-group-runs > .activity-sub { border-bottom: 0; }
+.activity-group-runs { padding: 1px 0 3px; }
+.activity-sub .activity-row-main { grid-template-columns: 6px minmax(0, 1fr) auto; gap: 8px; padding: 2px 4px 2px 25px; }
+.activity-list > .activity-sub .activity-row-main { padding-left: 8px; }
 .activity-sub .activity-dot { width: 6px; height: 6px; }
-.activity-sub .activity-unread-dot { left: 20px; }
+.activity-sub .activity-unread-dot { left: 14px; }
 .activity-sub-text { min-width: 0; display: flex; align-items: baseline; gap: 6px; font-size: 12px; line-height: 1.6; }
 .activity-sub-text b { flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; color: var(--ink); }
 .activity-sub.is-unread .activity-sub-text b { font-weight: 700; }
@@ -179,14 +214,20 @@ a.activity-row-main { color: inherit; text-decoration: none; }
 :is(.activity-status, .activity-detail-status, .activity-strip-status).is-warning { color: var(--warm-ink); }
 :is(.activity-status, .activity-detail-status, .activity-strip-status).is-danger { color: var(--danger-ink); }
 
-.activity-detail-head { display: flex; align-items: flex-start; gap: 10px; padding: 8px 10px 4px 14px; }
+/* The log reader: its title, what the task still needs, then the log. */
+.activity-detail-head { display: flex; align-items: flex-start; gap: 10px; padding: 12px 8px 6px 16px; }
 .activity-detail-text { flex: 1; min-width: 0; }
 .activity-detail-text h3 { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .activity-log-summary { margin-top: 1px; font-size: 12px; color: var(--muted-soft); }
 .activity-detail-status { margin-right: 6px; }
-.activity-detail-actions { display: flex; gap: 4px; flex-shrink: 0; }
-.activity-detail-actions button { gap: 4px}
-.activity-detail-actions svg { width: 14px; height: 14px; }
+.activity-detail-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+#task-activity-dialog .activity-needs { padding: 2px 16px 8px; border-bottom: 0; }
+#task-activity-dialog .activity-needs h2 { font-size: 12px; font-weight: 500; color: var(--muted-soft); }
+#task-activity-dialog .activity-needs h2 small { font-size: 11px; color: var(--muted-soft); }
+#task-activity-dialog .activity-needs .production-needs-list { margin-top: 6px; gap: 6px; }
+#task-activity-dialog .activity-needs .production-needs-list a { padding: 8px 10px; border: 0; background: var(--surface-alt); }
+#task-activity-dialog .activity-needs .production-needs-list a:hover { background: var(--fill-hover); }
+#task-activity-dialog .activity-needs .production-needs-list small { color: var(--muted-soft); }
 .activity-log-tools { display: flex; align-items: center; gap: 2px; padding: 0 10px 6px 12px; border-bottom: 1px solid var(--line); }
 .activity-log-body { position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 0 10px; font-size: 12px; }
 .activity-log-body:focus-visible { outline-offset: -3px; }
@@ -255,15 +296,6 @@ a.activity-row-main { color: inherit; text-decoration: none; }
 .activity-notice-close { align-self: flex-start; width: 28px; height: 28px; padding: 0; }
 .activity-notice-close svg { width: 15px; height: 15px; }
 .activity-settings .settings-actions { margin-top: 10px; }
-/* Leave usable list space when the window is short or a phone is horizontal. */
-@media (max-height: 600px) and (min-width: 620px) {
-  .activity-controls { padding: 8px 10px; gap: 8px; }
-}
-@media (max-height: 600px) and (max-width: 619px) {
-  .activity-layout { display: block; overflow-y: auto; }
-  .activity-runs { height: min(360px, calc(100dvh - 80px)); max-height: none; }
-  .activity-detail { min-height: 260px; }
-}
 @media (max-width: 700px) { .activity-trigger { gap: 3px; padding: 7px 8px; } .activity-count { font-size: 10px; padding: 2px 4px; } }
 /* On phones the task button joins the single header row as an icon; its counts become corner badges. */
 @media (max-width: 760px) {
@@ -283,16 +315,9 @@ a.activity-row-main { color: inherit; text-decoration: none; }
   .activity-notices { right: 16px; }
 }
 
-/* Status tabs and an optional search only, leaving room for results and logs. */
-.activity-controls{padding:8px;gap:6px}
-
 .activity-log-single{display:flex;align-items:baseline;gap:6px}.activity-log-single .activity-log-lines{flex:1;min-width:0}.activity-single-phase{font-size:11px;color:var(--muted-soft);padding-left:8px;flex-shrink:0}
 
-.activity-filters>button { flex: 1; }
-
-/* Filter row: one button per filter, the reader's own filters after the built-in ones. */
-.activity-chips[hidden] { display: none; }
-.activity-chips { display: grid; gap: 8px; }
+/* The reader's own filters: made, changed and removed in place (更多 → 我的筛选). */
 .activity-chip-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
 .activity-chip { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); }
 .activity-chip > button:first-child { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 10px; border: 0; border-radius: 999px; background: transparent; color: var(--ink); font-size: 12px; font-weight: 500; }
@@ -308,8 +333,6 @@ a.activity-row-main { color: inherit; text-decoration: none; }
 .activity-chip-remove { display: inline-grid; place-items: center; width: 20px; height: 20px; margin-right: 3px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted); }
 .activity-chip-remove:hover { background: var(--surface-alt); color: var(--danger-ink); }
 .activity-chip-remove svg { width: 12px; height: 12px; }
-.activity-chip-tune { width: 26px; height: 26px; padding: 0; color: var(--muted); }
-.activity-chip-tune svg { width: 16px; height: 16px; }
 .activity-chip-add { display: inline-flex; align-items: center; gap: 3px; height: 26px; padding: 0 10px 0 7px; border: 1px dashed var(--accent); border-radius: 999px; background: transparent; color: var(--accent-text); font-size: 12px; font-weight: 500; }
 .activity-chip-add svg { width: 14px; height: 14px; }
 .activity-chip-link { padding: 2px 6px; font-size: 12px; color: var(--accent-text); }
@@ -323,3 +346,23 @@ a.activity-row-main { color: inherit; text-decoration: none; }
 .activity-chip-hint.is-error { color: var(--danger-ink); }
 .activity-chip-actions { display: flex; justify-content: flex-end; gap: 6px; }
 .activity-chip-actions .danger { margin-right: auto; color: var(--danger-ink); }
+.activity-chip-empty { font-size: 12px; color: var(--muted-soft); }
+.activity-chip-row.is-editing { padding: 8px 12px 0; }
+.activity-chip-editor { margin: 8px 12px 0; }
+
+/* 顶部「更多」菜单 */
+.activity-menu-wrap { position: relative; }
+.activity-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 5; min-width: 196px; padding: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 8px 24px rgba(0, 0, 0, .12); display: grid; gap: 1px; }
+.activity-menu[hidden] { display: none; }
+.activity-menu button { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--ink); font-size: 13px; text-align: left; }
+.activity-menu button:hover:not(:disabled) { background: var(--fill-hover, var(--surface-alt)); }
+.activity-menu button:disabled { color: var(--muted-soft); }
+.activity-menu button svg { width: 15px; height: 15px; color: var(--muted); flex-shrink: 0; }
+.activity-menu button[aria-checked="true"] { color: var(--accent-text); }
+.activity-menu small { margin-left: auto; font-size: 11px; color: var(--warm-ink); }
+@media (max-width: 760px) { .activity-menu button { height: 38px; } }
+
+/* Phones: the panel fills the screen. */
+@media (max-width: 560px) {
+  #task-activity-dialog:modal, #task-activity-dialog.is-reading:modal { width: 100vw; height: 100dvh; margin: 0; border: 0; border-radius: 0; }
+}

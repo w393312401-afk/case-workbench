@@ -18,12 +18,12 @@ from resolve_bridge import ResolveBridge
 
 PLAN = {
     "versions": [
-        {"name_zh": "一套配齐", "buyer_zh": "攒磨石的人", "motive_zh": "一次配齐", "recommended": True, "cta": "GET YOUR *202H* BELOW.",
+        {"writing": "self", "name_zh": "一套配齐", "buyer_zh": "攒磨石的人", "motive_zh": "一次配齐", "recommended": True, "cta": "GET YOUR *202H* BELOW.",
          "caption_en": "One case. #KnifeSharpening", "caption_zh": "一箱装下。",
          "slides": [{"title_lines": ["STOP BUYING STONES", "*ONE BY ONE.*"], "body_lines": ["7 plates in one case"], "title_zh": "别一块块买",
                      "body_zh": "7 块磨板", "frame_time": 0.4, "picture_zh": "箱子", "crop_y": 0.2, "text_position": "bottom"},
                     {"title_lines": ["IT ALL PACKS", "BACK *IN.*"], "body_lines": ["3-year limited warranty", "GET YOUR *202H* BELOW."], "frame_time": 1.0}]},
-        {"name_zh": "送礼", "slides": [{"title_lines": ["GIFT"], "frame_time": 99, "text_position": "nowhere"}]},
+        {"writing": "qa", "name_zh": "送礼", "slides": [{"title_lines": ["GIFT"], "frame_time": 99, "text_position": "nowhere"}]},
     ],
     "gaps_zh": ["没有荡刀特写"],
 }
@@ -99,6 +99,27 @@ class RenderTests(unittest.TestCase):
         wide.paste((0, 0, 255), (1900, 0, 2000, 1000))
         self.assertEqual(render.crop_fit(wide, 0.5, 1).getpixel((render.W - 5, 10)), (0, 0, 255))
         self.assertNotEqual(render.crop_fit(wide, 0.5, 0).getpixel((render.W - 5, 10)), (0, 0, 255))
+
+    def test_zoom_blows_the_picture_up_inside_its_window(self):
+        image = Image.new("RGB", (1080, 1920), "black")
+        image.paste((255, 0, 0), (440, 860, 640, 1060))  # a 200 px red square in the middle
+        probe = (render.W // 2 + 150, render.H // 2)
+        self.assertEqual(render.crop_fit(image).getpixel((render.W // 2, render.H // 2)), (255, 0, 0))
+        self.assertNotEqual(render.crop_fit(image).getpixel(probe), (255, 0, 0))
+        zoomed = render.crop_fit(image, zoom=2)
+        self.assertEqual(zoomed.size, (render.W, render.H))
+        self.assertEqual(zoomed.getpixel(probe), (255, 0, 0))  # the square is now 400 px wide
+        corner = render.crop_fit(image, 0, 0, zoom=2)  # zoomed in on the top-left: the middle square is out of the window
+        self.assertNotEqual(corner.getpixel((render.W // 2, render.H // 2)), (255, 0, 0))
+        self.assertEqual(render.crop_fit(image, zoom=9).tobytes(), render.crop_fit(image, zoom=3).tobytes())  # at most 3×
+        self.assertEqual(render.crop_fit(image, zoom="x").tobytes(), render.crop_fit(image).tobytes())
+        small = Image.new("RGB", (540, 960), "black")
+        small.paste((0, 0, 255), (0, 0, 540, 40))
+        cell = render.crop_fit(small, 0, 0.5, 540, 720, zoom=1.5)
+        self.assertEqual((cell.size, cell.getpixel((270, 5))), ((540, 720), (0, 0, 255)))
+        collage = render.compose({"layout": "lr", "zoom": 2, "cells": [{"zoom": 1}]}, [image, image])
+        self.assertEqual(collage.getpixel((render.W // 4 + 120, render.H // 2)), (255, 0, 0))  # left cell zoomed
+        self.assertNotEqual(collage.getpixel((3 * render.W // 4 + 120, render.H // 2)), (255, 0, 0))  # right one not
 
     def test_collage_puts_each_picture_in_its_cell(self):
         red, blue = Image.new("RGB", (720, 1280), (255, 0, 0)), Image.new("RGB", (720, 1280), (0, 0, 255))
@@ -178,17 +199,34 @@ class ParseTests(unittest.TestCase):
         with self.assertRaises(PhotoSetError):
             parse_options('{"options":[{"title_lines":[]}]}')
 
-    def test_three_versions_take_the_three_writings_in_order(self):
+    def test_versions_take_the_two_writings_and_retired_ones_are_not_taken(self):
         plan = {"versions": [{"slides": [{"title_lines": ["A"]}]}, {"writing": "list", "slides": [{"title_lines": ["B"]}]},
-                             {"writing": "nonsense", "slides": [{"title_lines": ["C"]}]}]}
+                             {"writing": "kit", "slides": [{"title_lines": ["C"]}]}]}
         versions = parse_plan(json.dumps(plan))[0]
-        self.assertEqual([v["writing"] for v in versions], ["self", "list", "list"])  # the AI's own valid choice is kept
+        # 顾虑问答 / 理由清单 were retired 2026-11-19: an answer naming one takes the writing at its place instead.
+        self.assertEqual([(v["key"], v["writing"]) for v in versions], [("A", "self"), ("B", "kit"), ("C", "kit")])
         self.assertEqual(photo_carousel.new_work(versions[0])["writing"], "self")
-        self.assertEqual(photo_carousel.WRITINGS, {"self": "达人自述", "qa": "顾虑问答", "list": "理由清单"})
+        self.assertEqual(photo_carousel.WRITING_ORDER, ("self", "kit"))
+        # Old versions still show their writing's name and can still be reworded by its rule.
+        self.assertEqual(photo_carousel.WRITINGS, {"self": "达人自述", "kit": "整套配置", "rescue": "钝刀救回", "slots": "三槽一机", "qa": "顾虑问答", "list": "理由清单"})
+        self.assertEqual(set(photo_carousel.WRITING_RULES), set(photo_carousel.WRITINGS))
 
     def test_garbage_is_reported(self):
         with self.assertRaises(PhotoSetError):
             parse_plan("没有 JSON")
+
+    def test_asked_writings_give_letters_backups_and_recommend_b(self):
+        plan = {"versions": [{"recommended": False, "slides": [{"title_lines": ["Q"], "frame_time": 2, "alt_times": [5, "7.5", -1, "x", 9]}]},
+                             {"recommended": True, "slides": [{"title_lines": ["L"], "frame_time": 3}]}]}
+        versions = parse_plan(json.dumps(plan), ["kit", "self"])[0]
+        self.assertEqual([(v["key"], v["writing"], v["recommended"]) for v in versions], [("B", "kit", True), ("A", "self", False)])
+        self.assertEqual(versions[0]["slides"][0]["alt_times"], [5.0, 7.5])  # at most two, only real times
+        work = photo_carousel.new_work(versions[0])
+        self.assertEqual(work["slides"][0]["alternates"], [2.0, 5.0, 7.5])  # the AI's own pick stays first
+        self.assertNotIn("alternates", photo_carousel.new_work(versions[1])["slides"][0])
+        # Two versions claiming the same writing still get different letters.
+        twice = {"versions": [{"writing": "kit", "slides": [{"title_lines": ["1"]}]}, {"writing": "kit", "slides": [{"title_lines": ["2"]}]}]}
+        self.assertEqual([v["key"] for v in parse_plan(json.dumps(twice), ["self", "kit"])[0]], ["B", "A"])
 
     def test_sharpest_moves_off_blur_only(self):
         items = [{"t": 1.0, "sharp": 10}, {"t": 1.2, "sharp": 100}, {"t": 1.4, "sharp": 95}]
@@ -349,6 +387,72 @@ class DecisionTests(unittest.TestCase):
             with self.assertRaises(PhotoSetError):
                 self.sets.delete(self.JOB, "u2", bad)
 
+    def two_exports(self):
+        """Version A of u1 finalized twice; another set's version claims one more folder in the same 图文成品."""
+        self.sets.export_root.mkdir(parents=True)
+        mine = [self.sets.export_root / "PRD-20261108-A", self.sets.export_root / "PRD-20261108-A-v2"]
+        theirs = self.sets.export_root / "PRD-20261108-B"
+        for folder in (*mine, theirs):
+            (folder / "发布JPG").mkdir(parents=True)
+            (folder / "发布JPG" / "01.jpg").write_bytes(b"x" * 10)
+        self.write_set("PHS-000000000001", "u1", works=[
+            {"key": "A", "status": "done", "slides": [{"title_lines": ["HI"]}], "exports": [{"folder": str(f), "name": f.name} for f in mine]},
+            {"key": "B", "status": "doing", "exports": []}], current="B")
+        self.write_set("PHS-000000000002", "u2", works=[{"key": "B", "status": "done", "exports": [{"folder": str(theirs), "name": theirs.name}]}])
+        return mine, theirs
+
+    def test_unfinalize_reopens_the_version_and_deletes_only_its_exports(self):
+        mine, theirs = self.two_exports()
+        info = self.sets.unfinalize("PHS-000000000001", {"key": "A", "preview": True})
+        self.assertEqual((info["exports"], info["files"], info["bytes"], info["notion_page"]), (2, 2, 20, False))
+        self.assertTrue(all(folder.is_dir() for folder in mine))
+        result = self.sets.unfinalize("PHS-000000000001", {"key": "A"})
+        self.assertEqual(result["warnings"], [])
+        self.assertEqual((result["work"]["key"], result["work"]["status"], result["work"]["exports"]), ("A", "doing", []))
+        self.assertEqual(result["work"]["slides"], [{"title_lines": ["HI"]}])
+        self.assertFalse(any(folder.exists() for folder in mine))
+        self.assertTrue(theirs.is_dir())
+        self.assertEqual(self.state("u1")["state"], "doing")
+        self.assertEqual(self.state("u2")["state"], "exported")
+        self.sets.remove_work("PHS-000000000001", {"key": "A"})  # no longer exported, so it can leave the queue
+
+    def test_unfinalize_never_deletes_a_folder_outside_or_shared(self):
+        mine, theirs = self.two_exports()
+        outside = self.tmp / "别的资料"
+        outside.mkdir()
+        data = json.loads((self.sets.root / "PHS-000000000001" / "set.json").read_text(encoding="utf-8"))
+        data["works"][0]["exports"] += [{"folder": str(outside)}, {"folder": str(theirs)}, {"folder": str(self.sets.root)}]
+        (self.sets.root / "PHS-000000000001" / "set.json").write_text(json.dumps(data), encoding="utf-8")
+        self.assertEqual(self.sets.unfinalize("PHS-000000000001", {"key": "A", "preview": True})["exports"], 2)
+        self.sets.unfinalize("PHS-000000000001", {"key": "A"})
+        self.assertTrue(outside.is_dir() and theirs.is_dir() and self.sets.root.is_dir())
+
+    def test_unfinalize_is_refused_when_not_done_finished_running_or_uploading(self):
+        self.two_exports()
+        with self.assertRaises(PhotoSetError) as caught:
+            self.sets.unfinalize("PHS-000000000001", {"key": "B"})
+        self.assertEqual(caught.exception.status, 409)
+        self.sets.app.notion_uploads = type("Notion", (), {"photo_busy": lambda me, ids: True})()
+        with self.assertRaises(PhotoSetError) as caught:
+            self.sets.unfinalize("PHS-000000000001", {"key": "A"})
+        self.assertIn("Notion", str(caught.exception))
+        del self.sets.app.notion_uploads
+        self.sets.decide(self.JOB, "u1", {"decision": "finish"})
+        with self.assertRaises(PhotoSetError) as caught:
+            self.sets.unfinalize("PHS-000000000001", {"key": "A"})
+        self.assertIn("完结", str(caught.exception))
+        self.sets.decide(self.JOB, "u1", {"decision": "reopen"})
+        data = json.loads((self.sets.root / "PHS-000000000001" / "set.json").read_text(encoding="utf-8"))
+        data["ai"] = {"status": "running"}
+        (self.sets.root / "PHS-000000000001" / "set.json").write_text(json.dumps(data), encoding="utf-8")
+        with self.assertRaises(PhotoSetError) as caught:
+            self.sets.unfinalize("PHS-000000000001", {"key": "A"})
+        self.assertEqual(caught.exception.status, 409)
+        for bad in ({"key": "A", "preview": "yes"}, {"key": "A", "extra": 1}, []):
+            with self.assertRaises(PhotoSetError):
+                self.sets.unfinalize("PHS-000000000002", bad)
+        self.assertTrue((self.sets.export_root / "PRD-20261108-A").is_dir())
+
     def test_failed_steps_are_listed_for_the_needs_you_view(self):
         self.write_set("PHS-000000000001", "u1", ai={"status": "failed", "error": "超时", "finished_at": "t1"})
         self.write_set("PHS-000000000002", "u2", frames_job={"status": "done"}, slide_ai={"status": "running"})
@@ -407,7 +511,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual([(w["key"], w["status"]) for w in state["works"]], [("A", "doing"), ("B", "todo")])
         self.assertEqual(state["current"], "A")
         self.assertEqual(len(state["work"]["slides"]), 2)
-        self.assertEqual(state["work"]["cta"], "GET YOUR *202H* BELOW.")
+        self.assertEqual(state["work"]["cta"], "")  # 末张不默认带收口
         with self.assertRaises(PhotoSetError):  # versions are made in order
             self.sets.open_work(set_id, {"key": "B"})
         state = self.sets.edit_slide(set_id, 1, {"image": {"kind": "frame", "t": 1.2}, "crop_y": 0.9, "text_position": "top", "text_size": "s"})
@@ -437,7 +541,7 @@ class FlowTests(unittest.TestCase):
         copy_json = json.loads((folder / "copy.json").read_text(encoding="utf-8"))
         self.assertEqual(copy_json["slides"][0]["title_lines"], ["STOP BUYING STONES", "ONE BY ONE."])
         self.assertEqual(copy_json["chosen_layout"], "黑色字条")
-        self.assertIn("-A一套配齐", folder.name)
+        self.assertEqual("US-202-Zack-1104-1A", folder.name)  # 成品统一命名（2026-11-24）
         state = self.sets.detail("PRD-0123456789ab", "uid-1")
         self.assertEqual(state["work"]["status"], "done")
         self.assertEqual(state["next"]["key"], "B")
@@ -455,6 +559,110 @@ class FlowTests(unittest.TestCase):
         state = self.sets.remove_work(set_id, {"key": "B"})
         self.assertEqual([w["key"] for w in state["works"]], ["A"])
 
+    def test_plan_writes_a_and_the_kit_version_and_recommends_the_kit(self):
+        self.assertEqual(self.sets._writings(None), ["self", "kit"])
+        self.assertEqual(self.sets._writings({"all": True}), ["self", "kit"])  # the old "all three" switch no longer adds anything
+        set_id = self.ready()
+        self.sets.plan(set_id)
+        wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["ai"]["status"] != "running")
+        detail = self.sets.detail("PRD-0123456789ab", "uid-1")
+        self.assertEqual(detail["ai"]["status"], "done", detail["ai"])
+        prompt = self.app.ai.bridge.calls[0][0]
+        self.assertIn("先出 2 版逐张表", prompt)
+        self.assertIn("B 版 " + photo_carousel.WRITING_RULES["kit"], prompt)
+        self.assertIn("A 版 " + photo_carousel.WRITING_RULES["self"], prompt)
+        for retired in ("qa", "list"):
+            self.assertNotIn(photo_carousel.WRITING_RULES[retired], prompt)
+        self.assertIn("writing 依次是 self、kit", prompt)
+        # The kit version is exempt from the three-part chain and the spoken second line.
+        self.assertIn("除整套配置版外，每版都按三段走", prompt)
+        self.assertIn(photo_carousel.KIT_PLAN_RULE, prompt)
+        self.assertIn("alt_times", prompt)
+        self.assertEqual([v["key"] for v in detail["versions"] if v["recommended"]], ["B"])
+
+    def detail(self):
+        return self.sets.detail("PRD-0123456789ab", "uid-1")
+
+    def test_plan_in_german_keeps_the_language_through_rewording_and_export(self):
+        set_id = self.ready()
+        self.assertEqual(self.detail()["market"], "us")
+        self.assertIn("de", [row["id"] for row in self.detail()["markets"]])
+        with self.assertRaises(PhotoSetError):
+            self.sets.plan(set_id, {"market": "fr"})
+        self.sets.plan(set_id, {"market": "de"})
+        wait(lambda: self.detail()["ai"]["status"] != "running")
+        detail = self.detail()
+        self.assertEqual((detail["ai"]["status"], detail["market"]), ("done", "de"), detail["ai"])
+        prompt = self.app.ai.bridge.calls[0][0]
+        self.assertIn("本轮目标市场：德国 · 德语", prompt)
+        self.assertIn("德国 TikTok 达人对着镜头说话", prompt)
+        self.assertIn("🔴 + 德语标题", prompt)
+        self.assertNotIn("美国 TikTok 达人", prompt)
+        self.assertEqual({v["market"] for v in detail["versions"]}, {"de"})
+        state = self.sets.choose(set_id, {"versions": ["A"]})
+        self.assertEqual(state["work"]["market"], "de")
+        self.sets.rewrite(set_id, 1, {"zh": "不用再猜角度"})
+        wait(lambda: (self.detail().get("slide_ai") or {}).get("status") != "running")
+        prompt = self.app.ai.bridge.calls[1][0]
+        self.assertIn("出 3 种德语说法", prompt)
+        self.assertIn("地道的德语口语", prompt)
+        self.assertIn("标题用德国 TikTok 达人", prompt)
+        self.assertNotIn("美式", prompt)
+        folder = Path(self.sets.export(set_id)["export"]["folder"])
+        self.assertTrue(folder.name.startswith("DE-"), folder.name)
+        copy_json = json.loads((folder / "copy.json").read_text(encoding="utf-8"))
+        self.assertEqual((copy_json["market"], copy_json["image_language"]), ("DE", "de"))
+        # Planning again in another language leaves the version already being made in German.
+        self.sets.plan(set_id, {"market": "uk"})
+        wait(lambda: self.detail()["ai"]["status"] != "running")
+        detail = self.detail()
+        self.assertEqual({v["market"] for v in detail["versions"]}, {"uk"})
+        self.assertEqual(detail["work"]["market"], "de")
+
+    def test_a_set_follows_its_video_job_market_and_american_prompts_stay_as_before(self):
+        original = self.app.production.job
+        self.app.production.job = lambda identifier: {**original(identifier), "market": "uk"}
+        set_id = self.ready()
+        self.assertEqual(self.detail()["market"], "uk")
+        self.sets.plan(set_id)
+        wait(lambda: self.detail()["ai"]["status"] != "running")
+        prompt = self.app.ai.bridge.calls[0][0]
+        self.assertIn("本轮目标市场：英国 · 英语", prompt)
+        self.assertIn("英国 TikTok 达人", prompt)
+        self.assertIn("🔴 + 英式英语标题", prompt)
+        self.app.production.job = original
+        self.sets.plan(set_id, {"market": "us"})
+        wait(lambda: self.detail()["ai"]["status"] != "running")
+        prompt = self.app.ai.bridge.calls[1][0]
+        self.assertNotIn("本轮目标市场", prompt)
+        self.assertIn("都用美国 TikTok 达人对着镜头说话的口吻", prompt)
+        self.assertIn("🔴 + 英文标题", prompt)
+        state = self.sets.choose(set_id, {"versions": ["A"]})
+        self.assertEqual(state["work"]["market"], "us")
+        copy_json = json.loads((Path(self.sets.export(set_id)["export"]["folder"]) / "copy.json").read_text(encoding="utf-8"))
+        self.assertEqual((copy_json["market"], copy_json["image_language"]), ("US", "en"))
+
+    def test_backup_frames_snap_to_real_frames(self):
+        plan = json.loads(json.dumps(PLAN))
+        plan["versions"][0]["slides"][0]["alt_times"] = [0.45, 1.6, 0.5]
+        self.app.ai.bridge.output = json.dumps(plan)
+        set_id = self.ready()
+        self.sets.plan(set_id)
+        wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["ai"]["status"] != "running")
+        frames = self.sets.root / set_id / "frames.json"
+        info = json.loads(frames.read_text(encoding="utf-8"))
+        for item in info["items"]:  # every frame equally sharp: nothing is flagged as blurry yet
+            item["sharp"] = 100.0
+        frames.write_text(json.dumps(info), encoding="utf-8")
+        state = self.sets.choose(set_id, {"versions": ["A"]})
+        slide = state["work"]["slides"][0]
+        items = {item["t"] for item in info["items"]}
+        self.assertEqual(slide["alternates"][0], slide["image"]["t"])
+        self.assertTrue(set(slide["alternates"]) <= items)
+        self.assertEqual(len(slide["alternates"]), len(set(slide["alternates"])))  # backups too close to the pick are dropped
+        self.assertTrue(all(abs(a - b) >= 0.5 for i, a in enumerate(slide["alternates"]) for b in slide["alternates"][:i]))
+        self.assertNotIn("checks", state)  # the pre-export reminder was removed 2026-11-25
+
     def test_background_steps_show_in_the_task_panel_under_their_order(self):
         from task_activity import ActivityStore
         self.app.activity = ActivityStore(self.tmp / "activity")
@@ -470,7 +678,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual({run["source_id"] for run in runs}, {set_id})
         # The fake AI answers the rewrite with a plan, so that step fails and says why.
         self.assertEqual([run["status"] for run in runs], ["completed", "completed", "failed"], [run["message"] for run in runs])
-        self.assertIn("step=publish", runs[0]["url"])
+        self.assertIn("step=cut", runs[0]["url"])
         self.assertEqual(runs[1]["message"], "2 版逐张表已写好，去选一版")
         self.assertIn("没有标题", runs[2]["message"])
 
@@ -529,6 +737,7 @@ class FlowTests(unittest.TestCase):
     def test_chinese_meaning_gives_three_wordings_and_only_the_picked_one_is_used(self):
         set_id = self.chosen()
         self.sets.edit_slide(set_id, 2, {"layout": "lr", "image": {"kind": "frame", "t": 1.4}})
+        self.sets.edit_set(set_id, {"cta": "GET YOUR *202H* BELOW."})  # 末张不默认带收口，这里是用户自己填的
         before = self.sets._read(set_id)["works"][0]["slides"]
         self.app.ai.bridge.output = json.dumps({"options": [
             {"title_lines": ["3 YEARS", "*COVERED.*"], "body_lines": ["3-year limited warranty", "GET YOUR *202H* BELOW."],
@@ -690,6 +899,56 @@ class FlowTests(unittest.TestCase):
         PhotoCarousels(self.app, export_root=self.tmp / "图文成品")  # a restart reports the cut-off job
         self.assertEqual(self.sets._read(set_id)["slide_ai"]["status"], "failed")
 
+    def test_zoom_is_saved_per_cell_and_exported(self):
+        set_id = self.ready()
+        self.sets.plan(set_id)
+        wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["ai"]["status"] != "running")
+        self.sets.choose(set_id, {"versions": ["A"]})
+        plain = self.sets.rendered(set_id, "A", "bar", 1, 360)
+        state = self.sets.edit_slide(set_id, 1, {"zoom": 2.5})
+        self.assertEqual(state["work"]["slides"][0]["zoom"], 2.5)
+        self.assertEqual(self.sets._read(set_id)["works"][0]["history"][-1]["label"], "第 1 张：放大")
+        self.assertNotEqual(self.sets.rendered(set_id, "A", "bar", 1, 360), plain)
+        state = self.sets.edit_slide(set_id, 1, {"zoom": 9})
+        self.assertEqual(state["work"]["slides"][0]["zoom"], 3.0)
+        with self.assertRaises(PhotoSetError):
+            self.sets.edit_slide(set_id, 1, {"zoom": "big"})
+        state = self.sets.edit_slide(set_id, 1, {"zoom": 1})
+        self.assertNotIn("zoom", state["work"]["slides"][0])
+        self.assertEqual(self.sets.rendered(set_id, "A", "bar", 1, 360), plain)  # back to the cached picture
+        self.sets.edit_slide(set_id, 1, {"layout": "lr"})
+        state = self.sets.edit_slide(set_id, 1, {"cell": 2, "zoom": 2, "crop_x": 0.2})
+        slide = state["work"]["slides"][0]
+        self.assertEqual((slide.get("zoom"), slide["cells"][0]["zoom"], slide["cells"][0]["crop_x"]), (None, 2.0, 0.2))
+        self.assertEqual(self.sets._read(set_id)["works"][0]["history"][-1]["label"], "第 1 张第 2 格：裁切、放大")
+        self.sets.edit_slide(set_id, 2, {"zoom": 1.6})
+        result = self.sets.export(set_id)
+        copy_json = json.loads((Path(result["export"]["folder"]) / "copy.json").read_text(encoding="utf-8"))
+        self.assertEqual([s["zoom"] for s in copy_json["slides"]], [1.0, 1.6])
+
+    def test_each_slide_is_laid_out_once_for_every_preview_width(self):
+        set_id = self.ready()
+        self.sets.plan(set_id)
+        wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["ai"]["status"] != "running")
+        self.sets.choose(set_id, {"versions": ["A"]})
+        real, calls = render.render, []
+        def counted(*args, **kwargs):
+            calls.append(args[3])
+            return real(*args, **kwargs)
+        with patch.object(render, "render", counted):
+            paths = [self.sets.rendered(set_id, "A", "bar", 1, width) for width in (270, 540, 270)]
+            full = self.sets.rendered(set_id, "A", "bar", 1)
+            # asked for at the same moment (the strip and the big preview after an edit): still one layout
+            threads = [threading.Thread(target=self.sets.rendered, args=(set_id, "A", "bar", 2, width)) for width in (270, 540, 360)]
+            [thread.start() for thread in threads]
+            [thread.join() for thread in threads]
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual([Image.open(path).size for path in paths], [(270, 360), (540, 720), (270, 360)])
+        self.assertEqual(paths[0], paths[2])
+        self.assertEqual(Image.open(full).size, (render.W, render.H))
+        self.assertTrue(full.name.endswith("-full.jpg"))
+        self.assertEqual(len(list((self.sets.root / set_id / "renders").glob("*.part"))), 0)
+
     def test_collage_cells_have_their_own_pictures_and_crops(self):
         set_id = self.ready()
         self.sets.plan(set_id)
@@ -731,6 +990,72 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(copy_json["slides"][1]["layout"], "单图")
         self.assertTrue(plain.is_file())
 
+    def test_kit_version_slides_are_reworded_by_the_kit_rules(self):
+        job = self.app.production.job("PRD-0123456789ab")
+        slides = [{"title_lines": ["KNIFE GUYS.", "THIS KIT'S *FOR YOU.*"], "body_lines": ["6 abrasives + leather strop."]},
+                  {"title_lines": ["FOUR DIAMOND GRITS."], "body_lines": ["220 · 325 · 600 · 1000"]},
+                  {"title_lines": ["YOUR WHOLE SETUP.", "*ONE HARD CASE.*"], "body_lines": ["Store it together."]}]
+        data = {"id": "PHS-x", "timeline_uid": "uid-1", "product": "202H"}
+        kit = {"key": "B", "writing": "kit", "cta": "GET YOUR *202H* BELOW.", "slides": slides}
+        first, middle, last = (self.sets.rewrite_prompt(data, job, kit, number, [], 1) for number in (1, 2, 3))
+        self.assertIn("这是第 1 张：标题点名人群加整套", first)
+        self.assertIn("这是中段：只讲一个部件或功能", middle)
+        self.assertIn("标题和第二行说整套一箱带走", last)
+        for prompt in (first, middle, last):
+            self.assertIn(photo_carousel.KIT_SECOND_LINE_RULE, prompt)
+            self.assertIn("这一版的写法（这一张也照它写）：" + photo_carousel.WRITING_RULES["kit"], prompt)
+            self.assertNotIn(photo_carousel.SECOND_LINE_RULE, prompt)  # no spoken second line, no worry opening
+            self.assertNotIn("处境或烦恼开场", prompt)
+            self.assertNotIn(photo_carousel.CLOSING_REASON_RULE, prompt)
+        # A version written the retired 顾虑问答 way keeps its own rule and the spoken second line.
+        old = self.sets.rewrite_prompt(data, job, {**kit, "writing": "qa"}, 2, [], 1)
+        self.assertIn("这一版的写法（这一张也照它写）：" + photo_carousel.WRITING_RULES["qa"], old)
+        self.assertIn(photo_carousel.SECOND_LINE_RULE, old)
+
+    def test_198h_routes_b_version_by_material_and_rewords_by_writing(self):
+        self.assertEqual(self.sets._writings(None, product="198H"), ["self", "198h_b"])
+        self.assertEqual(self.sets._writings(None, product="202H"), ["self", "kit"])
+        job = {**self.app.production.job("PRD-0123456789ab"), "product": "198H",
+               "lines": [{"number": 1, "spoken": "Plug it in and pull it through.", "zh": "插电拉过去就行。"}]}
+        data = {"id": "PHS-x", "timeline_uid": "uid-1", "product": "198H"}
+        prompt = self.sets.prompt(data, job, [])
+        self.assertIn(photo_carousel.WRITING_RULES["self"], prompt)
+        self.assertIn(photo_carousel.WRITING_RULES["rescue"], prompt)
+        self.assertIn(photo_carousel.WRITING_RULES["slots"], prompt)
+        self.assertIn(photo_carousel.ROUTED_198H_PLAN_RULE, prompt)
+        self.assertIn("writing 依次是 self、rescue 或 slots（B 版二选一）", prompt)
+        self.assertNotIn(photo_carousel.KIT_PLAN_RULE, prompt)
+        for chosen in ("rescue", "slots"):
+            payload = {"versions": [
+                {"writing": "self", "recommended": True, "slides": [{"title_lines": ["A"]}]},
+                {"writing": chosen, "recommended": False, "slides": [{"title_lines": ["B"]}]},
+            ]}
+            versions = parse_plan(json.dumps(payload), ["self", "198h_b"])[0]
+            self.assertEqual([(v["key"], v["writing"], v["recommended"]) for v in versions],
+                             [("A", "self", False), ("B", chosen, True)])
+        # A retired writing returned in the 198H B slot falls back to slots and stays recommended.
+        fallback = {"versions": [
+            {"writing": "self", "slides": [{"title_lines": ["A"]}]},
+            {"writing": "qa", "slides": [{"title_lines": ["B"]}]},
+        ]}
+        versions = parse_plan(json.dumps(fallback), ["self", "198h_b"])[0]
+        self.assertEqual([(v["key"], v["writing"], v["recommended"]) for v in versions],
+                         [("A", "self", False), ("B", "slots", True)])
+        # Single-slide rewording uses slots and rescue rules respectively.
+        slides = [{"title_lines": ["ONE"], "body_lines": ["a"]},
+                  {"title_lines": ["TWO"], "body_lines": ["b"]},
+                  {"title_lines": ["THREE"], "body_lines": ["c"]}]
+        slots_first = self.sets.rewrite_prompt(data, job, {"key": "B", "writing": "slots", "slides": slides}, 1, [], 1)
+        slots_mid = self.sets.rewrite_prompt(data, job, {"key": "B", "writing": "slots", "slides": slides}, 2, [], 1)
+        self.assertIn("标题点名家庭厨师人群加一台搞定", slots_first)
+        self.assertIn(photo_carousel.SLOTS_SECOND_LINE_RULE, slots_mid)
+        self.assertNotIn(photo_carousel.SECOND_LINE_RULE, slots_mid)
+        rescue_first = self.sets.rewrite_prompt(data, job, {"key": "B", "writing": "rescue", "slides": slides}, 1, [], 1)
+        rescue_last = self.sets.rewrite_prompt(data, job, {"key": "B", "writing": "rescue", "slides": slides}, 3, [], 1)
+        self.assertIn("磨前钝刀翻车的痛点", rescue_first)
+        self.assertIn("磨后利落切开的结果", rescue_last)
+        self.assertIn(photo_carousel.SECOND_LINE_RULE, rescue_last)
+
     def test_prompt_follows_three_part_chain_and_carries_video_hook_and_direction(self):
         direction = {"product": "202H", "direction_id": "202H-S1", "audience": "徒手磨石守不住角度的人",
                      "main_difference": "S1 夹持控角", "concern": "S1 → 夹得住吗", "closing": "下方看整套 202H"}
@@ -745,13 +1070,13 @@ class FlowTests(unittest.TestCase):
                          "画面：手在磨石上来回", "首张说到心里", "只讲 1–2 个卖点", "末张给下单理由", "不默认做送礼版"):
             self.assertIn(expected, prompt)
         self.assertNotIn("送礼、打消顾虑", prompt)
-        for key in ("self", "qa", "list"):  # each version is written one way, in order A/B/C
+        for key in ("self", "kit"):  # each version is written one way, in order A/B
             self.assertIn(photo_carousel.WRITING_RULES[key], prompt)
         self.assertIn("A 版 " + photo_carousel.WRITING_RULES["self"], prompt)
-        self.assertIn("C 版 " + photo_carousel.WRITING_RULES["list"], prompt)
+        self.assertIn("B 版 " + photo_carousel.WRITING_RULES["kit"], prompt)
         self.assertIn(photo_carousel.SECOND_LINE_RULE, prompt)
         self.assertIn("优先缩短原话来用", prompt)
-        self.assertIn("writing 依次是 self、qa、list", prompt)
+        self.assertIn("writing 依次是 self、kit", prompt)
         self.assertNotIn("事实行", prompt)
         # The closing is spoken, not read off the warranty terms (2026-11-06).
         self.assertIn(photo_carousel.CLOSING_VOICE_RULE, prompt)
@@ -857,6 +1182,46 @@ class FlowTests(unittest.TestCase):
         self.assertEqual({key: calls[0][key] for key in ("project_id", "folder", "creator", "unique_id")},
                          {"project_id": "project-zack", "folder": ["Zack"], "creator": "Zack", "unique_id": "uid-1"})
         self.assertFalse(self.app.resolve.busy())
+
+    def test_day_export_queues_open_timelines_and_reports_the_rest(self):
+        job = "PRD-0123456789ab"
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        calls, entered = self.bind_resolve(gate=gate)
+        for body in ({}, {"items": []}, {"items": [{"job_id": job}]}, {"items": [{"job_id": job, "timeline_uid": "uid-1"}], "x": 1},
+                     {"items": [{"job_id": job, "timeline_uid": str(n)} for n in range(61)]}):
+            with self.assertRaises(PhotoSetError):
+                self.sets.import_resolve_many(body)
+        self.sets.decide(job, "uid-1", {"decision": "skip"})
+        reply = self.sets.import_resolve_many({"items": [{"job_id": job, "timeline_uid": "uid-1"}]})
+        self.assertEqual(reply, {"started": [], "skipped": [{"job_id": job, "timeline_uid": "uid-1", "error": "已选不做"}]})
+        self.sets.decide(job, "uid-1", {"decision": "clear"})
+        items = [{"job_id": job, "timeline_uid": "uid-1"}, {"job_id": job, "timeline_uid": "uid-9"}, {"job_id": job, "timeline_uid": "uid-1"}]
+        reply = self.sets.import_resolve_many({"items": items})
+        self.assertEqual(reply["started"], [{"job_id": job, "timeline_uid": "uid-1"}])
+        self.assertEqual(reply["skipped"], [{"job_id": job, "timeline_uid": "uid-9", "error": "请先选一条时间线。"}])
+        self.assertTrue(entered.wait(5))
+        state = self.sets.states([(job, "uid-1")])[(job, "uid-1")]
+        self.assertEqual((state["state"], state.get("importing")), ("pending", True))
+        # Asking again while it runs neither fails nor starts a second export.
+        self.assertEqual(self.sets.import_resolve_many({"items": items[:1]})["started"], items[:1])
+        gate.set()
+        wait(lambda: self.sets.detail(job, "uid-1")["resolve_import"]["status"] != "running")
+        wait(lambda: self.sets.detail(job, "uid-1")["frames_job"]["status"] != "running")
+        self.assertEqual(len([call for call in calls if call["command"] == "export_textless"]), 1)
+        state = self.sets.states([(job, "uid-1")])[(job, "uid-1")]
+        self.assertEqual(state["state"], "doing")
+        self.assertNotIn("importing", state)
+        reply = self.sets.import_resolve_many({"items": items[:1]})
+        self.assertEqual(reply["skipped"], [{"job_id": job, "timeline_uid": "uid-1", "error": "已经在做图文"}])
+
+    def test_failed_import_shows_on_the_undecided_row(self):
+        self.bind_resolve(fail=True)
+        self.sets.import_resolve_many({"items": [{"job_id": "PRD-0123456789ab", "timeline_uid": "uid-1"}]})
+        wait(lambda: self.sets.detail("PRD-0123456789ab", "uid-1")["resolve_import"]["status"] != "running")
+        state = self.sets.states([("PRD-0123456789ab", "uid-1")])[("PRD-0123456789ab", "uid-1")]
+        self.assertEqual(state["state"], "pending")
+        self.assertTrue(state["import_error"])
 
     def test_resolve_timeout_attempts_recovery_keeps_old_set_and_allows_retry(self):
         first = self.ready()
@@ -971,6 +1336,17 @@ class PhotoRoutesTests(unittest.TestCase):
             self.assertEqual(status, 200, body)
             self.assertEqual(body, reply)
             detail.assert_called_once_with("PRD-0123456789ab", "uid-2")
+
+    def test_day_export_route_hands_the_list_over(self):
+        reply = {"started": [], "skipped": []}
+        items = {"items": [{"job_id": "PRD-0123456789ab", "timeline_uid": "uid-2"}]}
+        with patch.object(self.server.app.photo_sets, "import_resolve_many", return_value=reply) as start:
+            status, _, body = self.request("POST", "/api/photo-sets/import-day", items, authenticated=False)
+            self.assertEqual(status, 403, body)
+            start.assert_not_called()
+            status, _, body = self.request("POST", "/api/photo-sets/import-day", items)
+            self.assertEqual((status, body), (202, reply))
+            start.assert_called_once_with(items)
 
     def test_running_photo_import_blocks_restart_and_data_replacement(self):
         with patch.object(self.server.app.photo_sets, "busy", return_value=True):

@@ -20,7 +20,11 @@ class ScriptRefreshNavigationBrowserTests(unittest.TestCase):
     open_page = writing_fixture.WritingLifecycleBrowserTests.open_page
 
     def test_module_and_main_router_quiet_refreshes_preserve_mounted_filters(self):
-        self.create_script('Unique refresh fixture.')
+        script = self.create_script('Unique refresh fixture.')
+        # Only a filmed copy is a to-do; a saved one without an order waits in 全部.
+        app = self.server.app
+        app.creation.mutate("script_status", {"request_id": "refresh-film-" + script["id"], "revision": app.creation.current_revision(),
+                                              "script_status": {"script_id": script["id"], "status": "filmed"}})
         page = self.open_page("#/202H/scripts")
         page.locator('#content-flow-query').fill('临时脚本')
         set_content_condition(page, 'kind', ['script'])

@@ -389,6 +389,9 @@ window.Campaigns = (() => {
   function revealCalendar() {
     const reveal = () => {
       if (!document.querySelector('#perf-campaigns .campaign-row')) return false;
+      // The board keeps the calendar folded to one line; open it before scrolling to it.
+      const fold = document.querySelector('#perf-campaigns').closest('details');
+      if (fold && !fold.open) fold.open = true;
       document.querySelector('#perf-campaigns').scrollIntoView({block: 'start'});
       return true;
     };

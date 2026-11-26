@@ -40,7 +40,7 @@ class NoiseVideoReviewTests(unittest.TestCase):
             route.fulfill(content_type='application/json', body='{"approved":true}')
 
         page = self.open_page(width=390, post=approve)
-        page.locator('[data-step="edit"]').click()
+        page.locator('[data-step~="edit"]').click()
         self.assertTrue(page.locator('.edit-review-form').is_visible())
         self.assertFalse(page.locator('#edit-panel #edit-form').is_visible())
         evidence(page,'video-review-results-first.png')
@@ -51,8 +51,6 @@ class NoiseVideoReviewTests(unittest.TestCase):
         self.assertTrue(page.evaluate("document.querySelector('#edit-runs').compareDocumentPosition(document.querySelector('#edit-form')) & Node.DOCUMENT_POSITION_FOLLOWING"))
         page.locator('[data-production-controls="edit"] > summary').click()
         page.locator('#edit-panel #edit-form [name="instruction"]').fill('下一版保留我的要求')
-        for check in page.locator('.edit-review-form input[name="reviewed"]').all():
-            check.check()
         page.locator('[data-approve-edit]').click()
         page.locator('[data-revoke-edit]').wait_for()
         self.assertTrue(page.locator('#edit-panel #edit-form').is_visible())
@@ -102,7 +100,7 @@ class NoiseVideoReviewTests(unittest.TestCase):
         timeline = dict(self.payload['job']['timelines'][0], unique_id='uid-new-target', name='新建待剪时间线')
         self.payload['job']['timelines'].append(timeline)
         page = self.open_page()
-        page.locator('[data-step="edit"]').click()
+        page.locator('[data-step~="edit"]').click()
         self.assertEqual(page.locator('#edit-panel #edit-form [name="timeline"]').input_value(), 'uid-new-target')
         self.assertTrue(page.locator('#edit-panel #edit-form').is_visible())
 

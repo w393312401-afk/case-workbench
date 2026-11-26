@@ -251,6 +251,18 @@ class WorkerTests(unittest.TestCase):
         reply = resolve_worker.candidates(Resolve(Project([material])), {"project": "202H", "materials": [], "target_uid": ""})
         self.assertEqual([clip["verified_labels"] for clip in reply["materials"][0]["clips"]], [["研磨 BK011"], []])
 
+    def test_a_source_start_reported_one_frame_early_is_listed_with_the_real_range(self):
+        class Shifted(Item):
+            def GetLeftOffset(self): return self.source + 1
+        material = Timeline("Buck110折刀成品素材", "mat-1", [Item("i1", 0, 60, 0, ["夹具 BK001"], "material_index_v1:i1"),
+                                                         Shifted("i2", 60, 156, 59, ["切纸 BK002"], "material_index_v1:i2")])
+        edit = Timeline("Lab261008-202-1", "e1", [Shifted("x", 0, 96, 59)])
+        reply = resolve_worker.candidates(Resolve(Project([material, edit])), {"project": "202H", "materials": [], "count_usage": True})
+        self.assertEqual([clip["true_source"] for clip in reply["materials"][0]["clips"]], [None, [60, 156]])
+        self.assertEqual([(item["source_start"], item["source_end"]) for item in reply["used"]], [(60, 156)])
+        found = build_candidates(reply, count_usage=True)
+        self.assertEqual([(row["source"], row["use_count"]) for row in found], [([0, 60], 0), ([60, 156], 1)])
+
     def test_frames_land_on_the_expected_clip_before_exporting(self):
         material = Timeline("素材", "mat-1", [Item("i1", 0, 60, 0), Item("i2", 60, 120, 60)])
         project = Project([material, Timeline("Zack", "t1", [])])

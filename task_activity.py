@@ -22,7 +22,9 @@ ACTIVE = frozenset({"queued", "running", "stopping"})
 TERMINAL = frozenset({"completed", "failed", "cancelled", "interrupted", "needs_attention"})
 # "prepublish" stays only so the history of the removed pre-publish review still reads back.
 # "photo" is the 图文 work of an order (抽帧, AI 逐张表, 单张改写, 导入无字版), listed under that order.
-KINDS = frozenset({"ai", "voice", "timeline", "edit", "validation", "data", "case", "photo", "prepublish"})
+# "review" is a 口播审查 of a candidate, adopted script or order (script_review.py), listed under what it reviewed;
+# its step holds the review's target key so the panel can open the review drawer itself.
+KINDS = frozenset({"ai", "voice", "timeline", "edit", "validation", "data", "case", "photo", "prepublish", "review"})
 RECOVERY_PHASES = frozenset({"save", "结果待恢复", "登记待恢复", "记录待恢复", "待核实外部结果", "结果已保存，正在登记"})
 IDENTIFIER = re.compile(r"[A-Za-z0-9_:.\-]{1,300}")
 UNAVAILABLE = "运行日志暂时不可用，任务仍按原流程处理。"
@@ -217,6 +219,16 @@ class ActivityStore:
             return "#/all/settings"
         if run["kind"] == "case":
             return f"#/{product}/case/{owner}"
+        if run["kind"] == "review":
+            # The owner is the review's target key: candidate:<task>:<round>:<n>, script:<id> or job:<order>.
+            key = str(run["step"] or run["owner_id"])
+            parts = key.split(":")
+            page = quote(parts[1] if len(parts) > 1 else "", safe="")
+            if parts[0] == "candidate" and len(parts) == 4:
+                return f"#/{product}/ai/{page}?" + urlencode({"round": parts[2], "review": key})
+            if parts[0] == "script":
+                return f"#/{product}/content/{page}?" + urlencode({"review": key})
+            return f"#/{product}/production/{page}?" + urlencode({"review": key})
         return f"#/{product}/production/{owner}?" + urlencode({"step": run["step"], "run": run["source_id"]})
 
     @classmethod
@@ -581,6 +593,36 @@ class ActivityStore:
             self.error = UNAVAILABLE
             return []
 
+    def backfill(self, run_id, *, started_at, finished_at, **fields):
+        """Add a run that ended before the panel watched its kind, at its own times and without a new alert.
+
+        A run already in the panel is left as it is; returns whether one was added."""
+        try:
+            with self.lock, self._connect() as db:
+                if db.execute("SELECT 1 FROM runs WHERE run_id=?", (run_id,)).fetchone():
+                    return False
+        except (OSError, sqlite3.Error):
+            self.error = UNAVAILABLE
+            return False
+        if fields.get("status") not in TERMINAL or self.record(run_id, **fields) is None:
+            return False
+        def moment(value):
+            try:
+                return str(value) if _since(value) else ""
+            except ActivityError:
+                return ""
+        started, finished = moment(started_at), moment(finished_at)
+        try:
+            with self.lock, self._connect() as db:
+                if started and finished:
+                    db.execute("UPDATE runs SET started_at=?, updated_at=?, finished_at=? WHERE run_id=?", (started, finished, finished, run_id))
+                    db.execute("UPDATE logs SET at=? WHERE run_id=?", (finished, run_id))
+                    db.execute("UPDATE notifications SET created_at=? WHERE run_id=?", (finished, run_id))
+                db.execute("UPDATE notifications SET read=1 WHERE run_id=?", (run_id,))
+        except (OSError, sqlite3.Error):
+            self.error = UNAVAILABLE
+        return True
+
     def retitle(self, run_id, title):
         """Rename a run in place: its time, status and log stay as they were."""
         title = str(title or "")[:300]
@@ -811,7 +853,7 @@ def reconcile_activity(app):
                     title = f"{label} · {task_label}" + (f" · 第 {round_index} 轮" if round_index else "")
                     activity.retitle(row["run_id"], title)
                     source = next((turn for turn in task["rounds"] if turn["round_id"]==row["source_id"]),None)
-                elif row["kind"] in {"data", "case"}:
+                elif row["kind"] in {"data", "case", "review"}:
                     source = None
                 elif owners is not None:
                     owner = owners.get(row["owner_id"])
@@ -882,6 +924,8 @@ def reconcile_activity(app):
                     message="本次处理已取消。"
                 if row["kind"]=="case":
                     message="工作台重启时自动下载与拆解还没做完，请打开案例点「重试」。"
+                if row["kind"]=="review":
+                    message="工作台重启时这次口播审查还没做完，请打开审查重新审。"
                 if row["kind"]=="data":
                     # Also reached after a restore: the archive was written while this record still said running.
                     message="服务重启或数据恢复时这次处理已不在运行；结果以设置中的备份记录为准。"

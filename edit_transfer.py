@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from direction_store import now
 from elevenlabs_client import VoiceError
+from production_operations import durable_bytes
 from production_store import JOB_ID, TAKE_ID
 
 MAX_PACKAGE = 80 * 1024 * 1024
@@ -194,6 +195,21 @@ def find_imported_package(app, identifier, fingerprint, rules_version=''):
     return {'job_id': None, 'reused': False}
 
 
+def _imported_take(job):
+    selected = (job["local_edit_origin"].get("inputs") or {}).get("selected_take")
+    return next((take for take in job.get("takes", []) if take.get("id") == selected), None)
+
+
+def _package_media_paths(app, identifier, take, replica):
+    audio = app.production.audio / identifier / take["id"]
+    references = app.production.root / "replica" / identifier
+    paths = {f"voiceover.{kind}": audio / f"voiceover.{kind}" for kind in ("mp3", "wav") if take.get(kind)}
+    for shot in (replica or {}).get("shots", []):
+        name = f"shot-{shot['number']:02d}.jpg"
+        paths[f"reference/{name}"] = references / name
+    return paths
+
+
 def imported_packages(app):
     """Small private index, preloaded while the user chooses a ZIP."""
     rows = []
@@ -202,16 +218,10 @@ def imported_packages(app):
             origin = job.get('local_edit_origin') or {}
             if not origin:
                 continue
-            take = next((row for row in job.get('takes', [])
-                         if row.get('id') == (origin.get('inputs') or {}).get('selected_take')), None)
-            if not take:
+            take = _imported_take(job)
+            if not take or not any(take.get(kind) for kind in ("mp3", "wav")):
                 continue
-            required = [app.production.audio / job['id'] / take['id'] / f'voiceover.{kind}'
-                        for kind in ('mp3', 'wav') if take.get(kind)]
-            if not required:
-                continue
-            required.extend(app.production.root / 'replica' / job['id'] / f"shot-{shot['number']:02d}.jpg"
-                            for shot in (job.get('replica') or {}).get('shots', []))
+            required = list(_package_media_paths(app, job["id"], take, job.get("replica")).values())
             rules_version = job.get('edit_skill_version') or ''
             if rules_version:
                 required.append(app.production.root / 'edit-skill' / job['id'] / 'SKILL.md')
@@ -280,11 +290,31 @@ def import_package(app, raw):
         if prior:
             changed = prior.get('local_edit_package') != package_version
             prior['local_edit_package'] = package_version
+            supplied_take = job['takes'][0]
+            payload = {f"voiceover.{kind}": content for kind, content in audio.items()} | references
+            for name, target in _package_media_paths(app, prior["id"], supplied_take, job.get("replica")).items():
+                if not target.is_file():
+                    durable_bytes(target, payload[name])
+            take = _imported_take(prior)
+            if take is None:
+                take = copy.deepcopy(supplied_take)
+                prior.setdefault("takes", []).append(take)
+                if not prior.get("selected_take"):
+                    prior["selected_take"] = take["id"]
+                for kind in ("mp3", "wav"):
+                    take[kind] = f"{prior['id']}/{take['id']}/voiceover.{kind}" if kind in audio else ""
+                changed = True
             # Downloading the package again is how an order picks up newer editing rules.
             if skill and prior.get('edit_skill_version') != manifest['skill_version']:
                 _store_skill(app, prior['id'], skill)
                 prior['edit_skill_version'] = manifest['skill_version']
                 changed = True
+            elif skill:
+                rules = app.production.root / "edit-skill" / prior["id"]
+                for name, content in skill.items():
+                    target = rules / name.removeprefix("skill/")
+                    if not target.is_file():
+                        durable_bytes(target, content)
             if changed:
                 app.production.write(data)
             return {'job_id': prior['id'], 'reused': True}

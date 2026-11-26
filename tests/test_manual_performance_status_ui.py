@@ -67,10 +67,9 @@ class ManualPerformanceStatusTests(unittest.TestCase):
             self.assertEqual(page.locator('.perf-table .perf-status').all_text_contents(), [label] * (2 if key == 'pending' else 1))
             self.assertIn('review_status=' + key, page.url)
             page.locator(f'.perf-legend-item[data-status-filter="{key}"]').click()
-        page.locator('[data-sort="status"]').click()
-        self.assertEqual(page.locator('.perf-table .perf-status').all_text_contents(), list(STATUS_NAMES.values()) + ['待复盘'])
-        page.locator('[data-sort="status"]').click()
-        self.assertEqual(page.locator('.perf-table .perf-status').all_text_contents(), ['待复盘'] + list(reversed(STATUS_NAMES.values())))
+        # 参考价值 is no longer a column (画布「自制视频列表」); each row still names its status beside account and date.
+        self.assertEqual(page.locator('[data-sort="status"]').count(), 0)
+        self.assertEqual(sorted(page.locator('.perf-table .perf-status').all_text_contents()), sorted(list(STATUS_NAMES.values()) + ['待复盘']))
         text = page.locator('#content').inner_text() + page.evaluate('CasePerformance.reviewMaterial()')
         for retired in ('重点复制','成交可参考','后起量','高播未转化','98%','75%','跟进规则'):
             self.assertNotIn(retired,text)
@@ -187,7 +186,9 @@ class ManualPerformanceStatusTests(unittest.TestCase):
             with self.subTest(scheme=scheme,width=width):
                 page = self.open_list(payload=self.sample_payload(),scheme=scheme,width=width)
                 self.assertFalse(page.evaluate('document.documentElement.scrollWidth > innerWidth'))
-                self.assertEqual(page.locator('.perf-legend-item').count(),6)
+                # Six statuses, plus 其中值得复盘 when some pending videos sold or played well.
+                self.assertEqual(page.locator('.perf-legend-item:not([data-status-filter="worth"]):not([data-status-filter="thin"])').count(),6)
+                self.assertLessEqual(page.locator('.perf-legend-item[data-status-filter="worth"]').count(),1)
                 page.screenshot(path=str(ARTIFACTS/f'list-{scheme}-{width}.png'),full_page=True)
 
 

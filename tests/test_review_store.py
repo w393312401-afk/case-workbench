@@ -7,6 +7,8 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from types import SimpleNamespace
 from urllib.parse import quote
 
 import test_server as fixture
@@ -107,6 +109,35 @@ class ReviewStoreTests(unittest.TestCase):
         imports = {i["source_file"]: i for i in self.store.summary()["imports"]}
         self.assertEqual(imports["tiktok_video/video.json"]["skipped"], 1)
 
+    def test_unlinked_video_folds_away_sorts_last_and_can_be_linked_by_hand(self):
+        # A viral joke under a video no product is known for: lots of likes, nothing about a product.
+        write(self.store.sources, "tiktok_video", "other.json", [
+            {"cid": "U1", "videoWebUrl": "https://www.tiktok.com/@someone/video/7600000000000000777", "text": "thinnest sandwich ever",
+             "diggCount": 99999, "createTimeISO": "2026-06-05T10:00:00.000Z", "uniqueId": "joker", "product": ""}])
+        self.store.sync()
+        by_likes = self.store.search({}, sort="likes")["reviews"]
+        self.assertEqual(by_likes[0]["text"], "thinnest sandwich ever")
+        useful = self.store.search({}, sort="useful")["reviews"]
+        # Every review that is tied to a product and tagged comes before the joke, however many likes it has.
+        joke = [r["text"] for r in useful].index("thinnest sandwich ever")
+        informative = [i for i, r in enumerate(useful) if r["product"] and any(t != "noise" for t in r["tags"]["nature"] + r["tags"]["topic"])]
+        self.assertTrue(informative and max(informative) < joke)
+        folded = self.store.search({"exclude_unlinked": True})
+        self.assertNotIn("thinnest sandwich ever", [r["text"] for r in folded["reviews"]])
+        self.assertEqual(folded["unlinked_hidden"], 1)
+        # One video's own comments always show, even folded.
+        one = self.store.search({"exclude_unlinked": True, "video": "7600000000000000777"})
+        self.assertEqual((one["total"], one["unlinked_hidden"]), (1, 0))
+        # Linking the video files its comments under the product, and a rebuild keeps it.
+        self.store.set_video_product("7600000000000000777", "202H")
+        self.assertEqual(self.store.search({"video": "7600000000000000777"})["reviews"][0]["product"], "202H")
+        self.store.sync(force=True)
+        self.assertEqual(self.store.search({"exclude_unlinked": True})["unlinked_hidden"], 0)
+        self.store.set_video_product("7600000000000000777", "")
+        self.assertEqual(self.store.search({"video": "7600000000000000777"})["reviews"][0]["product"], "")
+        with self.assertRaises(ReviewError):
+            self.store.set_video_product("not-a-video", "202H")
+
     def test_same_comment_in_two_files_is_stored_once(self):
         write(self.store.sources, "tiktok_video", "video-again.json", [
             {"cid": "C1", "videoWebUrl": "https://www.tiktok.com/@a/video/7654572167790611743", "text": "That’s a lot of wobble", "diggCount": 3,
@@ -154,6 +185,26 @@ class ReviewStoreTests(unittest.TestCase):
         unknown = self.store.search({"q": "重要"})
         self.assertEqual((unknown["total"], unknown["query"]["unmapped"], unknown["query"]["expanded"]), (0, ["重要"], []))
         self.assertEqual(self.store.search({"q": "wobble"})["query"], {"expanded": [], "unmapped": []})
+
+    def test_chinese_search_also_matches_chinese_translations(self):
+        self.store.sync()
+        rows = {r["text"]: r for r in self.store.search({}, limit=50)["reviews"]}
+        wobble, stones = rows["That’s a lot of wobble"], rows["Diamond stones are great. The case alone is worth it."]
+        self.assertEqual(self.store.search({"q": "重要"})["total"], 0)
+        from review_translations import fingerprint
+        (self.store.root / "translations.json").write_text(json.dumps({
+            wobble["id"]: {"fingerprint": fingerprint(wobble), "zh": "这晃得太厉害了，很重要", "title_zh": ""},
+            stones["id"]: {"fingerprint": "outdated", "zh": "金刚石磨石很好", "title_zh": "重要的套装"}}, ensure_ascii=False), encoding="utf-8")
+        found = self.store.search({"q": "重要"})
+        # matched through the Chinese translation, title included; the stale one is still searchable but not shown as current
+        self.assertEqual({r["text"] for r in found["reviews"]}, {wobble["text"], stones["text"]})
+        shown = {r["text"]: r for r in found["reviews"]}
+        self.assertEqual(shown[wobble["text"]]["zh"], "这晃得太厉害了，很重要")
+        self.assertNotIn("zh", shown[stones["text"]])
+        # every term must still match; English search is unchanged
+        self.assertEqual(self.store.search({"q": "重要 wobble"})["total"], 1)
+        self.assertEqual(self.store.search({"q": "很重要 diamond"})["total"], 0)
+        self.assertEqual(self.store.search({"q": "wobble"})["total"], 1)
 
     def test_chinese_word_table_rules(self):
         self.assertEqual([word for word, _ in zh_groups("夹具问题")], ["夹具", "问题"])  # two ideas in one word: both must match
@@ -408,6 +459,73 @@ class ExcerptTests(unittest.TestCase):
         self.assertEqual(excerpt(text, limit=60), excerpt(text, re.compile("zzz"), limit=60))
 
 
+class ReviewTranslationTests(unittest.TestCase):
+    setUp = ReviewStoreTests.setUp
+
+    def test_translation_cache_and_source_validation(self):
+        self.store.sync()
+        app = SimpleNamespace(reviews=self.store)
+        translate = lambda body: fixture.SERVER.Workbench.translate_review(app, body)
+        rows = self.store.search({"include_brand": True}, limit=100)["reviews"]
+        row = next(r for r in rows if r["title"] == "Great kit")
+        reply = next(r for r in rows if r["is_reply"])
+        conn = self.store.connect()
+        conn.execute("UPDATE reviews SET text=? WHERE id=?", ("First\n[second] <source>", row["id"]))
+        conn.commit()
+        conn.close()
+        with patch("case_breakdown_runner.run_prompt", return_value='```json\n{"zh":"第一行\\n第二行","title_zh":"好套装"}\n```') as run:
+            result = translate({"id": row["id"]})
+            self.assertEqual(result, {"zh": "第一行\n第二行", "title_zh": "好套装"})
+            self.assertIn('First\\n[second] \\u003csource>', run.call_args.args[1])
+            self.assertEqual(translate({"id": row["id"]}), result)
+            self.assertEqual(run.call_count, 1)
+            conn = self.store.connect()
+            conn.execute("UPDATE reviews SET text=? WHERE id=?", ("Changed", row["id"]))
+            conn.commit()
+            conn.close()
+            self.assertEqual(translate({"id": row["id"]}), result)
+            self.assertEqual(run.call_count, 2)
+        with patch("case_breakdown_runner.run_prompt", return_value='{"zh":"谢谢","title_zh":""}'):
+            self.assertEqual(translate({"id": reply["id"]})["zh"], "谢谢")
+        with self.assertRaises(fixture.SERVER.ApiError):
+            translate({"id": row["id"], "text": "other"})
+        with patch("case_breakdown_runner.run_prompt", side_effect=RuntimeError("token=secret sk-123456")):
+            with self.assertRaises(fixture.SERVER.ApiError) as error:
+                translate({"id": "0123456789abcdef"})
+            self.assertEqual(error.exception.status, 404)
+        with patch("case_breakdown_runner.run_prompt", side_effect=RuntimeError("token=secret sk-123456")):
+            conn = self.store.connect()
+            conn.execute("UPDATE reviews SET text=? WHERE id=?", ("Again", row["id"]))
+            conn.commit()
+            conn.close()
+            with self.assertRaises(fixture.SERVER.ApiError) as error:
+                translate({"id": row["id"]})
+            self.assertEqual(error.exception.status, 502)
+            self.assertNotIn("secret", str(error.exception))
+            self.assertNotIn("sk-123456", str(error.exception))
+
+    def test_invalid_output_and_mid_translation_edit_are_not_cached(self):
+        self.store.sync()
+        app = SimpleNamespace(reviews=self.store)
+        row = next(r for r in self.store.search({}, limit=100)["reviews"] if r["title"] == "Great kit")
+        translate = lambda: fixture.SERVER.Workbench.translate_review(app, {"id": row["id"]})
+        with patch("case_breakdown_runner.run_prompt", return_value='{"zh":"", "title_zh":"标题"}'):
+            with self.assertRaises(fixture.SERVER.ApiError) as error:
+                translate()
+            self.assertEqual(error.exception.status, 502)
+        def edit_source(*args, **kwargs):
+            conn = self.store.connect()
+            conn.execute("UPDATE reviews SET text=? WHERE id=?", ("Changed while translating", row["id"]))
+            conn.commit()
+            conn.close()
+            return '{"zh":"正文", "title_zh":"标题"}'
+        with patch("case_breakdown_runner.run_prompt", side_effect=edit_source):
+            with self.assertRaises(fixture.SERVER.ApiError) as error:
+                translate()
+            self.assertEqual(error.exception.status, 409)
+        self.assertFalse((self.store.root / "translations.json").exists())
+
+
 class ReviewHTTPTests(unittest.TestCase):
     setUp_ = fixture.WorkbenchHTTPTests.setUp
     stop_server = fixture.WorkbenchHTTPTests.stop_server
@@ -454,6 +572,45 @@ class ReviewHTTPTests(unittest.TestCase):
         self.assertEqual((status, result["reviews"]), (200, 11))
         self.assertEqual(self.request("POST", "/api/reviews/sync", {"x": 1})[0], 400)
         self.assertEqual(self.request("POST", "/api/reviews/sync", {}, authenticated=False)[0], 403)
+
+    def test_review_translation_cache_replies_and_source_changes(self):
+        self.server.app.reviews.sync()
+        records = self.server.app.reviews.search({"include_brand": True}, limit=100)["reviews"]
+        review = next(r for r in records if r["title"] == "Great kit")
+        reply = next(r for r in records if r["is_reply"])
+        identifier = review["id"]
+        connection = self.server.app.reviews.connect()
+        connection.execute("UPDATE reviews SET text=? WHERE id=?", ("First line\n[second] <source>", identifier))
+        connection.commit()
+        connection.close()
+        with patch("case_breakdown_runner.run_prompt", return_value=json.dumps({"zh": "第一行\n第二行", "title_zh": "好套装"}, ensure_ascii=False)) as run:
+            status, _, result = self.request("POST", "/api/reviews/translate", {"id": identifier})
+            self.assertEqual((status, result), (200, {"zh": "第一行\n第二行", "title_zh": "好套装"}))
+            self.assertIn('First line\\n[second] \\u003csource>', run.call_args.args[1])
+            self.assertEqual(self.request("POST", "/api/reviews/translate", {"id": identifier})[2], result)
+            self.assertEqual(run.call_count, 1)
+            connection = self.server.app.reviews.connect()
+            connection.execute("UPDATE reviews SET text=? WHERE id=?", ("Changed", identifier))
+            connection.commit()
+            connection.close()
+            self.assertEqual(self.request("POST", "/api/reviews/translate", {"id": identifier})[0], 200)
+            self.assertEqual(run.call_count, 2)
+        with patch("case_breakdown_runner.run_prompt", return_value='{"zh":"谢谢", "title_zh":""}'):
+            self.assertEqual(self.request("POST", "/api/reviews/translate", {"id": reply["id"]})[2]["zh"], "谢谢")
+        self.server.app.reviews.sync(force=True)
+        with patch("case_breakdown_runner.run_prompt", return_value='{"zh":"正文", "title_zh":"标题"}') as run:
+            self.assertEqual(self.request("POST", "/api/reviews/translate", {"id": identifier})[0], 200)
+            self.assertEqual(run.call_count, 1)
+
+    def test_review_translation_rejects_invalid_requests_and_output(self):
+        self.server.app.reviews.sync()
+        review = self.server.app.reviews.search({}, limit=1)["reviews"][0]
+        self.assertEqual(self.request("POST", "/api/reviews/translate", {"id": "bad"})[0], 400)
+        self.assertEqual(self.request("POST", "/api/reviews/translate", {"id": "0123456789abcdef"})[0], 404)
+        self.assertEqual(self.request("POST", "/api/reviews/translate", {"id": review["id"], "text": "other"})[0], 400)
+        with patch("case_breakdown_runner.run_prompt", return_value="not JSON"):
+            self.assertEqual(self.request("POST", "/api/reviews/translate", {"id": review["id"]})[0], 502)
+        self.assertFalse((self.runtime / "reviews" / "translations.json").exists())
 
     def test_page_script_is_served(self):
         status, headers, body = self.request("GET", "/reviews.js")

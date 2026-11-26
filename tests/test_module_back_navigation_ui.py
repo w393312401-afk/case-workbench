@@ -82,8 +82,14 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
             page.locator("#content h1").click()
             page.keyboard.press("Escape")
 
+    def film(self, script):
+        app = self.server.app
+        app.creation.mutate("script_status", {"request_id": uuid4().hex, "revision": app.creation.current_revision(),
+                                              "script_status": {"script_id": script["id"], "status": "filmed"}})
+
     def test_content_search_kind_and_scroll_survive_all_return_actions(self):
         target = self.create_script("导航目标采用稿")
+        self.film(target)
         page = self.open_page("#/202H/scripts")
         page.locator("#content-flow-query").fill("导航目标采用稿")
         set_content_condition(page, "kind", ["script"])
@@ -164,6 +170,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
 
     def test_all_product_content_detail_reload_keeps_the_parent_scope_and_filters(self):
         target = self.create_script("导航目标采用稿")
+        self.film(target)
         page = self.open_page("#/all/scripts")
         page.locator("#content-flow-query").fill("导航目标采用稿")
         set_content_condition(page, "kind", ["script"])
@@ -189,6 +196,7 @@ class ModuleBackNavigationBrowserTests(unittest.TestCase):
             "script": {"product": "202H", "title": "导航子版本", "text": "A revised temporary version.",
                        "confirmed": True, "parent_id": self.script["id"]},
         })["script"]
+        self.film(child)
         page = self.open_page("#/all/scripts")
         page.locator("#content-flow-query").fill("导航子版本")
         set_content_condition(page, "kind", ["script"])
@@ -264,7 +272,7 @@ class ModuleSwitchingBrowserTests(unittest.TestCase):
         page.locator('.perf-table [data-sort="gmv"]').click()
         page.locator('.perf-table [data-sort="gmv"]').click()
         page.locator("#perf-tab-board").click()
-        page.locator('[data-perf-metric="views"]').click()
+        page.locator('[data-perf-metric="orders"]').click()
         self.create_scrolling_list(page, "#perf-board")
         page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
         page.evaluate("window.scrollTo(0, 640)")
@@ -272,7 +280,7 @@ class ModuleSwitchingBrowserTests(unittest.TestCase):
         self.switch_away_and_return(page, "videos", "#perf-board", 640)
         self.assertEqual(page.locator("#perf-tab-board").get_attribute("aria-selected"), "true")
         self.assertEqual(page.locator("#perf-account").input_value(), "bushcraftedge")
-        self.assertEqual(page.locator('[data-perf-metric="views"]').get_attribute("aria-pressed"), "true")
+        self.assertEqual(page.locator('[data-perf-metric="orders"]').get_attribute("aria-pressed"), "true")
         self.assertFalse(page.locator("#perf-video-drawer").is_visible())
         parameters = page.evaluate("Object.fromEntries(new URLSearchParams(location.hash.split('?')[1]))")
         self.assertNotIn("video", parameters)

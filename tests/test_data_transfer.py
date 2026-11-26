@@ -54,7 +54,7 @@ class DataTransferTests(unittest.TestCase):
         name = f"case-workbench-{kind}-{len(list(destination.glob('*.zip'))):03}.zip"
         path = destination / name
         path.write_bytes(b"isolated backup fixture")
-        return {"name": name, "path": str(path), "bytes": path.stat().st_size, "created_at": FixedDatetime.current.isoformat()}
+        return {"name": name, "path": str(path), "bytes": path.stat().st_size, "created_at": FixedDatetime.current.isoformat(), "kind": kind}
 
     def test_saved_daily_settings_persist_the_next_future_first_run(self):
         result = self.service.save_settings(self.settings(interval_days=3, time="08:00", keep=7))
@@ -125,6 +125,20 @@ class DataTransferTests(unittest.TestCase):
             create.assert_called_once()
         self.assertEqual(self.service.status()["next_backup"], "2026-10-13T02:00:00")
 
+    def test_queued_backup_rechecks_slot_after_another_backup_completed(self):
+        self.service.config.update(settings=self.settings(keep=0), first_run="2026-10-10T02:00:00")
+        backup = self.service.backup
+
+        def another_backup_finishes_before_lock(**options):
+            backup(automatic=True)
+            return backup(**options)
+
+        with patch.object(self.service, "backup", side_effect=another_backup_finishes_before_lock), \
+                patch.object(self.service.manager, "create_archive", side_effect=self.fake_archive) as create:
+            self.assertIsNone(self.service.due_backup())
+        create.assert_called_once()
+        self.assertFalse(self.service.busy)
+
     def test_failed_automatic_backup_keeps_slot_due_and_persists_failure(self):
         self.service.config.update(settings=self.settings(), first_run="2026-10-10T02:00:00")
         with patch.object(self.service.manager, "create_archive", side_effect=OSError("backup disk unavailable")):
@@ -175,12 +189,12 @@ class DataTransferTests(unittest.TestCase):
 
     def test_retention_deletes_only_registered_valid_packages_in_selected_directory(self):
         self.target.mkdir()
-        records = [self.fake_archive(self.target) for _ in range(3)]
+        records = [self.fake_archive(self.target, kind="auto") for _ in range(3)]
         foreign = self.target / "user-important.zip"
         foreign.write_bytes(b"not an application backup")
         outside = self.fake_archive(self.root / "elsewhere")
         self.service.config["history"] = [*records, outside]
-        with patch.object(self.service.manager, "inspect_archive", return_value={}) as inspect:
+        with patch.object(self.service.manager, "inspect_archive", return_value={"kind": "auto"}) as inspect:
             self.service._prune(self.target, 1)
         self.assertFalse(Path(records[0]["path"]).exists())
         self.assertFalse(Path(records[1]["path"]).exists())
@@ -191,7 +205,7 @@ class DataTransferTests(unittest.TestCase):
 
     def test_retention_keeps_corrupt_or_renamed_packages_and_keep_zero_means_unlimited(self):
         self.target.mkdir()
-        records = [self.fake_archive(self.target) for _ in range(3)]
+        records = [self.fake_archive(self.target, kind="auto") for _ in range(3)]
         records[0]["name"] = "mismatched-name.zip"
         self.service.config["history"] = records
         with patch.object(self.service.manager, "inspect_archive", side_effect=ValueError("not a verified package")) as inspect:
@@ -200,6 +214,18 @@ class DataTransferTests(unittest.TestCase):
             self.service._prune(self.target, 1)
             inspect.assert_called_once_with(Path(records[1]["path"]))
         self.assertTrue(all(Path(item["path"]).exists() for item in records))
+
+    def test_automatic_retention_preserves_manually_created_and_recovery_archives(self):
+        self.service.config["settings"] = self.settings(keep=1)
+        manual = self.service.backup()["backup"]
+        first_auto = self.service.backup(automatic=True)["backup"]
+        first_auto.pop("kind")
+        recovery = self.service.manager.create_archive(self.target, kind="pre-import")
+        self.service.config["history"].append(recovery)
+        latest = self.service.backup(automatic=True)["backup"]
+        for archive in (manual, recovery, latest):
+            self.assertTrue(Path(archive["path"]).is_file())
+        self.assertFalse(Path(first_auto["path"]).exists())
 
     def test_preference_payload_rejects_unrelated_or_excessive_values(self):
         self.assertEqual(transfer.preferences({"case.view": "archive"}), {"case.view": "archive"})
@@ -213,8 +239,8 @@ class DataTransferTests(unittest.TestCase):
         source.write_text("sample source", encoding="utf-8")
         business = self.runtime / "business.json"
         business.write_text('{"value":"exported"}', encoding="utf-8")
-        (self.app / "图文素材").mkdir()
-        image = self.app / "图文素材" / "available-image.jpg"
+        (self.app / "工作台数据" / "图文素材").mkdir(parents=True)
+        image = self.app / "工作台数据" / "图文素材" / "available-image.jpg"
         image.write_bytes(b"independent image fixture")
         exported = self.service.export({"preferences": {"workbench.view": "all"}})
         token = exported["download_url"].rsplit("/", 1)[1]

@@ -60,6 +60,8 @@ class ScriptProductionActionsBrowserTests(unittest.TestCase):
         self.assertTrue(page.locator("#script-release").is_visible())
         page.locator("#script-more-actions > summary").click()
         page.locator("#script-derive").click()
+        # 逐句编辑里的「整段改」打开原来的整段编辑框。
+        page.locator(".adopted-line-edit [data-edit-whole]").click()
         page.locator("#script-editor-dialog[open]").wait_for()
         self.assertEqual(page.locator('#script-editor-dialog [name="text"]').input_value(), self.script["text"])
         page.locator('#script-editor-dialog [data-close]').first.click()

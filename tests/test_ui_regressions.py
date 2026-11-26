@@ -64,6 +64,8 @@ class WorkbenchBrowserTests(unittest.TestCase):
 
     def open_page(self, hash_route="#library"):
         context = self.browser.new_context(viewport={"width": 1080, "height": 620})
+        # 这些用例测的是本地视频播放器；TikTok 播放器另有 test_case_tiktok_player_ui。
+        context.add_init_script("try { localStorage.setItem('case-video-source', 'local'); } catch {}")
         self.addCleanup(context.close)
         page = context.new_page()
         page.set_default_timeout(10000)
@@ -334,10 +336,8 @@ class WorkbenchBrowserTests(unittest.TestCase):
         close_library_filters(page)
         page.locator("#case-search").fill("SHARPAL")
         page.locator("#result-count").get_by_text("10 条案例").wait_for()
-        open_library_filters(page)
         sold_option = next(label for label in page.locator("#sort-filter option").all_text_contents() if "售出" in label)
         page.locator("#sort-filter").select_option(label=sold_option)
-        close_library_filters(page)
         self.assertIn("category=positive", page.url)
         self.assertIn("q=", page.url)
         page.reload()

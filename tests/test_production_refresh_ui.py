@@ -40,8 +40,6 @@ class VoiceRefreshBrowserTests(ProductionValidationBrowserTests):
 
         with patch.object(self.browser,'new_context',side_effect=context_factory):
             page=self.open_page(post=approve)
-        for box in page.locator('[data-edit-review] input[name="reviewed"]').all():
-            box.check()
         page.locator('[data-approve-edit]').click()
         # The 下一步 strip is hidden in favour of the step bar but still tracks the state.
         page.locator('[data-next-state]').get_by_text('已人工审查',exact=True).wait_for(state='attached')
@@ -115,6 +113,82 @@ class VoiceRefreshBrowserTests(ProductionValidationBrowserTests):
         page.locator('#take-form [data-error]').get_by_text('Fixture voice unavailable',exact=False).wait_for()
         self.assertEqual(runtime.count(),0)
 
+    def test_deleting_selected_take_clears_selection_and_keeps_drafts(self):
+        job = self.payload['job']
+        groups = [{'number':1,'start':0,'end':1.5,'coverage':1}]
+        job.update(selected_take='TAK-first', takes=[self.take('TAK-first',groups),self.take('TAK-second',groups)], timelines=[], edits=[])
+        self.payload['revision'] = 1
+        def delete(route):
+            body = route.request.post_data_json
+            if body.get('preview'):
+                route.fulfill(json={'take_id':'TAK-first','selected':True,'bytes':4000,'files':2,'blockers':[]})
+                return
+            self.assertEqual(body['revision'], 1)
+            self.assertTrue(body['request_id'])
+            job.update(selected_take=None,takes=[job['takes'][1]])
+            self.payload['revision'] = 2
+            route.fulfill(json={'job':job,'deleted_take':'TAK-first','warnings':[]})
+        page = self.open_page(post=delete)
+        page.evaluate("document.querySelector('#take-form [name=new_note]').value = 'Unfinished note'; window.__takeForm = document.querySelector('#take-form')")
+        page.locator('[data-step~="voice"]').click()
+        page.locator('[data-take-id="TAK-first"] .production-row-menu > summary').click()
+        page.locator('[data-delete-take="TAK-first"]').click()
+        dialog = page.locator('dialog.production-dialog')
+        self.assertIn('清空当前选用',dialog.inner_text())
+        self.assertIn('不能回传到本单',dialog.inner_text())
+        self.assertIn('可能离线',dialog.inner_text())
+        dialog.locator('[data-submit]').click()
+        dialog.wait_for(state='detached')
+        page.locator('[data-take-id="TAK-first"]').wait_for(state='detached')
+        self.assertTrue(page.locator('[data-take-id="TAK-second"]').is_visible())
+        self.assertEqual(page.locator('[data-take-tabs]').count(),0)
+        self.assertTrue(page.evaluate("window.__takeForm === document.querySelector('#take-form')"))
+        self.assertEqual(page.locator('#take-form [name="new_note"]').input_value(),'Unfinished note')
+        self.assertEqual(page.locator('#take-panel h2 small').inner_text(),'1 版')
+        row = page.locator('#job-script-panel .production-table tbody tr').first
+        self.assertFalse(row.evaluate("node => node.classList.contains('voice-timing-row') || !!node.onclick || !!node.onkeydown"))
+
+    def test_deleting_last_take_shows_empty_state(self):
+        job = self.payload['job']
+        job.update(selected_take='TAK-first',takes=[self.take('TAK-first',[{'number':1,'start':0,'end':1.5,'coverage':1}])],timelines=[],edits=[])
+        self.payload['revision'] = 1
+        def delete(route):
+            if route.request.post_data_json.get('preview'):
+                route.fulfill(json={'take_id':'TAK-first','selected':True,'bytes':100,'files':1,'blockers':[]})
+            else:
+                job.update(selected_take=None,takes=[])
+                self.payload['revision'] = 2
+                route.fulfill(json={'job':job,'deleted_take':'TAK-first','warnings':[]})
+        page = self.open_page(post=delete)
+        page.locator('[data-step~="voice"]').click()
+        page.locator('[data-take-id="TAK-first"] .production-row-menu > summary').click()
+        page.locator('[data-delete-take="TAK-first"]').click()
+        page.locator('dialog.production-dialog [data-submit]').click()
+        # With no voiceover left the empty block steps aside: the voice form right there says what to do.
+        page.locator('#take-panel [data-empty-takes]').get_by_text('还没有配音。').wait_for(state='attached')
+        self.assertEqual(page.locator('#take-panel [data-take-id]').count(),0)
+        self.assertEqual(page.locator('#take-panel [data-take-tabs]').count(),0)
+        row = page.locator('#job-script-panel .production-table tbody tr').first
+        self.assertFalse(row.evaluate("node => node.classList.contains('voice-timing-row') || !!node.onclick || !!node.onkeydown"))
+        self.assertEqual(page.locator('#take-panel h2 small').inner_text(),'0 版')
+
+    def test_blocked_take_delete_shows_references_without_confirm(self):
+        job = self.payload['job']
+        job.update(selected_take='TAK-first',takes=[self.take('TAK-first',[{'number':1,'start':0,'end':1.5,'coverage':1}])])
+        def preview(route):
+            self.assertEqual(route.request.post_data_json, {'preview':True})
+            route.fulfill(json={'take_id':'TAK-first','selected':True,'bytes':0,'files':0,'blockers':['时间线仍在使用这版配音']})
+        page = self.open_page(post=preview)
+        page.locator('[data-step~="voice"]').click()
+        page.locator('[data-take-id="TAK-first"] .production-row-menu > summary').click()
+        page.locator('[data-delete-take="TAK-first"]').click()
+        dialog = page.locator('dialog.production-dialog')
+        self.assertIn('时间线仍在使用这版配音',dialog.inner_text())
+        self.assertTrue(dialog.locator('[data-submit]').is_hidden())
+        dialog.locator('[data-close]').last.click()
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual(page.locator('[data-take-id="TAK-first"]').count(),1)
+
     def test_take_selection_preserves_audio_details_and_other_step_drafts(self):
         job = self.payload['job']
         groups = [{'number':1,'start':0,'end':1.5,'coverage':1}]
@@ -132,16 +206,21 @@ class VoiceRefreshBrowserTests(ProductionValidationBrowserTests):
         page = self.open_page(post=select)
         page.locator('#edit-panel textarea[name="instruction"]').fill('Keep this unfinished edit request.')
         page.evaluate("window.__originalForm=document.querySelector('#edit-panel #edit-form');window.__originalAudio=document.querySelector('[data-take-id=TAK-first] audio')")
-        page.locator('[data-step="voice"]').click()
-        page.locator('[data-take-id="TAK-first"] details > summary').click()
+        page.locator('[data-step~="voice"]').click()
+        page.locator('[data-take-id="TAK-first"] details:not(.production-row-menu) > summary').click()
+        page.locator('[data-take-tab="TAK-second"]').click()
         page.locator('[data-select-take="TAK-second"]').click()
         page.locator('[data-take-id="TAK-second"] .take-head .script-status').get_by_text('当前使用',exact=True).wait_for()
+        self.assertEqual(page.locator('[data-take-tab="TAK-second"]').get_attribute('aria-selected'), 'true')
+        self.assertEqual(page.locator('[data-take-tab="TAK-second"] .voice-tab-dot').count(), 1)
+        self.assertEqual(page.locator('[data-take-tab="TAK-first"] .voice-tab-dot').count(), 0)
         self.assertTrue(page.evaluate("window.__originalAudio===document.querySelector('[data-take-id=TAK-first] audio')"))
-        self.assertTrue(page.locator('[data-take-id="TAK-first"] details').evaluate('node=>node.open'))
+        self.assertTrue(page.locator('[data-take-id="TAK-first"] details:not(.production-row-menu)').evaluate('node=>node.open'))
         self.assertTrue(page.evaluate("window.__originalForm===document.querySelector('#edit-panel #edit-form')"))
         self.assertEqual(page.locator('#edit-panel textarea[name="instruction"]').input_value(),'Keep this unfinished edit request.')
-        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-step'),'voice')
+        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-stage'), 'prep')
         # A second mutation must use the revision returned by the local refresh.
+        page.locator('[data-take-tab="TAK-first"]').click()
         page.locator('[data-select-take="TAK-first"]').click()
         page.locator('[data-take-id="TAK-first"] .take-head .script-status').wait_for()
         self.assertEqual([call['body']['revision'] for call in self.calls],[1,2])

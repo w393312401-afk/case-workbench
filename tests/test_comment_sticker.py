@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -401,6 +402,23 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("AvatarInitial", text)
         self.assertNotIn("CacheClip", text)
 
+    def test_card_narrows_to_its_words_keeping_its_left_edge(self):
+        comp = Comp()
+        comp.tools["CardShape"].inputs["Width"] = 0.1
+        worker.fill_comment_card(comp, "@a", ["one"], 0.04)
+        self.assertAlmostEqual(comp.tools["CardShape"].inputs["Width"], 0.04)
+        self.assertAlmostEqual(comp.tools["CardShape"].inputs["Center"][1], 0.4 - 0.03)
+        comp = Comp()
+        comp.tools["CardShape"].inputs["Width"] = 0.1
+        worker.fill_comment_card(comp, "@a", ["one"], 0.5)  # never wider than the template
+        self.assertEqual(comp.tools["CardShape"].inputs["Width"], 0.1)
+
+    def test_a_reply_label_template_shows_only_the_name(self):
+        comp = Comp()
+        comp.tools["Username"].inputs["StyledText"] = "Reply to @username's comment"
+        worker.fill_comment_card(comp, "@sam_k", ["one"])
+        self.assertEqual(comp.tools["Username"].inputs["StyledText"], "@sam_k")
+
 
 class StickerRunner(FakeRunner):
     def __call__(self, args, input, **options):
@@ -410,6 +428,178 @@ class StickerRunner(FakeRunner):
         self.calls.append(request)
         body = {"ok": True, "created": sum(call["command"] == "add_comment_sticker" for call in self.calls) == 1, "start": 0, "end": 100, "saved": True}
         return subprocess.CompletedProcess(args, 0, json.dumps(body).encode("utf-8"), b"")
+
+
+class CandidateOptionsTests(unittest.TestCase):
+    IDS = ("106e5d79395dbc48", "1a249448f7a6d869", "21b35bfb1fe0cd06")
+
+    def setUp(self):
+        self.app = mock.Mock()
+        self.job = {"script_id": "SCR-adopted", "source": {"variant_index": 0}}
+        self.provenance = {"task_id": "AIT-source", "round_id": "AIR-adopted", "variant_index": 0,
+                           "candidate_text": (f"- 稿 1 回应评论 {self.IDS[0]}（质疑类）。\n"
+                                              f"- 稿 2 回应评论 {self.IDS[1]}（提问类）。\n"
+                                              f"- 稿 3 回应 Reddit 评论 {self.IDS[2]}（陈述类）。")}
+        self.task = {"rounds": [{"round_id": "AIR-first", "instruction": "\n".join(
+            f"评论 {identifier}｜TikTok｜用户\nComment {index}\n来源：https://example.test/{identifier}"
+            for index, identifier in enumerate(self.IDS))}], "context": {"materials": []}}
+        self.rows = {identifier: {"id": identifier, "author_handle": f"user{index}", "text": f"Question {index}?",
+                                  "avatar": "saved.png" if index == 1 else None}
+                     for index, identifier in enumerate(self.IDS)}
+        self.app.creation.get_script.return_value = {"source": self.provenance}
+        self.app.ai.get.return_value = self.task
+        self.app.reviews.review.side_effect = self.rows.get
+
+    def options(self):
+        return [row["id"] for row in sticker.options(self.app, self.job)]
+
+    def test_each_adopted_variant_recovers_its_own_comment_before_other_avatars(self):
+        for index, identifier in enumerate(self.IDS):
+            with self.subTest(index=index):
+                self.provenance["variant_index"] = index
+                options = self.options()
+                self.assertEqual(options[0], identifier)
+                self.assertCountEqual(options, self.IDS)
+
+    def test_manual_edit_keeps_the_adopted_header_instead_of_using_current_outputs(self):
+        self.task["rounds"].append({"round_id": "AIR-adopted", "kind": "manual_edit", "instruction": "只重译稿 1"})
+        for turn in self.task["rounds"]:
+            turn["output"] = f"- 稿 1 回应评论 {self.IDS[1]}（提问类）。"
+        self.assertEqual(self.options()[0], self.IDS[0])
+
+    def test_comment_after_each_draft_is_matched_to_its_own_opening(self):
+        self.provenance["candidate_text"] = "\n\n---\n\n".join(
+            f"开头逻辑：A\n**口播（配音用）**\n```\nDraft {i}\n```\n"
+            f"- 评论 {identifier}：第 1 行回答问题。"
+            for i, identifier in enumerate(self.IDS))
+        for index, identifier in enumerate(self.IDS):
+            with self.subTest(index=index):
+                self.provenance["variant_index"] = index
+                self.assertEqual(self.options()[0], identifier)
+
+    def test_draft_comment_requires_an_unambiguous_opening_and_supplied_id(self):
+        first, second, _ = self.IDS
+        draft = "**口播（配音用）**\n```\nDraft\n```\n"
+        for annotation in (f"- 评论 {first}：第 2 行回应问题。",
+                           f"- 评论 {first}：第 1 行回答问题。\n- 评论 {second}：第 1 行回应问题。",
+                           "- 评论 invented：第 1 行回答问题。"):
+            with self.subTest(annotation=annotation):
+                self.provenance["candidate_text"] = draft + annotation
+                self.assertEqual(self.options(), [])
+        self.provenance["candidate_text"] = draft + f"- 评论 {first}：第 1 行回答问题。\n" + draft
+        self.assertEqual(self.options(), [])
+
+    def test_structured_mapping_is_scoped_to_variant_and_supplied_comments(self):
+        self.provenance["candidate_text"] = "\n".join(
+            f"评论贴纸关联：第 {i + 1} 稿｜评论 {identifier}" for i, identifier in enumerate(self.IDS))
+        for index, identifier in enumerate(self.IDS):
+            self.provenance["variant_index"] = index
+            self.assertEqual(sticker.adoption_comments(self.app, self.provenance, self.task)["selected_id"], identifier)
+        self.provenance["candidate_text"] += "\n评论贴纸关联：第 3 稿｜评论 invented"
+        self.assertEqual(sticker.adoption_comments(self.app, self.provenance, self.task)["selected_id"], "")
+
+    def test_frozen_choice_survives_missing_task_and_comment_database(self):
+        self.provenance["candidate_text"] = f"评论贴纸关联：第 1 稿｜评论 {self.IDS[0]}"
+        frozen = sticker.adoption_comments(self.app, self.provenance, self.task)
+        self.provenance["comment_sticker"] = frozen
+        self.app.ai.get.side_effect = RuntimeError("task deleted")
+        self.app.reviews.review.side_effect = RuntimeError("database unavailable")
+        self.assertEqual(self.options()[0], self.IDS[0])
+        frozen["selected_id"] = ""
+        self.assertEqual(self.options(), [])
+
+    def test_adoption_validates_and_freezes_the_persons_choice(self):
+        from workbench_creation import CreationWorkbenchMixin
+        from creation_store import CreationError
+        app = mock.MagicMock()
+        app.creation.replay.return_value = None
+        app.creation.mutate.return_value = {"script": {"id": "SCR-test"}}
+        app.creation_catalog.return_value = {"scripts": []}
+        app._script_alias.side_effect = lambda script: script
+        source = {"task_id": "AIT-source", "round_id": "AIR-source", "product": "202H",
+                  "candidate_text": "**口播（配音用）**\n```\nFirst line.\n```"}
+        app.ai.candidate.return_value = source
+        app.ai.get.return_value = self.task
+        app.reviews.review.side_effect = self.rows.get
+        body = {"script": {"product": "202H"}, "source": {"task_id": "AIT-source", "round_id": "AIR-source",
+                "task_revision": 1, "variant_index": 0, "comment_review_id": self.IDS[1]}}
+        CreationWorkbenchMixin.save_script(app, body)
+        frozen = app.creation.mutate.call_args.args[2]["comment_sticker"]
+        self.assertEqual(frozen["selected_id"], self.IDS[1])
+        self.assertEqual(frozen["candidates"][1]["text"], "Question 1?")
+        body["source"]["comment_review_id"] = "not-supplied"
+        with self.assertRaises(CreationError):
+            CreationWorkbenchMixin.save_script(app, body)
+
+    def test_only_comments_explicitly_supplied_in_instruction_lines_are_allowed(self):
+        invented = "0123456789abcdef"
+        self.provenance["candidate_text"] = f"- 稿 1 回应评论 {invented}（质疑类）。"
+        self.task["rounds"][0]["instruction"] += f"\n来源：https://example.test/评论/{invented}\n参考编号 {invented}"
+        self.task["rounds"][0]["review_context"] = {"status": "attached", "text": f"评论 {invented}｜摘要"}
+        self.rows[invented] = {"id": invented, "author_handle": "extra", "text": "Not supplied."}
+        self.assertEqual(self.options(), [])
+
+    def test_unknown_or_ambiguous_mapping_does_not_guess_the_first_input(self):
+        first, second, _ = self.IDS
+        candidates = ("No explicit mapping.", f"正文里说稿 1 回应评论 {first}",
+                      f"- 稿 9 回应评论 {first}（质疑类）。",
+                      f"- 稿 1 回应评论 {first}（质疑类）。\n- 稿 1 回应评论 {second}（提问类）。",
+                      f"- 稿 1 回应评论 {first}、{second}（质疑类）。",
+                      f"- 稿 1 回应评论 {first}（也回应评论 {second}）。")
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                self.provenance["candidate_text"] = candidate
+                self.assertEqual(self.options(), [])
+
+    def test_source_variant_index_must_be_an_actual_nonnegative_integer(self):
+        for index in (None, True, False, -1, "0", 1.0):
+            with self.subTest(index=index):
+                self.provenance["variant_index"] = index
+                self.assertEqual(self.options(), [])
+
+    def test_legacy_marker_and_basket_priorities_and_global_deduplication_stay(self):
+        first, second, third = self.IDS
+        self.task["rounds"][0]["instruction"] += f"\n{sticker.MARKER}{second}"
+        self.task["context"] = {"materials": [{"type": "review", "source_id": third}],
+                                "linked_reviews": [{"review_id": first, "linked_as": "方向顾虑"}]}
+        self.assertEqual(self.options(), [second, third, first])
+        self.provenance["candidate_text"] = "No mapping."
+        self.assertEqual(self.options(), [second, third, first])
+
+    def stance_task(self, identifier):
+        self.task["rounds"] = [{"round_id": "AIR-first", "instruction": (
+            f"顺着这条评论写稿（站在观众这边）。评论 {identifier}｜@user｜TikTok｜观众（评论者说法未核实）：\nQuestion?\n\n写法：……")}]
+
+    def test_stance_comment_is_the_default_sticker_for_every_draft(self):
+        second = self.IDS[1]
+        self.stance_task(second)
+        self.assertEqual(sticker.stance_ids(self.task["rounds"]), [second])
+        self.provenance["candidate_text"] = "No mapping."
+        for index in range(3):
+            with self.subTest(index=index):
+                self.provenance["variant_index"] = index
+                chosen = sticker.adoption_comments(self.app, self.provenance, self.task)
+                self.assertEqual(chosen["selected_id"], second)
+                self.assertEqual([row["id"] for row in chosen["candidates"]], [second])
+        self.assertEqual(self.options()[0], second)
+
+    def test_explicit_mapping_still_wins_over_the_stance_comment(self):
+        first, second, _ = self.IDS
+        self.stance_task(second)
+        self.task["context"] = {"materials": [{"type": "review", "source_id": first}]}
+        self.provenance["candidate_text"] = f"评论贴纸关联：第 1 稿｜评论 {first}"
+        self.assertEqual(sticker.adoption_comments(self.app, self.provenance, self.task)["selected_id"], first)
+
+    def test_structured_mapping_may_leave_out_the_word_comment(self):
+        self.provenance["candidate_text"] = "\n".join(
+            f"评论贴纸关联：第 {i + 1} 稿｜{identifier}" for i, identifier in enumerate(self.IDS))
+        for index, identifier in enumerate(self.IDS):
+            self.provenance["variant_index"] = index
+            self.assertEqual(sticker.adoption_comments(self.app, self.provenance, self.task)["selected_id"], identifier)
+
+    def test_other_requests_have_no_stance_comment(self):
+        self.assertEqual(sticker.stance_ids(self.task["rounds"]), [])
+        self.assertEqual(sticker.stance_ids([{"instruction": f"别顺着这条评论写稿。评论 {self.IDS[0]}｜x"}]), [])
 
 
 class FlowTests(unittest.TestCase):
@@ -478,6 +668,18 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(self.calls()[0]["username"], "@amy")
             with self.assertRaisesRegex(VoiceError, "找不到"):
                 pick("r9")
+
+    def test_a_comment_picked_from_the_library_search_is_used_and_goes_to_the_basket(self):
+        found = {"id": "lib1", "author_handle": "knife.guy", "author_name": "", "text": "Mine slipped every time.", "avatar": None, "thread": []}
+        self.bench.reviews.review.side_effect = lambda identifier: found if identifier == "lib1" else None
+        self.bench.reviews.note_used.return_value = {"added": ["lib1"]}
+        with mock.patch.object(sticker, "options", lambda app, job: [self.REVIEW]):
+            pick = lambda identifier: self.bench.add_timeline_comment_sticker(self.job["id"], {"timeline_uid": self.line["unique_id"], "request_id": uuid4().hex, "review_id": identifier})
+            card = pick("lib1")["timeline"]["comment_sticker"]
+            self.assertEqual((card["review_id"], card["username"]), ("lib1", "@knife.guy"))
+            self.assertEqual(self.bench.reviews.note_used.call_args.args[0][0][0], "lib1")
+            with self.assertRaisesRegex(VoiceError, "找不到"):
+                pick("gone")
 
     def test_options_put_comments_with_avatars_first(self):
         self.bench.ai = mock.Mock()
@@ -564,14 +766,91 @@ def designed():
     return text.rstrip()[:-1] + '\tFrames = {\n\t\tCacheClip = "C:/machine/path",\n\t},\n}\n'
 
 
+class MadeUpCommentTests(unittest.TestCase):
+    MADE = {"type": "ai_comment", "source_id": "AI-0123456789ab", "author_handle": "@samk", "title": "@samk", "text": "does it do serrated?", "zh": "锯齿刀能磨吗"}
+
+    def test_a_made_up_basket_comment_is_offered_but_never_goes_to_the_basket_as_used(self):
+        task = {"rounds": [{"instruction": "写稿"}], "context": {"materials": [self.MADE]}}
+        app = mock.Mock()
+        app.creation.get_script.return_value = {"source": {"task_id": "T1"}}
+        app.ai.get.return_value = task
+        app.reviews.review.return_value = None
+        [row] = sticker.options(app, {"script_id": "S1"})
+        self.assertEqual((row["id"], sticker.username(row), row["avatar"]), ("AI-0123456789ab", "@samk", None))
+        app.reviews.review.assert_not_called()
+        self.assertEqual(sticker.attached_ids(task["context"]), ["AI-0123456789ab"])
+        self.assertIsNone(sticker.video_use({"id": "PRD-1"}, {"unique_id": "u"}, {"review_id": "AI-0123456789ab"}))
+        frozen = sticker.adoption_comments(app, {"candidate_text": "评论贴纸关联：第 1 稿｜评论 AI-0123456789ab", "variant_index": 0}, task)
+        self.assertEqual(frozen["selected_id"], "AI-0123456789ab")
+        self.assertEqual(frozen["candidates"][0]["text"], "does it do serrated?")
+
+
+class MadeUpOpeningRuleTests(unittest.TestCase):
+    def test_writing_is_told_to_open_every_draft_as_a_reply_to_the_made_up_comment(self):
+        import ai_tasks
+        self.assertEqual(ai_tasks._made_up_opening_rule({"materials": [{"type": "review", "source_id": "r1"}]}), "")
+        rule = ai_tasks._made_up_opening_rule({"materials": [MadeUpCommentTests.MADE]})
+        self.assertIn('评论 AI-0123456789ab｜"@samk"："does it do serrated?"', rule)
+        for words in ("每条稿都用上面的一条评论开场", "不反复叫评论者名字", "不用 Your move", "第一句口播直接接这条评论说话", "不要把评论者的处境、经历或原话改成讲述者自己的经历", "评论贴纸关联：第 N 稿｜评论 ID"):
+            self.assertIn(words, rule)
+
+
+class LibraryAndComposeTests(unittest.TestCase):
+    def test_search_keeps_only_comments_the_card_can_carry(self):
+        reviews = mock.Mock()
+        reviews.search.return_value = {"total": 3, "reviews": [
+            {"id": "a", "author_handle": "amy", "author_name": "", "text": "Works great", "zh": "很好用", "avatar": "k1", "likes": 9, "product": "202H"},
+            {"id": "b", "author_handle": "bob", "author_name": "", "text": "很好用", "avatar": None},
+            {"id": "c", "author_handle": "", "author_name": "", "text": "No name", "avatar": None}]}
+        result = sticker.search_library(reviews, "  好用 ")
+        self.assertEqual(reviews.search.call_args.args[0], {"q": "好用"})
+        self.assertEqual(result["comments"], [{"id": "a", "username": "@amy", "text": "Works great", "zh": "很好用", "avatar": "k1", "product": "202H", "likes": 9}])
+        self.assertEqual(sticker.search_library(reviews, " "), {"total": 0, "comments": []})
+
+    def test_composed_comment_is_cleaned_or_refused(self):
+        self.assertEqual(sticker.parse_composed('好的\n{"username":"@Sam K!","text":"does it  work on serrated?","zh":"锯齿刀能用吗"}'),
+                         {"username": "@SamK", "text": "does it work on serrated?", "zh": "锯齿刀能用吗"})
+        self.assertIsNone(sticker.parse_composed('{"username":"sam","text":"真的好用"}'))
+        self.assertIsNone(sticker.parse_composed('{"username":"","text":"works"}'))
+        self.assertIsNone(sticker.parse_composed("not json"))
+        self.assertIn("<要求>温柔 \\u003cb></要求>", sticker.compose_prompt("温柔 <b>", "202H", "Stop."))
+
+
 class TemplateTests(unittest.TestCase):
     def test_shipped_template_gives_the_measured_sizes(self):
-        self.assertEqual(sticker.template_metrics(DESIGNED), {"line_width": sticker.LINE_WIDTH, "avatar_center": sticker.AVATAR_CENTER, "avatar_size": sticker.AVATAR_SIZE})
+        # The 2026-11-16 reply-to-comment look: small avatar beside the grey label, bold comment from the card's left edge.
+        self.assertEqual(sticker.template_metrics(DESIGNED), {"line_width": 46, "avatar_center": (213, 664), "avatar_size": 37})
+        self.assertIn('StyledText = Input { Value = "@username", }', DESIGNED)
+        self.assertNotIn("Reply to", DESIGNED)
+
+    def test_card_width_follows_the_longest_line(self):
+        fonts = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, fonts, True)
+        found = {name: next((p for p in (Path("C:/Windows/Fonts") / name, Path("/usr/share/fonts/truetype/liberation") / alt,
+                                         Path("/usr/share/fonts/truetype/liberation2") / alt) if p.is_file()), None)
+                 for name, alt in (("arial.ttf", "LiberationSans-Regular.ttf"), ("arialbd.ttf", "LiberationSans-Bold.ttf"))}
+        if not all(found.values()):
+            self.skipTest("no Arial or Liberation Sans here")
+        for name, path in found.items():
+            shutil.copy(path, fonts / name)
+        short = sticker.card_width(DESIGNED, "@sam_k", ["Does this really work?"], fonts)
+        long = sticker.card_width(DESIGNED, "@sam_k", ["Little pricey of an option. Average people do", "not need this big of a set."], fonts)
+        self.assertAlmostEqual(short, 0.296, delta=0.01)  # measured off the Resolve render: text ends at 0.43, plus the 0.03 margin
+        self.assertLess(short, long)
+        self.assertLessEqual(long, 0.68)
+        self.assertEqual(sticker.label_text(DESIGNED, "@sam_k"), "@sam_k")
+        self.assertEqual(sticker.label_text(DESIGNED.replace('"@username"', '"Reply to @username\'s comment"'), "@sam_k"), "@sam_k")
+        self.assertIsNone(sticker.card_width(DESIGNED, "@sam_k", ["x"], fonts / "missing"))
+
+    def test_the_first_regular_template_keeps_its_measured_sizes(self):
+        first = (DESIGNED.replace("{ 0.197, 0.654 }", "{ 0.218, 0.64 }").replace("Width = Input { Value = 0.03, }", "Width = Input { Value = 0.073, }")
+                 .replace("{ 0.19, 0.627 }", "{ 0.275, 0.627 }").replace('Value = "Bold"', 'Value = "Regular"').replace("Value = 0.032,", "Value = 0.034,"))
+        self.assertEqual(sticker.template_metrics(first), {"line_width": sticker.LINE_WIDTH, "avatar_center": sticker.AVATAR_CENTER, "avatar_size": sticker.AVATAR_SIZE})
 
     def test_larger_text_fits_fewer_characters_and_a_moved_avatar_moves_the_picture(self):
-        text = DESIGNED.replace("Size = Input { Value = 0.034, }", "Size = Input { Value = 0.068, }").replace("Center = Input { Value = { 0.218, 0.64 }, }", "Center = Input { Value = { 0.3, 0.5 }, }")
+        text = DESIGNED.replace("Size = Input { Value = 0.032, }", "Size = Input { Value = 0.064, }").replace("Center = Input { Value = { 0.197, 0.654 }, }", "Center = Input { Value = { 0.3, 0.5 }, }")
         metrics = sticker.template_metrics(text)
-        self.assertEqual(metrics["line_width"], 21)
+        self.assertEqual(metrics["line_width"], 23)
         self.assertEqual(metrics["avatar_center"], (324, 960))
 
     def test_the_design_becomes_a_clip_avatar_template(self):

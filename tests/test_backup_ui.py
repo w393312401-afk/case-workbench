@@ -107,7 +107,7 @@ class BackupBrowserTests(unittest.TestCase):
           });
         ''')
         page.add_script_tag(path=str(ROOT / "static" / "settings.js"))
-        page.evaluate("WorkbenchSettings.render()")
+        page.evaluate("WorkbenchSettings.render();document.querySelectorAll('[data-settings-section]').forEach(s=>s.hidden=s.dataset.settingsSection==='overview')")
         return page
 
     def ready(self, page):

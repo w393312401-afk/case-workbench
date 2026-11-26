@@ -153,7 +153,8 @@ class TKCandidatesBrowserTests(unittest.TestCase):
         page = self.open_page()
         section = page.locator(".tk-candidates")
         expect(section.locator(".tk-cand")).to_have_count(0)
-        expect(section.locator("h2 small")).to_have_text("TK 看板 · 0 条待处理")
+        # Nothing waiting folds the inbox to one quiet line.
+        expect(section.locator(".tk-cand-line")).to_contain_text("没有待处理")
         expect(section.locator(".tk-cand-footer")).to_contain_text("已处理 3 · 已忽略 1")
         posts = []
         page.on("request", lambda request: posts.append(request.url) if request.method == "POST" else None)

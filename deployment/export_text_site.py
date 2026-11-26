@@ -6,7 +6,6 @@ stay local. All calls to the original service are GET requests.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import hashlib
 import json
@@ -18,6 +17,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from urllib.parse import urlencode
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
@@ -131,10 +131,17 @@ def video_details(videos):
     return details
 
 
-def export(base):
+def export(base, pace=1.0):
+    # The workbench answers under one interpreter lock: four parallel readers left whoever was using it
+    # a fifth of its time for a minute or two. Read one record at a time and rest as long as each read
+    # took (at most half a second), so pages stay responsive while a snapshot is being made.
     def get(path):
+        started = time.monotonic()
         with urlopen(base.rstrip("/") + path, timeout=120) as response:
-            return json.load(response)
+            value = json.load(response)
+        if pace:
+            time.sleep(min(0.5, (time.monotonic() - started) * pace))
+        return value
 
     paths = {
         "state": "/api/state", "product_catalog": "/api/products", "review_summary": "/api/reviews/summary",
@@ -145,8 +152,7 @@ def export(base):
         "directions_all": "/api/directions?archive=all", "creation": "/api/creation",
         "materials": "/api/materials", "tasks": "/api/ai/tasks", "review_followups": "/api/review-followups",
     }
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        responses = dict(zip(paths, executor.map(get, paths.values())))
+    responses = {name: get(path) for name, path in paths.items()}
     reviews, video_context, offset = [], {}, 0
     while True:
         result = get("/api/reviews?" + urlencode({"include_brand": 1, "include_irrelevant": 1,
@@ -180,9 +186,9 @@ def export(base):
         expected = full["videos"][video["video_id"]]
         if any(expected.get(key) != value for key, value in actual.items()):
             raise RuntimeError("销售详情批量导出与工作台接口不一致，拒绝发布。")
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        for (kind, identifier, _), result in zip(requests, executor.map(get, [r[2] for r in requests])):
-            full[kind][identifier] = result.get("video") if kind == "videos" else result.get("task") if kind == "tasks" else result
+    for kind, identifier, path in requests:
+        result = get(path)
+        full[kind][identifier] = result.get("video") if kind == "videos" else result.get("task") if kind == "tasks" else result
     if (get("/api/state")["digest"] != responses["state"]["digest"] or get("/api/products") != responses["product_catalog"]
             or get("/api/creation")["revision"] != responses["creation"]["revision"]
             or get("/api/review-followups")["revision"] != responses["review_followups"]["revision"]):

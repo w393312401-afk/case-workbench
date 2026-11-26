@@ -13,6 +13,32 @@ PINNED = """() => {
 
 
 class VideoStepsBrowserTests(ProductionValidationBrowserTests):
+    def test_original_script_is_built_only_when_opened_and_reused(self):
+        self.payload['variant'] = {'markdown': '## 完整原稿\n\n**口播（配音用）**\n```text\nOne kit.\n```', 'label': '测试稿'}
+        page = self.open_page()
+        self.assertEqual(page.locator('#job-script-body *').count(), 0)
+        page.locator('[data-step~="lines"]').click()
+        page.locator('#job-script-original > summary').click()
+        page.locator('#job-script-body code').wait_for()
+        self.assertEqual(page.locator('#job-script-body code').inner_text(), 'One kit.')
+        self.assertEqual(page.locator('#job-script-body button').get_attribute('aria-label'), '复制口播')
+        page.evaluate('() => window.__originalCode = document.querySelector("#job-script-body code")')
+        page.locator('#job-script-original > summary').click()
+        page.locator('#job-script-original > summary').click()
+        self.assertTrue(page.evaluate('() => window.__originalCode === document.querySelector("#job-script-body code")'))
+
+    def test_open_original_script_keeps_current_text_after_refresh(self):
+        self.payload['variant'] = {'markdown': '## 旧稿\n\nOne kit.', 'label': '测试稿'}
+        page = self.open_page()
+        page.locator('[data-step~="lines"]').click()
+        page.locator('#job-script-original > summary').click()
+        page.locator('#job-script-body').get_by_text('One kit.', exact=True).wait_for()
+        self.payload['variant']['markdown'] = '## 更新稿\n\nUpdated wording.'
+        page.evaluate('() => window.CaseProduction.route(true)')
+        self.assertTrue(page.locator('#job-script-original').evaluate('node => node.open'))
+        page.locator('#job-script-body').get_by_text('Updated wording.', exact=True).wait_for()
+        self.assertEqual(page.locator('#job-script-body').get_by_text('One kit.', exact=True).count(), 0)
+
     def test_steps_switch_sections_and_stay_pinned(self):
         self.payload["job"]["takes"] = [self.take("TAK-0123456789ab", [{"number": 1, "start": 0, "end": 1.5, "coverage": 1}])]
         self.payload["job"]["selected_take"] = "TAK-0123456789ab"
@@ -21,8 +47,11 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         self.timelines = ["禁用-蓝点折刀", "蓝点折刀成品素材", "Lab261011-202-1", "户外猎刀成品素材", "混剪素材", "Buck110折刀", "繁體廚刀", "raw-001"]
         page = self.open_page()
         steps = page.locator(".production-steps")
-        self.assertEqual(steps.locator("[data-step] span").all_inner_texts(), ["脚本", "配音", "达芬奇时间线", "AI 剪辑与人工审查", "成片与发布"])
-        self.assertEqual(steps.locator('[aria-selected="true"]').get_attribute("data-step"), "edit")
+        # Three stages hold the six working steps; a step key still finds the stage it belongs to.
+        self.assertEqual(steps.locator("[data-stage]").evaluate_all("nodes => nodes.map(node => `${node.dataset.stage}:${node.dataset.step}`)"),
+                         ["prep:lines voice timeline", "review:edit cut", "publish:publish"])
+        self.assertEqual(["".join(text.split()) for text in steps.locator("[data-stage] span").all_inner_texts()], ["1备料", "2审片", "3发布"])
+        self.assertEqual(steps.locator('[aria-selected="true"]').get_attribute("data-stage"), "review")
         page.locator("#edit-panel").wait_for()
         for hidden in ("#voice-panel", "#timeline-panel"):
             self.assertFalse(page.locator(hidden).is_visible())
@@ -34,7 +63,7 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         self.assertEqual(page.locator('#edit-form input[name="material"]:checked').count(), 0)
         page.locator("#edit-form [data-materials] .context-note").get_by_text("没有上次剪辑用过", exact=False).wait_for()
 
-        steps.locator('[data-step="voice"]').click()
+        steps.locator('[data-step~="voice"]').click()
         page.locator("#voice-panel").wait_for()
         self.assertFalse(page.locator("#edit-panel").is_visible())
         # Open completed controls and shorten the window so this fixture remains long enough to test sticky scrolling.
@@ -116,11 +145,12 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         page.route("**/api/production/resolve", lambda route: route.fulfill(json={"ok": False, "busy": True,
             "error": "达芬奇正在执行另一项工作台操作（可能是 AI 剪辑），请完成后再试。"}))
         self.assertEqual(page.locator('[data-select-take="TAK-built"]').inner_text(), "选用这一版")
+        page.locator('[data-take-tab="TAK-new"]').click()
         button = page.locator('[data-select-take="TAK-new"]')
         self.assertEqual(button.inner_text(), "选用并建时间线（Lab）")
         button.click()
         page.wait_for_function("() => !document.querySelector('[data-select-take=\"TAK-new\"]').disabled")
-        page.locator('.production-steps [data-step="voice"][aria-selected="true"]').wait_for()
+        page.locator('.production-steps [data-step~="voice"][aria-selected="true"]').wait_for()
         self.assertEqual([call["url"].rsplit("/", 1)[-1] for call in self.calls], ["select", "timeline"])
         self.assertEqual(self.calls[0]["body"]["take_id"], "TAK-new")
         self.assertEqual(self.calls[1]["body"]["creator"], "Lab")
@@ -130,6 +160,7 @@ class VideoStepsBrowserTests(ProductionValidationBrowserTests):
         self.payload["creators"] = ["Lab", "Zack"]
         self.payload["job"]["takes"] = [self.take("TAK-new", good), self.take("TAK-other", good)]
         page = self.open_page()
+        page.locator('[data-take-tab="TAK-new"]').click()
         card = page.locator('[data-take-id="TAK-new"]')
         card.locator("[data-build-creator]").select_option("Zack")
         self.assertEqual(card.locator("[data-select-take]").get_attribute("data-build"), "Zack")

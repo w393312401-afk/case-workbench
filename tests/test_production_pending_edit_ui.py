@@ -44,7 +44,7 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
                 content_type="application/json", body=json.dumps({"ok": False, "busy": True,
                     "error": "达芬奇正在执行另一项工作台操作"}, ensure_ascii=False)))
             page.reload()
-            page.locator('.production-steps [data-step="edit"]').click()
+            page.locator('.production-steps [data-step~="edit"]').click()
         return page
 
     def form(self, page):
@@ -54,16 +54,15 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
 
     def test_first_queued_timeline_accepts_exact_build_edit_request_without_handoff(self):
         page = fixture.ProductionValidationBrowserTests.open_page(self, width=390)
-        page.locator('.production-steps [data-step="timeline"]').click()
+        page.locator('.production-steps [data-step~="timeline"]').click()
         prepare = page.locator("[data-prepare-pending-edit]")
         expect(prepare).to_be_visible()
         prepare.click()
-        expect(page.locator('.production-steps [aria-selected="true"]')).to_have_attribute("data-step", "edit")
+        expect(page.locator('.production-steps [aria-selected="true"]')).to_have_attribute("data-stage", "review")
         form = self.form(page)
         expect(form.locator('[name="timeline"]')).to_have_value("pending:" + BUILD_REQUEST)
         expect(form.locator('[name="timeline"] option:checked')).to_contain_text("Lab261011-202-序号")
         expect(form.locator('[data-copy-handoff]')).to_be_disabled()
-        form.locator('[name="mode"]').select_option("sync")
         form.locator('[name="instruction"]').fill("开头保留切纸结果，随后跟随这版配音。")
         submit = form.locator('button[type="submit"]')
         expect(submit).to_be_enabled()
@@ -74,7 +73,7 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
         body = self.calls[0]["body"]
         self.assertTrue(body["request_id"])
         self.assertEqual({key: value for key, value in body.items() if key != "request_id"}, {
-            "timeline_request_id": BUILD_REQUEST, "mode": "sync",
+            "timeline_request_id": BUILD_REQUEST, "mode": "explain",
             "instruction": "开头保留切纸结果，随后跟随这版配音。", "materials": ["Lab成品素材"]})
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 
@@ -130,17 +129,16 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
                         target = form.locator('[name="timeline"]')
                         expect(target).to_have_value("pending:" + BUILD_REQUEST)
                         form.locator('[name="instruction"]').fill("这段要求只给原本排队的新时间线")
-                        form.locator('[name="mode"]').select_option("sync")
                         self.payload["job"].update(timeline_building=None, timeline_failure={
                             "request_id": BUILD_REQUEST, "cancelled": cancelled,
                             "error": "已取消建线" if cancelled else "原建线失败，未生成时间线",
                             "at": "2026-10-11T10:01:00"})
                         expect(page.locator("[data-timeline-busy]")).to_have_count(0, timeout=7000)
                         expect(page.locator('.production-steps [aria-selected="true"]')).to_have_attribute(
-                            "data-step", "edit")
+                            "data-stage", "review")
                         expect(target).to_have_value("pending:" + BUILD_REQUEST)
                         expect(form.locator('[name="instruction"]')).to_have_value("这段要求只给原本排队的新时间线")
-                        expect(form.locator('[name="mode"]')).to_have_value("sync")
+                        expect(form.locator('[name="mode"]')).to_have_value("explain")
                         expect(form.locator('[data-pending-edit-note]')).to_be_visible()
                         expect(form.locator('[data-pending-edit-note]')).to_contain_text("重新建线")
                         expect(form.locator('button[type="submit"]')).to_be_disabled()
@@ -163,11 +161,10 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
         page = self.open_page(post=cancelled)
         form = self.form(page)
         form.locator('[name="instruction"]').fill("保留我尚未提交成功的要求")
-        form.locator('[name="mode"]').select_option("montage")
         form.locator('button[type="submit"]').click()
         expect(form.locator("[data-error]")).to_contain_text("这次建线已取消，未启动剪辑")
         expect(form.locator('[name="instruction"]')).to_have_value("保留我尚未提交成功的要求")
-        expect(form.locator('[name="mode"]')).to_have_value("montage")
+        expect(form.locator('[name="mode"]')).to_have_value("explain")
         expect(form.locator('[name="timeline"]')).to_have_value("pending:" + BUILD_REQUEST)
         expect(form.locator('button[type="submit"]')).to_be_enabled()
         self.assertEqual(len(self.calls), 1)
@@ -176,12 +173,11 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
         page = self.open_page()
         form = self.form(page)
         form.locator('[name="instruction"]').fill("轮到我时仍要保留这段要求")
-        form.locator('[name="mode"]').select_option("sync")
         self.payload["job"]["timeline_building"]["stage"] = "building"
         expect(page.locator("[data-timeline-busy]")).to_contain_text("正在达芬奇里建时间线", timeout=7000)
-        expect(page.locator('.production-steps [aria-selected="true"]')).to_have_attribute("data-step", "edit")
+        expect(page.locator('.production-steps [aria-selected="true"]')).to_have_attribute("data-stage", "review")
         expect(form.locator('[name="instruction"]')).to_have_value("轮到我时仍要保留这段要求")
-        expect(form.locator('[name="mode"]')).to_have_value("sync")
+        expect(form.locator('[name="mode"]')).to_have_value("explain")
         self.payload["job"]["timeline_building"] = None
         self.payload["job"]["status"] = "timeline"
         self.payload["job"]["timelines"] = [{"unique_id": "uid-new", "name": "Lab261011-202-2",
@@ -191,9 +187,9 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
              "frames": 60, "fps": "29.97", "take_id": TAKE_ID, "built_at": "2026-10-11",
              "build_request_id": "unrelated-build-request", "materials": ["Lab成品素材"]}]
         expect(form.locator('[name="timeline"]')).to_have_value("uid-new", timeout=7000)
-        expect(page.locator('.production-steps [aria-selected="true"]')).to_have_attribute("data-step", "edit")
+        expect(page.locator('.production-steps [aria-selected="true"]')).to_have_attribute("data-stage", "review")
         expect(form.locator('[name="instruction"]')).to_have_value("轮到我时仍要保留这段要求")
-        expect(form.locator('[name="mode"]')).to_have_value("sync")
+        expect(form.locator('[name="mode"]')).to_have_value("explain")
         expect(form.locator('[data-copy-handoff]')).to_be_enabled()
         self.assertEqual(self.calls, [])
 
@@ -286,7 +282,7 @@ class ProductionPendingEditBrowserTests(unittest.TestCase):
 
     def test_the_timeline_card_names_the_model_that_cut_it(self):
         page, _ = self.recut_setup()
-        page.locator('.production-steps [data-step="timeline"]').click()
+        page.locator('.production-steps [data-step~="timeline"]').click()
         expect(page.locator('[data-timeline-id="uid-own"] [data-timeline-model]')).to_contain_text("gpt-6.1-terra")
 
 

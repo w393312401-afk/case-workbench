@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import re
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -29,6 +30,7 @@ class FakeNotion:
         self.bad_readback = False
         self.bad_body = False
         self.account_field = "发布账号"
+        self.query_access = "available"
 
     @contextmanager
     def client(self):
@@ -39,7 +41,7 @@ class FakeNotion:
         if action == self.fail:
             raise VoiceError(502, "测试中断")
         if action == "get_tool_access":
-            return {"current_tool_access": {"query_data_sources": {"status": "available"}}}
+            return {"current_tool_access": {"query_data_sources": {"status": self.query_access}}}
         if action == "fetch":
             if args["id"].startswith("collection://"):
                 if notion_id(args["id"]) == notion_id(ACCOUNTS):
@@ -61,7 +63,7 @@ class FakeNotion:
                 return {"results": [{"url": "https://app.notion.com/p/" + ACCOUNT, "Username": "fixture"}] if "fixture" in data["params"] else []}
             # Queries must use the canonical table from the fetched schema, including its hyphens.
             assert data["data_source_urls"] == ["collection://" + DEST]
-            return {"results": [{"url": "https://app.notion.com/p/" + uid} for uid, page in self.pages.items() if page["properties"]["名称"] == data["params"][0]]}
+            return {"results": [{"url": "https://app.notion.com/p/" + uid} for uid, page in self.pages.items() if page["properties"]["名称"] in data["params"]]}
         if action == "create_pages":
             self.pages[notion_id(PAGE)] = copy.deepcopy(args["pages"][0])
             return {"pages": [{"id": PAGE, "url": "https://app.notion.com/p/" + PAGE}]}
@@ -130,6 +132,23 @@ class NotionUploadTests(unittest.TestCase):
         self.assertTrue(self.app.calendar["video:" + JOB]["calendar_uploaded"])
         self.assertFalse(self.manager.busy())
 
+    def test_page_name_follows_the_release_naming_and_market(self):
+        # 成品统一命名（2026-11-24）：国旗 形式 产品-达人-日期-序号。
+        self.assertEqual(("🇺🇸 ▶️ 202-Fixture-1103-1", "US-202-Fixture-1103-1"),
+                         (lambda d: (d["name"], d["file_name"]))(self.manager.detail(JOB, "timeline-1")))
+        data = self.app.production.read()
+        data["jobs"][0]["market"] = "de"
+        self.app.production.write(data)
+        self.run_upload()
+        self.assertEqual("🇩🇪 ▶️ 202-Fixture-1103-1", self.bridge.pages[notion_id(PAGE)]["properties"]["名称"])
+
+    def test_a_page_made_under_the_old_name_is_found_and_renamed(self):
+        # An interrupted upload from before the new names left a page named after the timeline and no page id.
+        self.bridge.pages[notion_id(PAGE)] = {"properties": {"名称": "Fixture261103-202-1", "标题＋tags": "", "发布账号": "[]"}, "content": ""}
+        self.run_upload()
+        self.assertEqual(1, len(self.bridge.pages))
+        self.assertEqual("🇺🇸 ▶️ 202-Fixture-1103-1", self.bridge.pages[notion_id(PAGE)]["properties"]["名称"])
+
     def test_connection_is_remembered_and_tools_are_awaited(self):
         import notion_bridge
         from notion_bridge import NotionBridge
@@ -191,6 +210,26 @@ class NotionUploadTests(unittest.TestCase):
         self.bridge.bad_readback = True
         self.assertEqual("failed", self.run_upload(self.body(title="🔴Another#tag"))["status"])
         self.assertEqual({}, json.loads((self.manager.store.root / "accounts.json").read_text(encoding="utf-8"))[notion_id("collection://" + ACCOUNTS)])
+
+    def test_exhausted_query_precheck_says_quota_and_keeps_the_remembered_account(self):
+        key = notion_id("collection://" + ACCOUNTS)
+        self.manager._remember_account(key, "fixture", "https://app.notion.com/p/" + ACCOUNT)
+        remembered = json.loads((self.manager.store.root / "accounts.json").read_text(encoding="utf-8"))[key]
+        # A new page still needs one lookup; the hourly allowance is used up at that moment.
+        self.bridge.query_access = "usage_limit_reached"
+        with patch("sys.stderr"):
+            row = self.run_upload()
+        self.assertEqual("failed", row["status"])
+        self.assertIn("额度", row["error"])
+        self.assertNotIn("权限", row["error"])
+        self.assertEqual(remembered, json.loads((self.manager.store.root / "accounts.json").read_text(encoding="utf-8"))[key])
+
+    def test_other_query_precheck_status_is_shown(self):
+        self.bridge.query_access = "unavailable"
+        with patch("sys.stderr"):
+            row = self.run_upload()
+        self.assertEqual("failed", row["status"])
+        self.assertIn("unavailable", row["error"])
 
     def test_query_quota_error_is_named_plainly(self):
         from notion_bridge import unpack
@@ -338,6 +377,80 @@ class NotionUploadTests(unittest.TestCase):
         self.assertEqual("temporary-notion", tool["threadId"])
 
 
+class NotionConnectionErrorTests(unittest.TestCase):
+    """The page must say which side failed instead of one generic 授权未完成 line."""
+
+    class Session:
+        thread_id = None
+        def __init__(self, outcome):
+            self.outcome = outcome
+        def request(self, method, params, **kwargs):
+            if method == "config/read":
+                return {"config": {"mcp_servers": {"notion": {"url": "https://mcp.notion.com/mcp"}}}}
+            if method == "mcpServer/oauth/login":
+                return {"authorizationUrl": "https://mcp.notion.com/authorize?secret-state=do-not-show"}
+            return {}
+        def notification(self, method, params):
+            pass
+        def pump(self, deadline=None):
+            if isinstance(self.outcome, Exception):
+                raise self.outcome
+            self.notification("mcpServer/oauthLogin/completed", {"name": "notion", **self.outcome})
+        def close(self):
+            pass
+
+    def bridge(self, start):
+        patcher = patch("notion_bridge.CodexStillsBridge._restricted_session", side_effect=start)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return NotionBridge()
+
+    def finished_login(self, outcome):
+        bridge = self.bridge(lambda *args: self.Session(outcome))
+        first = bridge.connect()
+        for _ in range(200):
+            with bridge.lock:
+                if bridge.login.get("status") not in {"waiting", "preparing"}:
+                    return first, dict(bridge.login)
+            threading.Event().wait(0.01)
+        self.fail("login did not finish")
+
+    def test_codex_refusing_its_config_names_the_field_on_the_page(self):
+        from codex_bridge import BridgeError
+        def start(*args):
+            raise BridgeError("本机 Codex 配置里有当前版本不认识的设置「computer_use.windows.always_allowed_app_ids」，未启动。", code="CODEX_CONFIG")
+        state = self.bridge(start).status(refresh=True)
+        self.assertEqual("unavailable", state["status"])
+        self.assertTrue(state["error"].startswith("本机 Codex 启动失败"))
+        self.assertIn("computer_use.windows.always_allowed_app_ids", state["error"])
+        login = self.bridge(start).connect()
+        self.assertEqual("disconnected", login["status"])
+        self.assertIn("本机 Codex 启动失败", login["error"])
+
+    def test_codex_login_problem_is_named(self):
+        from codex_bridge import BridgeError
+        def start(*args):
+            raise BridgeError("本机 Codex 登录暂不可用。", code="CODEX_AUTH")
+        self.assertIn("Codex 检查登录", self.bridge(start).status(refresh=True)["error"])
+
+    def test_denied_timed_out_and_failed_authorizations_are_told_apart(self):
+        from codex_bridge import BridgeError
+        cases = [({"success": False, "error": "OAuth error: access_denied"}, "没有同意"),
+                 ({"success": False, "error": "timed out waiting for callback"}, "授权超时"),
+                 (BridgeError("Codex 响应超时。", code="CODEX_TIMEOUT"), "授权超时"),
+                 ({"success": False, "error": "token exchange failed: https://example.invalid/?code=secret"}, "Codex 报告授权失败")]
+        for outcome, expected in cases:
+            with self.subTest(expected=expected):
+                _, final = self.finished_login(outcome)
+                self.assertEqual("disconnected", final["status"])
+                self.assertIn(expected, final["error"])
+                self.assertNotIn("secret", final["error"])
+
+    def test_successful_authorization_has_no_error(self):
+        _, final = self.finished_login({"success": True})
+        self.assertEqual({"status": "connected"}, final)
+
+
 class PhotoNotionUploadTests(unittest.TestCase):
     """挂车图文: the exported 发布 JPGs and frozen copy go to the same calendar, recorded apart from video uploads."""
     SET = "PHS-aaaaaaaaaaaa"
@@ -374,16 +487,16 @@ class PhotoNotionUploadTests(unittest.TestCase):
     def test_every_picture_goes_into_files_and_the_body_holds_copy_and_slide_text(self):
         self.export("C1-20261108-A达人自述", slides=3)
         detail = self.manager.photo_detail(self.SET, "A")
-        self.assertEqual(("", 3, "Fixture261103-202-1 图文A", "fixture"), (detail["blocked_reason"], detail["pictures"], detail["name"], detail["account"]))
+        self.assertEqual(("", 3, "🇺🇸 🧩 202-Fixture-1103-1A", "fixture"), (detail["blocked_reason"], detail["pictures"], detail["name"], detail["account"]))
         self.assertEqual("🔴I found the next level#SHARPAL202H", detail["title"])
         row = self.run_photo()
         self.assertEqual("completed", row["status"])
         uploads = [args for action, args in self.bridge.calls if action == "create_file_upload"]
         self.assertEqual(["image/jpeg"] * 3, [args["content_type"] for args in uploads])
-        self.assertEqual("Fixture261103-202-1 图文A-01.jpg", uploads[0]["filename"])
+        self.assertEqual("US-202-Fixture-1103-1A-01.jpg", uploads[0]["filename"])
         page = self.bridge.pages[notion_id(PAGE)]
         self.assertEqual(3, len(page["properties"]["文件和媒体"]))
-        self.assertEqual(("2026-11-09", "Fixture261103-202-1 图文A", "就绪"),
+        self.assertEqual(("2026-11-09", "🇺🇸 🧩 202-Fixture-1103-1A", "就绪"),
                          (page["properties"]["date:日期:start"], page["properties"]["名称"], page["properties"]["视频状态"]))
         for text in ("Seven plates in one case.", "一个盒子装七块磨板。", "SLIDE 2 TITLE", "Slide 3 line.", "第 1 张"):
             self.assertIn(text, page["content"])
@@ -505,6 +618,28 @@ class NotionUploadHTTPTests(unittest.TestCase):
         for suffix in ("", "?timeline=one&timeline=two", "?timeline=one&extra=value"):
             status, _, _ = self.request("GET", f"/api/production/jobs/{JOB}/notion{suffix}")
             self.assertEqual(400, status)
+
+
+class ReceiptCacheTests(unittest.TestCase):
+    """Receipts are validated once per file version; callers get private copies."""
+
+    def test_unchanged_file_is_not_revalidated_and_a_rewrite_is_read_again(self):
+        from workbench_notion import NotionUploadStore
+        with tempfile.TemporaryDirectory() as folder:
+            store = NotionUploadStore(folder)
+            self.assertEqual({}, store.read()["uploads"])
+            store.root.mkdir(parents=True)
+            row = {"id": "NUP-" + "a" * 12, "job_id": "PRD-" + "b" * 12, "timeline_uid": "t1", "status": "completed"}
+            store.path.write_text(json.dumps({"schema_version": 1, "uploads": {row["id"]: row}}), encoding="utf-8")
+            first = store.read()
+            first["uploads"][row["id"]]["status"] = "changed by caller"
+            with patch.object(NotionUploadStore, "_read_validated", side_effect=AssertionError("re-validated")):
+                self.assertEqual("completed", store.read()["uploads"][row["id"]]["status"])
+            store.path.write_text(json.dumps({"schema_version": 1, "uploads": {}}) + "\n", encoding="utf-8")
+            self.assertEqual({}, store.read()["uploads"])
+            store.path.write_text("{broken", encoding="utf-8")
+            with self.assertRaises(VoiceError):
+                store.read()
 
 
 if __name__ == "__main__":

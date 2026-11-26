@@ -29,9 +29,11 @@ class ScriptLongTermBrowserTests(unittest.TestCase):
         newer = self.derive(old)
         independent = self.create_script("Independent content with same title.")
         page = self.open_page("#/202H/scripts", width=390)
-        expect(page.locator("#content-flow-list .flow-row")).to_have_count(2)
-        self.assertEqual(page.evaluate("location.hash"), "#/202H/content")
+        page.wait_for_function("() => location.hash === '#/202H/content'")
         expect(page.locator(".scripts-tabs")).to_have_count(0)
+        # Saved copies without an order wait in 全部, not 待处理.
+        page.evaluate("() => {location.hash = '#/202H/content?view=all'}")
+        expect(page.locator("#content-flow-list .flow-row")).to_have_count(2)
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#/202H/scripts/{old['id']}")
         expect(page.locator("#content-adopted-script")).to_have_attribute("data-adopted-script-id", old["id"])
         self.assertEqual(page.evaluate("location.hash"), f"#/202H/content/{old['id']}")
@@ -52,6 +54,8 @@ class ScriptLongTermBrowserTests(unittest.TestCase):
         page = self.open_page(f"#/202H/content/{old['id']}", width=390)
         page.locator("#script-more-actions > summary").click()
         page.locator("#script-derive").click()
+        # 逐句编辑里的「整段改」打开原来的整段编辑框。
+        page.locator(".adopted-line-edit [data-edit-whole]").click()
         dialog = page.locator("#script-editor-dialog")
         dialog.locator('[name="text"]').fill("Revised adopted words for the next production.")
         dialog.get_by_role("button", name="保存采用稿", exact=True).click()

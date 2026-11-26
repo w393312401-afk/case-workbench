@@ -10,6 +10,7 @@ class ApiKeyTests(unittest.TestCase):
     def setUp(self):
         self.registry = {}
         patches = [mock.patch.object(api_keys, "_registry", side_effect=lambda name: self.registry.get(name)),
+                   mock.patch.object(api_keys, "_local_key", return_value=None),
                    mock.patch.object(api_keys, "_write", side_effect=self.write),
                    mock.patch.object(api_keys, "_broadcast"),
                    mock.patch.dict(os.environ, {}, clear=False)]

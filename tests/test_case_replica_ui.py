@@ -1,4 +1,5 @@
-"""照原片做视频 dialog: the original script is the default and optimized scripts are an optional count; mocked API only."""
+"""照原片做视频 dialog: the original script is the default, optimized scripts are an optional count or the only output,
+and the AI model can be picked; mocked API only."""
 from __future__ import annotations
 
 import unittest
@@ -40,6 +41,9 @@ class CaseReplicaBrowserTests(unittest.TestCase):
             else:
                 route.fulfill(json=preview)
         page.route(f"**/api/cases/{self.identifier}/replica", replica)
+        page.route("**/api/ai/options", lambda route: route.fulfill(json={
+            "models": [{"id": "claude-x", "name": "Claude X", "provider": "claude", "reasoning_efforts": ["low", "high"]}],
+            "kind_defaults": [], "default_settings": {"model": None, "reasoning_effort": None}}))
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#/202H/case/{self.identifier}")
         page.wait_for_function("() => !!state.token")
         page.locator("#replica-top").click()
@@ -64,6 +68,28 @@ class CaseReplicaBrowserTests(unittest.TestCase):
         dialog.locator('[data-replica="continue"]').click()
         page.wait_for_function("() => !document.querySelector('#replica-dialog[open]')")
         self.assertEqual([{"new": False, "optimize": 0}], self.posts)
+
+    def test_optimized_only_makes_no_job_and_needs_at_least_one_script(self):
+        page = self.open_dialog(jobs=[JOB], reply={"task": {"task_id": "AIT-0123456789ab"}})
+        dialog = page.locator("#replica-dialog")
+        before = page.evaluate("location.hash")
+        dialog.locator('input[value="optimized"]').check()
+        self.assertEqual(0, dialog.locator('[data-replica="continue"]').count())
+        self.assertNotIn("不写", dialog.locator("[data-optimize]").inner_text())
+        self.assertEqual("2", dialog.locator("[data-optimize]").input_value())
+        dialog.locator('[data-replica="draft"]').click()
+        page.wait_for_function("() => !document.querySelector('#replica-dialog[open]')")
+        self.assertEqual([{"original": False, "optimize": 2}], self.posts)
+        self.assertEqual(before, page.evaluate("location.hash"))
+
+    def test_the_picked_model_is_sent(self):
+        page = self.open_dialog()
+        dialog = page.locator("#replica-dialog")
+        dialog.locator("[data-mp-model]").select_option("claude-x")
+        dialog.locator("[data-mp-effort]").select_option("high")
+        dialog.locator('[data-replica="new"]').click()
+        page.wait_for_function("() => !document.querySelector('#replica-dialog[open]')")
+        self.assertEqual([{"new": True, "optimize": 2, "model": "claude-x", "reasoning_effort": "high"}], self.posts)
 
 
 if __name__ == "__main__":

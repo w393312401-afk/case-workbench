@@ -8,19 +8,21 @@
   <script src="/shell.js" defer></script><script src="/settings.js" defer></script><script src="/directions.js" defer></script><script src="/navigation.js" defer></script><script src="/native.js" defer></script><script src="/library.js" defer></script><script src="/bulk.js" defer></script><script src="/detail.js" defer></script>
   <link rel="stylesheet" href="/direction-picker.css"><script src="/direction-picker.js" defer></script>
   <link rel="stylesheet" href="/tk-candidates.css"><script src="/tk-candidates.js" defer></script>
-  <link rel="stylesheet" href="/reviews-layout.css"><link rel="stylesheet" href="/home.css"><link rel="stylesheet" href="/material-basket.css"><link rel="stylesheet" href="/scripts.css"><link rel="stylesheet" href="/production.css"><link rel="stylesheet" href="/writing.css">
+  <link rel="stylesheet" href="/hook-bank.css"><script src="/hook-bank.js" defer></script>
+  <link rel="stylesheet" href="/reviews-layout.css"><link rel="stylesheet" href="/home.css"><link rel="stylesheet" href="/material-basket.css"><link rel="stylesheet" href="/scripts.css"><link rel="stylesheet" href="/production.css"><link rel="stylesheet" href="/edit-visual.css"><link rel="stylesheet" href="/writing.css">
   <link rel="stylesheet" href="/workflow-links.css"><script src="/workflow-links.js" defer></script>
   <link rel="stylesheet" href="/production-needs.css"><script src="/production-needs.js" defer></script>
   <link rel="stylesheet" href="/review-experiences.css"><script src="/review-experiences.js" defer></script>
   <link rel="stylesheet" href="/feedback-chain.css"><script src="/feedback-chain.js" defer></script>
   <link rel="stylesheet" href="/delivery-provenance.css"><script src="/delivery-provenance.js" defer></script><script src="/copy-id.js" defer></script><script src="/drawer-resize.js" defer></script><link rel="stylesheet" href="/campaigns.css"><script src="/campaigns.js" defer></script>
-  <script src="/review-opportunities.js" defer></script><script src="/notion-upload.js" defer></script><link rel="stylesheet" href="/photo-carousel.css"><script src="/photo-carousel.js" defer></script><script src="/photo-overview.js" defer></script><script src="/needs-you.js" defer></script><script src="/video-preview.js" defer></script><script src="/video-publication.js" defer></script><script src="/auto-breakdown.js" defer></script>
-  <script src="/material-basket.js" defer></script><script src="/review-followups.js" defer></script><script src="/home.js" defer></script><script src="/scripts.js" defer></script><script src="/production.js" defer></script>
-  <link rel="stylesheet" href="/case-replica.css"><script src="/transcript-sync.js" defer></script><script src="/case-replica.js" defer></script><script src="/delete.js" defer></script><script src="/editor.js" defer></script><script src="/inline-editor.js" defer></script><script src="/app.js" defer></script><script src="/ai.js" defer></script><script src="/perf-dashboard.js" defer></script><script src="/perf-date-picker.js" defer></script><script src="/perf-creators.js" defer></script><script src="/performance.js" defer></script><script src="/review-scrape.js" defer></script><script src="/reviews.js" defer></script><script src="/global-search.js" defer></script>
+  <script src="/review-zh.js" defer></script><script src="/review-opportunities.js" defer></script><script src="/notion-upload.js" defer></script><link rel="stylesheet" href="/photo-carousel.css"><script src="/model-pick.js" defer></script><link rel="stylesheet" href="/script-review.css"><script src="/script-review.js" defer></script><script src="/photo-carousel.js" defer></script><script src="/photo-overview.js" defer></script><script src="/needs-you.js" defer></script><script src="/video-preview.js" defer></script><script src="/video-publication.js" defer></script><script src="/auto-breakdown.js" defer></script>
+  <script src="/material-basket.js" defer></script><script src="/review-followups.js" defer></script><script src="/home.js" defer></script><script src="/scripts.js" defer></script><script src="/edit-visual.js" defer></script><script src="/production.js" defer></script>
+  <link rel="stylesheet" href="/case-replica.css"><script src="/transcript-sync.js" defer></script><script src="/case-replica.js" defer></script><script src="/delete.js" defer></script><script src="/editor.js" defer></script><script src="/inline-editor.js" defer></script><script src="/app.js" defer></script><script src="/ai.js" defer></script><script src="/perf-dashboard.js" defer></script><script src="/perf-date-picker.js" defer></script><script src="/perf-creators.js" defer></script><link rel="stylesheet" href="/perf-negative.css"><script src="/perf-negative.js" defer></script><script src="/performance.js" defer></script><script src="/review-scrape.js" defer></script><script src="/reviews.js" defer></script><script src="/global-search.js" defer></script>
   <link rel="stylesheet" href="/activity.css">
   <link rel="stylesheet" href="/content-flow.css"><script src="/content-flow.js" defer></script>
   <link rel="stylesheet" href="/review-opportunities.css"><link rel="stylesheet" href="/video-publication.css"><link rel="stylesheet" href="/auto-breakdown.css">
   <link rel="stylesheet" href="/remote-session.css"><script src="/remote-session.js" defer></script>
+  <link rel="stylesheet" href="/away-mode.css"><script src="/away-mode.js" defer></script>
 </head>
 <body>
   <div class="sidebar-rail" id="sidebar-rail" aria-label="模块快捷入口" hidden>
@@ -32,6 +34,7 @@
       <button type="button" class="sidebar-rail-item" data-sidebar-target="ai-nav" aria-label="内容创作"><span data-icon="writing"></span><span class="sidebar-rail-count" data-sidebar-count hidden></span></button>
       <button type="button" class="sidebar-rail-item" data-sidebar-target="videos-nav" aria-label="带货数据"><span data-icon="chart"></span></button>
       <button type="button" class="sidebar-rail-item" data-sidebar-target="library-nav" aria-label="案例库"><span data-icon="library"></span></button>
+      <button type="button" class="sidebar-rail-item" data-sidebar-target="hooks-nav" aria-label="开头库"><span data-icon="spark"></span></button>
     </nav>
     <div class="sidebar-rail-tools">
       <button type="button" class="sidebar-rail-item" data-sidebar-target="materials-nav" aria-label="打开摘录篮"><span data-icon="basket"></span><span class="sidebar-rail-count" data-sidebar-count hidden></span></button>
@@ -48,6 +51,7 @@
       <button class="nav-item" id="ai-nav" data-page="content"><span data-icon="writing"></span>内容创作<span class="nav-count" id="ai-active-count" hidden></span></button>
       <button class="nav-item" id="videos-nav" data-page="videos"><span data-icon="chart"></span>带货数据</button>
       <button class="nav-item" id="library-nav" data-page="library"><span data-icon="library"></span>案例库</button>
+      <button class="nav-item" id="hooks-nav" data-page="hooks"><span data-icon="spark"></span>开头库</button>
     </nav>
     <details class="library-navigation" id="library-navigation" hidden><summary>原案例栏目</summary>
     <nav aria-label="案例分类">

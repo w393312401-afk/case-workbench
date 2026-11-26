@@ -1,6 +1,7 @@
 """Orders keep their exact adopted text visible while related revisions stay accessible."""
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 from production_browser import ProductionBrowserTests
@@ -30,6 +31,62 @@ def snapshot_mobile(page, name):
 
 
 class VideoAdoptedBrowserTests(ProductionBrowserTests):
+    def test_order_adopted_copy_and_history_do_not_need_the_product_catalog(self):
+        first = save_script(self.app, "The exact first version.")
+        later = save_script(self.app, "Later family version.", first)
+        save_script(self.app, "Unrelated adopted copy.")
+        job = self.app.create_production_job({"request_id": uuid4().hex,
+            "revision": self.app.production.public()["revision"], "job": {"script_id": first["id"]}})["job"]
+        reads = []
+        new_context = self.browser.new_context
+        def context(**options):
+            created = new_context(**options)
+            def unavailable(route):
+                reads.append(route.request.url)
+                # Leave a full-product read pending: the exact copy must not wait for it.
+            created.route("**/api/creation?*", unavailable)
+            return created
+        with patch.object(self.browser, "new_context", side_effect=context):
+            page = self.open_page(f"#production/{job['id']}")
+        page.locator('[data-step~="lines"]').click()
+        adopted = page.locator("#job-adopted-script")
+        adopted.locator("[data-adopted-copy]").wait_for()
+        page.evaluate("navigator.clipboard.writeText = async text => {window.copiedAdopted = text;}")
+        adopted.locator("[data-adopted-copy]").click()
+        self.assertEqual(page.evaluate("window.copiedAdopted"), first["text"])
+        adopted.locator("[data-adopted-copy-fold] > summary").click()
+        self.assertIn(first["text"], adopted.inner_text())
+        history = adopted.locator("[data-script-versions]")
+        history.locator(":scope > summary").click()
+        history.locator(f'[data-script-version="{later["id"]}"] > summary').click()
+        self.assertIn(later["text"], history.inner_text())
+        self.assertNotIn("Unrelated adopted copy.", history.inner_text())
+        self.assertEqual(reads, [])
+
+    def test_old_order_response_without_bundled_copy_uses_catalog_fallback(self):
+        script = save_script(self.app, "Copy from a previous service version.")
+        job = self.app.create_production_job({"request_id": uuid4().hex,
+            "revision": self.app.production.public()["revision"], "job": {"script_id": script["id"]}})["job"]
+        payload = self.app.production_job(job["id"])
+        payload.pop("script_catalog")
+        payload["script"] = {key: payload["script"].get(key) for key in
+                             ("id", "title", "status", "version", "product", "direction_id")}
+        reads = []
+        new_context = self.browser.new_context
+        def context(**options):
+            created = new_context(**options)
+            created.route(f"**/api/production/jobs/{job['id']}", lambda route: route.fulfill(json=payload))
+            created.on("request", lambda request: reads.append(request.url) if "/api/creation?" in request.url else None)
+            return created
+        with patch.object(self.browser, "new_context", side_effect=context):
+            page = self.open_page(f"#production/{job['id']}")
+        page.locator('[data-step~="lines"]').click()
+        adopted = page.locator("#job-adopted-script")
+        adopted.locator("[data-adopted-copy]").wait_for()
+        adopted.locator("[data-adopted-copy-fold] > summary").click()
+        self.assertIn(script["text"], adopted.inner_text())
+        self.assertEqual(len(reads), 1)
+
     def test_real_second_version_prefills_editor_and_editing_keeps_the_order_on_its_original_copy(self):
         source = self.app.creation.get_script(self.script["id"])["source"]
         first = save_script(self.app, "One kit.", source={**source, "variant_index": 0})
@@ -38,7 +95,7 @@ class VideoAdoptedBrowserTests(ProductionBrowserTests):
             "revision": self.app.production.public()["revision"], "job": {"script_id": script["id"]}})["job"]
         page = self.open_page(f"#production/{job['id']}")
         page.set_viewport_size({"width": 390, "height": 740})
-        page.locator('[data-step="lines"]').click()
+        page.locator('[data-step~="lines"]').click()
         adopted = page.locator("#job-adopted-script")
         page.locator(f'#job-adopted-script[data-adopted-script-id="{script["id"]}"]').wait_for()
         self.assertEqual(adopted.locator(".section-title-row h2").inner_text(), "本次采用稿 · 第 2 版")
@@ -64,7 +121,7 @@ class VideoAdoptedBrowserTests(ProductionBrowserTests):
         editor.locator('[name="text"]').fill("A new spoken draft for another production.")
         editor.locator('[name="translation_zh"]').fill("新的三版中文。")
         editor.get_by_role("button", name="保存采用稿", exact=True).click()
-        page.locator("#content-adopted-script .adopted-copy > pre").filter(
+        page.locator("#content-adopted-script .adopted-copy .ai-variant-pairs").filter(
             has_text="A new spoken draft for another production.").first.wait_for()
         versions = [row for row in self.app.creation.public()["scripts"] if row["family_id"] == script["family_id"]]
         self.assertEqual(len(versions), 3)
@@ -73,7 +130,7 @@ class VideoAdoptedBrowserTests(ProductionBrowserTests):
         self.assertEqual(self.app.production.job(job["id"])["script_id"], script["id"])
         self.assertEqual(self.app.production.job(job["id"])["lines"][0]["spoken"], "One kit.")
         page.evaluate("hash => { location.hash = hash; }", f"#production/{job['id']}")
-        page.locator('[data-step="lines"]').click()
+        page.locator('[data-step~="lines"]').click()
         page.locator(f'#job-adopted-script[data-adopted-script-id="{script["id"]}"]').wait_for()
         history = adopted.locator("[data-script-versions]")
         history.locator(":scope > summary").click()
@@ -81,14 +138,14 @@ class VideoAdoptedBrowserTests(ProductionBrowserTests):
         version.locator(":scope > summary").click()
         self.assertIn(later["text"], version.inner_text())
         snapshot_mobile(page, "video-adopted")
-        page.locator('[data-step="voice"]').click()
+        page.locator('[data-step~="voice"]').click()
         self.assertFalse(adopted.is_visible())
         self.assertEqual(self.app.creation.get_script(script["id"])["text"], "One kit.")
 
     def test_script_page_without_a_video_has_no_empty_performance_card(self):
         script = save_script(self.app, "Not posted yet.")
         page = self.open_page(f"#content/{script['id']}")
-        page.locator("#content-adopted-script .adopted-copy > pre").first.wait_for()
+        page.locator("#content-adopted-script .adopted-copy .ai-variant-pairs").first.wait_for()
         # The side panel already says the video ID is not registered; no second empty card below.
         self.assertEqual(page.locator("#script-sales").inner_html(), "")
 
@@ -97,7 +154,7 @@ class VideoAdoptedBrowserTests(ProductionBrowserTests):
         job = self.app.create_production_job({"request_id": uuid4().hex,
             "revision": self.app.production.public()["revision"], "job": {"script_id": script["id"]}})["job"]
         page = self.open_page(f"#production/{job['id']}")
-        page.locator('[data-step="lines"]').click()
+        page.locator('[data-step~="lines"]').click()
         adopted = page.locator(f'#job-adopted-script[data-adopted-script-id="{script["id"]}"]')
         link = adopted.locator(".adopted-version-single")
         link.wait_for()

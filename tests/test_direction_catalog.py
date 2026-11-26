@@ -310,30 +310,39 @@ class DirectionRuleTests(unittest.TestCase):
         return point, self.mutate("/api/direction-catalog", direction={"product": "202H", "selling_point_id": point["id"],
                                   "concern": "装夹麻烦吗 → A3 一次装夹翻面继续", "closing": "B4 当前渠道价格", **extra})
 
-    def test_variant_needs_a_new_progression_and_update_keeps_variants(self):
+    def test_variant_progression_is_free_text_and_update_keeps_variants(self):
         point, (status, _, created) = self.created(progression="问题-解决")
         self.assertEqual(status, 200, created)
         self.assertTrue(created["direction"]["variants"][0]["baseline"])
         base = {"product": "202H", "selling_point_id": point["id"], "concern": "先看结果 → A2 双夹", "closing": "B4 当前渠道价格",
                 "execution_change": "结果开头"}
-        self.assertEqual(self.mutate("/api/direction-catalog", direction={**base, "progression": "问题-解决"})[0], 409)
-        self.assertEqual(self.mutate("/api/direction-catalog", direction={**base, "progression": "随便"})[0], 400)
-        status, _, added = self.mutate("/api/direction-catalog", direction={**base, "progression": "结果倒叙"})
+        # A preset is only a suggestion: a repeated or self-described structure is kept, a one-character one is not.
+        self.assertEqual(self.mutate("/api/direction-catalog", direction={**base, "progression": "随"})[0], 400)
+        status, _, added = self.mutate("/api/direction-catalog", direction={**base, "progression": "问题-解决"})
         self.assertEqual(status, 200, added)
-        self.assertEqual(added["direction"]["variants"][1]["progression"], "结果倒叙")
+        self.assertEqual(added["direction"]["variants"][1]["progression"], "问题-解决")
+        status, _, again = self.mutate("/api/direction-catalog", direction={**base, "concern": "开箱逐件讲 → A2 双夹", "progression": "开箱逐件讲"})
+        self.assertEqual(status, 200, again)
+        self.assertEqual(again["direction"]["variants"][2]["progression"], "开箱逐件讲")
+        status, _, bare = self.mutate("/api/direction-catalog", direction={**base, "concern": "不写结构 → A2 双夹"})
+        self.assertEqual(status, 200, bare)
+        self.assertNotIn("progression", bare["direction"]["variants"][3])
+        added = bare
         entity = added["direction"]
         self.assertEqual(self.mutate("/api/direction-catalog", operation="update", direction={**entity, "concern": "1"})[0], 400)
         self.assertEqual(self.mutate("/api/direction-catalog", operation="update", direction={**entity, "concern": "S9 不存在 → B1"})[0], 400)
         self.assertEqual(self.mutate("/api/direction-catalog", operation="update", direction={**entity, "concern": "耐用吗 → 做工扎实（未编号）"})[0], 400)
         status, _, updated = self.mutate("/api/direction-catalog", operation="update", direction={**entity, "concern": "装夹麻烦吗 → A3 翻面"})
         self.assertEqual(status, 200, updated)
-        self.assertEqual(len(updated["direction"]["variants"]), 2)
+        self.assertEqual(len(updated["direction"]["variants"]), 4)
         status, _, marked = self.mutate("/api/direction-catalog", operation="variant_meta",
                                         direction={"product": "202H", "direction_id": "202H-S1", "index": 1, "baseline": True})
         self.assertEqual(status, 200, marked)
-        self.assertEqual([bool(item.get("baseline")) for item in marked["direction"]["variants"]], [False, True])
-        self.assertEqual(self.mutate("/api/direction-catalog", operation="variant_meta",
-                                     direction={"product": "202H", "direction_id": "202H-S1", "index": 1, "progression": "问题-解决"})[0], 409)
+        self.assertEqual([bool(item.get("baseline")) for item in marked["direction"]["variants"]], [False, True, False, False])
+        status, _, relabeled = self.mutate("/api/direction-catalog", operation="variant_meta",
+                                           direction={"product": "202H", "direction_id": "202H-S1", "index": 3, "progression": "问题-解决"})
+        self.assertEqual(status, 200, relabeled)
+        self.assertEqual(relabeled["direction"]["variants"][3]["progression"], "问题-解决")
 
     def test_non_s_lead_needs_a_reason(self):
         _, (status, _, result) = self.created("A2")
@@ -451,6 +460,40 @@ class DirectionRuleTests(unittest.TestCase):
                                         direction={"product": "202H", "direction_id": "202H-S1", "index": 0, "audience": "节前刀座"})
         self.assertEqual(status, 200, marked)
         self.assertEqual(marked["direction"]["variants"][0]["audience"], "节前刀座")
+
+    def test_judgement_keeps_one_open_plan_pauses_and_resumes_without_history(self):
+        _, (status, _, created) = self.created()
+        self.assertEqual(status, 200, created)
+        judge = lambda value: self.request("POST", "/api/direction-judgement", {
+            "product": "202H", "direction_id": "202H-S1", "judgement": value, "request_id": uuid4().hex})
+        plans = lambda: [(plan["action"], plan["status"]) for plan in self.server.app.creation.public()["plans"]]
+        entity = lambda: next(item for item in self.catalog()["directions"] if item["direction_id"] == "202H-S1")
+        self.assertEqual(judge("later")[0], 400)
+        status, _, result = judge("scale")
+        self.assertEqual((status, result["settled"], result["plan"]["action"]), (200, 0, "scale"))
+        self.assertEqual(entity()["pending_plan"]["scripts_since"], 0)
+        # Picking the same judgement again adds nothing.
+        self.assertEqual(judge("scale")[2]["settled"], 0)
+        self.assertEqual(plans(), [("scale", "pending")])
+        # A plan somebody started writing from counts as done once replaced; an untouched one is cancelled.
+        store = self.server.app.creation
+        started = store.public()["plans"][0]
+        store.mutate("plan", {"revision": store.public()["revision"], "request_id": uuid4().hex,
+                              "plan": {"id": started["id"], "status": "working"}})
+        status, _, result = judge("execution")
+        self.assertEqual((status, result["settled"]), (200, 1))
+        self.assertEqual(plans(), [("scale", "done"), ("execution", "pending")])
+        self.assertEqual(entity()["pending_plan"]["action"], "execution")
+        status, _, result = judge("stop")
+        self.assertEqual((status, result["status"], result["plan"]), (200, "paused", None))
+        self.assertEqual(plans(), [("scale", "done"), ("execution", "cancelled")])
+        paused = entity()
+        self.assertEqual((paused["status"], paused["pending_plan"]), ("paused", None))
+        self.assertNotIn("history", paused)  # pausing rewrites no wording
+        status, _, result = judge("observe")
+        self.assertEqual((status, result["status"]), (200, "testing"))
+        self.assertEqual((entity()["status"], len(plans())), ("testing", 2))
+        self.assertTrue(self.catalog()["progress_available"])
 
 
 if __name__ == "__main__":

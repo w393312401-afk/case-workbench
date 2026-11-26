@@ -91,6 +91,8 @@ class ReviewBatchDraftBrowserTests(unittest.TestCase):
             route.fulfill(json={"results": [{**row, "status": "queued", "task_id": "AIT-fixture"} for row in body["videos"]], "replayed": False})
 
         page.route("**/api/performance/batch-draft", submit)
+        # More than 200 videos would open on 值得复盘 once; this test is about the full list.
+        page.evaluate("localStorage.setItem('workbench-video-worth-default', '1')")
         page.reload()
         page.wait_for_function("() => document.querySelectorAll('[data-video-row]').length === 200")
         self.assertIn("10 条", page.locator("[data-batch-draft]").inner_text())

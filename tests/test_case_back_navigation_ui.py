@@ -23,9 +23,9 @@ class CaseBackNavigationBrowserTests(unittest.TestCase):
         browser_fixture.open_library_filters(page)
         page.locator('#direction-filter').select_option('202H-S1')
         page.locator('#variant-filter').select_option('direction')
-        page.locator('#sort-filter').select_option('views')
-        page.locator('#sort-direction').select_option('asc')
         browser_fixture.close_library_filters(page)
+        page.locator('#sort-filter').select_option('views')
+        page.locator('#library-sort-dir').click()
         page.evaluate("""() => {
             const sheet = document.styleSheets[0];
             sheet.insertRule('#case-results { padding-top: 850px !important; padding-bottom: 1500px !important; }', sheet.cssRules.length);
@@ -66,7 +66,7 @@ class CaseBackNavigationBrowserTests(unittest.TestCase):
                 self.assertEqual(page.locator('#direction-filter').input_value(), '202H-S1')
                 self.assertEqual(page.locator('#variant-filter').input_value(), 'direction')
                 self.assertEqual(page.locator('#sort-filter').input_value(), 'views')
-                self.assertEqual(page.locator('#sort-direction').input_value(), 'asc')
+                self.assertEqual(page.evaluate('state.sortDir'), 'asc')
 
     def test_explicit_different_library_scope_starts_at_top(self):
         page = self.filtered_library()

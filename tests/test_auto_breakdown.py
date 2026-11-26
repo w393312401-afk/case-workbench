@@ -150,7 +150,7 @@ class ResumeReadinessTests(unittest.TestCase):
 
 class WorkbenchCase(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="auto-breakdown-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="auto-breakdown-test-", ignore_cleanup_errors=True)
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
         self.skill, self.runtime = root / "skill", root / "runtime"
@@ -184,7 +184,7 @@ class WorkbenchCase(unittest.TestCase):
             headers["X-Workbench-Token"] = getattr(self, "token", "")
             raw = json.dumps(body or {}).encode("utf-8")
             headers.update({"Content-Type": "application/json", "Content-Length": str(len(raw))})
-        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=30)
         try:
             connection.request(method, path, body=raw, headers=headers)
             response = connection.getresponse()

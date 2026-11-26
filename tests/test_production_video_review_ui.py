@@ -36,16 +36,14 @@ class ProductionVideoReviewBrowserTests(unittest.TestCase):
 
         page = self.open_page(width=390, post=approve)
         form = page.locator(".edit-review-form")
+        # One click registers the three manual items; the bar names them and the note stays folded until asked for.
         submit = form.get_by_role("button", name="确认完成", exact=True)
-        self.assertTrue(submit.is_disabled())
-        submit.evaluate("button => button.click()")
-        self.assertEqual(self.calls, [])
-        boxes = form.locator('input[name="reviewed"]')
-        self.assertEqual(boxes.count(), 3)
-        boxes.nth(0).check();boxes.nth(1).check()
-        self.assertTrue(submit.is_disabled())
-        boxes.nth(2).check()
         self.assertTrue(submit.is_enabled())
+        self.assertEqual(form.locator('input[name="reviewed"]').count(), 3)
+        self.assertIn("画面内容与口播是否匹配", form.locator(".edit-review-scope").inner_text())
+        self.assertFalse(form.locator("textarea").is_visible())
+        self.assertEqual(form.evaluate("node => getComputedStyle(node).position"), "sticky")
+        form.get_by_text("加备注", exact=True).click()
         note = '<img src=x onerror="window.__badReview=true"> 人工已核对'
         form.locator("textarea").fill(note)
         page.evaluate("window.__voiceNode=document.querySelector('#take-panel audio');window.__takeForm=document.querySelector('#take-form');window.__editForm=document.querySelector('#edit-form')")
@@ -63,13 +61,12 @@ class ProductionVideoReviewBrowserTests(unittest.TestCase):
         self.skill_delivery()
         page = self.open_page(post=lambda route: route.fulfill(status=503, content_type="application/json", body=json.dumps({"error": "隔离测试：稍后重试"}, ensure_ascii=False)))
         form = page.locator(".edit-review-form")
-        for box in form.locator('input[name="reviewed"]').all():
-            box.check()
+        form.get_by_text("加备注", exact=True).click()
         form.locator("textarea").fill("保留我的备注")
         form.get_by_role("button", name="确认完成", exact=True).click()
         form.locator("[data-error]").get_by_text("隔离测试：稍后重试", exact=True).wait_for()
         self.assertTrue(form.get_by_role("button", name="确认完成", exact=True).is_enabled())
-        self.assertTrue(all(box.is_checked() and box.is_enabled() for box in form.locator('input[name="reviewed"]').all()))
+        self.assertTrue(form.locator("textarea").is_enabled())
         self.assertEqual(form.locator("textarea").input_value(), "保留我的备注")
 
     def test_approved_ai_completion_revokes_without_showing_a_second_completion_path(self):
@@ -87,7 +84,7 @@ class ProductionVideoReviewBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator("[data-complete-job],[data-revoke-job-completion]").count(), 0)
         page.locator('[data-revoke-edit="EDT-0123456789ab"]').click()
         page.locator(".edit-review-form").wait_for()
-        self.assertTrue(page.locator("[data-approve-edit]").is_disabled())
+        self.assertTrue(page.locator("[data-approve-edit]").is_enabled())
         self.assertEqual(page.locator("[data-complete-job],[data-revoke-edit]").count(), 0)
 
     def test_archived_approval_checklist_and_completion_are_read_only(self):
@@ -95,7 +92,8 @@ class ProductionVideoReviewBrowserTests(unittest.TestCase):
         self.payload["job"]["archived"] = True
         page = self.open_page()
         self.assertTrue(page.locator("[data-approve-edit]").is_disabled())
-        self.assertTrue(all(box.is_disabled() for box in page.locator('.edit-review-form input[type="checkbox"]').all()))
+        self.assertTrue(page.locator('.edit-review-form textarea').is_disabled())
+        self.assertIn("恢复制作单后可确认", page.locator('.edit-review-form [data-review-hint]').inner_text())
         self.assertEqual(self.calls, [])
 
     def test_manual_completion_keeps_old_ai_runs_in_folded_history(self):
@@ -115,7 +113,7 @@ class ProductionVideoReviewBrowserTests(unittest.TestCase):
         self.payload["job"]["timelines"].insert(0, old)
         self.payload["job"]["edits"].insert(0, {**self.edit("approved", "EDT-old"), "timeline_uid": "uid-old", "approval": {"at": "2026-10-13"}})
         page = self.open_page()
-        page.locator('.production-steps [data-step="timeline"]').click()
+        page.locator('.production-steps [data-step~="timeline"]').click()
         active = page.locator('[data-timeline-id="uid-own"]')
         self.assertIn("current", active.get_attribute("class"))
         active.get_by_text("当前使用", exact=True).wait_for()
@@ -140,7 +138,7 @@ class ProductionVideoReviewBrowserTests(unittest.TestCase):
         self.payload["job"]["edits"].insert(0, {**self.edit("approved", "EDT-old"), "timeline_uid": "uid-old", "timeline_name": "旧时间线",
                                                 "approval": {"at": "2026-10-13"}})
         page = self.open_page()
-        page.locator('.production-steps [data-step="edit"]').click()
+        page.locator('.production-steps [data-step~="edit"]').click()
         tabs = page.locator(".production-focus [data-timeline-focus]")
         self.assertEqual(tabs.count(), 2)
         # The timeline waiting for review is shown first; the finished one is one click away.

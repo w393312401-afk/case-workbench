@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import shutil
@@ -19,6 +20,7 @@ from workbench_video_publish import reviewed_source
 PLAYBACK_PROFILE = "web1"
 PLAYBACK_DIR = "在线播放"
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{n}" for n in range(1, 10)), *(f"LPT{n}" for n in range(1, 10))}
+_LEGACY_EXPORT_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def video_file_name(name):
@@ -77,30 +79,61 @@ class TimelinePreviews:
         self.optimizer = optimizer
         self.root = app.production.root / "video-previews"
         self.root.mkdir(parents=True, exist_ok=True)
+        self._bad_rows = set()
         for path in self.root.glob("PRD-*/*/preview.json"):
-            row = json.loads(path.read_text(encoding="utf-8"))
-            if self._tidy(path.parent, row):
-                durable_json(path, row)
-            if row.get("status") == "running":
-                row.update(status="failed", error="工作台重启打断了预览更新，请重试。", finished_at=now())
-                durable_json(path, row)
-            elif row.get("status") == "optimizing":
-                row.update(status="done", message="", error="")
-                durable_json(path, row)
-            if row.get("status") == "done" and row.get("video") and row["video"].get("profile") != PLAYBACK_PROFILE:
-                row.update(status="optimizing", message="正在准备流畅播放的视频…")
-                durable_json(path, row)
-                threading.Thread(target=self._upgrade_playback, args=(row,), daemon=True, name="preview-playback-upgrade").start()
-            elif row.get("pending_confirmation"):
-                threading.Thread(target=self._start_pending, args=(row["job_id"], row["timeline_uid"]), daemon=True,
-                                 name="confirmed-export-resume").start()
+            try:
+                row = self._load_row(path)
+                if self._tidy(path.parent, row):
+                    durable_json(path, row)
+                if row.get("status") == "running":
+                    row.update(status="failed", error="工作台重启打断了预览更新，请重试。", finished_at=now())
+                    durable_json(path, row)
+                elif row.get("status") == "optimizing":
+                    row.update(status="done", message="", error="")
+                    durable_json(path, row)
+                if row.get("status") == "done" and row.get("video") and row["video"].get("profile") != PLAYBACK_PROFILE:
+                    row.update(status="optimizing", message="正在准备流畅播放的视频…")
+                    durable_json(path, row)
+                    threading.Thread(target=self._upgrade_playback, args=(row,), daemon=True, name="preview-playback-upgrade").start()
+                elif row.get("pending_confirmation"):
+                    threading.Thread(target=self._start_pending, args=(row["job_id"], row["timeline_uid"]), daemon=True,
+                                     name="confirmed-export-resume").start()
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                self._invalid_row(path, exc)
 
     def _folder(self, job_id, uid):
         return self.root / job_id / hashlib.sha256(uid.encode("utf-8")).hexdigest()[:24]
 
     def _read(self, job_id, uid):
-        path = self._folder(job_id, uid) / "preview.json"
-        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        return self._load_row(self._folder(job_id, uid) / "preview.json")
+
+    def _invalid_row(self, path, error):
+        if path not in self._bad_rows:
+            self._bad_rows.add(path)
+            logging.getLogger(__name__).warning("Preview record %s: %s", path, type(error).__name__)
+        return {"status": "failed", "error": "预览记录无法读取，请更新预览重建。", "unavailable": isinstance(error, OSError)}
+
+    def _load_row(self, path):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(row, dict) or not isinstance(row.get("status", ""), str):
+                raise ValueError("Invalid preview record")
+            video = row.get("video")
+            if video and (not isinstance(video, dict) or any(not isinstance(video.get(field), str)
+                    for field in ("file", "version", "name", "kind", "generated_at"))):
+                raise ValueError("Invalid preview video")
+            if row.get("status") == "running" and not isinstance(row.get("run_id"), str):
+                raise ValueError("Missing preview run")
+            if (video or row.get("pending_confirmation")) and (
+                    not isinstance(row.get("job_id"), str) or not isinstance(row.get("timeline_uid"), str)
+                    or self._folder(row["job_id"], row["timeline_uid"]) != path.parent):
+                raise ValueError("Invalid preview owner")
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            return self._invalid_row(path, exc)
+        self._bad_rows.discard(path)
+        return row
 
     def _timeline(self, job_id, uid):
         job = self.app.production.job(job_id)
@@ -135,9 +168,15 @@ class TimelinePreviews:
             if path.is_relative_to(folder) and path.is_file() and path.stat().st_size:
                 return video, path
         # Existing local exports are also viewable before a new preview is requested.
-        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", timeline.get("name", ""))
+        name = _LEGACY_EXPORT_CHARS.sub("_", timeline.get("name", ""))
         path = self.app.production.root / "exports" / (name + ".mp4")
         if path.is_file() and path.stat().st_size:
+            with self.lock:
+                owners = {(order["id"], item["unique_id"], item.get("project_id") or item.get("project"))
+                          for order in self.app.production._read_catalog()["jobs"] for item in order.get("timelines", [])
+                          if _LEGACY_EXPORT_CHARS.sub("_", item.get("name", "")).casefold() == name.casefold()}
+            if owners != {(job["id"], timeline["unique_id"], timeline.get("project_id") or timeline.get("project"))}:
+                return None, None
             stamp = path.stat()
             version = "existing-" + hashlib.sha256(f"{stamp.st_mtime_ns}:{stamp.st_size}".encode()).hexdigest()[:16]
             return {"version": version, "name": path.name, "kind": "已导出视频", "generated_at":
@@ -206,8 +245,8 @@ class TimelinePreviews:
         with self.lock:
             paths = (self.root / job_id).glob("*/preview.json") if job_id else self.root.glob("PRD-*/*/preview.json")
             for path in paths:
-                row = json.loads(path.read_text(encoding="utf-8"))
-                if row.get("status") in {"running", "optimizing"} or row.get("pending_confirmation"):
+                row = self._load_row(path)
+                if row.get("status") in {"running", "optimizing"} or row.get("pending_confirmation") or row.get("unavailable"):
                     return True
             return False
 

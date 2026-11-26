@@ -67,6 +67,9 @@ def test_lookup_reuses_checked_inputs_only_when_rules_and_media_are_present(stat
     assert find_imported_package(local, origin['job_id'], origin['fingerprint'])['job_id'] is None
     local.production_audio(imported, manifest['job']['selected_take'], 'wav').unlink()
     assert find_imported_package(local, *args)['job_id'] is None
+    assert import_package(local, raw) == {'job_id': imported, 'reused': True}
+    assert local.production_audio(imported, manifest['job']['selected_take'], 'wav').read_bytes() == b'audio-wav'
+    assert find_imported_package(local, *args) == {'job_id': imported, 'reused': True}
     assert len(local.production.read()['jobs']) == 1
 
 

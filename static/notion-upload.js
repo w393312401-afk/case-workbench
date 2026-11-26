@@ -7,6 +7,14 @@ window.NotionUpload = (() => {
   const link = receipt => receipt?.page_id && /^[a-f0-9-]{32,36}$/i.test(receipt.page_id) ? `https://www.notion.so/${receipt.page_id.replaceAll('-','')}` : '';
   // Option text: the headline the post uses, then its Chinese reading for the eye only.
   const titleLabel = (title,zh) => title.split('#')[0].trim() + (zh ? `｜${zh}` : '');
+  // Notion 上传完成后顺带写飞书多维表格；没配飞书的记录没有 feishu_status，不显示这一行。
+  const feishuText = receipt => {
+    const status = receipt?.feishu_status, note = receipt?.feishu_error || '';
+    if (status === 'synced') return {text:'飞书：已同步' + (note ? `（${note}）` : ''),bad:Boolean(note)};
+    if (status === 'failed') return {text:'飞书：同步失败：' + (note || '原因不明'),bad:true};
+    if (status === 'skipped') return {text:'飞书：没同步：' + note,bad:true};
+    return null;
+  };
   // Missing readings are made once and saved (shared with 成片与发布); uploading never waits for them.
   async function fillTitleChinese(dialog,job,api,data) {
     const titles = data.copy?.titles || [];
@@ -49,7 +57,7 @@ window.NotionUpload = (() => {
       <label class="field"><span>标题＋tags</span><textarea name="title" rows="3" required maxlength="2000">${esc(receipt?.title || titles[0] || '')}</textarea></label>
       <div class="form-row"><label class="field"><span>钩子屏显</span><textarea name="screen_en" rows="2" maxlength="300">${esc(timeline?.hook_overlay?.text || data.copy?.screen_en || '')}</textarea></label><label class="field"><span>屏显中文</span><textarea name="screen_zh" rows="2" maxlength="300">${esc(data.copy?.screen_zh || '')}</textarea></label></div>
       <details><summary>查看上传的中英文案</summary><h4>英文文案</h4><pre>${esc(data.copy?.en || '')}</pre><h4>中文文案</h4><pre>${esc(data.copy?.zh || '尚未补充中文文案')}</pre></details>
-      <p data-notion-progress role="status">${esc(active ? receipt.progress : '')}</p><p class="ai-error" data-notion-error role="alert" hidden></p>
+      <p data-notion-progress role="status">${esc(active ? receipt.progress : '')}</p>${(feishu => feishu && receipt.status === 'completed' ? `<p data-notion-feishu role="status" class="${feishu.bad ? 'ai-error' : 'context-note'}">${esc(feishu.text)}</p>` : '<p data-notion-feishu role="status" hidden></p>')(feishuText(receipt))}<p class="ai-error" data-notion-error role="alert" hidden></p>
       <a data-notion-result target="_blank" rel="noopener noreferrer" ${link(receipt) ? `href="${esc(link(receipt))}"` : 'hidden'}>查看 Notion 页面</a></div>
       <div class="dialog-footer"><span>${active ? '关闭窗口后仍会继续上传。' : ''}</span><div><button type="button" class="secondary" data-close>关闭</button><button type="submit" class="primary" data-notion-submit ${active || data.blocked_reason || !data.configured ? 'disabled' : ''}>${receipt?.page_id ? '更新到 Notion' : '上传到 Notion'}</button></div></div></form>`;
     document.body.append(dialog);dialog.showModal();
@@ -75,6 +83,8 @@ window.NotionUpload = (() => {
         if (current?.status === 'completed') {
           request = null;const result = dialog.querySelector('[data-notion-result]');result.href = link(current);result.hidden = false;
           progress.textContent = current.warning || '已上传到 Notion。';
+          const feishu = feishuText(current), line = dialog.querySelector('[data-notion-feishu]');
+          if (feishu) {line.textContent = feishu.text;line.className = feishu.bad ? 'ai-error' : 'context-note';line.hidden = false;}
           if (typeof toast === 'function') toast('已上传到 Notion。');
           window.VideoPublication?.markNotionUploaded?.(host,data.timeline_uid);
           // The order may now be 完成: refresh the content list and the task panel instead of waiting for their polls.
@@ -161,7 +171,10 @@ window.NotionUpload = (() => {
       if (!receipt) return '';
       if (receipt.status === 'running') return receipt.progress || '正在上传…';
       if (receipt.status === 'completed') return receipt.warning || `已上传到 Notion${receipt.export_name ? `（${receipt.export_name}）` : ''}`;
-      return receipt.error || '上传未完成，可以重试。';
+      // A failed receipt stays until the next try; name when it happened so an old failure is not read as current.
+      const when = receipt.updated_at ? new Date(receipt.updated_at) : null;
+      const stamp = when && !isNaN(when) ? `${when.getMonth() + 1}/${when.getDate()} ${String(when.getHours()).padStart(2,'0')}:${String(when.getMinutes()).padStart(2,'0')} 那次：` : '';
+      return stamp + (receipt.error || '上传未完成，可以重试。') + '（点下方按钮重试）';
     };
     function paint() {
       const host = ctl.host;if (!host?.isConnected || !ctl.data) return;
@@ -177,11 +190,12 @@ window.NotionUpload = (() => {
         <label class="field"><span>发布账号</span><input data-pn-field="account" maxlength="200" value="${esc(draft.account)}" placeholder="Notion 账号列表里的用户名" ${running ? 'disabled' : ''}></label>
         <label class="field photo-notion-title"><span>标题＋tags</span>${titles.length > 1 ? `<select data-pn-title ${running ? 'disabled' : ''}>${titles.map((title,index) => `<option value="${index}" ${title === draft.title ? 'selected' : ''}>${esc(titleLabel(title,data.copy?.titles_zh?.[index]))}</option>`).join('')}</select>` : ''}<textarea rows="2" maxlength="2000" data-pn-field="title" ${running ? 'disabled' : ''}>${esc(draft.title)}</textarea></label></div>
         <div class="photo-step-line"><span class="context-note">${esc(data.pictures)} 张发布 JPG 放进「文件和媒体」，正文放中英文案和逐张文字。</span><button type="button" class="primary compact" data-pn-submit ${disabled ? 'disabled' : ''}>${label}</button></div>`;
-      const note = ctl.error || receiptText(receipt);
+      const note = ctl.error || receiptText(receipt), feishu = done ? feishuText(receipt) : null;
       const tone = ctl.error || receipt?.status === 'failed' || receipt?.status === 'interrupted' || receipt?.warning ? 'ai-error' : 'context-note';
       host.innerHTML = `<div class="photo-notion"><h4>上传到 Notion <small>${esc(data.name)} → ${esc(data.destination)}</small></h4>
         ${data.blocked_reason ? `<p class="context-note">${esc(data.blocked_reason)}</p>` : `
         <p class="photo-notion-status"><span class="${tone}" role="status">${esc(note || '还没上传。')}</span>${href ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">查看 Notion</a>` : ''}</p>
+        ${feishu ? `<p class="${feishu.bad ? 'ai-error' : 'context-note'}" role="status">${esc(feishu.text)}</p>` : ''}
         ${stale ? '<p class="ai-error">导出过更新的版本，Notion 上还是旧图：点「更新到 Notion」换上新图。</p>' : ''}
         ${data.configured ? '' : '<p class="ai-error">请先在本机配置 Notion 发布日历地址。</p>'}
         ${connection}

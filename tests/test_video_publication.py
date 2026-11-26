@@ -117,6 +117,16 @@ class VideoPublicationTests(unittest.TestCase):
             self.bench.edit_video_publication(JOB, {"publication_id": record["id"], "revision": result["revision"], "post_id": "12", "published_on": "2026-10-02"})
         self.assertEqual(bad.exception.status, 400)
 
+    def test_registered_detail_reads_one_catalog_for_receipt_lines_and_script_posts(self):
+        self.save()
+        original_read = VideoPublicationStore.read
+        with patch.object(VideoPublicationStore, "read", autospec=True, side_effect=original_read) as read:
+            detail = self.bench.video_publication_detail(JOB)
+        self.assertEqual(detail["publication"]["post_id"], POST)
+        self.assertEqual(detail["timelines"][0]["post_id"], POST)
+        self.assertEqual(detail["script_registrations"], [POST])
+        read.assert_called_once()
+
     def test_replay_after_restart_does_not_copy_or_create_duplicate_history(self):
         body = self.body()
         saved = self.save(body)
@@ -806,3 +816,38 @@ class NeedsYouTests(unittest.TestCase):
         self.bench.photo_sets = type("Sets", (), {"failures": lambda _: []})()
         (self.tmp / "previews" / JOB / "x1" / "preview.json").unlink()
         self.assertEqual(self.bench.needs_you("051A"), {"product": "051A", "items": [], "counts": {}})
+
+
+class MadeTodayTests(unittest.TestCase):
+    """今天进 Notion 的成品条数: each timeline / carousel version counts once, on the local day of its first completed upload."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.bench = Bench(Path(temporary.name))
+        data = self.bench.production.empty()
+        data["jobs"] = [{"id": JOB, "product": "051A"}, {"id": "PRD-000000000002", "product": "999Z"}]
+        self.bench.production.write(data)
+        videos = {"V1": {"job_id": JOB, "timeline_uid": "a", "status": "completed", "updated_at": "2026-11-19T02:00:00+00:00"},
+                  "V2": {"job_id": JOB, "timeline_uid": "a", "status": "completed", "updated_at": "2026-11-19T05:00:00+00:00"},
+                  "V3": {"job_id": JOB, "timeline_uid": "b", "status": "failed", "updated_at": "2026-11-19T03:00:00+00:00"},
+                  "V4": {"job_id": JOB, "timeline_uid": "c", "status": "completed", "updated_at": "2026-11-17T03:00:00+00:00"},
+                  "V5": {"job_id": JOB, "timeline_uid": "c", "status": "completed", "updated_at": "2026-11-19T04:00:00+00:00"},
+                  "V6": {"job_id": "PRD-000000000002", "timeline_uid": "x", "status": "completed", "updated_at": "2026-11-19T04:00:00+00:00"}}
+        photos = {"P1": {"job_id": JOB, "set_id": "PHS-1", "work": "A", "status": "completed", "updated_at": "2026-11-19T06:00:00+00:00"},
+                  "P2": {"job_id": JOB, "set_id": "PHS-1", "work": "B", "status": "completed", "updated_at": "2026-11-19T07:00:00+00:00"},
+                  "P3": {"job_id": JOB, "set_id": "PHS-2", "work": "A", "status": "running", "updated_at": "2026-11-19T07:00:00+00:00"}}
+        store = lambda rows: type("Store", (), {"read": lambda _: {"uploads": rows}})()
+        self.bench.notion_uploads = type("Uploads", (), {"store": store(videos), "photo_store": store(photos)})()
+
+    def test_counts_first_completed_upload_per_timeline_and_version(self):
+        from datetime import datetime, timezone
+        stamp = datetime(2026, 11, 19, 4, 0, tzinfo=timezone.utc).astimezone().date()
+        out = self.bench.made_today("051A", today=stamp)
+        self.assertEqual((out["videos"], out["photos"]), (1, 2))
+        self.assertEqual(self.bench.made_today("all", today=stamp)["videos"], 2)
+        self.assertEqual(self.bench.made_today("999Z", today=stamp), {"date": stamp.isoformat(), "videos": 1, "photos": 0})
+
+    def test_missing_upload_records_count_nothing(self):
+        self.bench.notion_uploads = None
+        self.assertEqual(self.bench.made_today("")["videos"], 0)

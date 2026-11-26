@@ -9,7 +9,7 @@ from datetime import date, timedelta
 
 from creation_store import CreationError, text
 from direction_store import fingerprint, product_key
-from performance_store import RATE_MIN_VIEWS
+from performance_store import RATE_MIN_VIEWS, clone_records
 from retro_draft import parse_card
 from review_policy import review_context, report_window
 from manual_review_status import ManualReviewStatus
@@ -99,14 +99,15 @@ class FeedbackWorkbenchMixin:
             return ManualReviewStatus(self.review_followups.read()["entries"], self.creation.scripts_readonly(),
                                       publications=self._video_publications().read()["jobs"].values())
 
-    def annotate_review_status(self, videos, snapshot=None):
+    def annotate_review_status(self, videos, snapshot=None, *, detached=False):
+        """detached: the rows are already the caller's own copy and may be annotated in place."""
         snapshot = snapshot if snapshot is not None else self.review_status_snapshot()
-        result = copy.deepcopy(videos)
+        result = videos if detached else clone_records(videos)
         for video in result:
             video["review_status"] = snapshot.for_video(video)
         return result
 
-    def annotate_review_drafts(self, videos):
+    def annotate_review_drafts(self, videos, *, detached=False):
         """Batch eligibility belongs to this exact product/video/window, never to a traffic band."""
         if not videos:
             return []
@@ -132,7 +133,7 @@ class FeedbackWorkbenchMixin:
             except Exception:
                 # Broken AI history must not hide the sales list or allow duplicate tasks.
                 unavailable = True
-            result = copy.deepcopy(videos)
+            result = videos if detached else clone_records(videos)
             for video in result:
                 key = (product_key(video.get("product")), str(video.get("video_id") or ""), video.get("window_end"))
                 draft = drafts.get(key, (None, None))[1]
@@ -250,7 +251,7 @@ class FeedbackWorkbenchMixin:
 
     def review_videos(self, videos=None):
         """Include registered posts before a sales export arrives, without making up sales."""
-        videos = copy.deepcopy(self.performance.videos() if videos is None else videos)
+        videos = clone_records(self.performance.videos() if videos is None else videos)
         by_id = {str(row["video_id"]): row for row in videos}
         for identifier, registration in self._registrations(self.creation.read()["scripts"]).items():
             if identifier in by_id:
@@ -263,7 +264,7 @@ class FeedbackWorkbenchMixin:
                 by_id[identifier] = video
         for video in videos:
             video["review_context"] = review_context(video)
-        return self.annotate_review_status(videos)
+        return self.annotate_review_status(videos, detached=True)
 
     def review_video(self, video_id, scripts, video=None):
         """What review_videos() makes of this one video (its review_context, registered and registered_on), without

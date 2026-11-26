@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import date
 import json
 import sqlite3
 import tempfile
@@ -114,6 +115,37 @@ class SalesDataResolverTests(unittest.TestCase):
         self.assertEqual(self.performance.video(LINKED)["views"], brief[LINKED]["views"])
         self.assertEqual(len(brief[LINKED]["excluded_overlapping_periods"]), 1)
         self.assertIn("重叠周表", self.resolver.resolve_case(case())["evidence"]["context"])
+
+
+class SalesDataStateTests(unittest.TestCase):
+    def test_case_library_projection_refreshes_for_calendar_and_day_without_changing_sales_data(self):
+        with tempfile.TemporaryDirectory(prefix="sales-state-") as folder:
+            root = Path(folder)
+            video = root / "fixture.mp4"
+            video.write_bytes(b"fixture")
+            store = http.SERVER.CaseStore(root / "skill")
+            saved = store.add({"title": "Fixture", "product": "202H", "original": {"text": "fixture", "source": "test"},
+                               "feedback": {"kind": "editorial", "text": "fixture"}, "current": http.snapshot(video)})
+            exports.build_exports(root / "exports")
+            app = http.SERVER.Workbench(root / "skill", root / "runtime", allow_open=False, performance_sources=[root / "exports"])
+            app.performance.sync()
+            with patch.object(http.SERVER, "pacific_today", return_value=date(2026, 9, 14)):
+                first = app.state()
+                row = first["cases"][0]
+                self.assertEqual(row["sales_data"], app.detail(saved["case_id"])["sales_data"])
+                self.assertEqual(row["library_performance"]["status"], "new")
+                self.assertEqual(row["library_performance"]["recent"]["items"]["value"], 4)
+                self.assertTrue(row["library_performance"]["recent"]["items"]["complete"])
+                calendar = app.campaigns.public()
+                app.campaigns.mutate({"action": "save", "revision": calendar["revision"], "campaign": {
+                    "name": "Fixture sale", "start": "2026-09-07", "end": "2026-09-13", "confidence": "manual", "verified": True}})
+                second = app.state()
+                self.assertEqual(second["cases"][0]["library_performance"]["campaign"]["percent"], 25.0)
+                self.assertNotEqual(first["signature"], second["signature"])
+            with patch.object(http.SERVER, "pacific_today", return_value=date(2026, 9, 15)):
+                third = app.state()
+                self.assertEqual(third["cases"][0]["library_performance"]["age_days"], 15)
+                self.assertFalse(third["cases"][0]["library_performance"]["recent"]["items"]["complete"])
 
 
 class SalesDataHTTPTests(unittest.TestCase):

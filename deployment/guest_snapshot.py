@@ -304,11 +304,15 @@ def build_snapshot(root, base, *, scanner=None, expected_marks=None, exporter=No
 class SnapshotService:
     def __init__(self, root=ROOT, base=BASE, *, interval=30, scanner=None,
                  builder=build_snapshot, ready=SYNC.local_api_ready, clock=time.monotonic,
-                 logger=None):
+                 logger=None, quiet=0, max_wait=600):
         self.root = Path(root)
         self.base = validate_base(base)
         self.guest = guest_directory(self.root)
         self.interval = max(30, float(interval))
+        # A rebuild reads every record through the workbench and slows it for whoever is using it.
+        # Wait until saving has paused for `quiet` seconds; never hold a change back longer than `max_wait`.
+        self.quiet, self.max_wait = max(0, float(quiet)), max(0, float(max_wait))
+        self.pending_marks, self.changed_at, self.dirty_since = None, None, None
         self.scanner = scanner or GuestScanner(self.root)
         self.builder, self.ready, self.clock = builder, ready, clock
         self.logger = logger or logging.getLogger("workbench.guest_snapshot")
@@ -350,11 +354,23 @@ class SnapshotService:
             return False
         if self.marks is not None and not SYNC.changed_files(self.marks, current, business_only=True):
             self.marks = current
+            self.pending_marks = self.changed_at = self.dirty_since = None
             self.status("ready")
             return False
+        if self.quiet and self.marks is not None and not force:
+            if self.pending_marks is None or SYNC.changed_files(self.pending_marks, current, business_only=True):
+                self.changed_at = now
+                if self.dirty_since is None:
+                    self.dirty_since = now
+            self.pending_marks = current
+            if now - self.changed_at < self.quiet and now - self.dirty_since < self.max_wait:
+                self.status("pending")
+                return False
         if not self.ready(self.base):
             self.status("waiting_local_service")
             return False
+        # Whatever this attempt's outcome, the next forced rebuild is a full `max_wait` away.
+        self.dirty_since = None
         self.status("building")
         try:
             completed = self.builder(self.root, self.base, scanner=self.scanner, expected_marks=current)
@@ -375,9 +391,13 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--base", default=BASE)
     parser.add_argument("--interval", type=float, default=30)
+    parser.add_argument("--quiet", type=float, default=90,
+                        help="seconds without a saved change before a rebuild starts")
+    parser.add_argument("--max-wait", type=float, default=600,
+                        help="longest a change waits while saving continues")
     args = parser.parse_args(argv)
     try:
-        service = SnapshotService(base=args.base, interval=args.interval)
+        service = SnapshotService(base=args.base, interval=args.interval, quiet=args.quiet, max_wait=args.max_wait)
         logger = logging.getLogger("workbench.guest_snapshot")
         logger.setLevel(logging.INFO)
         handler = RotatingFileHandler(service.guest / "snapshot.log", maxBytes=256 * 1024,

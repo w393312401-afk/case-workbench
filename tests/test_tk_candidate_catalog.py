@@ -236,7 +236,7 @@ class CandidateCatalogTests(unittest.TestCase):
         result = self.store.register_candidate(self.candidate())
         data = self.store.read()
         entity = result["direction"]
-        with self.assertRaisesRegex(DirectionError, "请选择这条变体的推进结构"):
+        with self.assertRaisesRegex(DirectionError, "完全相同"):
             self.store._save_direction(data, {**entity, "execution_change": "新的执行改动"})
 
 

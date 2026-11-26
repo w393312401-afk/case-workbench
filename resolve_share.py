@@ -15,6 +15,7 @@ read when someone else takes a turn, and restored on its next call.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import secrets
 import socket
 import sys
@@ -74,18 +75,31 @@ class ProjectShares:
         try:
             yield share
         finally:
-            ended = False
-            with self.cond:
-                share.users -= 1
-                share.views.pop(owner, None)
-                if share.view_owner == owner:
-                    share.view_owner = None
-                if share.users <= 0:
-                    self.shares.pop(key, None)
-                    ended = True
-                self.cond.notify_all()
-            if ended:
-                share.lease.__exit__(None, None, None)
+            self.leave(share, owner)
+
+    def join(self, key):
+        """Join the project's open share, or None when there is none. Only for a short job of the same project (a
+        timeline build), which may join although someone else waits: it holds DaVinci for one turn, not a session."""
+        with self.cond:
+            share = self.shares.get(key)
+            if share is not None:
+                share.users += 1
+            return share
+
+    def leave(self, share, owner):
+        """End one user's part of a share; the last one out hands DaVinci back to the usual line."""
+        ended = False
+        with self.cond:
+            share.users -= 1
+            share.views.pop(owner, None)
+            if share.view_owner == owner:
+                share.view_owner = None
+            if share.users <= 0:
+                self.shares.pop(share.key, None)
+                ended = True
+            self.cond.notify_all()
+        if ended:
+            share.lease.__exit__(None, None, None)
 
     def _next(self, share):
         if share.reserved and time.monotonic() >= share.reserved[1]:
@@ -151,10 +165,14 @@ class ProjectShares:
 
 class TurnServer:
     """Localhost line protocol for one edit's MCP gate: `<token> acquire` -> `ok[\\t<note>]` / `err\\t<message>`,
-    then `<token> release` -> `ok`. A dropped connection gives its turn back."""
+    then `<token> release` -> `ok`. A dropped connection gives its turn back.
 
-    def __init__(self, shares, share, owner, cancel, timeout):
+    `<token> picks` comes before a call that places footage: `ok`, or `err\\t<JSON string>` with what `check` returned
+    as the reason the call may not run. Without a check, or when it fails, the answer is `ok`."""
+
+    def __init__(self, shares, share, owner, cancel, timeout, check=None):
         self.shares, self.share, self.owner, self.cancel, self.timeout = shares, share, owner, cancel, timeout
+        self.check = check
         self.token = secrets.token_hex(16)
         self.stats = {"calls": 0, "waited": 0.0, "longest_wait": 0.0, "view_notes": 0, "refused": 0}
         self._stats_lock = threading.Lock()
@@ -216,6 +234,12 @@ class TurnServer:
                         current, held = held, None
                         current.__exit__(None, None, None)
                     connection.sendall(b"ok\n")
+                elif action == "picks":
+                    try:
+                        refusal = str(self.check() or "") if self.check is not None else ""
+                    except Exception:
+                        refusal = ""
+                    connection.sendall((("err\t" + json.dumps(refusal, ensure_ascii=False)) if refusal else "ok").encode("utf-8") + b"\n")
                 else:
                     connection.sendall("err\t排队请求无效。\n".encode("utf-8"))
         except (OSError, ValueError):

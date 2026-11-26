@@ -495,6 +495,24 @@ class AIHTTPTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/ai/tasks?case_id=invalid")[0], 400)
         self.assertEqual(self.request("GET", "/api/ai/tasks/AIT-000000000000")[0], 404)
 
+    def test_counts_projection_skips_cards_and_production_and_validates_its_query(self):
+        self.bridge.blocked = True
+        task = self.create()
+        self.assertTrue(self.bridge.started.wait(2))
+        with patch.object(self.server.app.ai, "list_tasks", side_effect=AssertionError("No task cards")), \
+                patch.object(self.server.app.production, "public", side_effect=AssertionError("No production history")):
+            status, data = self.request("GET", "/api/ai/tasks?projection=counts")
+            self.assertEqual(status, 200, data)
+            self.assertEqual(data, {"counts": {"active": 1, "by_product": {"202H": 1}}})
+            self.assertEqual(self.request("GET", "/api/ai/tasks?projection=counts&product=129N")[1],
+                             {"counts": {"active": 0, "by_product": {}}})
+        for query in ("projection=bad", "projection=counts&projection=counts", "projection=", "projection=counts&case_id=invalid"):
+            self.assertEqual(self.request("GET", "/api/ai/tasks?" + query)[0], 400)
+        self.request("POST", f"/api/ai/tasks/{task['task_id']}/cancel",
+                     {"request_id": uuid4().hex, "round_id": task["rounds"][0]["round_id"]})
+        self.wait(task["task_id"])
+        self.assertIn("tasks", self.request("GET", "/api/ai/tasks?projection=full")[1])
+
 
 if __name__ == "__main__":
     unittest.main()

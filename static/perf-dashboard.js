@@ -13,9 +13,12 @@
   const accountMatches = (selection, account) => !selection || selection.split(",").includes(account);
   const validPeriod = (period) => period === "all" || !!rangeOf(period);
   const periodLabel = (period) => { const r = rangeOf(period); return r ? `${r[0]} 至 ${r[1]}` : "全部周期"; };
-  const money = (v) => (v == null ? "—" : "$" + Math.round(v).toLocaleString("en-US"));
-  const money2 = (v) => (v == null ? "—" : "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
-  const count = (v) => (v == null ? "—" : Math.round(v).toLocaleString("en-US"));
+  // One formatter for the page: toLocaleString builds a new one on every call, and the boards format tens of thousands of numbers.
+  const usWhole = new Intl.NumberFormat("en-US");
+  const usCents = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = (v) => (v == null ? "—" : "$" + usWhole.format(Math.round(v)));
+  const money2 = (v) => (v == null ? "—" : "$" + usCents.format(v));
+  const count = (v) => (v == null ? "—" : usWhole.format(Math.round(v)));
   const pct = (v) => (v == null ? "—" : v.toFixed(2) + "%");
   const ratio = (a, b, scale = 1) => (b ? (a * scale) / b : null);
   const compact = (v, prefix = "") => {
@@ -282,7 +285,8 @@
     if (!known.length) return null;
     const [latest] = known.at(-1), previous = known.at(-2)?.[0];
     const move = previous ? ((latest - previous) / previous) * 100 : null;
-    return [fmt(latest), move == null ? "上周无对比" : Math.abs(move) < 0.5 ? "与上周持平" : `比上周 ${move > 0 ? "↑" : "↓"}${Math.abs(move).toFixed(0)}%`];
+    // "前一周", not "上周": the newest week here is the newest exported week, which can be weeks ago.
+    return [fmt(latest), move == null ? "前一周无对比" : Math.abs(move) < 0.5 ? "与前一周持平" : `比前一周 ${move > 0 ? "↑" : "↓"}${Math.abs(move).toFixed(0)}%`];
   }
 
   const weekLabel = (w) => w.week.slice(5);
@@ -434,10 +438,12 @@
   };
   function metricTiles(S, chosen) {
     const ws = S.weeks.filter((w) => w.complete && wholeWeek(w)), t = S.total;
-    return `<div class="perf-kpis perf-kpi-picker" role="group" aria-label="选择主图指标">${Object.entries(metrics).map(([key, [label, read, fmt]]) => {
-      const move = change(ws.map(read), fmt);
+    const tileLabels = { gmv: "自制视频 GMV" };
+    return `<div class="perf-kpis perf-kpi-picker" role="group" aria-label="选择主图指标">${Object.entries(metrics).filter(([key]) => key !== "views").map(([key, [metricLabel, read, fmt]]) => {
+      const label = tileLabels[key] || metricLabel;
+      const move = change(ws.map(read), fmt), latestWeek = ws.findLast((w) => read(w) != null);
       const value = key === "gmv" && S.range ? money2(read(t)) : fmt(read(t));
-      return `<button type="button" class="perf-kpi${key === chosen ? " is-selected" : ""}" data-perf-metric="${key}" aria-pressed="${key === chosen}"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(S.missing.length ? "数据不全 · 仅计已覆盖日期" : move ? `最近一周 ${move[0]} · ${move[1]}` : "没有完整周")}</small></button>`;
+      return `<button type="button" class="perf-kpi${key === chosen ? " is-selected" : ""}" data-perf-metric="${key}" aria-pressed="${key === chosen}"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(S.missing.length ? "数据不全 · 仅计已覆盖日期" : move ? `${latestWeek.week.slice(5)} 那周 ${move[0]} · ${move[1]}` : "没有完整周")}</small></button>`;
     }).join("")}</div>`;
   }
   // The chosen measure, week by week, then the same measure split by account (additive measures only).
@@ -446,18 +452,21 @@
     const id = `c${serial++}`, values = ws.map((w) => (w.complete ? read(w) : null));
     tipFor(id, ws.map((w, i) => ({ value: w.complete ? fmt(values[i]) : "数据不全", when: weekSpan(w),
       lines: w.complete ? [["订单", count(w.orders)], ["GMV", money(w.gmv)], ["播放", count(w.views)], ["商品点击", count(w.clicks)]].filter(([name]) => !label.includes(name)) : [["", "该周导出有缺口，不计入走势"]] })));
-    const main = sized(900, 250, () => (kind === "line" ? line : columns)(id, `每周${label}`, values, { tick, x: (i) => weekLabel(ws[i]) }));
+    // With an account split the two charts sit side by side, so each is drawn at half width to keep its labels readable.
+    const paired = additive && S.accountsShown.length > 1, [cw, ch] = paired ? [620, 280] : [900, 250];
+    const main = sized(cw, ch, () => (kind === "line" ? line : columns)(id, `每周${label}`, values, { tick, x: (i) => weekLabel(ws[i]) }));
     const head = change(values.map((v, i) => wholeWeek(ws[i]) ? v : null), fmt);
     let split = "";
     if (additive && S.accountsShown.length > 1) {
-      const sid = `c${serial++}`, names = S.accountsShown;
+      // Accounts with nothing in this measure for the whole period are left out of the split and named once below it.
+      const totalOf = (name) => ws.reduce((sum, w) => sum + (w.acc.get(name) ? read(w.acc.get(name)) : 0), 0);
+      const sid = `c${serial++}`, names = S.accountsShown.filter((name) => totalOf(name) > 0), quiet = S.accountsShown.filter((name) => !(totalOf(name) > 0));
       const series = names.map((name) => ({ name, slot: S.P.slot.get(name), values: ws.map((w) => (w.acc.get(name) ? read(w.acc.get(name)) : 0)) }));
       tipFor(sid, ws.map((w, i) => ({ value: w.complete ? fmt(read(w)) : "数据不全", when: `${weekSpan(w)} · 合计`,
         lines: w.complete ? series.filter((x) => x.values[i] > 0).sort((x, y) => y.values[i] - x.values[i]).map((x) => [x.name, fmt(x.values[i]), x.slot]) : [["", "该周导出有缺口，不计入走势"]] })));
-      const totalOf = (name) => ws.reduce((sum, w) => sum + (w.acc.get(name) ? read(w.acc.get(name)) : 0), 0);
-      split = `<div class="perf-mini perf-split"><div class="perf-mini-head"><span>按账号拆分</span><small>颜色固定对应账号</small></div>${sized(900, 200, () => stacked(sid, `各账号每周${label}`, series, { n: ws.length, gap: (i) => !ws[i].complete, tick, x: (i) => weekLabel(ws[i]) }))}${legendFor(names, S, totalOf, fmt)}<div class="perf-tooltip" role="status" hidden></div></div>`;
+      split = `<div class="perf-mini perf-split"><div class="perf-mini-head"><span>按账号拆分</span><small>颜色固定对应账号</small></div>${sized(cw, ch, () => stacked(sid, `各账号每周${label}`, series, { n: ws.length, gap: (i) => !ws[i].complete, tick, x: (i) => weekLabel(ws[i]) }))}${legendFor(names, S, totalOf, fmt)}${quiet.length ? `<p class="perf-chart-note">其余 ${quiet.length} 个账号这段时间为 0：${esc(quiet.join("、"))}</p>` : ""}<div class="perf-tooltip" role="status" hidden></div></div>`;
     }
-    return `<section class="section-card perf-trend-card perf-main-card"><div class="perf-mini perf-main"><div class="perf-mini-head"><span>每周${esc(label)}</span>${head ? `<strong>${esc(head[0])}</strong><small>${esc(head[1])}</small>` : ""}</div>${main}<div class="perf-tooltip" role="status" hidden></div></div>${split}</section>`;
+    return `<section class="section-card perf-trend-card perf-main-card${split ? " is-paired" : ""}"><div class="perf-mini perf-main"><div class="perf-mini-head"><span>每周${esc(label)}</span>${head ? `<strong>${esc(head[0])}</strong><small>${esc(head[1])}</small>` : ""}</div>${main}<div class="perf-tooltip" role="status" hidden></div></div>${split}</section>`;
   }
   function fold(title, hint, body) {
     return `<details class="perf-fold section-card"><summary><span>${esc(title)}</span>${hint ? `<small>${esc(hint)}</small>` : ""}</summary><div class="perf-fold-body">${body}</div></details>`;
@@ -471,7 +480,7 @@
     const S = ctx.scoped || scope(ctx);
     S.shopRatio = shopTotalRatio(a, S);
     if (!S.total.videos) return `<div class="empty"><h3>${S.campaignRange ? "当前活动期没有视频周数据" : "当前筛选下没有数据"}</h3><p>换个账号、产品或周期试试，或点「清除筛选」。</p></div>${S.campaignRange ? shopCards(S) : ""}`;
-    const chosen = metrics[ctx.filters.metric] ? ctx.filters.metric : "gmv", hasTrend = !S.exact || S.weeks.some(w => w.complete), w = weeklyCards(S);
+    const chosen = metrics[ctx.filters.metric] && ctx.filters.metric !== "views" ? ctx.filters.metric : "gmv", hasTrend = !S.exact || S.weeks.some(w => w.complete), w = weeklyCards(S);
     const monthly = monthlyTable(S, a), shop = shopCards(S);
     return `${metricTiles(S, chosen)}${hasTrend ? mainCharts(S, chosen) : '<p class="perf-chart-note">只有完整区间报表，暂无可绘制的每周数据。</p>'}
       ${section("视频排行 Top 10", "按归因 GMV，点一行看详情", `${topVideos(S, ctx)}<button type="button" class="secondary perf-more" data-perf-tab="list">查看全部自制视频</button>`)}
@@ -511,13 +520,13 @@
 
   function sourceStrip(ctx, S) {
     const f = ctx.filters, extras = ctx.extras || {};
-    const card = (tab, label, value, lines) => `<button type="button" class="perf-source" data-perf-tab="${tab}"><span>${esc(label)}</span><strong>${esc(value)}</strong>${lines.map((line) => `<small>${esc(line)}</small>`).join("")}</button>`;
+    const card = (tab, label, value, lines, hint = "") => `<button type="button" class="perf-source" data-perf-tab="${tab}"${hint ? ` title="${esc(hint)}"` : ""}><span>${esc(label)}</span><strong>${esc(value)}</strong>${lines.map((line) => `<small>${esc(line)}</small>`).join("")}</button>`;
     const none = (tab, label, text) => card(tab, label, "—", [text]);
 
     let video = none("list", "自制视频", "当前筛选下没有数据");
     if (S?.total.videos) {
       const t = S.total, span = S.range ? S.range.join(" 至 ") : S.weeks.length ? `${S.weeks[0].week} 至 ${addCalendarDays(S.weeks.at(-1).week, 6)}` : "";
-      video = card("list", "自制视频", (S.range ? money2 : money)(t.gmv), [`订单 ${count(t.orders)} · 播放 ${count(t.views)}`, `${S.exact ? "完整区间报表" : S.range ? "所选日期" : "按周导出"} · ${span}${S.missing.length ? " · 数据不全" : ""}`]);
+      video = card("list", "自制视频", (S.range ? money2 : money)(t.gmv), [`订单 ${count(t.orders)} · 播放 ${count(t.views)}${S.missing.length ? " · 数据不全" : ""}`], `${S.exact ? "完整区间报表" : S.range ? "所选日期" : "按周导出"} · ${span}`);
     }
 
     let photo;
@@ -526,7 +535,7 @@
     else {
       const P = photoTotals(extras.photoItems, f), labels = P.periods.filter((_, i) => !P.picked || P.picked.has(i)).map((p) => p.label);
       photo = labels.length
-        ? card("photos", "自制图文", money(P.total.gmv), [`售出 ${count(P.total.sold)} · 播放 ${count(P.total.views)} · ${count(P.total.posts.size)} 条`, `按月导出 · ${labels.join("、")}`])
+        ? card("photos", "自制图文", money(P.total.gmv), [`售出 ${count(P.total.sold)} · 播放 ${count(P.total.views)} · ${count(P.total.posts.size)} 条`], `按月导出 · ${labels.join("、")}`)
         : none("photos", "自制图文", "所选周期没有图文导出");
     }
 
@@ -536,11 +545,12 @@
     else {
       const C = window.PerfCreators.overview(extras.creators, f), shown = C.periods.filter((_, i) => !C.picked || C.picked.has(i));
       creators = shown.length
-        ? card("creators", "海外达人", money(C.total.gmv), [`订单 ${count(C.total.orders)} · 出单达人 ${count(C.total.sellers)} 位`,
-            `按月导出 · ${shown.map((p) => p.label + partial(p)).join("、")} · 不含自有账号${f.account ? "，不受账号筛选影响" : ""}`])
+        ? card("creators", "海外达人", money(C.total.gmv), [`订单 ${count(C.total.orders)} · 出单达人 ${count(C.total.sellers)} 位 · 不含自有账号${f.account ? "，不受账号筛选影响" : ""}`],
+            `按月导出 · ${shown.map((p) => p.label + partial(p)).join("、")}`)
         : none("creators", "海外达人", "所选周期没有达人导出");
     }
-    return section("来源构成", "三类各算各的口径，不相加；跟随周期和产品筛选，点一张卡看明细", `<div class="perf-sources">${video}${photo}${creators}</div>`);
+    // One line above the figures: the three sources side by side, never added together. A click opens the tab behind one.
+    return `<div class="perf-sources-row" aria-label="来源构成"><span class="perf-sources-label" title="三类各算各的口径，不相加；跟随周期和产品筛选，点一个看明细">来源 · 各算各的，不相加</span><div class="perf-sources">${video}${photo}${creators}</div></div>`;
   }
 
   // Grouped (not stacked) bars: one group per month, one bar per source.

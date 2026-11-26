@@ -1,0 +1,37 @@
+/* 反面素材库: the 带货数据 page's 「反面素材」 tab (perf-negative.js). */
+.neg-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}
+.neg-head p{color:var(--muted-soft);font-size:var(--font-meta);line-height:1.8}
+.neg-head button{flex-shrink:0}
+.neg-settings{margin:0 0 16px;padding:12px 16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);font-size:var(--font-meta)}
+.neg-settings summary{cursor:pointer;color:var(--muted);line-height:1.8}
+.neg-settings summary span{margin-left:10px;color:var(--accent-text)}
+.neg-settings-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px 16px;margin-top:14px}
+.neg-settings-form label,.neg-manual-form label{display:flex;flex-direction:column;gap:6px;color:var(--muted-soft)}
+.neg-settings-form input,.neg-manual-form input,.neg-manual-form select,.neg-manual-form textarea,.neg-reason-form textarea{border:1px solid var(--line-strong);border-radius:7px;background:var(--surface);color:var(--ink);padding:8px 10px;width:100%}
+.neg-settings-form small{color:var(--muted-soft)}
+.neg-settings-actions{display:flex;gap:8px;align-items:flex-end;grid-column:1/-1}
+.neg-hint{margin-top:12px;color:var(--muted-soft);line-height:1.8}
+.neg-sections{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.neg-sections button{background:var(--surface-alt);color:var(--muted);border-radius:8px;padding:7px 12px;font-size:var(--font-meta)}
+.neg-sections button small{margin-left:6px;color:var(--muted-soft)}
+.neg-sections button.is-active{background:var(--ink);color:var(--paper)}
+.neg-sections button.is-active small{color:inherit;opacity:.75}
+.neg-table{min-width:980px}
+.neg-table td{vertical-align:top}
+.neg-date{font-variant-numeric:tabular-nums}
+.neg-video{max-width:320px;white-space:normal!important}
+.neg-video a{color:var(--accent-text)}
+.neg-video a:hover{text-decoration:underline}
+.neg-video small{display:block;color:var(--muted-soft);margin-top:3px}
+.neg-reason-cell{white-space:normal!important;min-width:280px;max-width:420px}
+.neg-reason{color:var(--ink);line-height:1.7;margin-bottom:4px}
+.neg-auto{color:var(--muted);line-height:1.7;margin-bottom:4px}
+.neg-auto.is-muted{color:var(--muted-soft);font-size:var(--font-micro)}
+.neg-reason-cell>button{padding-left:0}
+.neg-reason-form div{display:flex;gap:6px;margin-top:6px}
+.neg-row-actions{text-align:right}
+.neg-row-actions button+button{margin-left:4px}
+.neg-add{margin-bottom:12px}
+.neg-manual-form{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px 14px;margin-bottom:14px;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.neg-manual-form .wide{grid-column:span 2}
+@media (max-width:760px){.neg-head{flex-direction:column}.neg-manual-form{grid-template-columns:1fr 1fr}.neg-manual-form .wide{grid-column:1/-1}}

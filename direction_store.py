@@ -53,15 +53,20 @@ def variant_number(variants, index):
     return "#" + str(sum(1 for item in variants[:index + 1] if item.get("variant_type") != "direction"))
 
 
-def progression_value(value):
-    """One of PROGRESSIONS, or "其他：说明" with a short description."""
+def progression_value(value, required=True):
+    """How the variant moves: a preset from PROGRESSIONS is only a suggestion, any short description is kept.
+    Older records wrote free text as "其他：说明"; that form is still accepted and kept as written."""
     value = value.strip() if isinstance(value, str) else ""
     if value in PROGRESSIONS:
         return value
     match = re.fullmatch(r"其他[:：]\s*(.{2,60})", value)
     if match:
         return "其他：" + match.group(1).strip()
-    raise DirectionError(400, "请选择这条变体的推进结构；选“其他”时写明结构。")
+    if 2 <= len(value) <= 60:
+        return value
+    if not value and not required:
+        return ""
+    raise DirectionError(400, "推进结构写 2 到 60 个字，例如“问题-解决”或“开箱逐件讲”。")
 
 
 def chain_issues(points, *parts, former=False):
@@ -636,13 +641,22 @@ class DirectionStore:
         return {"deleted": point["id"], "code": point["code"]}
 
     def _save_direction(self, data, value, operation="add_variant"):
-        if operation not in {"add_variant", "update", "variant_meta"}:
+        if operation not in {"add_variant", "update", "variant_meta", "status"}:
             raise DirectionError(400, "请选择新增执行变体或编辑方向。")
         if not isinstance(value, dict):
             raise DirectionError(400, "请填写方向。")
         product = product_key(text(value.get("product"), "产品", limit=200))
         if operation == "variant_meta":
             return self._save_variant_meta(data, product, value)
+        if operation == "status":
+            # Pausing or resuming changes no wording, so nothing moves to the definition history.
+            entity = self.find_direction(data, product, text(value.get("direction_id"), "方向编号", limit=200))
+            if entity is None:
+                raise DirectionError(404, "这条方向不存在。")
+            if value.get("status") not in {"testing", "active", "paused", "archived"}:
+                raise DirectionError(400, "方向状态无效。")
+            entity["status"] = value["status"]
+            return {"direction": copy.deepcopy(entity), "existing": True}
         point = self.find_point(data, value.get("selling_point_id")) if value.get("selling_point_id") else None
         if value.get("selling_point_id") and (not point or point["product"] != product):
             raise DirectionError(400, "请选择当前产品的卖点。")
@@ -686,14 +700,12 @@ class DirectionStore:
                                                           "audience": old.get("audience", ""), "replaced_at": now()})
                 old.update({key: chain[key] for key in ("main_difference", "concern", "closing")}, status=status, notes=notes, audience=audience)
                 return {"direction": copy.deepcopy(old), "existing": True}
-            progression = progression_value(value.get("progression"))
+            # A repeated structure is allowed: what changed is told by execution_change, not by a unique label.
+            progression = progression_value(value.get("progression"), required=False)
             change = text(value.get("execution_change"), "执行改动", limit=4000)
-            same = next((index for index, item in enumerate(old["variants"]) if item.get("progression") == progression and not item.get("conflict")), None)
-            if same is not None:
-                raise DirectionError(409, f"这个方向{variant_number(old['variants'], same)}已经是“{progression}”推进，只换开头不算新变体。请换一种推进结构。")
             if any({key: item.get(key) for key in ("concern", "closing")} == {key: chain[key] for key in ("concern", "closing")} for item in old["variants"]):
                 raise DirectionError(409, "这条链和已有记录完全相同，不算新变体。")
-            meta = {"progression": progression}
+            meta = {"progression": progression} if progression else {}
             if audience:
                 meta["audience"] = audience
             self.add_variant(old, {**chain, "execution_change": change}, source, meta=meta)
@@ -730,11 +742,7 @@ class DirectionStore:
             raise DirectionError(400, "要标注的变体不存在，请刷新后重试。")
         variant = entity["variants"][index]
         if "progression" in value:
-            progression = progression_value(value["progression"])
-            same = next((i for i, item in enumerate(entity["variants"]) if i != index and item.get("progression") == progression and not item.get("conflict")), None)
-            if same is not None:
-                raise DirectionError(409, f"{variant_number(entity['variants'], same)}已经是“{progression}”推进。两条推进相同，应合并为一条变体。")
-            variant["progression"] = progression
+            variant["progression"] = progression_value(value["progression"])
         if "audience" in value:
             audience = text(value.get("audience") or "", "目标人群", False, 2000)
             if audience:

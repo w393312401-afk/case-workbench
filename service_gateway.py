@@ -17,13 +17,14 @@ import threading
 import time
 from urllib.parse import unquote, urlsplit
 
-from app_config import load_config
+from app_config import keep_full_speed, load_config
 
 
 APP_ROOT = Path(__file__).resolve().parent
 CHUNK_SIZE = 64 * 1024
 CONTROL_LIMIT = 1024 * 1024
 ENGINE_REFRESH_RETRY_SECONDS = 15
+UPLOAD_IDLE_TIMEOUT = 300
 GATEWAY_HEADER = "X-Workbench-Gateway"
 FORWARDED_HEADER = "X-Workbench-Forwarded"
 HOP_HEADERS = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -155,11 +156,13 @@ class ServiceGateway(ThreadingHTTPServer):
         with self._control_lock:
             self._refresh_restart_state_locked()
             restart_pending = self._restart_pending
+            restart_failed = (not restart_pending and self._restart_process is not None
+                              and bool(self._restart_process.returncode))
         public = {key: value for key, value in status.items() if key not in {"proxy_secret", "gateway_secret"}}
         return {**public, "pid": os.getpid(), "role": "gateway", "port": self.server_port,
                 "task_host_pid": host["pid"], "task_host_launch_id": host["launch_id"],
                 "restart_keeps_tasks": True, "shutdown_supported": True, "shutting_down": self.shutting_down,
-                "restart_pending": restart_pending,
+                "restart_pending": restart_pending, "restart_failed": restart_failed,
                 "task_host_code_stale": bool(status.get("code_stale")),
                 "code_stale": code_signature(self.root) > self.started_version}
 
@@ -284,6 +287,26 @@ class GatewayHandler(BaseHTTPRequestHandler):
         finally:
             self.connection.settimeout(timeout)
 
+    def forward_body(self, upstream, length):
+        if not length:
+            return
+        timeout = self.connection.gettimeout()
+        self.connection.settimeout(UPLOAD_IDLE_TIMEOUT)
+        try:
+            left = length
+            while left:
+                try:
+                    chunk = self.rfile.read(min(CHUNK_SIZE, left))
+                except TimeoutError:
+                    raise GatewayError(408, "上传长时间没有收到数据，请重新上传。") from None
+                if not chunk:
+                    raise ConnectionError("Incomplete request")
+                self._body_read += len(chunk)
+                upstream.send(chunk)
+                left -= len(chunk)
+        finally:
+            self.connection.settimeout(timeout)
+
     def proxy(self):
         # The host repeats its original business guards. Preserve Host/Origin, including extension origins.
         host = self.server.host_manifest()
@@ -301,29 +324,38 @@ class GatewayHandler(BaseHTTPRequestHandler):
             connection.putheader(FORWARDED_HEADER, "1")
             connection.putheader("Connection", "close")
             connection.endheaders()
-            left = length
-            while left:
-                chunk = self.rfile.read(min(CHUNK_SIZE, left))
-                if not chunk:
-                    raise ConnectionError("Incomplete request")
-                self._body_read += len(chunk)
-                connection.send(chunk)
-                left -= len(chunk)
+            self.forward_body(connection, length)
             response = connection.getresponse()
             self.send_response(response.status, response.reason)
             response_tokens = {name.strip().lower() for name in response.getheader("Connection", "").split(",")}
             for key, value in response.getheaders():
                 if key.lower() not in HOP_HEADERS | response_tokens | {GATEWAY_HEADER.lower(), FORWARDED_HEADER.lower()}:
                     self.send_header(key, value)
-            # Decode upstream chunk framing through HTTPResponse; closing delimits SSE and other unknown lengths.
-            self.close_connection = True
-            self.send_header("Connection", "close")
+            # A fixed-length read can reuse the browser/public proxy's socket
+            # even though its independent upstream connection closes. Streams
+            # still close-delimit their decoded body, and writes/errors retain
+            # their previous connection behavior.
+            lengths = response.headers.get_all("Content-Length", [])
+            # 204/304 carry no body at all, so the socket stays reusable without a length.
+            framed = (response.status in {204, 304} and not response.chunked) or (
+                len(lengths) == 1 and re.fullmatch(r"[0-9]{1,18}", lengths[0])
+                and "content-length" not in response_tokens and not response.chunked)
+            event_stream = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower() == "text/event-stream"
+            self.close_connection = bool(self.close_connection or "close" in connection_tokens
+                                         or self.command not in {"GET", "HEAD"} or not 200 <= response.status < 400
+                                         or not framed or event_stream)
+            if self.close_connection:
+                self.send_header("Connection", "close")
             self.end_headers()
             sent_headers = True
             if self.command != "HEAD":
                 while chunk := response.read1(CHUNK_SIZE):
                     self.wfile.write(chunk)
                     self.wfile.flush()
+                if response.length not in (None, 0):
+                    # Never parse another request after an upstream response
+                    # ended before the length promised to the downstream peer.
+                    self.close_connection = True
         except (OSError, http.client.HTTPException):
             self.close_connection = True
             if not sent_headers:
@@ -366,7 +398,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 writing = True
             self.proxy()
         except GatewayError as error:
-            self.drain_rejected_body()
+            if error.status != 408:
+                self.drain_rejected_body()
             self.close_connection = True
             self.output(error.status, {"error": str(error)})
         except (BrokenPipeError, ConnectionResetError):
@@ -389,6 +422,7 @@ def main(argv=None):
     parser.add_argument("--runtime-root", default=config["runtime_root"])
     parser.add_argument("--port", type=int, default=config["port"])
     args = parser.parse_args(argv)
+    keep_full_speed()
     gateway = make_gateway(args.skill_root, args.runtime_root, port=args.port)
     try:
         gateway.serve_forever(poll_interval=.05)

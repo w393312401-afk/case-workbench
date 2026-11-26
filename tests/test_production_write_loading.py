@@ -9,7 +9,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from elevenlabs_client import VoiceError
-from production_store import ProductionStore
+from production_store import ProductionStore, public_job
 
 
 class ProductionWriteLoadingTests(unittest.TestCase):
@@ -93,6 +93,66 @@ class ProductionWriteLoadingTests(unittest.TestCase):
         other.mutate("reading", self.body(reading={"product": "202H", "written": "A", "spoken": "B"}))
         self.assertNotEqual(self.store.current_revision(), expected)
         self.assertEqual(self.store.current_revision(), self.store.revision(self.store.read()))
+
+    def test_job_context_projects_only_one_order_and_keeps_complete_options(self):
+        identifier = "PRD-000000000001"
+        data = self.store.empty()
+        data["jobs"] = [
+            {"id": identifier, "product": "202H", "title": "current", "lines": [], "edits": []},
+            {"id": "PRD-000000000002", "product": "202H", "title": "other", "edits": [
+                {"materials": ["素材甲", "素材乙"], "started_at": "2026-11-01"}]},
+            {"id": "PRD-000000000003", "product": "129N", "title": "other product", "edits": [
+                {"materials": ["别的产品素材"], "started_at": "2026-11-02"}]}]
+        data["voices"] = [{"voice_id": "voice", "settings": {"stability": 0.5}}]
+        data["defaults"] = {"202H": "voice"}
+        data["readings"] = [{"product": "202H", "written": "202H", "spoken": "two oh two H"},
+                            {"product": "129N", "written": "129N", "spoken": "one two nine N"}]
+        data["settings"] = {"creators": ["Lab"], "products": {"202H": {"fps": "30"}}}
+        self.store.write(data)
+        full = self.store.public()
+        with patch("production_store.public_job", wraps=public_job) as project:
+            context = self.store.job_context(identifier)
+        self.assertEqual([call.args[0]["id"] for call in project.call_args_list], [identifier])
+        self.assertEqual(context["job"], full["jobs"][0])
+        self.assertEqual(context["revision"], full["revision"])
+        self.assertEqual(context["known_job_ids"], frozenset(item["id"] for item in full["jobs"]))
+        self.assertEqual(context["readings"], [full["readings"][0]])
+        self.assertEqual(context["voices"], full["voices"])
+        self.assertEqual(context["defaults"], full["defaults"])
+        self.assertEqual(context["creators"], full["settings"]["creators"])
+        self.assertEqual(context["product_settings"], self.store.product_settings(full, "202H"))
+        self.assertEqual(context["material_combos"], self.store.material_combos(full, "202H"))
+        expected = copy.deepcopy(context)
+        context["job"]["lines"].append({"spoken": "unsaved"})
+        context["voices"][0]["settings"]["stability"] = 0.1
+        context["defaults"].clear()
+        context["readings"][0]["spoken"] = "unsaved"
+        context["creators"].append("Unsaved")
+        context["product_settings"]["fps"] = "60"
+        context["material_combos"][0]["materials"].append("unsaved")
+        self.assertEqual(self.store.job_context(identifier), expected)
+
+    def test_job_context_sees_external_updates_and_deleted_counterparts(self):
+        identifier = "PRD-000000000001"
+        counterpart = "PRD-000000000002"
+        data = self.store.empty()
+        data["jobs"] = [{"id": identifier, "product": "202H", "title": "current", "edits": []},
+                        {"id": counterpart, "product": "202H", "title": "other", "edits": []}]
+        self.store.write(data)
+        before = self.store.job_context(identifier)
+        other = ProductionStore(self.store.root.parent)
+        changed = other.read()
+        changed["jobs"].pop()
+        changed["jobs"][0]["title"] = "updated"
+        other.write(changed)
+        after = self.store.job_context(identifier)
+        self.assertEqual(after["job"]["title"], "updated")
+        self.assertNotIn(counterpart, after["known_job_ids"])
+        self.assertNotEqual(after["revision"], before["revision"])
+        self.assertEqual(after["revision"], self.store.current_revision())
+        with self.assertRaises(VoiceError) as caught:
+            self.store.job_context(counterpart)
+        self.assertEqual(caught.exception.status, 404)
 
 
 if __name__ == "__main__":

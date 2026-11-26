@@ -35,22 +35,22 @@
     return { name: hit ? hit[0] : "", from: r[0], to: r[1] };
   }
 
-  function triggerContent(period, summary) {
-    const { name, from, to } = triggerLabel(period, summary);
+  function triggerContent(period, summary, options = {}) {
+    const label = triggerLabel(period, summary), from = label.from, to = label.to, name = options.campaign || label.name;
     const text = from ? `${name ? `${name}：` : ""}<span>${from}</span><i>-</i><span>${to}</span>` : name;
     return `${text}<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>`;
   }
 
   function trigger(period, summary, options = {}) {
     const id = escape(idOf(options));
-    return `<div class="perf-date" id="${id}"><button type="button" class="perf-date-trigger${period !== "all" ? " is-set" : ""}" id="${id}-trigger" aria-haspopup="dialog" aria-expanded="false" aria-label="${escape(labelOf(options))}">${triggerContent(period, summary)}</button></div>`;
+    return `<div class="perf-date" id="${id}"><button type="button" class="perf-date-trigger${period !== "all" ? " is-set" : ""}" id="${id}-trigger" aria-haspopup="dialog" aria-expanded="false" aria-label="${escape(labelOf(options))}">${triggerContent(period, summary, options)}</button></div>`;
   }
 
   // An activity can change the period without redrawing the toolbar; the button keeps its handlers.
   function sync(period, summary, options = {}) {
     const button = document.getElementById(`${idOf(options)}-trigger`);
     if (!button) return;
-    button.innerHTML = triggerContent(period, summary);
+    button.innerHTML = triggerContent(period, summary, options);
     button.classList.toggle("is-set", period !== "all");
   }
 
@@ -106,13 +106,20 @@
     return `<div class="perf-cal-month">${title}<div class="perf-cal-year">${months.join("")}</div></div>`;
   }
 
+  // [{id, name, start, end, selected, upcoming}] from the page, when it has an activity calendar.
+  function campaignPresets(ctx) {
+    const rows = typeof ctx.campaigns === "function" ? ctx.campaigns() || [] : [];
+    if (!rows.length) return "";
+    const md = (day) => `${Number(day.slice(5, 7))}/${Number(day.slice(8, 10))}`;
+    return `<p class="perf-date-presets-label">活动期</p>${rows.map((row) => `<button type="button" data-campaign="${escape(row.id)}" class="perf-date-campaign${row.selected ? " is-active" : ""}" title="${escape(row.start)} 至 ${escape(row.end)}${row.upcoming ? " · 未开始" : ""}">${escape(row.name)}<small>${md(row.start)}–${md(row.end)}</small></button>`).join("")}`;
+  }
   function panelMarkup() {
     const s = state, { y, m } = s.view, ny = m === 11 ? y + 1 : y, nm = (m + 1) % 12;
     const current = s.ctx.period(), chosen = triggerLabel(current, s.ctx.summary?.()).name || (current === "all" ? "全部周期" : "");
     // The right side holds the chosen end, as it does for months.
     const body = s.mode === "month" ? `${yearMarkup(ny - 1, s, "left")}${yearMarkup(ny, s, "right")}` : `${monthMarkup(y, m, s, "left")}${monthMarkup(ny, nm, s, "right")}`;
     return `<div class="perf-date-panel" role="dialog" aria-label="选择${escape(labelOf(s.ctx))}">
-      <div class="perf-date-presets">${presets(s.ctx.summary?.()).map(([name, r]) => `<button type="button" data-preset="${value(r)}" class="${name === chosen ? "is-active" : ""}">${name}</button>`).join("")}</div>
+      <div class="perf-date-presets">${presets(s.ctx.summary?.()).map(([name, r]) => `<button type="button" data-preset="${value(r)}" class="${name === chosen ? "is-active" : ""}">${name}</button>`).join("")}${campaignPresets(s.ctx)}</div>
       <div class="perf-date-main">
         <div class="perf-date-modes" role="group" aria-label="选择方式">${MODES.map(([k, label]) => `<button type="button" data-mode="${k}" aria-pressed="${k === s.mode}">${label}</button>`).join("")}</div>
         <div class="perf-cal-months">${body}</div>
@@ -188,6 +195,7 @@
       if (state?.host !== host) return;
       const el = event.target.closest("button");
       if (!el || el.classList.contains("perf-date-trigger")) return;
+      if (el.dataset.campaign != null && state.ctx.chooseCampaign) { const id = el.dataset.campaign, ctx = state.ctx; close(); return ctx.chooseCampaign(id); }
       if (el.dataset.preset) { const [a, b] = el.dataset.preset === "all" ? [null, null] : el.dataset.preset.split("~"); return apply(a, b); }
       if (el.dataset.date) return pick(el.dataset.date);
       if (el.dataset.week) return apply(el.dataset.week, clampEnd(shift(el.dataset.week, 6), maxDate(state.ctx)));

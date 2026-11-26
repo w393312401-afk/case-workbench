@@ -37,6 +37,40 @@ class RecoverableWorkerTests(unittest.TestCase):
         self.assertTrue(again["recovered"])
         self.assert_one_build()
 
+    def test_settings_refused_by_davinci_are_read_back_and_retried_in_the_same_build(self):
+        # 2026-11: in a 2160x3840 project DaVinci answered False to SetSettings on the new timeline, which
+        # stopped every such build until it was recovered by hand.
+        self.request.update(width=720, height=1280)
+        for applies_anyway in (True, False):
+            with self.subTest(applies_anyway=applies_anyway):
+                project = fixture.FakeProject()
+                resolve = fixture.FakeResolve(project)
+                request = {**self.request, "recovery_file": str(self.root / f"settings-{applies_anyway}.json")}
+                calls = []
+                def refuse_first(timeline, values):
+                    calls.append(values)
+                    if len(calls) == 1:
+                        if applies_anyway:
+                            timeline.settings = values
+                        return False
+                    timeline.settings = values
+                    return True
+                with patch.object(fixture.FakeTimeline, "SetSettings", refuse_first), patch.object(worker, "SETTINGS_PAUSE", 0):
+                    result = worker.build(resolve, request)
+                target = project.items[0]
+                self.assertEqual((target.GetSetting("timelineResolutionWidth"), target.GetSetting("timelineResolutionHeight")),
+                                 ("720", "1280"))
+                self.assertEqual(len(calls), 1 if applies_anyway else 2)
+                self.assertNotIn("__WB_", result["name"])
+
+    def test_settings_that_never_take_still_stop_the_build(self):
+        self.request.update(width=720, height=1280)
+        with patch.object(fixture.FakeTimeline, "SetSettings", lambda timeline, values: False), \
+                patch.object(worker, "SETTINGS_PAUSE", 0):
+            with self.assertRaises(worker.WorkerError) as caught:
+                worker.build(self.resolve, self.request)
+        self.assertIn("帧率或分辨率没有设置成功", str(caught.exception))
+
     def test_lead_in_places_voice_after_silence_and_recovers_at_that_position(self):
         self.request["lead_frames"] = 15
         append = self.project.pool.AppendToTimeline

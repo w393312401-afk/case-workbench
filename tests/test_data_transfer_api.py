@@ -20,8 +20,8 @@ class DataTransferAPITests(unittest.TestCase):
     def isolate_transfer(self):
         data = self.server.app.data_transfer
         app = self.root / "isolated-app"
-        (app / "图文素材").mkdir(parents=True)
-        (app / "图文素材" / "one.jpg").write_bytes(b"isolated image")
+        (app / "工作台数据" / "图文素材").mkdir(parents=True)
+        (app / "工作台数据" / "图文素材" / "one.jpg").write_bytes(b"isolated image")
         data.app_root = app
         data.manager.app_root = app
         data.manager.extra_sources = ()
@@ -134,7 +134,7 @@ class DataTransferAPITests(unittest.TestCase):
         with patch.object(data.schedule, "configure", return_value={"installed": False, "mode": "windows"}):
             status, _, value = self.request("POST", "/api/data/settings", {**body, "directory": str(destination)})
             self.assertEqual(status, 200, value)
-            for rejected in (data.app_root, data.app_root / "图文素材", data.app_root / "other", self.server.app.runtime / "backups"):
+            for rejected in (data.app_root, data.app_root / "工作台数据" / "图文素材", data.app_root / "other", self.server.app.runtime / "backups"):
                 status, _, value = self.request("POST", "/api/data/settings", {**body, "directory": str(rejected)})
                 self.assertEqual(status, 400, rejected)
                 self.assertIn("避免重复打包", value["error"])

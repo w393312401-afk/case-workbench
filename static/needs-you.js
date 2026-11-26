@@ -12,9 +12,16 @@ window.NeedsYou = (() => {
     host.hidden = !items.length;
     if (!items.length) {host.innerHTML = '';return;}
     const summary = Object.entries(data.counts || {}).map(([kind,count]) => `${names[kind] || kind} ${count}`).join(' · ');
-    const rows = ui.open ? `<ul class="needs-list">${items.map(item => `<li class="needs-row"><span class="needs-kind">${esc(item.kind_label)}</span><a class="needs-main" href="${esc(url(item.hash,item.product))}" title="打开这张制作单的成片与发布"><span class="needs-title">${esc(item.timeline_name || item.job_title)}</span><span class="needs-meta">${esc([item.job_title,item.message].filter(Boolean).join(' · '))}</span></a><time>${esc(day(item.since))}</time></li>`).join('')}</ul>` : '';
+    const rows = ui.open ? `<ul class="needs-list">${items.map(item => `<li class="needs-row"><span class="needs-kind">${esc(item.kind_label)}</span><a class="needs-main" href="${esc(url(item.hash,item.product))}" ${item.kind === 'carousel' ? `data-needs-photo="${esc(item.job_id)}|${esc(item.timeline_uid)}" title="打开这条图文"` : 'title="打开这张制作单的成片与发布"'}><span class="needs-title">${esc(item.timeline_name || item.job_title)}</span><span class="needs-meta">${esc([item.job_title,item.message].filter(Boolean).join(' · '))}</span></a><time>${esc(day(item.since))}</time></li>`).join('')}</ul>` : '';
     host.innerHTML = `<button type="button" class="needs-bar" aria-expanded="${ui.open}" data-needs-toggle><b>需要你出手 ${items.length}</b><span>${esc(summary)}</span><i aria-hidden="true">${ui.open ? '收起' : '查看'}</i></button>${rows}`;
     host.querySelector('[data-needs-toggle]').onclick = () => {ui.open = !ui.open;paint(host,data,{url});};
+    host.querySelectorAll('[data-needs-photo]').forEach(link => link.addEventListener('click',event => {
+      if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0 || !window.PhotoCarousel?.open) return;
+      const item = items.find(row => `${row.job_id}|${row.timeline_uid}` === link.dataset.needsPhoto);if (!item) return;
+      event.preventDefault();
+      window.PhotoCarousel.open({job:{id:item.job_id,product:item.product,title:item.job_title},api,uid:item.timeline_uid,timelineName:item.timeline_name,subtitle:item.job_title,
+        onChange:() => {window.TaskActivity?.refreshWork?.();window.dispatchEvent(new CustomEvent('workbench:photochange'));}});
+    }));
   }
 
   return {paint};

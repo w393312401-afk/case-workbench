@@ -192,6 +192,20 @@ class ResolveLaunchTests(unittest.TestCase):
         bridge.run("status")
         self.assertEqual((launched, calls), ([], ["status"]))
 
+    def test_open_requires_the_window_to_reach_the_foreground(self):
+        bridge = ResolveBridge(probe=lambda: True)
+        with mock.patch.object(bridge, "_call", return_value={"ok": True}), \
+                mock.patch("resolve_bridge.os") as windows, mock.patch("resolve_bridge.focus_resolve_window") as focus:
+            windows.name = "nt"
+            focus.return_value = False
+            self.assertTrue(bridge.run("status")["ok"])
+            focus.assert_not_called()
+            with self.assertRaisesRegex(VoiceError, "时间线已在达芬奇中打开"):
+                bridge.run("open")
+            focus.return_value = True
+            self.assertTrue(bridge.run("open")["ok"])
+            self.assertEqual(focus.call_count, 2)
+
     def test_missing_executable_asks_for_a_manual_start(self):
         bridge, calls = self.bridge([False], [], started=False, answers=[{"ok": False, "error": "连不上"}])
         with self.assertRaisesRegex(VoiceError, "没有找到 Resolve.exe"):

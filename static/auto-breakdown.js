@@ -35,23 +35,24 @@
     if (options) return options;
     try {
       const result = await api("/api/ai/options");
-      options = { models: Array.isArray(result.models) ? result.models : [], defaults: result.default_settings || {} };
+      // 拆解 starts on the model last picked for 拆解; the global default fills in when nothing was picked yet.
+      const own = (Array.isArray(result.kind_defaults) ? result.kind_defaults : []).find((row) => row?.kind === "breakdown" && row.source === "kind");
+      options = { models: Array.isArray(result.models) ? result.models : [], defaults: own || result.default_settings || {}, own: Boolean(own) };
     } catch { options = { models: [], defaults: {} }; }
     return options;
   }
-  const provider = (m) => m.provider || (String(m.id).startsWith("claude-") ? "claude" : "codex");
+  const provider = (m) => m.provider || (String(m.id).startsWith("antigravity:") ? "antigravity" : String(m.id).startsWith("claude-") ? "claude" : "codex");
   const modelName = (id) => options?.models.find((m) => m.id === id)?.name || id;
+  const defaultWord = () => (options?.own ? "沿用上次" : "全局默认");
+  const providerNames = () => [["", defaultWord()], ["claude", "Claude"], ["codex", "Codex"], ["antigravity", "Antigravity"]];
   function runMarkup(job) {
     if (!options) return "";
     const d = options.defaults, pick = job?.model || "";
     const fallback = d.model ? `${modelName(d.model)}${d.reasoning_effort ? ` · ${effortNames[d.reasoning_effort] || d.reasoning_effort}` : ""}` : "本机自动选择";
-    const option = (m) => `<option value="${esc(m.id)}" ${m.id === pick ? "selected" : ""} ${m.available === false ? "disabled" : ""}>${esc(m.name || m.id)}${m.available === false ? " · 未就绪" : ""}</option>`;
-    const groups = [["claude", "Claude"], ["codex", "Codex"]].map(([key, label]) => {
-      const list = options.models.filter((m) => provider(m) === key);
-      return list.length ? `<optgroup label="${label}">${list.map(option).join("")}</optgroup>` : "";
-    }).join("");
+    const chosen = options.models.find((m) => m.id === pick), initialProvider = pick ? provider(chosen || {id: pick}) : "";
+    const providers = providerNames().map(([id, name]) => `<button type="button" data-run-provider="${id}" aria-pressed="${id === initialProvider}" ${id && id !== initialProvider && !options.models.some(m => provider(m) === id) ? "disabled" : ""}>${name}</button>`).join("");
     const label = !job ? "AI 拆解" : job.status === "completed" || job.status === "analyzer_pending" ? "重新 AI 拆解" : "重试 AI 拆解";
-    const run = `<div class="auto-breakdown-run"><label class="field"><span>模型</span><select data-run-model><option value="">全局默认（${esc(fallback)}）</option>${groups}</select></label><label class="field"><span>思考强度</span><select data-run-effort></select></label><button type="button" class="${job && job.status !== "failed" && job.status !== "interrupted" ? "secondary" : "primary"} compact" data-run-start>${label}</button></div>`;
+    const run = `<div class="auto-breakdown-run"><div class="auto-breakdown-provider"><span>模型服务</span><div class="seg" role="group" aria-label="本次拆解的模型服务">${providers}</div></div><label class="field"><span>模型</span><select data-run-model data-initial-model="${esc(pick)}" data-fallback="${esc(fallback)}"></select></label><label class="field"><span>思考强度</span><select data-run-effort></select></label><button type="button" class="${job && job.status !== "failed" && job.status !== "interrupted" ? "secondary" : "primary"} compact" data-run-start>${label}</button></div>`;
     return job && (job.status === "completed" || job.status === "analyzer_pending") ? `<details class="auto-breakdown-rerun"><summary>重新 AI 拆解</summary>${run}</details>` : run;
   }
   function paintEfforts(box, job) {
@@ -60,14 +61,33 @@
     const model = options.models.find((m) => m.id === select.value);
     const list = (model?.reasoning_efforts || []).filter((v) => typeof v === "string");
     const keep = effort.value || (select.value === (job?.model || "") ? job?.reasoning_effort : "") || "";
-    effort.innerHTML = `<option value="">${select.value ? "模型默认" : "全局默认"}</option>` + list.map((v) => `<option value="${esc(v)}" ${v === keep ? "selected" : ""}>${esc(effortNames[v] || v)}</option>`).join("");
+    effort.innerHTML = `<option value="">${select.value ? "模型默认" : defaultWord()}</option>` + list.map((v) => `<option value="${esc(v)}" ${v === keep ? "selected" : ""}>${esc(effortNames[v] || v)}</option>`).join("");
     effort.disabled = !select.value || !list.length;
   }
   function bindRun(box, item, job) {
     const select = box.querySelector("[data-run-model]");
     if (!select) return;
-    paintEfforts(box, job);
-    select.addEventListener("change", () => { box.querySelector("[data-run-effort]").value = ""; paintEfforts(box, job); });
+    const providers = [...box.querySelectorAll("[data-run-provider]")], startButton = box.querySelector("[data-run-start]");
+    let selectedProvider = providers.find(button => button.getAttribute("aria-pressed") === "true")?.dataset.runProvider || "";
+    const paintModels = (pick = "") => {
+      const list = options.models.filter(m => provider(m) === selectedProvider);
+      select.innerHTML = selectedProvider
+        ? `<option value="">请选择模型</option>` + list.map(m => `<option value="${esc(m.id)}" ${m.available === false ? "disabled" : ""}>${esc(m.name || m.id)}${m.available === false ? " · 未就绪" : ""}</option>`).join("")
+        : `<option value="">${defaultWord()}（${esc(select.dataset.fallback)}）</option>`;
+      if (pick && selectedProvider && !list.some(m => m.id === pick)) select.insertAdjacentHTML("beforeend", `<option value="${esc(pick)}" disabled>当前不可用 · ${esc(pick)}</option>`);
+      select.value = pick;
+      select.disabled = !selectedProvider;
+      providers.forEach(button => button.setAttribute("aria-pressed", String(button.dataset.runProvider === selectedProvider)));
+      startButton.disabled = Boolean(selectedProvider && (!select.value || select.selectedOptions[0]?.disabled));
+      paintEfforts(box, job);
+    };
+    providers.forEach(button => button.addEventListener("click", () => {
+      selectedProvider = button.dataset.runProvider;
+      box.querySelector("[data-run-effort]").value = "";
+      paintModels();
+    }));
+    paintModels(select.dataset.initialModel);
+    select.addEventListener("change", () => { startButton.disabled = Boolean(selectedProvider && (!select.value || select.selectedOptions[0]?.disabled)); box.querySelector("[data-run-effort]").value = ""; paintEfforts(box, job); });
     box.querySelector("[data-run-start]").addEventListener("click", async (event) => {
       event.currentTarget.disabled = true;
       const settings = { model: select.value, reasoning_effort: box.querySelector("[data-run-effort]").value };

@@ -220,6 +220,21 @@
 .ai-round.is-collapsed .ai-round-toggle svg{transform:none}
 .ai-round.is-collapsed .ai-round-body{display:none}
 #content .ai-round-time{margin:0;white-space:nowrap}
+.ai-round-group{position:relative;margin:0 0 18px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+#content #ai-unused-rounds>summary{display:flex;align-items:center;gap:8px;min-height:30px;margin:0 0 12px;padding-right:180px;list-style:none;color:var(--muted);font-size:13px;cursor:pointer}
+#content #ai-unused-rounds>summary::-webkit-details-marker{display:none}
+#content #ai-unused-rounds>summary::before{content:"";flex:none;width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .15s}
+#content #ai-unused-rounds[open]>summary::before{transform:rotate(45deg)}
+#ai-round-cleanup{position:absolute;top:0;right:0}
+.ai-round-empty,.ai-kept-round-title{margin:0 0 12px;font-size:12px;color:var(--muted-soft)}
+.ai-round-protection{flex:none;font-size:12px;color:var(--muted-soft);white-space:nowrap}
+.ai-round-cleanup-feedback{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin:0 0 16px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);font-size:13px;color:var(--muted)}
+@media(max-width:760px){
+  #content #ai-unused-rounds>summary{min-height:38px;padding-right:155px}
+  #content .ai-round-heading{flex-wrap:wrap}
+  .ai-round-toggle{flex-basis:calc(100% - 100px)}
+  .ai-round-protection{margin-left:auto}
+}
 .ai-round-body{margin-top:14px}
 #content .ai-user-request{margin:0 0 10px auto;max-width:78%;width:fit-content;padding:10px 14px;border-radius:16px 16px 4px 16px;background:var(--accent);color:var(--on-accent)}
 #content .ai-user-request p{color:var(--on-accent);margin:0;font-size:14px;line-height:1.6}
@@ -262,6 +277,12 @@
 #ai-create-version{font-size:12px;color:var(--muted-soft)}
 .ai-create-ask textarea{min-height:120px}
 .ai-source-row{display:flex;align-items:flex-end;gap:10px}
+  .ai-provider-pick{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0 0}
+  .ai-provider-pick>.seg{flex-wrap:wrap}
+  .ai-model-pick{display:flex;align-items:flex-end;gap:10px;margin:12px 0 4px}
+.ai-model-pick .field{margin:0;min-width:0}
+.ai-model-pick .field:first-child{flex:1.4}
+.ai-model-pick .field:nth-child(2){flex:1}
 .ai-source-row .field{flex:1;margin:0}
 .ai-source-row .subtle{white-space:nowrap;margin-bottom:4px}
 #ai-create-dialog .ai-basket-choice{display:flex;flex-direction:column;gap:8px;margin:4px 0 6px}
@@ -280,6 +301,8 @@
   #content .ai-user-request{max-width:92%}
   #content .ai-composer{bottom:calc(var(--mobile-tabs,60px) + 10px)}
   .ai-source-row{flex-direction:column;align-items:stretch}
+  .ai-model-pick{flex-wrap:wrap}
+  .ai-model-pick .field{flex:1 1 100%!important}
   .ai-list-heading{flex-direction:column;gap:10px}
 }
 #content .ai-round-execution{border:0;padding:0;margin:0 0 14px;background:none}
@@ -344,13 +367,14 @@
 #ai-rounds .markdown-body :is(h2,h3,h4,h5,p){scroll-margin-top:84px}
 @media(max-width:850px){.ai-variant-nav{right:4px;top:auto;bottom:150px;transform:none}}
 /* Until it is used, the follow-up composer stays one row so it does not cover the results it follows; focusing or a draft expands it. */
-#content .ai-composer:not(:focus-within):has(#ai-continue-instruction:placeholder-shown) form{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px}
-#content .ai-composer:not(:focus-within):has(#ai-continue-instruction:placeholder-shown) textarea{flex:1;min-width:0;height:36px;min-height:36px;resize:none}
-#content .ai-composer:not(:focus-within):has(#ai-continue-instruction:placeholder-shown) :is(.ai-advanced:not([open]),#ai-continue-note,.ai-shortcut-hint){display:none}
+/* Keep retries expanded so focusing the button cannot move it before the click completes. */
+#content .ai-composer:not(.is-retry):not(:focus-within):has(#ai-continue-instruction:placeholder-shown) form{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px}
+#content .ai-composer:not(.is-retry):not(:focus-within):has(#ai-continue-instruction:placeholder-shown) textarea{flex:1;min-width:0;height:36px;min-height:36px;resize:none}
+#content .ai-composer:not(.is-retry):not(:focus-within):has(#ai-continue-instruction:placeholder-shown) :is(.ai-advanced:not([open]),#ai-continue-note,.ai-shortcut-hint){display:none}
 /* The model line stays visible even when collapsed: it is where an unusable default is reported. */
-#content .ai-composer:not(:focus-within):has(#ai-continue-instruction:placeholder-shown) .ai-global-defaults{flex:0 1 auto;max-width:45%;margin:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-#content .ai-composer:not(:focus-within):has(#ai-continue-instruction:placeholder-shown) .ai-advanced[open]{flex-basis:100%;order:3}
-#content .ai-composer:not(:focus-within):has(#ai-continue-instruction:placeholder-shown) .ai-continue-footer{margin:0}
+#content .ai-composer:not(.is-retry):not(:focus-within):has(#ai-continue-instruction:placeholder-shown) .ai-global-defaults{flex:0 1 auto;max-width:45%;margin:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#content .ai-composer:not(.is-retry):not(:focus-within):has(#ai-continue-instruction:placeholder-shown) .ai-advanced[open]{flex-basis:100%;order:3}
+#content .ai-composer:not(.is-retry):not(:focus-within):has(#ai-continue-instruction:placeholder-shown) .ai-continue-footer{margin:0}
 
 /* 从案例写稿的「写法」：贴着原稿改 / 原稿发散 (2026-10-15) */
 .ai-source-mode{border:1px solid var(--line);border-radius:9px;padding:10px 14px;margin:0 0 14px;background:var(--surface)}
@@ -370,7 +394,7 @@
 .ai-raw-output pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:440px;overflow:auto;padding:12px;background:var(--surface-alt);color:var(--muted);border:1px solid var(--line);border-radius:8px}
 .ai-title-lines-detail{margin-top:4px}
 .ai-task-progress[hidden]{display:none}
-#content .ai-composer:not(:focus-within):has(#ai-continue-instruction:placeholder-shown){position:static}
+#content .ai-composer:not(.is-retry):not(:focus-within):has(#ai-continue-instruction:placeholder-shown){position:static}
 
 /* 2026-10-29 one card per variant; only the picked one shows. */
 .ai-variant-state{display:inline-flex;padding:1px 8px;border-radius:999px;font-size:12px;color:var(--muted-soft);background:var(--fill)}
@@ -427,13 +451,8 @@
 #content :is(.ai-task-info,.ai-info-scope details,.ai-round.is-desk :is(.ai-user-request,.ai-round-execution details,.ai-raw-output))>summary::before{content:"";flex:none;width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .15s}
 #content :is(.ai-task-info,.ai-info-scope details,.ai-round.is-desk :is(.ai-user-request,.ai-round-execution details,.ai-raw-output))[open]>summary::before{transform:rotate(45deg)}
 
-.ai-round.is-off{display:none}
-.ai-round-toggle:disabled{cursor:default;opacity:1}
-.ai-round-toggle:disabled svg{display:none}
 .ai-desk-main{min-width:0}
 #content .ai-round.is-desk{padding:14px 16px}
-.ai-round.is-desk>.ai-round-heading{display:none}
-.ai-round.is-desk>.ai-round-body{margin-top:0}
 .ai-round.is-desk .ai-desk{display:grid;grid-template-columns:196px minmax(0,1fr);gap:16px;align-items:start;scroll-margin-top:calc(var(--topbar-h) + 12px)}
 
 /* Each rail entry shows exactly one thing on the right. */
@@ -472,8 +491,17 @@
 .ai-round.is-desk .ai-variant-card-head h4{flex:0 1 auto}
 .ai-variant-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-left:auto}
 .ai-variant-actions svg{width:14px;height:14px}
-.ai-variant-screen{margin:0 0 8px;font-size:13px;line-height:1.6;color:var(--ink);overflow-wrap:anywhere}
+.ai-variant-screen{display:grid;grid-template-columns:auto minmax(0,1fr);margin:0 0 8px;font-size:13px;line-height:1.6;color:var(--ink);overflow-wrap:anywhere}
+.ai-variant-screen-zh{grid-column:2;font-size:12px;color:var(--muted)}
 .ai-variant-screen>span{margin-right:8px;font-size:12px;color:var(--muted-soft)}
+.ai-variant-reply{display:grid;grid-template-columns:auto minmax(0,1fr);margin:0 0 10px;padding-bottom:10px;border-bottom:1px solid var(--line);font-size:13px;line-height:1.55;color:var(--ink);overflow-wrap:anywhere}
+.ai-variant-reply:empty{display:none}
+.ai-variant-reply-label{margin-right:8px;font-size:12px;color:var(--muted-soft)}
+.ai-variant-reply-body>p{margin:0}
+.ai-variant-reply-who{display:flex;align-items:center;gap:6px;margin-bottom:2px!important;font-size:12px;color:var(--muted)}
+.ai-variant-reply-who strong{font-weight:600;color:var(--ink)}
+.ai-variant-reply-avatar{display:inline-grid;place-items:center;flex:none;width:22px;height:22px;border-radius:50%;object-fit:cover;background:var(--surface-alt);color:var(--muted);font-size:11px;font-weight:600}
+.ai-variant-reply-zh{margin:4px 0 0}
 .ai-variant-tabs{display:flex;flex-wrap:wrap;gap:2px;margin:0 0 10px;border-bottom:1px solid var(--line)}
 #content .ai-variant-tab{min-height:0;margin-bottom:-1px;padding:6px 12px;border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:var(--muted);font:inherit;font-size:13px;cursor:pointer}
 #content .ai-variant-tab:hover{color:var(--ink)}
@@ -525,3 +553,241 @@
 .ai-variant-order small{font-size:12px;color:var(--muted-soft)}
 .ai-variant-order-delete{appearance:none;border:0;background:transparent;padding:2px 6px;border-radius:6px;font:inherit;color:var(--danger-ink);cursor:pointer}
 .ai-variant-order-delete:hover,.ai-variant-order-delete:focus-visible{background:var(--line)}
+#ai-task-delete{color:var(--danger-ink)}
+
+/* 改稿：逐句对照编辑。左边口播、右边中文；改过中文的句子标「待重译」，存成新一轮。 */
+.ai-edit[hidden],.ai-variant-script[hidden]{display:none}
+.ai-edit-hint{margin:0 0 6px;font-size:12px;line-height:1.6;color:var(--muted)}
+.ai-edit-row{display:grid;grid-template-columns:22px minmax(0,1fr) minmax(0,1fr);gap:4px 10px;padding:8px 0;border-top:1px solid var(--line)}
+.ai-edit-row:first-child{border-top:0}
+.ai-edit-no{padding-top:8px;font-size:12px;text-align:right;color:var(--muted-soft)}
+#content .ai-edit textarea{width:100%;min-height:54px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit;font-size:14px;line-height:1.6;resize:vertical;field-sizing:content}
+#content .ai-edit textarea:focus-visible{outline:2px solid var(--accent);outline-offset:-1px}
+#content .ai-edit-row.is-changed [data-edit-field=zh]{border-color:var(--accent)}
+#content .ai-edit-row.is-pending [data-edit-field=spoken]{border-style:dashed;color:var(--muted-soft)}
+.ai-edit-tools{grid-column:2/-1;display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+.ai-edit-state{margin-right:auto;font-size:12px;color:var(--muted-soft)}
+.ai-edit-row.is-pending .ai-edit-state{color:var(--warm-ink)}
+#content .ai-edit-tools button{min-width:28px;min-height:0;padding:2px 8px;border:1px solid var(--line);border-radius:6px;background:none;color:var(--muted);font:inherit;font-size:12px;cursor:pointer}
+#content .ai-edit-tools button:hover:not(:disabled){color:var(--ink);background:var(--fill)}
+#content .ai-edit-tools button:disabled{opacity:.35;cursor:default}
+#content .ai-edit-tools button[hidden]{display:none}
+#content .ai-edit-tools [aria-pressed=true]{border-color:var(--accent);background:var(--surface-tint);color:var(--accent-text)}
+.ai-edit-foot{position:sticky;bottom:0;z-index:2;display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:4px;padding:10px 0 4px;border-top:1px solid var(--line);background:var(--surface)}
+.ai-edit-foot p{flex:1 1 200px;margin:0;font-size:12px;color:var(--muted)}
+/* While a draft is being rewritten its other actions step aside, and so does the ask-the-writer box below it. */
+.ai-variant-card.is-editing :is(.ai-variant-actions,.ai-variant-choice){display:none}
+#content .ai-round.is-desk:has(.ai-variant-card.is-editing:not([hidden])) .ai-composer{display:none}
+.ai-edit-summary{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin:0 0 8px;font-size:12px;color:var(--muted)}
+.ai-edit-summary>span{color:var(--accent-text)}
+.ai-edit-summary small{font-size:12px;color:var(--muted-soft)}
+.ai-edit-summary details{flex-basis:100%}
+.ai-edit-summary summary{cursor:pointer;color:var(--muted)}
+.ai-edit-summary details p{margin:2px 0;color:var(--muted);text-decoration:line-through}
+.ai-edit-summary details p small{margin-left:8px}
+.ai-edit-tag{display:inline-block;margin-right:6px;padding:0 6px;border-radius:999px;font-size:12px;line-height:1.5;color:var(--accent-text);background:var(--surface-tint)}
+.ai-variant-pairs .ai-variant-was{display:block;font-size:12px;line-height:1.5;color:var(--muted-soft);text-decoration:line-through}
+#content .ai-edit-resume{margin:8px 0 0}
+@media(max-width:760px){
+  .ai-edit-row{grid-template-columns:18px minmax(0,1fr)}
+  .ai-edit-row [data-edit-field=zh]{grid-column:2}
+}
+
+/* 轮次栏：左侧每轮一行（新的在上），右侧只显示选中的那一轮或手写表单 */
+#ai-rounds:has(>.ai-round-rail){display:grid;grid-template-columns:176px minmax(0,1fr);gap:16px;align-items:start}
+.ai-round-rail{position:sticky;top:calc(var(--topbar-h) + 12px);display:flex;flex-direction:column;gap:6px;max-height:calc(100vh - var(--topbar-h) - 40px);overflow:auto}
+.ai-round-stage{min-width:0}
+.ai-round-write{width:100%}
+.ai-round-write.is-current{background:var(--surface-tint);color:var(--accent-text)}
+.ai-round-rows{display:flex;flex-direction:column;gap:4px}
+.ai-round-row{display:grid;grid-template-columns:18px minmax(0,1fr);column-gap:6px;row-gap:2px;align-items:start;width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--surface);text-align:left;color:var(--muted);font-size:12px;line-height:1.45}
+.ai-round-row b{font-weight:500;color:var(--muted-soft)}
+.ai-round-row-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--ink)}
+.ai-round-row small{grid-column:2;font-size:11px;color:var(--muted-soft)}
+.ai-round-row small.is-kept{color:var(--success-ink,var(--accent-text))}
+.ai-round-row small.is-running{color:var(--accent-text)}
+.ai-round-row small.is-failed{color:var(--danger-ink)}
+.ai-round-row:hover{border-color:var(--line-strong,var(--line))}
+.ai-round-row.is-current{background:var(--surface-tint);border-color:transparent}
+.ai-round-row.is-current .ai-round-row-text{color:var(--accent-text)}
+#ai-round-cleanup{position:static;width:100%;margin-top:6px}
+.ai-round-rail .ai-round-cleanup-feedback{margin:0;padding:6px 8px;font-size:12px}
+#ai-rounds:has(>.ai-round-rail) .ai-round-stage .ai-round.is-collapsed{display:none}
+#ai-rounds:has(>.ai-round-rail) .ai-round-stage .ai-round-toggle{pointer-events:none;cursor:default}
+#ai-rounds:has(>.ai-round-rail) .ai-round-stage .ai-round-toggle svg{display:none}
+#ai-rounds:has(>.ai-round-rail) #ai-unused-rounds>summary,#ai-rounds:has(>.ai-round-rail) .ai-kept-round-title,#ai-rounds:has(>.ai-round-rail) .ai-round-empty{display:none}
+#ai-rounds:has(>.ai-round-rail) .ai-round-group{margin:0;padding:0;border:0}
+#ai-rounds.is-manual .ai-round-stage :is(.ai-round-group,#ai-kept-group){display:none}
+#ai-rounds.is-manual~.ai-composer,#ai-rounds.is-manual+.ai-composer{display:none}
+.ai-manual-write{padding:16px 18px;border-radius:14px;background:var(--surface);box-shadow:var(--shadow-card);margin:0 0 14px}
+.ai-manual-write h3{margin:0 0 4px;font-size:15px}
+.ai-manual-write>.ai-muted{margin:0 0 12px;font-size:12px}
+.ai-mw-field{display:flex;flex-direction:column;gap:4px;margin:0 0 10px;font-size:12px;color:var(--muted)}
+.ai-mw-rows{display:flex;flex-direction:column;gap:8px;margin:4px 0 10px}
+.ai-mw-row{display:grid;grid-template-columns:22px minmax(0,1fr) minmax(0,1fr) 30px;gap:8px;align-items:start}
+.ai-mw-row b{padding-top:8px;font-weight:500;font-size:12px;color:var(--muted-soft)}
+.ai-mw-row textarea{min-height:48px;resize:vertical}
+.ai-mw-head{display:flex;align-items:center;gap:12px;margin:0 0 12px}
+.ai-mw-head h3{margin:0}
+.ai-mw-modes{display:inline-flex;padding:2px;border-radius:8px;background:var(--surface-muted,var(--bg))}
+.ai-mw-modes button{padding:4px 12px;border:0;border-radius:6px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer}
+.ai-mw-modes button[aria-pressed=true]{background:var(--surface);color:var(--ink);box-shadow:0 0 0 1px var(--line)}
+.ai-mi-preview{display:flex;flex-direction:column;gap:8px;margin:0 0 10px}
+.ai-mi-preview>p{margin:0;font-size:12px}
+.ai-mi-preview>p:empty{display:none}
+.ai-mi-zone{display:flex;flex-direction:column;align-items:center;gap:6px;padding:34px 20px;border:1.5px dashed var(--line-strong,var(--line));border-radius:12px;text-align:center;color:var(--muted)}
+.ai-mi-zone:focus-visible{outline:0;border-color:var(--accent-text);background:var(--surface-tint)}
+.ai-mi-zone>svg{width:22px;height:22px;color:var(--muted-soft)}
+.ai-mi-zone b{font-size:15px;font-weight:600;color:var(--ink)}
+.ai-mi-zone span{max-width:420px;font-size:12px;line-height:1.5}
+.ai-mi-zone button{margin-top:6px}
+.ai-mi-summary{display:flex;align-items:center;gap:4px;font-size:13px;color:var(--ink)}
+.ai-mi-summary>span:first-child{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.ai-mi-summary>span:first-child svg{width:15px;height:15px;flex:none;color:var(--muted-soft)}
+.ai-mi-summary{flex-wrap:wrap}
+.ai-mi-summary>span:nth-child(2){flex:1}
+.ai-mi-variant{display:flex;flex-direction:column;gap:6px;padding:11px 12px;border:1px solid var(--line);border-radius:10px;font-size:12px}
+.ai-mi-variant b{font-size:13px;font-weight:600;color:var(--ink)}
+.ai-mi-variant p{margin:0;color:var(--muted-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ai-mi-chips{display:flex;flex-wrap:wrap;gap:6px}
+.ai-mi-chip{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;font-size:12px;line-height:1.5}
+.ai-mi-chip svg{width:12px;height:12px}
+.ai-mi-chip.is-ok{background:var(--surface-success);color:var(--success-ink)}
+.ai-mi-chip.is-warn{background:var(--surface-tint);color:var(--accent-text)}
+.ai-mi-chip.is-none{box-shadow:inset 0 0 0 1px var(--line);color:var(--muted-soft)}
+.ai-mi-variant ul{margin:0;padding-left:16px;color:var(--accent-text)}
+.ai-mi-raw{margin:0 0 10px}
+.ai-mi-raw textarea{width:100%;min-height:180px;resize:vertical;font-size:12px;line-height:1.5}
+.ai-mi-title{width:200px;max-width:40%}
+.ai-mi-fallback{display:flex;align-items:center;gap:10px;padding:9px 11px;border:1px dashed var(--line);border-radius:8px;font-size:12px;color:var(--muted)}
+.ai-mi-fallback p{flex:1;margin:0}
+.ai-mw-footer{display:flex;align-items:center;gap:8px}
+.ai-mw-footer>span{flex:1}
+@media(max-width:900px){
+  #ai-rounds:has(>.ai-round-rail){display:block}
+  .ai-round-rail{position:static;max-height:none;margin:0 0 12px}
+  .ai-round-rows{flex-direction:row;overflow-x:auto;padding-bottom:4px}
+  .ai-round-row{min-width:150px;width:auto}
+  .ai-mw-row{grid-template-columns:22px minmax(0,1fr) 30px}
+  .ai-mw-row [data-mw-field=zh]{grid-column:2}
+}
+/* 写稿轮次起草和复核期间：左栏放进度和设置，右边只放要求和稿子。候选稿排好后左栏换成候选稿列表（.is-desk）。 */
+.ai-run-rail[hidden]{display:none}
+.ai-user-request[open] .ai-request-preview{display:none}
+.ai-round.is-run .ai-desk{display:grid;grid-template-columns:176px minmax(0,1fr);gap:18px;align-items:start}
+.ai-run-rail{position:sticky;top:calc(var(--topbar-h) + 10px);display:flex;flex-direction:column;gap:12px;min-width:0;padding-right:16px;border-right:1px solid var(--line)}
+.ai-run-steps{display:flex;flex-direction:column;margin:0;padding:0;list-style:none}
+.ai-run-step{position:relative;display:grid;grid-template-columns:13px minmax(0,1fr) auto;align-items:center;column-gap:8px;padding:0 0 14px;font-size:13px;line-height:1.5;color:var(--muted)}
+.ai-run-step:last-child{padding-bottom:0}
+.ai-run-step:not(:last-child)::before{content:"";position:absolute;left:6px;top:17px;bottom:-3px;width:1px;background:var(--step-line)}
+.ai-run-step.is-done:not(:last-child)::before{background:var(--step-line-done)}
+.ai-run-mark{box-sizing:border-box;width:9px;height:9px;margin:0 2px;border:1.5px solid var(--line-strong);border-radius:50%;background:var(--surface)}
+.ai-run-step.is-done>.ai-run-mark{border-color:var(--step-done);background:var(--step-done)}
+.ai-run-step.is-current>.ai-run-mark{border-color:var(--step-current);background:var(--step-current);box-shadow:0 0 0 3px color-mix(in srgb,var(--step-current) 22%,transparent)}
+.ai-run-step.is-problem>.ai-run-mark{border-color:var(--danger);background:var(--danger)}
+.ai-run-step.is-done .ai-run-name{color:var(--ink)}
+.ai-run-step.is-current .ai-run-name{color:var(--accent-text);font-weight:600}
+.ai-run-step small{font-size:12px;color:var(--muted-soft);font-variant-numeric:tabular-nums;white-space:nowrap}
+.ai-run-step.is-problem small{color:var(--danger-ink)}
+.ai-run-logs:not(:has(.activity-strip)){display:none}
+.ai-run-logs .activity-strip{flex-wrap:wrap;gap:4px 8px;margin:0;padding:0;border:0;background:none}
+.ai-run-logs .activity-strip:hover{background:none}
+.ai-run-logs :is(.activity-dot,.activity-strip-status,.activity-strip-text){display:none}
+.ai-run-logs .activity-strip-time{flex:1}
+.ai-run-meta{display:flex;flex-direction:column;gap:2px;padding-top:10px;border-top:1px solid var(--line);font-size:12px;line-height:1.6;color:var(--muted-soft)}
+.ai-run-meta p{margin:0;overflow-wrap:anywhere}
+.ai-run-meta button{align-self:flex-start;margin:4px 0 0 -8px}
+#content .ai-round.is-run .ai-user-request{margin:0 0 10px;max-width:none;width:auto;padding:0;border-radius:0;background:none;color:var(--muted)}
+#content .ai-round.is-run .ai-user-request>summary{color:var(--muted)}
+#content .ai-round.is-run .ai-user-request p{color:var(--ink);font-size:13px}
+#content .ai-round.is-run .ai-round-execution{margin:0}
+#content .ai-round.is-run .ai-execution-details{text-align:left;margin:0 0 10px}
+#content .ai-round.is-run .ai-round-execution:not(.is-open)>:is(.ai-run-line,.ai-execution-details),
+#content .ai-round.is-run .ai-round-execution:not(.is-open)>.ai-stage-status>:is(p:not(.ai-format-check),small){display:none}
+#content .ai-round.is-run .ai-round-execution.is-open{margin:0 0 12px;padding:10px 12px;border-radius:10px;background:var(--surface-alt)}
+#content .ai-round.is-run .ai-round-execution.is-open :is(.ai-run-line,.ai-execution-details){text-align:left}
+#content .ai-round.is-run .ai-round-execution.is-open>.ai-execution-details[open]{margin:6px 0;padding:0;background:none}
+#content .ai-round.is-run .ai-round-execution.is-open>.ai-execution-details:first-of-type>summary{display:none}
+@media(max-width:860px){
+  .ai-round.is-run .ai-desk{display:block}
+  .ai-run-rail{position:static;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px 16px;margin:0 0 12px;padding:0 0 10px;border-right:0;border-bottom:1px solid var(--line)}
+  .ai-run-steps{flex-direction:row;flex-wrap:wrap;gap:4px 14px}
+  .ai-run-step{grid-template-columns:13px auto auto;padding:0}
+  .ai-run-step:not(:last-child)::before{display:none}
+  .ai-run-meta{flex-direction:row;flex-wrap:wrap;align-items:center;gap:2px 10px;padding-top:0;border-top:0}
+  .ai-run-meta button{margin:0}
+}
+
+/* 2026-11-15 选稿台: one main action per draft, the rest in ···; drafts and the round's documents under their own headings */
+.ai-variant-more{position:relative;display:inline-block}
+.ai-variant-more>summary{list-style:none;width:28px;height:28px;display:grid;place-items:center;cursor:pointer}
+.ai-variant-more>summary::-webkit-details-marker{display:none}
+.ai-variant-more>[role=menu]{position:absolute;right:0;top:calc(100% + 4px);z-index:6;min-width:168px;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.12);display:grid;gap:1px}
+.ai-variant-more [role=menuitem]{display:flex;align-items:center;gap:6px;justify-content:flex-start;width:100%;min-height:32px;padding:0 9px;border:0;border-radius:6px;background:transparent;color:var(--ink);font-size:13px;box-shadow:none}
+.ai-variant-more [role=menuitem]:hover{background:var(--fill-hover,var(--surface-alt))}
+.ai-variant-more [role=menuitem] svg{width:14px;height:14px}
+.ai-desk-rail-title{margin:0;padding:6px 10px 4px;font-size:12px;font-weight:600;color:var(--muted-soft)}
+.ai-desk-sections{margin-top:10px;padding-top:6px;border-top:1px solid var(--line)}
+.ai-round-row-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal}
+.ai-round-cleanup{color:var(--muted-soft)}.ai-round-cleanup:hover:not(:disabled){color:var(--danger-ink)}
+
+/* 开始写稿: product, direction and market in one row; the model folds to one line */
+.ai-source-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.ai-source-grid .field{margin:0}
+.ai-check small{display:block;margin:2px 0 0 22px;font-size:12px;color:var(--muted-soft)}
+.ai-source-links{display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;margin:4px 0 0;font-size:12px;color:var(--muted-soft)}
+.ai-source-links .subtle{padding:2px 4px;font-size:12px}
+.ai-create-model-fold{border-top:1px solid var(--line);padding-top:10px}
+.ai-create-model-fold>summary{display:flex;justify-content:space-between;gap:12px;cursor:pointer;list-style:none;font-size:13px}
+.ai-create-model-fold>summary::-webkit-details-marker{display:none}
+.ai-create-model-change{color:var(--accent-text);flex-shrink:0}
+.ai-create-model-fold[open] .ai-create-model-change{display:none}
+.ai-create-model-fold[open]>summary{margin-bottom:10px}
+.ai-product-pick{width:min(420px,92vw);padding:22px;border:0;border-radius:16px}
+.ai-product-pick h2{margin:0 0 6px;font-size:18px}
+.ai-product-pick-list{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+.ai-product-pick-foot{display:flex;justify-content:flex-end}
+
+/* 页头：本轮几条稿还没定 */
+.ai-desk-tally{font-size:12px;padding:2px 8px;border-radius:5px;background:var(--surface-alt);color:var(--muted);white-space:nowrap}
+.ai-desk-tally[data-tone=warn]{background:var(--surface-warm);color:var(--warm-ink)}
+.ai-desk-tally[data-tone=ok]{color:var(--success-ink)}
+/* 按对标：开始写稿里的硬条件 */
+.ai-benchmark{margin:0 0 14px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.ai-benchmark.is-on{border-color:var(--accent)}
+.ai-benchmark-switch{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer}
+.ai-benchmark.is-on .ai-benchmark-switch{background:var(--surface-tint)}
+.ai-benchmark-switch>span{flex:1;min-width:0}
+.ai-benchmark-switch strong{display:block;font-weight:600}
+.ai-benchmark-switch small{display:block;font-size:12px;color:var(--muted-soft)}
+.ai-benchmark-switch input{appearance:none;-webkit-appearance:none;flex:none;width:34px;height:20px;margin:0;border-radius:999px;background:var(--line-strong);position:relative;cursor:pointer}
+.ai-benchmark-switch input::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px #0003;transition:left .15s}
+.ai-benchmark-switch input:checked{background:var(--accent)}
+.ai-benchmark-switch input:checked::after{left:16px}
+.ai-benchmark-switch input:disabled{opacity:.5;cursor:default}
+.ai-benchmark-body{display:flex;flex-direction:column;gap:10px;padding:10px 12px}
+.ai-benchmark-rules{margin:0;padding:0;border:0;display:flex;flex-direction:column;gap:6px}
+.ai-benchmark-rules legend{padding:0 0 4px;font-size:12px;color:var(--muted-soft)}
+.ai-benchmark-rules label{display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer}
+.ai-benchmark-rules input{margin-top:3px;accent-color:var(--accent)}
+.ai-benchmark-rules small{display:block;font-size:12px;color:var(--muted-soft)}
+.ai-benchmark-hook{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;background:var(--surface-alt);font-size:13px}
+.ai-benchmark-hook>span{flex:1;min-width:0}
+.ai-benchmark-hook small{display:block;font-size:12px;color:var(--muted-soft)}
+/* 对标核对：候选稿上只展开缺口 */
+.ai-bench-check{margin:10px 0 0;display:flex;flex-direction:column;gap:6px}
+.ai-bench-gap{padding:10px 12px;border-radius:12px;background:var(--surface-warm);color:var(--warm-ink);font-size:13px}
+.ai-bench-gap strong{font-weight:600}
+.ai-bench-gap p{margin:4px 0 0}
+.ai-bench-gap .ai-bench-actions{display:flex;gap:6px;margin-top:6px}
+.ai-bench-done{font-size:13px;color:var(--muted)}
+.ai-bench-done summary{cursor:pointer;color:var(--success-ink)}
+.ai-bench-done ul{margin:6px 0 0;padding-left:18px;line-height:1.8}
+.ai-bench-note{font-size:12px;color:var(--muted-soft)}
+.ai-bench-badge{flex:none;padding:1px 8px;border-radius:999px;font-size:12px;background:var(--surface-success);color:var(--success-ink)}
+.ai-bench-badge.has-gap{background:var(--surface-warm);color:var(--warm-ink)}
+/* 手机底栏 8 个入口每个不到 50px，「卖点与方向」五个字放不下，挤到隔壁；底栏里改叫「卖点方向」。 */
+@media (max-width: 760px) {
+  body .sidebar #directions-nav { font-size: 0; }
+  body .sidebar #directions-nav::after { content: "卖点方向"; content: "卖点方向" / ""; font-size: 10.5px; }
+}

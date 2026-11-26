@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from uuid import uuid4
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from content_management import ContentManagementStore, _finished, build_content_items
 from content_naming import content_heading, content_title, task_topic_hint, variant_labels
@@ -91,7 +91,8 @@ class ContentQueueTests(unittest.TestCase):
     def test_multiple_script_families_from_one_candidate_remain_independent(self):
         rows = self.queue([task()], [script(), script("SCR-two", "SCR-two")])
         self.assertEqual({row["id"] for row in rows}, {"script:SCR-one", "script:SCR-two"})
-        self.assertTrue(all(row["needs_attention"] for row in rows))
+        # A saved draft nobody opened an order for is not a to-do; it stays reachable in 全部.
+        self.assertFalse(any(row["needs_attention"] or row["history"] for row in rows))
 
     def test_version_family_is_one_candidate_and_new_unproduced_version_stays_available(self):
         versions = [script(), script("SCR-v2", "SCR-one", 2)]
@@ -179,6 +180,32 @@ class ContentQueueTests(unittest.TestCase):
         done = row(self.queue([task(management_state="finished", **marks(**{"1": "skip", "2": "skip"}))],
                               [script(source={"task_id": "AIT-one", "round_id": "AIR-one", "variant_index": 0})]))
         self.assertEqual((done["stage"], done["stage_label"], done["needs_attention"]), ("finished", "已完结", False))
+
+    def test_a_round_with_an_order_from_an_earlier_day_counts_as_screened(self):
+        row = lambda rows: next(item for item in rows if item["id"] == "task:AIT-one")
+        made = lambda **extra: script(status="published", **extra)
+        now = datetime.now(timezone.utc).isoformat()
+        old = row(self.queue([task(management_state="needs_revision")], [made()], [job(created_at="2026-10-01T00:00:00Z")]))
+        self.assertEqual((old["stage_label"], old["needs_attention"], old["history"]), ("已完结", False, True))
+        # An order made today leaves the rest of the day to open more.
+        fresh = row(self.queue([task(management_state="needs_revision")], [made()], [job(created_at=now)]))
+        self.assertEqual((fresh["stage"], fresh["needs_attention"]), ("needs_revision", True))
+        # A newer round has not been looked at because an older one produced something.
+        newer = task(management_state="needs_revision", rounds=[{"round_id": "AIR-one", "status": "completed"}, {"round_id": "AIR-two", "status": "completed"}])
+        self.assertTrue(row(self.queue([newer], [made()], [job(created_at="2026-10-01T00:00:00Z")]))["needs_attention"])
+        # An archived order is not a reason to close the task.
+        self.assertTrue(row(self.queue([task(management_state="needs_revision")], [made()], [job(created_at="2026-10-01T00:00:00Z", archived=True)]))["needs_attention"])
+
+    def test_screened_task_with_a_draft_still_marked_to_make_stays_on_the_list(self):
+        marks = {"variant_choices": {"AIR-one": {"total": 2, "picks": {"0": "do", "1": "skip"}}}}
+        rows = self.queue([task(management_state="finished", **marks)])
+        row = next(item for item in rows if item["id"] == "task:AIT-one")
+        self.assertEqual((row["stage_label"], row["needs_attention"]), ("还有 1 条要做", True))
+
+    def test_order_links_its_writing_task_only_while_that_task_exists(self):
+        labels = lambda rows: [link["label"] for link in next(item for item in rows if item["kind"] == "video")["links"]]
+        self.assertIn("协作记录", labels(self.queue([task()], [script()], [job()])))
+        self.assertNotIn("协作记录", labels(self.queue([], [script()], [job()])))
 
     def test_task_id_without_round_id_is_not_adoption_evidence(self):
         rows = self.queue([task()], [script(source={"task_id": "AIT-one"})])

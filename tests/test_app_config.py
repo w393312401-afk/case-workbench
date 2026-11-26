@@ -9,7 +9,7 @@ import unittest
 
 from unittest.mock import patch
 
-from app_config import load_config, open_edit_import
+from app_config import load_config, open_edit_import, save_local_config
 
 
 class AppConfigTests(unittest.TestCase):
@@ -54,6 +54,29 @@ class AppConfigTests(unittest.TestCase):
             (Path(folder) / "config.json").write_text("[]", encoding="utf-8")
             with self.assertRaises(ValueError):
                 load_config(folder)
+
+    def test_service_save_preserves_unrelated_local_paths_and_options(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / "config.local.json"
+            original = {"runtime_root": "private/runtime", "port": 9876, "notion": {"enabled": True}}
+            path.write_text(json.dumps(original), encoding="utf-8-sig")
+            service = {"enabled": True, "base_url": "http://127.0.0.1:8046/v1", "model": "test", "vision": False}
+            save_local_config({"antigravity": service}, root)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {**original, "antigravity": service})
+            self.assertEqual(set(item.name for item in root.iterdir()), {"config.local.json"})
+
+    def test_failed_service_save_keeps_the_previous_configuration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / "config.local.json"
+            path.write_text('{"port": 9876}', encoding="utf-8")
+            previous = path.read_bytes()
+            with patch("app_config.os.replace", side_effect=OSError("fixture disk error")):
+                with self.assertRaises(OSError):
+                    save_local_config({"antigravity": {"enabled": True}}, root)
+            self.assertEqual(path.read_bytes(), previous)
+            self.assertEqual(set(item.name for item in root.iterdir()), {"config.local.json"})
 
     def test_legacy_runtime_alias_retains_its_spelling(self):
         with tempfile.TemporaryDirectory() as folder:

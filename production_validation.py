@@ -134,6 +134,16 @@ def _declared(spans, picture_gaps):
     return [(a, b) for a, b in picture_gaps if any(max(a, left) < min(b, right) for left, right in spans)]
 
 
+def covered_voice_end(items, start):
+    """The frame picture must reach: a voiceover rarely lasts whole frames, and its last partial frame still plays."""
+    ends = []
+    for item in items:
+        exact = item.get("end_exact")
+        exact = exact if isinstance(exact, (int, float)) and not isinstance(exact, bool) and math.isfinite(exact) else item["end"]
+        ends.append(max(item["end"], math.ceil(exact - 1e-6)))
+    return max(ends) - start if ends else None
+
+
 def engineering_summary(inspect, job, record, fps=None, report=None):
     inspect = snapshot(inspect)
     fps = inspect["fps"]
@@ -141,16 +151,18 @@ def engineering_summary(inspect, job, record, fps=None, report=None):
     voice = voice_track(inspect)
     voice_items = voice["items"] if voice else []
     voice_end = max((item["end"] for item in voice_items), default=inspect["end_frame"]) - start
+    # Coverage runs to the voiceover's last partial frame; voice_frames stays the whole count recorded at build.
+    cover_end = covered_voice_end(voice_items, start) or voice_end
     shots = sorted((item["start"] - start, item["end"] - start, item.get("name", ""))
                    for track in inspect["tracks"]["video"] if track.get("enabled") is not False
                    for item in track["items"] if item.get("enabled") is not False)
-    limit = math.floor(actual_rate)
+    limit = math.floor(actual_rate * 4)  # the editing skill lets an ordinary shot run 4 seconds
     gaps = [{"start": marker["frame"], "end": marker["frame"] + marker["duration"], "name": marker.get("name") or "", "status": "missing",
              "note": marker.get("note") or "", "seconds": round(marker["frame"] / actual_rate, 2)}
             for marker in inspect["markers"] if GAP_NAME.match(marker.get("name") or "") and marker.get("color") == "Red"
             and marker["duration"] > 0 and str(marker.get("note") or "").strip()]
     intervals = [(left, right) for left, right, _ in shots]
-    raw_uncovered = _intervals_uncovered(intervals, 0, voice_end)
+    raw_uncovered = _intervals_uncovered(intervals, 0, cover_end)
     declared = reported_gaps(report, voice_end)
     for left, right in _declared([(gap["start"], gap["end"]) for gap in declared], raw_uncovered):
         declarations = [gap for gap in declared if max(left, gap["start"]) < min(right, gap["end"])]
@@ -167,11 +179,11 @@ def engineering_summary(inspect, job, record, fps=None, report=None):
             need = "；".join(gap["need"] for gap in active if gap["need"])
             gaps.append({"start": a, "end": b, "name": need or ("待核实素材" if state == "unverified" else "缺素材"),
                          "status": state, "note": "", "seconds": round(a / actual_rate, 2), "source": "report"})
-    uncovered = _intervals_uncovered(intervals + [(gap["start"], gap["end"]) for gap in gaps], 0, voice_end)
+    uncovered = _intervals_uncovered(intervals + [(gap["start"], gap["end"]) for gap in gaps], 0, cover_end)
     prefix = f"workbench-group:{job['id']}:"
     groups = [marker for marker in inspect["markers"] if str(marker.get("custom") or "").startswith(prefix)]
     details = lambda spans: [{"start": left, "end": right, "seconds": round(left / actual_rate, 2)} for left, right in spans]
-    return {"timeline": inspect.get("name"), "fps": fps, "voice_frames": voice_end, "voice_seconds": round(voice_end / actual_rate, 2),
+    return {"timeline": inspect.get("name"), "fps": fps, "voice_frames": voice_end, "voice_cover_frames": cover_end, "voice_seconds": round(voice_end / actual_rate, 2),
             "shots": len(shots), "long_shots": sum(right - left > limit for left, right, _ in shots), "frame_limit": limit,
             "max_shot": max((right - left for left, right, _ in shots), default=0), "gaps": gaps, "uncovered": details(uncovered),
             "picture_gaps": details(raw_uncovered), "group_markers": len(groups), "groups_expected": len(job["lines"]),

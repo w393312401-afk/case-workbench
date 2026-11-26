@@ -87,11 +87,15 @@ window.ReviewFollowups = (() => {
   }
   function order(videos, scripts = [], {entries = [],tasks = [],today = ''} = {}) {
     const own = ownPosts(scripts);
-    return [...videos].sort((a, b) => priority(a,entries,tasks,today,scripts).rank - priority(b,entries,tasks,today,scripts).rank ||
+    // Rank each video once: the comparator runs thousands of times, and a rank reads every entry and task.
+    const retrospectives = tasks.filter(task => task.action === 'retrospective' && !task.archived);
+    const ranks = new Map(videos.map(video => [video, priority(video,entries,retrospectives,today,scripts).rank]));
+    return [...videos].sort((a, b) => ranks.get(a) - ranks.get(b) ||
       Number(Boolean(b.registered || ownsPost(own,b))) - Number(Boolean(a.registered || ownsPost(own,a))) ||
       String(b.window_end).localeCompare(String(a.window_end)) || String(a.video_id).localeCompare(String(b.video_id)));
   }
-  const number = value => value === null || value === undefined || value === '' ? '—' : Number(value).toLocaleString('zh-CN');
+  const zhNumber = new Intl.NumberFormat('zh-CN');
+  const number = value => value === null || value === undefined || value === '' ? '—' : zhNumber.format(Number(value));
   const chip = (text, tone = '') => `<span class="home-chip${tone ? ` is-${tone}` : ''}">${esc(text)}</span>`;
   const stateNames = {pending:'待处理', observing:'持续观察', deferred:'暂缓', reviewed:'已复盘'};
   const decisionNames = {scale:'加码', execution:'换执行', stop:'停测', observe:'历史观察记录', none:'已结束'};

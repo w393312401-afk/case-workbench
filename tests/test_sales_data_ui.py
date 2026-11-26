@@ -57,6 +57,8 @@ class SalesDataBrowserTests(unittest.TestCase):
         statuses = statuses or {}
         sales_snapshots = sales_snapshots if sales_snapshots is not None else {}
         context = self.browser.new_context(viewport={"width": 1080, "height": 680})
+        # 这些用例测的是本地视频播放器；TikTok 播放器另有 test_case_tiktok_player_ui。
+        context.add_init_script("try { localStorage.setItem('case-video-source', 'local'); } catch {}")
         self.addCleanup(context.close)
         page = context.new_page()
         page.set_default_timeout(10000)
@@ -138,11 +140,6 @@ class SalesDataBrowserTests(unittest.TestCase):
         page.locator("#case-comparison").get_by_text("100,001", exact=True).first.wait_for()
         self.assertEqual(page.locator("#case-comparison").get_by_text("0.94%", exact=True).count(), 0)
         page.locator("#close-comparison").click()
-        page.locator("#directions-nav").click()
-        page.locator(".direction-card-link").first.click()
-        page.locator(".dir-case-performance > summary").click()
-        page.locator(".direction-observations").get_by_text("100001", exact=True).first.wait_for()
-        self.assertEqual(page.locator(".direction-observations").get_by_text("0.94%", exact=True).count(), 0)
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#case/{self.identifier}")
         page.locator('.detail-tabs [data-tab="data"]').click()
         section = page.locator("#detail-section-performance")

@@ -27,6 +27,8 @@ CAMPAIGN_ID = re.compile(r"TKC-[A-Za-z0-9-]{3,60}\Z")
 # A script may only name dates that are backed by a source or that a person has checked; upcoming means within this many days.
 WRITING_CONFIDENCE = ("official", "media", "manual")
 WRITING_LEAD_DAYS = 14
+# From this many days before it starts until it ends, a campaign is the script's own closing line (see the writing skill).
+BODY_CTA_DAYS = 5
 
 CALENDAR_SOURCE = "https://moras.ai/blog/tiktok-shop-sales-calendar"
 SELLER_GUIDE = "https://seller-us.tiktok.com/university/essay?knowledge_id=26854147802894"
@@ -206,9 +208,11 @@ class CampaignStore:
         """Running or soon-starting campaigns with trustworthy dates: the only deadlines a script may name."""
         today = today or pacific_today()
         first, last = today.isoformat(), (today + timedelta(days=WRITING_LEAD_DAYS)).isoformat()
+        near = (today + timedelta(days=BODY_CTA_DAYS)).isoformat()
         with self.lock:
             rows = self.merged(self.read())
-        return [{"name": row["name"], "start": row["start"], "end": row["end"], "status": "running" if row["start"] <= first else "upcoming"}
+        return [{"name": row["name"], "start": row["start"], "end": row["end"], "status": "running" if row["start"] <= first else "upcoming",
+                 "body_cta": row["start"] <= near}
                 for row in rows if row["end"] >= first and row["start"] <= last and (row["verified"] or row["confidence"] in WRITING_CONFIDENCE)]
 
     def mutate(self, body):

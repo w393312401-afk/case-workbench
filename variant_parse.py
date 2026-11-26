@@ -364,6 +364,46 @@ def variant_script(text, index):
     return "\n".join(out)
 
 
+def variant_full(text, index, spoken="", title=""):
+    """One draft as written, for reading it after its task is gone; "" when nothing says which draft it was.
+
+    Older scripts recorded no position, so they are matched by their words, then by the 变体 number in their title."""
+    if type(index) is not int:
+        variants, wanted = parse_variants(text), spoken_lines(spoken)
+        chosen = next((item for item in variants if wanted and same_lines([line["spoken"] for line in item["lines"]], wanted)), None)
+        number = re.search(r"变体\s*[#＃Vv]?\s*(\d+)", str(title or ""))
+        if not chosen and number:
+            chosen = next((item for item in variants if re.search(rf"[#＃Vv]\s*{number.group(1)}(?!\d)", item["label"])), None)
+        if not chosen:
+            return ""
+        index = chosen["index"]
+    blocks = _blocks(text)
+    if not 0 <= index < len(blocks):
+        return ""
+    out, fence = [], None
+    for line in blocks[index].splitlines():
+        stripped = line.strip()
+        if fence is not None:
+            fence.append(line)
+            if stripped.startswith("```"):
+                # Picture data is for the machine; everything else stays exactly as written.
+                if not any('"photo_carousel"' in row or "'photo_carousel'" in row for row in fence):
+                    out.extend(fence)
+                fence = None
+        elif stripped.startswith("```"):
+            fence = [line]
+        elif stripped.startswith(("**", "#")) and "发布前核对" in stripped:
+            break  # The batch's shared check follows the last draft and belongs to none of them.
+        else:
+            out.append(line)
+    out.extend(fence or [])
+    while out and (not out[-1].strip() or re.fullmatch(r"\s*(?:---+|\*\*\*+)\s*", out[-1])):
+        out.pop()
+    while out and (not out[0].strip() or re.fullmatch(r"\s*(?:---+|\*\*\*+)\s*", out[0])):
+        out.pop(0)
+    return "\n".join(out)
+
+
 # ---- format check and re-layout verification ----
 
 WORD = re.compile(r"[a-z0-9ßà-öø-ÿ]+(?:'[a-z0-9ßà-öø-ÿ]+)*")

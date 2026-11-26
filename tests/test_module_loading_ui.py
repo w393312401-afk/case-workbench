@@ -56,7 +56,7 @@ class ModuleLoadingTests(unittest.TestCase):
 
     def assert_no_optional_sales_reads(self, page):
         self.assertEqual(page.evaluate("""salesReads.filter(read =>
-          read.path === '/api/performance/analytics' || read.path.startsWith('/api/direction-catalog'))"""), [])
+          read.path.startsWith('/api/performance/analytics') || read.path.startsWith('/api/direction-catalog'))"""), [])
 
     def test_home_work_remains_available_without_chart_services(self):
         page, chart_calls = self.page(), []
@@ -135,7 +135,7 @@ class ModuleLoadingTests(unittest.TestCase):
     def test_video_reentry_waits_for_fresh_charts_without_waiting_for_catalog(self):
         page = self.page()
         page.goto(f"{self.base}/#/202H/videos")
-        page.locator(".perf-trend-card").first.wait_for()
+        page.locator(".perf-trend-card:visible").first.wait_for()
         page.locator('[data-page="settings"]').click()
         page.locator(".settings-page").wait_for()
         charts, catalog = [], []
@@ -148,7 +148,7 @@ class ModuleLoadingTests(unittest.TestCase):
         self.assertEqual(len(charts), 1)
         self.assertEqual(len(catalog), 1)
         charts.pop().continue_()
-        page.locator("#perf-board .perf-trend-card").first.wait_for()
+        page.locator("#perf-board .perf-trend-card:visible").first.wait_for()
         self.assertEqual(len(catalog), 1)
         catalog.pop().continue_()
 
@@ -165,8 +165,8 @@ class ModuleLoadingTests(unittest.TestCase):
         self.assertEqual(page.evaluate("salesReads.map(read => read.path)"), [home_videos])
         page.unroute("**" + home_videos)
         page.locator('#home-page a[href$="/videos?tab=board"]').click()
-        page.locator("#perf-board .perf-trend-card").first.wait_for()
-        self.assertTrue(page.evaluate("salesReads.some(read => read.path === '/api/performance/analytics')"))
+        page.locator("#perf-board .perf-trend-card:visible").first.wait_for()
+        self.assertTrue(page.evaluate("salesReads.some(read => read.path.startsWith('/api/performance/analytics'))"))
 
     def test_video_defers_charts_and_catalog_until_table_has_rendered(self):
         page, summary, videos = self.page(), [], []
@@ -181,8 +181,8 @@ class ModuleLoadingTests(unittest.TestCase):
         self.assert_no_optional_sales_reads(page)
         summary.pop().continue_()
         page.locator(".perf-table").wait_for()
-        page.wait_for_function("() => salesReads.some(read => read.path === '/api/performance/analytics') && salesReads.some(read => read.path.startsWith('/api/direction-catalog'))")
-        self.assertTrue(page.evaluate("salesReads.filter(read => read.path === '/api/performance/analytics' || read.path.startsWith('/api/direction-catalog')).every(read => read.videosReady)"))
+        page.wait_for_function("() => salesReads.some(read => read.path.startsWith('/api/performance/analytics')) && salesReads.some(read => read.path.startsWith('/api/direction-catalog'))")
+        self.assertTrue(page.evaluate("salesReads.filter(read => read.path.startsWith('/api/performance/analytics') || read.path.startsWith('/api/direction-catalog')).every(read => read.videosReady)"))
 
     def test_leaving_before_foreground_reads_finish_does_not_start_optional_work(self):
         for module in ("home", "videos"):

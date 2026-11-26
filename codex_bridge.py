@@ -81,6 +81,21 @@ def _service_error(error, stage="本次分析"):
     return BridgeError(f"Codex 未能完成{stage}，请检查本机 Codex 状态后重试。")
 
 
+STDERR_SCAN_BYTES = 16 * 1024
+_FILE_REJECTION = re.compile(r"[^\r\n]*?\.toml:\d+:\d+: unknown configuration field `([^`\r\n]{1,200})`")
+_OVERRIDE_REJECTION = re.compile(r"unknown configuration field `([^`\r\n]{1,200})` in -c/--config override")
+
+
+def config_rejection(text):
+    """Classify a --strict-config startup error; returns (source, field) with a sanitized field name only."""
+    for source, pattern in (("override", _OVERRIDE_REJECTION), ("file", _FILE_REJECTION)):
+        match = pattern.search(text)
+        if match:
+            field = re.sub(r"[^\w.\-\[\]'\"]", "", match[1])[:120]
+            return source, field or "未知字段"
+    return None
+
+
 class _Session:
     MAX_LINE_BYTES = 8 * 1024 * 1024
 
@@ -106,6 +121,7 @@ class _Session:
         self.responses = {}
         self.next_id = 0
         self.last_progress = None
+        self.config_problem = None
         self.readers = [threading.Thread(target=self._read_stdout, daemon=True, name="case-ai-stdout"),
                         threading.Thread(target=self._read_stderr, daemon=True, name="case-ai-stderr")]
         for reader in self.readers:
@@ -173,12 +189,26 @@ class _Session:
             self._enqueue("eof")
 
     def _read_stderr(self):
-        # Discard diagnostics rather than retaining commands, paths or tokens.
+        # Discard diagnostics rather than retaining commands, paths or tokens. Only the
+        # startup head is scanned, in memory, for a strict-config rejection; just the
+        # rejected field name is kept, never the line, path or anything else.
+        head = b""
         try:
-            while not self.closing.is_set() and self.process.stderr.read(64 * 1024):
-                pass
+            while not self.closing.is_set():
+                chunk = self.process.stderr.read(64 * 1024)
+                if not chunk:
+                    break
+                if self.config_problem is None and len(head) < STDERR_SCAN_BYTES:
+                    head = (head + chunk)[:STDERR_SCAN_BYTES]
+                    self.config_problem = config_rejection(head.decode("utf-8", "replace"))
         except (OSError, ValueError):
             pass
+
+    def startup_config_problem(self, wait=1.0):
+        """(source, field) when Codex refused its config at startup: source is "file" for a config.toml, "override" for -c."""
+        if self.config_problem is None and self.process.poll() is not None:
+            self.readers[1].join(timeout=wait)
+        return self.config_problem
 
     def send(self, value):
         payload = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")

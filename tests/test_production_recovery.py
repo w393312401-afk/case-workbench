@@ -402,6 +402,39 @@ except VoiceError as error:
         self.assertEqual(resolve.calls[0]["operation_key"], resolve.calls[1]["operation_key"])
         self.assertEqual(resolve.calls[0]["recovery_file"], resolve.calls[1]["recovery_file"])
 
+    def test_build_refused_part_way_resumes_once_on_its_own(self):
+        job, body = self.configured_job(), {"request_id": uuid4().hex, "creator": "Lab"}
+        resolve = self.bench.resolve
+        run, refusals = resolve.run, []
+
+        def refuse_after_journal(command, payload=None, **options):
+            if len(refusals) < self.refuse:
+                refusals.append(payload["operation_key"])
+                Path(payload["recovery_file"]).parent.mkdir(parents=True, exist_ok=True)
+                Path(payload["recovery_file"]).write_text(json.dumps({"stage": "created"}), encoding="utf-8")
+                raise VoiceError(409, "原请求时间线的帧率或分辨率没有设置成功。")
+            return run(command, payload, **options)
+
+        self.refuse = 1
+        with patch.object(resolve, "run", refuse_after_journal), patch("workbench_production.TIMELINE_AUTO_RECOVER_PAUSE", 0):
+            result = self.bench.build_timeline(job["id"], body)
+        self.assertEqual(result["timeline"]["unique_id"], "line-" + refusals[0][:12])
+        self.assertEqual((len(refusals), len(resolve.calls)), (1, 1))
+        self.assertEqual(resolve.calls[0]["operation_key"], refusals[0])
+        self.assertEqual(self.operation("timeline", job, body)["state"], "committed")
+        self.assertEqual(self.bench._production_operations().public(job["id"]), [])
+
+        # A second refusal is left for a person: no endless retries against DaVinci.
+        refusals.clear()
+        self.refuse = 9
+        other = {"request_id": uuid4().hex, "creator": "Lab"}
+        with patch.object(resolve, "run", refuse_after_journal), patch("workbench_production.TIMELINE_AUTO_RECOVER_PAUSE", 0):
+            self.error(409, self.bench.build_timeline, job["id"], other)
+        self.assertEqual(len(refusals), 2)
+        record = self.operation("timeline", job, other)
+        self.assertEqual((record["state"], record["auto_recovered"]), ("uncertain", True))
+        self.assertEqual(len(self.bench._production_operations().public(job["id"])), 1)
+
     def lost_build(self):
         job, body = self.configured_job(), {"request_id": uuid4().hex, "creator": "Lab"}
         self.bench.resolve = RecoveringResolve(lost_response=True)

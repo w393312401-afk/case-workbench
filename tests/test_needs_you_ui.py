@@ -57,6 +57,21 @@ class NeedsYouBrowserTests(unittest.TestCase):
         self.page.evaluate("() => {window.data = {items:[],counts:{}};window.draw();}")
         self.assertFalse(self.page.locator("#host").is_visible())
 
+    def test_a_carousel_failure_opens_its_drawer_in_place(self):
+        self.page.evaluate("""() => {
+          window.opened = [];window.api = async () => ({});
+          window.PhotoCarousel = {open:args => window.opened.push([args.job.id,args.uid,args.timelineName])};
+          window.data.items.push({kind:'carousel',kind_label:'图文抽帧失败',job_id:'PRD-2',job_title:'202H 对比',timeline_uid:'p',timeline_name:'时间线 p',product:'202H',
+            message:'视频读不出来',since:'2026-11-06T08:00:00+00:00',hash:'#production/PRD-2?step=cut&photo=p'});
+          window.data.counts.carousel = 1;window.draw();
+        }""")
+        self.page.locator("[data-needs-toggle]").click()
+        self.page.locator("[data-needs-photo]").click()
+        self.assertEqual(self.page.evaluate("window.opened"), [["PRD-2", "p", "时间线 p"]])
+        self.assertEqual(self.page.evaluate("location.hash"), "")
+        # Other failures still go to their order page.
+        self.assertIsNone(self.page.locator(".needs-row a").first.get_attribute("data-needs-photo"))
+
 
 if __name__ == "__main__":
     unittest.main()

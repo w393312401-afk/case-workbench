@@ -395,12 +395,12 @@ class PerformanceBrowserTests(unittest.TestCase):
         self.add_product_without_video_data()
         page = self.open_page("#videos")
         page.locator(".perf-kpis").wait_for()
-        self.assertEqual(page.locator(".perf-kpi").count(), 6)  # six metric tiles; each one picks the main chart
+        self.assertEqual(page.locator(".perf-kpi").count(), 5)  # five metric tiles; each one picks the main chart
         self.assertEqual(page.locator("#perf-tab-board").get_attribute("aria-selected"), "true")
         self.assertGreaterEqual(page.locator(".perf-board svg.perf-chart").count(), 5)
-        page.locator('[data-perf-metric="views"]').click()
-        page.locator('[data-perf-metric="views"][aria-pressed="true"]').wait_for()
-        self.assertIn("播放量", page.locator(".perf-main .perf-mini-head").inner_text())
+        page.locator('[data-perf-metric="orders"]').click()
+        page.locator('[data-perf-metric="orders"][aria-pressed="true"]').wait_for()
+        self.assertIn("归因订单", page.locator(".perf-main .perf-mini-head").inner_text())
         self.assertIn("$", page.locator(".perf-kpi").first.inner_text())
         page.locator(".perf-hit").first.hover()
         page.locator(".perf-tooltip:not([hidden])").wait_for()
@@ -438,7 +438,7 @@ class PerformanceBrowserTests(unittest.TestCase):
         table = page.locator(".perf-table")
         table.locator("tbody tr").first.wait_for()
         self.assertEqual(page.locator("#perf-sort").count(), 0)
-        column = lambda: [int(t.replace("$", "").replace(",", "")) for t in table.locator("tbody tr td:nth-child(7)").all_inner_texts()]
+        column = lambda: [int(t.replace("$", "").replace(",", "")) for t in table.locator("tbody tr td:nth-child(8)").all_inner_texts()]
         table.locator('button[data-sort="gmv"]').click()
         self.assertEqual(table.locator('th[aria-sort="descending"] [data-sort="gmv"]').count(), 1)
         self.assertEqual(column(), sorted(column(), reverse=True))

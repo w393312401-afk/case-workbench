@@ -57,6 +57,8 @@ class DetailWorkspaceTests(unittest.TestCase):
 
     def open_page(self, *, width=1600, height=900, tab=""):
         context = self.browser.new_context(viewport={"width": width, "height": height})
+        # 这些用例测的是本地视频播放器；TikTok 播放器另有 test_case_tiktok_player_ui。
+        context.add_init_script("try { localStorage.setItem('case-video-source', 'local'); } catch {}")
         self.addCleanup(context.close)
         page = context.new_page()
         page.set_default_timeout(10000)

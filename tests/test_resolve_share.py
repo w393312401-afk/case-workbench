@@ -169,10 +169,49 @@ class GateTests(unittest.TestCase):
         (folder / "fake_mcp.py").write_text(FAKE_MCP, encoding="utf-8")
         self.fake = folder / "fake_mcp.py"
 
-    def call(self, process, number, name):
+    def call(self, process, number, name, script=None):
         process.stdin.write((json.dumps({"jsonrpc": "2.0", "id": number, "method": "tools/call",
-                                         "params": {"name": name, "arguments": {}}}) + "\n").encode("utf-8"))
+                                         "params": {"name": name, "arguments": {"script": script} if script else {}}}) + "\n").encode("utf-8"))
         process.stdin.flush()
+
+    def test_a_placing_call_runs_only_after_the_shot_list_passes(self):
+        answers = ["先写 picks.json\n再放置", ""]
+        with self.shares.session("P", "a", cancel=self.cancel, timeout=5) as share:
+            server = TurnServer(self.shares, share, "a", self.cancel, 5, check=lambda: answers.pop(0))
+            config = server.mcp_config({"command": sys.executable, "args": ["-I", str(self.fake)]})
+            process = subprocess.Popen([config["command"], *config["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+            try:
+                self.call(process, 1, "run_script", "timeline.GetName()")  # reads never ask for the shot list
+                self.assertEqual(json.loads(process.stdout.readline())["result"]["content"][0]["text"], "ran run_script")
+                self.assertEqual(len(answers), 2)
+                self.call(process, 2, "run_script", "pool.AppendToTimeline(clips)")
+                reply = json.loads(process.stdout.readline())
+                self.assertTrue(reply["result"]["isError"])
+                self.assertEqual(reply["result"]["content"][0]["text"], "先写 picks.json\n再放置")
+                self.assertEqual(server.stats["calls"], 1)  # the refused call never took DaVinci
+                self.call(process, 3, "run_script", "pool.AppendToTimeline(clips)")
+                self.assertEqual(json.loads(process.stdout.readline())["result"]["content"][0]["text"], "ran run_script")
+            finally:
+                process.stdin.close()
+                process.wait(5)
+                server.close()
+
+    def test_placing_is_not_held_up_without_a_check_or_when_it_fails(self):
+        def broken():
+            raise RuntimeError("boom")
+
+        for check in (None, broken):
+            with self.shares.session("P", "a", cancel=self.cancel, timeout=5) as share:
+                server = TurnServer(self.shares, share, "a", self.cancel, 5, check=check)
+                config = server.mcp_config({"command": sys.executable, "args": ["-I", str(self.fake)]})
+                process = subprocess.Popen([config["command"], *config["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+                try:
+                    self.call(process, 1, "run_script", "pool.AppendToTimeline(clips)")
+                    self.assertEqual(json.loads(process.stdout.readline())["result"]["content"][0]["text"], "ran run_script")
+                finally:
+                    process.stdin.close()
+                    process.wait(5)
+                    server.close()
 
     def test_scripting_calls_wait_for_the_turn_but_documentation_does_not(self):
         with self.shares.session("P", "a", cancel=self.cancel, timeout=5) as share, \

@@ -194,10 +194,16 @@ class CreationHTTPTests(unittest.TestCase):
         self.assertIn("逐句对应原稿 2 句", task["rounds"][0]["instruction"])
         prompt = bridge.calls[0]["prompt"]
         self.assertIn("照原片优化", prompt)
-        self.assertIn("口播行数等于 writing_mode.lines", prompt)
-        self.assertIn("带货力验收", prompt)
-        self.assertIn("收口句子各条不同", prompt)
-        self.assertIn("原稿开头的情绪或身份", prompt)
+        # Pictures are locked, wording is not: a persuasion chain is rebuilt over the same shots, one closing line may be added.
+        self.assertIn("锁的是画面，不是措辞", prompt)
+        self.assertIn("说服链", prompt)
+        self.assertIn("口播前 writing_mode.lines 行与原文参照里的原稿逐句对应", prompt)
+        self.assertIn("可以在全稿最后另加一句（至多一句）", prompt)
+        self.assertIn("不靠把话说软来过事实护栏", prompt)
+        self.assertIn("收口只留一个购买入口", prompt)
+        self.assertNotIn("默认每一句逐字沿用", prompt)
+        import ai_tasks
+        self.assertIn("带货力验收", ai_tasks.REPLICA_REVIEW)
         self.assertIn("<untrusted_case_breakdown>", prompt)
         self.assertNotIn("推进结构两两不同", prompt)
 
@@ -236,6 +242,26 @@ class CreationHTTPTests(unittest.TestCase):
             "item": {"type": "expression", "source_id": self.identifier, "product": "202H", "text": "Invented words"}})
         self.assertEqual(status, 409, result)
         self.assertEqual(self.request("GET", "/api/materials")[2]["items"], [])
+
+    def test_ai_made_comment_is_composed_kept_as_its_own_kind_and_removed(self):
+        with patch("case_breakdown_runner.run_prompt", return_value='{"username":"@sam k","text":"does it do serrated?","zh":"锯齿刀能磨吗"}'):
+            status, _, made = self.request("POST", "/api/materials/ai-comment", {"hint": "半信半疑", "product": "202H"})
+        self.assertEqual(status, 200, made)
+        self.assertEqual(made, {"username": "@samk", "text": "does it do serrated?", "zh": "锯齿刀能磨吗"})
+        self.assertEqual(self.request("POST", "/api/materials/ai-comment", {"hint": " "})[0], 400)
+        add = lambda **item: {"revision": self.materials()["revision"], "request_id": uuid4().hex, "operation": "add",
+                              "item": {"type": "ai_comment", "product": "202H", "author_handle": "@samk", "text": "does it do serrated?", "zh": "锯齿刀能磨吗", **item}}
+        status, _, result = self.request("POST", "/api/materials", add())
+        self.assertEqual(status, 200, result)
+        [item] = result["items"]
+        self.assertEqual((item["type"], item["author_handle"], item["zh"], item["source_label"]), ("ai_comment", "@samk", "锯齿刀能磨吗", "AI 编评论"))
+        self.assertTrue(item["source_id"].startswith("AI-"))
+        self.assertEqual(self.server.app.reviews.picks(), [])
+        self.assertTrue(self.request("POST", "/api/materials", add())[2].get("existing"))
+        self.assertEqual(self.request("POST", "/api/materials", add(text="这把好用吗"))[0], 400)
+        status, _, removed = self.request("POST", "/api/materials/remove", {"request_id": uuid4().hex, "ids": [item["id"]], "product": "202H"})
+        self.assertEqual(status, 200, removed)
+        self.assertEqual(self.materials()["items"], [])
 
     def test_reviews_share_pick_source_theme_links_and_frozen_ai_materials(self):
         direction = self.direction()

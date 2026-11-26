@@ -28,7 +28,11 @@ class CampaignBrowserTests(unittest.TestCase):
         return self.ok("GET", "/api/campaigns")
 
     def board(self, width=1200):
-        return self.open_page(width=width, route="#/202H/videos?tab=board", ready="#perf-campaigns .campaign-row")
+        page = self.open_page(width=width, route="#/202H/videos?tab=board", ready=".perf-calendar-fold > summary")
+        # The board folds the calendar to one line; open it to work with the activities.
+        page.locator(".perf-calendar-fold > summary").click()
+        page.locator("#perf-campaigns .campaign-row").first.wait_for()
+        return page
 
     def runway(self, moment, width=1600, timezone="America/Los_Angeles"):
         context = self.browser.new_context(viewport={"width": width, "height": 800}, timezone_id=timezone)
@@ -112,6 +116,56 @@ class CampaignBrowserTests(unittest.TestCase):
         pill = page.locator("#campaign-runway").bounding_box()
         self.assertLess(picker["x"] + picker["width"], pill["x"], "picker overlaps the runway pill")
         self.assertFalse(page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth"))
+
+    def test_phone_top_bar_keeps_every_button_clear_of_the_product_picker(self):
+        # The public site adds an account button; a live campaign pill is wider than a coming one; the
+        # 「我去拍了」button lives beside the overview heading on phones. Nothing may sit under the fixed picker.
+        for width in (360, 375, 390, 430):
+            page = self.runway("2026-11-28T12:00:00-08:00", width=width)
+            page.evaluate("""() => { const account = document.createElement('details'); account.className = 'remote-account';
+              account.innerHTML = '<summary>T</summary>'; document.querySelector('.topbar-right').append(account); }""")
+            page.locator("#away-home-open").wait_for()
+            page.wait_for_timeout(100)
+            self.assertTrue(page.locator("#away-open").is_hidden())
+            boxes = page.evaluate("""() => { const picker = document.querySelector('.sidebar .global-product').getBoundingClientRect();
+              const items = [document.querySelector('#campaign-runway'), ...document.querySelector('.topbar-right').children]
+                .map(node => node.getBoundingClientRect()).filter(box => box.width);
+              return {picker: [picker.left, picker.right], left: Math.min(...items.map(box => box.left))}; }""")
+            self.assertGreaterEqual(boxes["picker"][1] - boxes["picker"][0], 60, f"picker too narrow at {width}")
+            self.assertLess(boxes["picker"][1], boxes["left"], f"picker covers a top-bar item at {width}")
+            if width >= 390:
+                self.assertTrue(page.locator("#campaign-runway").is_visible(), f"campaign pill hidden at {width}")
+            self.assertFalse(page.evaluate("() => document.documentElement.scrollWidth > document.documentElement.clientWidth"))
+        page.locator("#away-home-open").click()
+        page.locator("#away-dialog[open]").wait_for()
+
+    def test_desktop_top_bar_steps_aside_instead_of_overlapping(self):
+        # Beside a docked task panel or in a narrow window the bar is narrower than its contents. The runway used to
+        # shrink to nothing with its words spilling over the breadcrumb; now items step aside, font size unchanged.
+        for width in (1700, 1280, 1000, 800):
+            page = self.runway("2026-11-25T12:00:00-08:00", width=width)
+            page.evaluate("""() => { const account = document.createElement('details'); account.className = 'remote-account';
+              account.innerHTML = '<summary><span class="remote-account-avatar">S</span><span class="remote-account-short">sharpal</span></summary>';
+              document.querySelector('.topbar-right').append(account); }""")
+            page.wait_for_timeout(150)
+            boxes = page.evaluate("""() => {
+              const shown = node => node && node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden';
+              const runway = document.querySelector('#campaign-runway');
+              const parts = [document.querySelector('#breadcrumb'), runway, ...document.querySelector('.topbar-right').children].filter(shown)
+                .map(node => { const box = node.getBoundingClientRect(); return [node.id || node.className, box.left, box.right]; }).filter(item => item[2] > item[1]);
+              const inside = shown(runway) ? [...runway.querySelectorAll('.runway-count, .runway-words')].filter(shown).every(node => {
+                const box = node.getBoundingClientRect(), outer = runway.getBoundingClientRect(); return box.left >= outer.left - 1 && box.right <= outer.right + 1; }) : true;
+              return {parts, inside, bar: document.querySelector('.topbar').className, scroll: document.documentElement.scrollWidth > document.documentElement.clientWidth}; }""")
+            parts = sorted(boxes["parts"], key=lambda item: item[1])
+            for before, after in zip(parts, parts[1:]):
+                self.assertLessEqual(before[2], after[1] + 1, f"{before[0]} overlaps {after[0]} at {width}: {boxes['bar']}")
+            self.assertTrue(boxes["inside"], f"runway words spill out at {width}: {boxes['bar']}")
+            self.assertFalse(boxes["scroll"])
+            if width == 1700:
+                self.assertNotIn("squeeze", boxes["bar"])
+            # The runway's full summary stays reachable from its title.
+            if page.locator("#campaign-runway").is_visible():
+                self.assertIn("黑五网一", page.locator("#campaign-runway").get_attribute("title"))
 
     def test_board_lists_every_node_with_how_far_its_date_can_be_trusted(self):
         page = self.board()

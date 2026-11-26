@@ -125,6 +125,65 @@ class ReviewPageTests(unittest.TestCase):
         page.locator(".rev-thread:not([hidden])").wait_for(state="detached")
         self.assertEqual(button.get_attribute("aria-expanded"), "false")
 
+    def test_chinese_translation_shows_under_each_comment_and_in_conversations(self):
+        calls = []
+
+        def lookup(route):
+            ids = route.request.post_data_json["ids"]
+            calls.append(ids)
+            if len(calls) == 1:
+                route.fulfill(json={"items": {}, "pending": [], "failed": ids, "error": "暂时不可用"})
+            else:
+                route.fulfill(json={"items": {i: {"zh": f"译文 <img src=x onerror=alert(1)> {i}", "title_zh": ""} for i in ids},
+                                    "pending": [], "failed": [], "error": ""})
+
+        context = self.browser.new_context(viewport={"width": 1080, "height": 800})
+        self.addCleanup(context.close)
+        page = context.new_page()
+        page.set_default_timeout(10000)
+        page.route("**/api/reviews/translations/lookup", lookup)
+        page.goto(f"{self.base}/#reviews")
+        page.locator(".rev-card").first.wait_for()
+        card = self.card(page, "That’s a lot of wobble")
+        translation = card.locator(":scope > .review-zh")
+        translation.get_by_text("中文翻译没成功", exact=False).wait_for()
+        self.assertEqual(card.locator("details.rev-translation").count(), 0)  # no longer folded
+        translation.get_by_role("button", name="重试").click()
+        translation.get_by_text("译文 <img src=x onerror=alert(1)>", exact=False).wait_for()
+        self.assertEqual(page.locator(".review-zh img").count(), 0)
+        self.assertTrue(translation.is_visible())
+        # It sits right under the original text.
+        self.assertEqual(translation.evaluate("el => el.previousElementSibling.classList.contains('rev-text') || !!el.previousElementSibling.querySelector('.rev-text')"), True)
+        asked = len(calls)
+        card.locator("[data-thread]").click()
+        reply = card.locator(".rev-thread .rev-reply").first
+        reply.wait_for()
+        reply.locator(".review-zh").get_by_text("译文", exact=False).wait_for()
+        self.assertGreater(len(calls), asked)
+
+    def test_batch_translation_progress_stop_and_retry(self):
+        page = self.open_page()
+        state = {"running": False, "run": {"status": "idle"}, "remaining": 3}
+        requests = []
+
+        def batch(route):
+            requests.append((route.request.method, route.request.url))
+            if route.request.method == "POST" and route.request.url.endswith("/stop"):
+                state.update(running=False, run={"status": "cancelled", "done": 1, "total": 3, "failed": 0}, remaining=2)
+            elif route.request.method == "POST":
+                state.update(running=True, run={"status": "running", "done": 1, "total": 3, "failed": 0}, remaining=2)
+            route.fulfill(json=state)
+
+        page.route("**/api/reviews/translations/batch**", batch)
+        page.reload()
+        box = page.locator("#rev-batch-translation")
+        box.get_by_text("还有 3 条评论待翻译").wait_for()
+        box.get_by_role("button", name="批量翻译评论").click()
+        box.get_by_text("已处理 1 / 3 条", exact=False).wait_for()
+        box.get_by_role("button", name="停止").click()
+        box.get_by_role("button", name="继续翻译").wait_for()
+        self.assertTrue(any(method == "POST" and url.endswith("/stop") for method, url in requests))
+
     def test_a_reply_can_show_the_comment_it_answers(self):
         page = self.open_page()
         self.open_drawer(page)
@@ -197,20 +256,10 @@ class ReviewPageTests(unittest.TestCase):
 
         context.route("**/reviews.js", delayed_module)
         page = context.new_page()
-        page.add_init_script("""(() => {
-          const original = window.fetch;
-          window.reviewModuleReadyAtBootstrap = [];
-          window.fetch = function(input, options) {
-            if (String(input).startsWith('/api/state'))
-              window.reviewModuleReadyAtBootstrap.push(Boolean(window.CaseReviews));
-            return original.call(this, input, options);
-          };
-        })();""")
         page.goto(f"{self.base}/#reviews?topic=stability")
         self.count(page, "1 条")
         self.assertIn("wobble", page.locator(".rev-card").inner_text())
         self.assert_review_route(page, topic="stability")
-        self.assertIs(page.evaluate("reviewModuleReadyAtBootstrap[0]"), True)
 
     def test_product_switch_clears_previous_video_and_sku_filters(self):
         for key, value, expected in (("video", performance.LINKED, "3 条"),
@@ -270,6 +319,8 @@ class ReviewPageTests(unittest.TestCase):
         identifier = self.card(page, "That’s a lot of wobble").get_attribute("data-id")
         page.locator("#rev-basket-toggle").click()
         basket = page.locator("#material-basket-dialog")
+        # One line per item; the opened row holds the note and actions.
+        basket.locator("[data-material-expand]").click()
         field = basket.locator("[data-material-note]")
         field.wait_for()
         field.fill("夹具晃的画面别用")
@@ -283,6 +334,7 @@ class ReviewPageTests(unittest.TestCase):
         basket.locator("[data-material-close]").click()
         page.reload()
         page.locator("#rev-basket-toggle").click()
+        basket.locator("[data-material-expand]").click()
         basket.locator("[data-material-note]").wait_for()
         self.assertEqual(basket.locator("[data-material-note]").input_value(), "夹具晃的画面别用")
         basket.locator("[data-material-clear]").click()

@@ -15,15 +15,15 @@ class VideoGuidanceBrowserTests(ProductionManualCompletionBrowserTests):
         self.assertFalse(controls.evaluate('node => node.open'))
         self.assertFalse(page.locator('#edit-panel #edit-form').is_visible())
         self.assertTrue(page.locator('[data-revoke-job-completion]').is_visible())
-        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-step'), 'edit')
-        page.locator('[data-next-action]').get_by_text('下一步：登记发布视频 ID →', exact=True).wait_for(state='attached')
+        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-stage'), 'review')
+        page.locator('[data-next-action]').get_by_text('去发布', exact=True).wait_for(state='attached')
         page.locator('[data-next-action]').dispatch_event('click')
-        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-step'), 'publish')
-        page.locator('[data-step="voice"]').click()
+        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-stage'), 'publish')
+        page.locator('[data-step~="voice"]').click()
         self.assertTrue(page.locator('#take-panel').is_visible())
         self.assertFalse(page.locator('#take-form').is_visible())
         self.assertTrue(page.evaluate("document.querySelector('#take-panel').compareDocumentPosition(document.querySelector('#voice-panel')) & Node.DOCUMENT_POSITION_FOLLOWING"))
-        page.locator('[data-step="timeline"]').click()
+        page.locator('[data-step~="timeline"]').click()
         self.assertTrue(page.locator('.timeline-card').is_visible())
         self.assertFalse(page.locator('#timeline-form').is_visible())
         self.assertLessEqual(page.evaluate('document.documentElement.scrollWidth'), 391)
@@ -37,10 +37,11 @@ class VideoGuidanceBrowserTests(ProductionManualCompletionBrowserTests):
             'source_current':True, 'file_available':True,
         }
         page = self.open_edit_step()
-        page.locator('[data-step="publish"].done').wait_for()
-        page.locator('[data-step="publish"] small').get_by_text('已登记发布', exact=True).wait_for()
-        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-step'), 'edit')
-        page.locator('[data-next-action]').get_by_text('下一步：查看发布记录 →', exact=True).wait_for(state='attached')
+        page.locator('[data-step~="publish"].done').wait_for()
+        page.locator('[data-step~="publish"] small').get_by_text('已登记发布', exact=True).wait_for()
+        self.assertEqual(page.locator('.production-steps [aria-selected="true"]').get_attribute('data-stage'), 'review')
+        # A finished order shows no "next step" bar.
+        page.locator('.production-next').wait_for(state='hidden')
 
     def test_historical_publication_does_not_complete_current_step(self):
         self.payload['job'].update(status='approved', manual_completion=self.receipt())
@@ -51,9 +52,9 @@ class VideoGuidanceBrowserTests(ProductionManualCompletionBrowserTests):
             'source_current':False, 'file_available':True,
         }
         page = self.open_edit_step()
-        page.locator('[data-step="publish"] small').get_by_text('登记版本需核对', exact=True).wait_for()
-        self.assertNotIn('done', page.locator('[data-step="publish"]').get_attribute('class') or '')
-        page.locator('[data-next-action]').get_by_text('下一步：核对发布登记与当前版本 →', exact=True).wait_for(state='attached')
+        page.locator('[data-step~="publish"] small').get_by_text('登记版本需核对', exact=True).wait_for()
+        self.assertNotIn('done', page.locator('[data-step~="publish"]').get_attribute('class') or '')
+        page.locator('[data-next-action]').get_by_text('核对发布登记与当前版本', exact=True).wait_for(state='attached')
 
     def test_video_id_only_publication_completes_step(self):
         self.payload['job'].update(status='approved', manual_completion=self.receipt())
@@ -63,8 +64,9 @@ class VideoGuidanceBrowserTests(ProductionManualCompletionBrowserTests):
             'file':None, 'source_current':True, 'file_available':False,
         }
         page = self.open_edit_step()
-        page.locator('[data-step="publish"].done').wait_for()
-        page.locator('[data-next-action]').get_by_text('下一步：查看发布记录 →', exact=True).wait_for(state='attached')
+        page.locator('[data-step~="publish"].done').wait_for()
+        # A finished order shows no "next step" bar.
+        page.locator('.production-next').wait_for(state='hidden')
 
 
 # Reuse fixture setup without rediscovering inherited test cases.

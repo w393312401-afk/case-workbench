@@ -146,7 +146,7 @@ class WorkflowLinksBrowserTests(unittest.TestCase):
         link = self.link_for(page, "video", self.jobs[0]["id"])
         self.assertEqual(parse_qs(link.get_attribute("href").split("?", 1)[1]).get("step"), ["publish"])
         link.click()
-        expect(page.locator('.production-steps [data-step="publish"]')).to_have_attribute("aria-selected", "true")
+        expect(page.locator('.production-steps [data-step~="publish"]')).to_have_attribute("aria-selected", "true")
         self.assert_ready(page, "publication", 1)
         self.assertEqual(self.links(page, "publication").first.get_attribute("href"),
                          "#/202H/videos?video=7654986913497009441")
@@ -154,7 +154,8 @@ class WorkflowLinksBrowserTests(unittest.TestCase):
 
     def test_version_detail_keeps_text_first_and_a_single_secondary_source_section(self):
         page = self.open_page(width=1280, links_open=False)
-        expect(page.locator("#content-adopted-script")).to_contain_text(self.script["text"])
+        for line in self.script["text"].splitlines():
+            expect(page.locator("#content-adopted-script")).to_contain_text(line)
         fold = page.locator("#workflow-links > details")
         expect(fold).not_to_have_attribute("open", "")
         self.assertTrue(page.evaluate("""() => Boolean(document.querySelector('.script-detail-grid')
@@ -172,6 +173,30 @@ class WorkflowLinksBrowserTests(unittest.TestCase):
         page.set_viewport_size({"width": 390, "height": 900})
         self.assertFalse(page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth"))
         page.screenshot(path=str(folder / "version-detail-mobile.png"), full_page=True)
+
+    def test_video_opens_without_reading_collapsed_workflow_history(self):
+        reads = []
+        def production(route):
+            reads.append("production")
+            route.fulfill(json=copy.deepcopy(self.listing))
+        def progress(route):
+            reads.append("progress")
+            route.fulfill(json=copy.deepcopy(self.progress))
+        page = self.open_page(self.job_url(self.jobs[0]["id"]), links_open=False,
+                              production_route=production, progress_route=progress)
+        page.locator(".production-steps").wait_for()
+        fold = page.locator("#workflow-links > details")
+        expect(fold).not_to_have_attribute("open", "")
+        expect(fold.locator(":scope > summary")).to_contain_text("展开查看关联")
+        self.assertEqual(reads, [])
+        fold.locator(":scope > summary").click()
+        self.assert_ready(page, "task", 1)
+        self.assertEqual(sorted(reads), ["production", "progress"])
+        # Opening and closing an already read fold keeps the links and performs no extra reads.
+        fold.locator(":scope > summary").click()
+        fold.locator(":scope > summary").click()
+        self.assert_ready(page, "task", 1)
+        self.assertEqual(len(reads), 2)
 
     def test_same_task_round_navigation_keeps_the_hub_refreshable(self):
         task = copy.deepcopy(self.task)

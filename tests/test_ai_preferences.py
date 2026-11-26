@@ -63,6 +63,19 @@ class AIPreferencesTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/ai/preferences")[1]["preferences"], selected)
         self.assertEqual(self.bridge.prompts, [])
 
+    def test_new_claude_alias_can_be_saved_and_used_by_a_task(self):
+        model = "claude-alias:fable"
+        self.catalog["models"].append({"id": model, "name": "Claude Fable", "provider": "claude",
+                                       "available": True, "reasoning_efforts": ["medium"]})
+        selected = self.save(model, "medium")
+        self.assertEqual(self.request("GET", "/api/ai/options")[1]["default_settings"], selected)
+        with patch.object(self.bridge, "run", wraps=self.bridge.run) as run:
+            task = self.wait(self.create({**self.body(), "skill_selection": "none"})["task_id"])
+        self.assertEqual((run.call_args.kwargs["model"], run.call_args.kwargs["reasoning_effort"]),
+                         (model, "medium"))
+        self.assertEqual((task["rounds"][0]["requested_model"], task["rounds"][0]["requested_reasoning_effort"]),
+                         (model, "medium"))
+
     def test_saved_client_default_is_not_replaced_by_later_available_claude(self):
         selected = self.save(None, None)
         self.catalog["models"][-1]["available"] = True
@@ -166,6 +179,62 @@ class AIPreferencesTests(unittest.TestCase):
         options = self.request("GET", "/api/ai/options")[1]
         self.assertTrue(options["defaults_configured"])
         self.assertIsNone(options["defaults_error"])
+
+    def kinds(self):
+        return {row["kind"]: row for row in self.request("GET", "/api/ai/kind-preferences")[1]["kinds"]}
+
+    def test_each_kind_starts_on_its_last_pick_and_the_rest_follow_the_global_default(self):
+        ai = self.server.app.ai
+        shared = self.save("test-a", "high")
+        self.assertTrue(all(row["source"] == "global" and row["model"] == "test-a" for row in self.kinds().values()))
+        # Picking a model when starting one kind of task is remembered for that kind only.
+        self.assertEqual(ai.resolve_default_settings({"model": "test-b", "reasoning_effort": "medium"}, kind="carousel"),
+                         {"model": "test-b", "reasoning_effort": "medium"})
+        self.assertEqual(ai.resolve_default_settings({}, kind="carousel"), {"model": "test-b", "reasoning_effort": "medium"})
+        self.assertEqual(ai.resolve_default_settings({}, kind="skeleton"), shared)
+        self.assertEqual(ai.preferences(), shared)
+        rows = self.kinds()
+        self.assertEqual((rows["carousel"]["source"], rows["carousel"]["model"]), ("kind", "test-b"))
+        self.assertEqual(rows["writing"]["source"], "global")
+        options = self.request("GET", "/api/ai/options")[1]
+        self.assertEqual(options["default_settings"], shared)  # the shared answer stays the global default
+        self.assertEqual(next(row for row in options["kind_defaults"] if row["kind"] == "carousel")["model"], "test-b")
+        self.assertEqual(self.request("GET", "/api/ai/options?kind=carousel")[1]["default_settings"],
+                         {"model": "test-b", "reasoning_effort": "medium"})
+        # It survives a restart, and an invalid pick is rejected without being remembered.
+        restarted = AITaskManager(self.store, self.runtime, threading.RLock(), bridge=self.bridge)
+        self.addCleanup(restarted.shutdown)
+        self.assertEqual(restarted.preferences(kind="carousel")["model"], "test-b")
+        with self.assertRaises(Exception):
+            ai.resolve_default_settings({"model": "missing-model"}, kind="skeleton")
+        self.assertEqual(self.kinds()["skeleton"]["source"], "global")
+
+    def test_a_writing_task_remembers_its_model_and_background_work_is_only_set_in_settings(self):
+        ai = self.server.app.ai
+        self.save("test-a", "low")
+        self.wait(self.create({**self.body(), "skill_selection": "none", "model": "test-b", "reasoning_effort": "medium"})["task_id"])
+        self.assertEqual((self.kinds()["writing"]["source"], self.kinds()["writing"]["model"]), ("kind", "test-b"))
+        with patch.object(self.bridge, "run", wraps=self.bridge.run) as run:
+            self.wait(self.create({**self.body(), "skill_selection": "none"})["task_id"])
+        self.assertEqual(run.call_args.kwargs["model"], "test-b")
+        # Unattended work never learns from a run; only the settings page fixes or clears its model.
+        ai.remember_kind("background", "test-b", None)
+        self.assertEqual(self.kinds()["background"]["source"], "global")
+        status, result = self.request("POST", "/api/ai/kind-preferences", {"kind": "background", "model": "test-b", "reasoning_effort": "medium"})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(ai.preferences(kind="background"), {"model": "test-b", "reasoning_effort": "medium"})
+        self.assertFalse(next(row for row in result["kinds"] if row["kind"] == "background")["pick"])
+        for payload in ({"kind": "nope", "model": "test-a", "reasoning_effort": None}, {"kind": "background", "model": "missing", "reasoning_effort": None},
+                        {"kind": "background", "model": "test-b", "reasoning_effort": "high"}, {"kind": "background"}):
+            with self.subTest(payload=payload):
+                self.assertEqual(self.request("POST", "/api/ai/kind-preferences", payload)[0], 400)
+        self.assertEqual(ai.preferences(kind="background")["model"], "test-b")
+        status, result = self.request("POST", "/api/ai/kind-preferences", {"kind": "background", "clear": True})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(ai.preferences(kind="background"), {"model": "test-a", "reasoning_effort": "low"})
+        # A damaged file falls back to the global default instead of blocking tasks.
+        (self.runtime / "ai-kind-preferences.json").write_text("not json", encoding="utf-8")
+        self.assertEqual(ai.preferences(kind="writing"), {"model": "test-a", "reasoning_effort": "low"})
 
 
 if __name__ == "__main__":

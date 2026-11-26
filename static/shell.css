@@ -164,6 +164,7 @@
 .product-picker-list{flex:1 1 auto;min-height:0;min-width:0;max-height:360px;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;margin:0;padding:0 3px 0 0;list-style:none;scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
 .product-picker-option{display:flex;align-items:center;gap:12px;min-width:0;min-height:42px;padding:10px;border-radius:8px;font-size:13px;line-height:1.5;cursor:pointer}
 .product-picker-option>span:first-child{flex:1;min-width:0;white-space:normal;overflow-wrap:anywhere}
+.product-picker-description{display:block;margin-top:3px;color:var(--muted);font-size:12px;font-weight:400}
 .product-picker-check{flex:0 0 18px;text-align:center;color:var(--accent-text)}
 .product-picker-option:hover,.product-picker-option.is-active{background:var(--surface-alt)}
 .product-picker-option.is-current{color:var(--accent-text);font-weight:600;background:var(--surface-tint)}
@@ -191,6 +192,8 @@ label>.workbench-select,.field>.workbench-select{width:100%}
 .product-picker-trigger[aria-invalid="true"]{border-color:var(--danger);outline-color:var(--danger)}
 .product-picker-validation{display:block;margin-top:5px;white-space:normal;font-size:12px;line-height:1.5;color:var(--danger-ink)}
 @media(max-width:760px){.workbench-select>.product-picker-trigger{min-height:36px;font-size:16px}}
+/* 宽度按电脑上 13px 字量的；手机字号放大到 16px 后按当前选项文字重新撑开，不再截成「使…」。 */
+@media(max-width:760px){.workbench-select,.workbench-select.is-inline{width:max-content;max-width:100%;flex-shrink:0}}
 #product-manager-dialog{width:min(640px,calc(100vw - 32px));max-width:none;max-height:min(760px,calc(100dvh - 40px));padding:0;border:1px solid var(--line);border-radius:16px;background:var(--surface);color:var(--ink);overflow-x:hidden;overflow-y:auto}
 #product-manager-dialog[open]{display:flex;flex-direction:column}
 .product-manager-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:22px 24px 18px;flex-shrink:0}
@@ -259,3 +262,63 @@ label>.workbench-select,.field>.workbench-select{width:100%}
 }
 
 .connection-status:not(.has-problem) #connection-dot{display:none}
+
+/* Phones: shell.js fitPhoneTopbar sizes the fixed product picker to the room the top-bar buttons leave.
+   Tighter gaps keep the campaign pill and the picker side by side on a 390px screen; a tight picker drops its
+   arrow and keeps the short product name. */
+@media(max-width:760px){
+  body .topbar,body .topbar-right{gap:4px}
+  body .campaign-runway{padding:0 6px}
+  .global-product.is-tight .product-picker-trigger{justify-content:center;padding:0 6px}
+  .global-product.is-tight .product-picker-trigger svg{display:none}
+}
+/* iPhone 点进字号小于 16px 的输入框会把整页放大；手机上所有输入框、文本框、下拉统一 16px。 */
+@media(max-width:760px){input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=file]),textarea,select{font-size:16px!important}}
+/* 常用两款并排（198H｜202H｜⋯）：shell.js renderProductQuick 放最近用的两款，点一下就换；其余产品和全部产品在 ⋯（原来的列表）里。
+   边栏收成图标栏时，同样两颗按钮放在顶栏左侧。 */
+.product-quick{display:flex;flex:1 1 auto;min-width:0;gap:2px;padding:2px;border:1px solid var(--sidebar-line);border-radius:var(--btn-radius);background:var(--sidebar-control)}
+.product-quick-option{flex:1 1 0;min-width:0;height:calc(var(--btn-h-lg) - 6px);padding:0 6px;border-radius:calc(var(--btn-radius) - 2px);background:transparent;color:var(--sidebar-muted);font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .15s,color .15s}
+.product-quick-option:hover{background:var(--sidebar-hover);color:var(--sidebar-ink)}
+.product-quick-option.is-current{background:var(--accent);color:var(--on-accent)}
+body:not(.public-text-mode) .sidebar .global-product.has-quick{display:flex;align-items:center;gap:4px}
+.global-product.has-quick .product-combo{flex:0 0 auto}
+body:not(.public-text-mode) .global-product.has-quick:not(.quick-off) .product-combo-trigger{width:34px;padding:0;justify-content:center}
+body:not(.public-text-mode) .global-product.has-quick:not(.quick-off) .product-combo-trigger>span{display:none}
+.global-product.quick-off .product-combo{flex:0 1 auto;max-width:45%}
+.product-quick-topbar{display:none!important}
+@media(min-width:761px){
+  html.sidebar-collapsed .product-quick-topbar:not([hidden]){display:flex!important;flex:0 0 auto;width:150px;margin-right:6px;border-color:var(--line);background:var(--surface)}
+  html.sidebar-collapsed .product-quick-topbar .product-quick-option:not(.is-current){color:var(--muted)}
+  html.sidebar-collapsed .product-quick-topbar .product-quick-option:not(.is-current):hover{background:var(--surface-alt);color:var(--ink)}
+}
+@media(max-width:760px){
+  .product-quick{border-color:var(--line);background:var(--surface)}
+  .product-quick-option{height:calc(var(--btn-h-lg) - 6px);padding:0 3px;font-size:15px;color:var(--muted)}
+  .product-quick-option.is-current{color:var(--on-accent)}
+  .product-quick-option>span[data-short]{font-size:0}
+  .product-quick-option>span[data-short]::before{content:attr(data-short);font-size:15px}
+  /* 手机上 ⋯ 收成窄箭头；再点一下已选的那款也能打开完整列表。 */
+  body:not(.public-text-mode) .global-product.has-quick:not(.quick-off):not(.quick-tight) .product-combo-trigger{width:26px;padding:0}
+  .global-product.has-quick:not(.quick-tight) .product-quick{flex:1 1 auto}
+  /* 放不下两颗按钮时（fitPhoneTopbar 加 quick-tight），退回原来的单个选择器。 */
+  .global-product.quick-tight .product-quick{display:none}
+  .global-product.quick-tight .product-combo{flex:1 1 auto;max-width:none}
+  .global-product.quick-tight .product-combo-trigger{width:100%!important;padding:0 8px 0 10px!important;justify-content:space-between!important}
+  .global-product.quick-tight .product-combo-trigger>span{display:block!important}
+}
+body.public-text-mode .product-quick{display:none!important}
+/* 电脑上顶栏放不下时（任务面板停靠、窗口窄）：shell.js fitDesktopTopbar 逐级加类，字号不变，一项项让位。
+   倒计时任何时候都不再溢出压到面包屑上。 */
+@media(min-width:761px){
+  .campaign-runway{overflow:hidden}
+  .topbar.squeeze-account .remote-account-short{display:none}
+  .topbar.squeeze-account .remote-account>summary{padding:6px}
+  .topbar.squeeze-crumbs #breadcrumb li:not([aria-current]){display:none}
+  .topbar.squeeze-crumbs #breadcrumb li[aria-current]::before{content:none}
+  .topbar.squeeze-runway .campaign-runway{flex:0 1 auto;height:var(--btn-h-lg,36px);padding:0 10px;background:var(--fill);border-radius:var(--btn-radius);container:none}
+  .topbar.squeeze-runway .campaign-runway .runway-body{height:100%;gap:4px;justify-content:flex-start}
+  .topbar.squeeze-runway .campaign-runway .runway-count{font-size:20px;line-height:22px}
+  .topbar.squeeze-runway .campaign-runway .runway-words small,.topbar.squeeze-runway .campaign-runway .runway-days{display:none}
+  .topbar.squeeze-no-crumbs #breadcrumb{display:none}
+  .topbar.squeeze-no-runway .campaign-runway{display:none}
+}

@@ -38,6 +38,8 @@ class ActivityNeedsBrowserTests(unittest.TestCase):
         page.add_style_tag(path=str(fixture.ROOT/'static/production-needs.css'))
         page.add_script_tag(path=str(fixture.ROOT/'static/production-needs.js'))
         page.locator('#task-activity-open').click()
+        # The log, and with it what the task still needs, opens when its row is clicked.
+        page.locator("[data-activity-log='edit:one']").click()
         page.wait_for_function("document.querySelector('.activity-needs')?.dataset.needsSequence==='1'")
         expect(page.locator('.activity-needs')).to_be_hidden()
         record['edits'][0].update(status='needs_material',report={'gaps':[{'start':30,'end':60,'need':'已完成运行后保存的缺素材区间'}]})

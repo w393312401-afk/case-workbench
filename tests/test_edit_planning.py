@@ -128,16 +128,46 @@ class EditPlanningTests(unittest.TestCase):
         self.assertEqual(ids(third["before"]), ["candidate-3"])
         self.assertEqual(ids(third["after"]), [])
 
+    def test_each_planner_gets_a_one_line_listing_of_its_run_and_neighbours(self):
+        rows = self.candidates(6)
+        for row in rows[3:]:
+            row["timeline"] = "other-timeline"
+        rows[2].update(key="BK002-abc", label_status="verified", record=[10, 60], frames=50, used_by=["成片甲"],
+                       item_uid="1e387323-ef9b-475a-91a7-d087daa31fa7", media_path="D:\\素材\\磨刀.mov",
+                       description={"summary": "推磨近景", "subject": "折刀", "cta": False},
+                       actions=[{"name": "推磨", "start": 210, "end": 240, "complete": False}])
+        (self.folder / "candidates.json").write_text(json.dumps({"usage_counted": True, "candidates": rows}, ensure_ascii=False), encoding="utf-8")
+        first, second, third = [(directory / "candidates.md").read_text(encoding="utf-8")
+                                for directory in prepare_workers(self.folder, self.handoff)]
+        # Own clips sit under their own heading; the clips just outside the run are listed apart.
+        own, after = first.split("## 本组之后的片段")
+        self.assertIn("## 本组候选（2 个）", own)
+        self.assertNotIn("本组之前的片段", first)
+        self.assertEqual([line.split("｜")[0] for line in own.splitlines() if line.startswith("- ")], ["- candidate-0", "- candidate-1"])
+        self.assertIn("- BK002-abc｜画面 2｜已核标签｜时间线位置 [10, 60)｜源帧 [200, 250)｜50 帧｜已用 1 次（成片甲）｜无对照图｜"
+                      "推磨近景；主体：折刀；无号召手势；动作区间：推磨 [210, 240)（不完整）", after)
+        self.assertLess(second.index("## 本组之前的片段"), second.index("## 本组候选（2 个）"))
+        self.assertEqual(second.count("### 素材时间线：source-timeline"), 2)
+        self.assertEqual(second.count("### 素材时间线：other-timeline"), 2)
+        self.assertNotIn("本组之后的片段", third)
+        # Ids and file paths are what make the full rows expensive; they stay in the JSON for a lookup by key.
+        for listing in (first, second, third):
+            self.assertNotIn("1e387323", listing)
+            self.assertNotIn("磨刀.mov", listing)
+        self.assertIn("1e387323", (self.folder / "planning" / "worker-2" / "candidates.json").read_text(encoding="utf-8"))
+
     def test_planner_prompt_explains_runs_and_neighbours(self):
         self.candidates(3)
         bridge = FakePlanner()
         self.analyze(bridge)
         for call in bridge.calls:
             self.assertIn("连续的一段", call["prompt"])
-            self.assertIn("before/after", call["prompt"])
+            self.assertIn("请读取 handoff.md 与 candidates.md", call["prompt"])
+            self.assertIn("本组之前 / 之后的片段", call["prompt"])
+            self.assertIn("candidates.json 是同一批片段的完整字段，很大，不要整份读取", call["prompt"])
             self.assertIn("不为它们出建议", call["prompt"])
             self.assertIn('{"picks": [{"group": 1, "key": "候选编号"}]}', call["prompt"])
-            self.assertIn("被否定的片段或 before/after", call["prompt"])
+            self.assertIn("被否定的片段或本组之前 / 之后的片段", call["prompt"])
             self.assertIn("一个意群需要几个镜头就按顺序列几项", call["prompt"])
             self.assertIn("末尾附任务要求的首选清单", call["profile"]["rules"])
 
@@ -467,3 +497,17 @@ class PlannerCostTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StageListingTest(unittest.TestCase):
+    """分工清单里的磨削阶段：片段带阶段才写，清单里有阶段才解释。"""
+
+    def test_stage_is_listed_with_its_note_only_when_some_clip_has_one(self):
+        from edit_candidates import STAGE_NOTE
+        from edit_planning import worker_listing
+        plain = {"key": "BK001-a", "label": "研磨 目数待确认 BK001", "label_status": "verified", "record": [0, 60], "source": [0, 60], "frames": 60}
+        staged = {**plain, "key": "BK002-b", "stage": {"name": "3000树脂", "index": 6, "count": 18}}
+        text = worker_listing(1, 1, [plain], [], [staged])
+        self.assertIn(STAGE_NOTE, text)
+        self.assertEqual(text.count("；磨削阶段：3000树脂（第 6/18 段）"), 1)
+        self.assertNotIn("磨削阶段", worker_listing(1, 1, [plain], [], []))

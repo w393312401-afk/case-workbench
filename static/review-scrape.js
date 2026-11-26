@@ -11,14 +11,14 @@ window.ReviewScrape = (() => {
     const status = run ? `<span class="scrape-status" data-state="${esc(run.status)}">${labels[run.status] || esc(run.status)}</span>${run.status === "done" || run.fetched != null ? ` 抓到 ${run.fetched ?? 0} 条，日期内 ${run.kept ?? 0} 条${run.cost_usd != null ? ` · 花费 $${run.cost_usd}` : ""}` : ""}${run.error ? `<small class="scrape-error">${esc(run.error)}</small>` : ""}` : "";
     return `<li class="scrape-platform"><label><input type="checkbox" data-scrape-platform="${esc(p.platform)}" ${p.targets.length ? "checked" : ""}> <b>${esc(p.label)}</b></label>
       <span class="scrape-meta">库里最新 ${esc(p.latest || "无")} · 最多 ${p.limit} 条</span>${status ? `<span class="scrape-run">${status}</span>` : ""}
-      <details><summary>${p.targets.length} 个${esc(p.target_label)}${p.edited ? "（改过）" : ""}</summary><textarea rows="4" data-scrape-targets="${esc(p.platform)}" aria-label="${esc(p.label)}的抓取目标，一行一个">${esc(p.targets.join("\n"))}</textarea></details></li>`;
+      <details><summary>${p.targets.length} 个${esc(p.target_label)}${p.edited ? "（改过）" : p.suggested ? (p.platform === "reddit" ? "（按产品名）" : "（按带货数据带出）") : ""}</summary><textarea rows="4" data-scrape-targets="${esc(p.platform)}" placeholder="没有现成的来源，贴${esc(p.target_label)}，一行一个" aria-label="${esc(p.label)}的抓取目标，一行一个">${esc(p.targets.join("\n"))}</textarea></details></li>`;
   }
 
   function markup(data) {
     const job = data.job, busy = data.busy;
-    const token = data.token ? "" : `<p class="data-warning">还没有 Apify 令牌：到 <a href="#settings">设置 → 密钥与令牌</a> 填入，保存后回来点「开始抓取」。</p>`;
+    const token = data.token ? "" : `<p class="data-warning">还没有 Apify 令牌：到 <a href="#settings/account">设置 → 账号与密钥</a> 填入，保存后回来点「开始抓取」。</p>`;
     const done = job && job.status === "done" ? `<p class="context-note">${esc(job.start)} 至 ${esc(job.end)} 抓完${job.added != null ? `，评论库新增 ${job.added} 条` : ""}。${job.sync_error ? esc(job.sync_error) : ""}</p>` : "";
-    return `${token}<p class="rev-muted">每个平台从库里已有评论的来源接着抓，只保留评论日期落在下面范围里的；推荐开始日期是库里最新一条评论那天（各平台取最早的那个，保证不漏）。Apify 按抓到的条数计费，日期外的也算。</p>
+    return `${token}<p class="rev-muted">每个平台从库里已有评论的来源接着抓；库里还没有的，TikTok 视频和 TikTok Shop 按带货数据带出这个产品的商品页和评论最多的 30 条视频，Reddit 按产品名搜。只保留评论日期落在下面范围里的；推荐开始日期是库里最新一条评论那天（各平台取最早的那个，保证不漏）。Apify 按抓到的条数计费，日期外的也算。</p>
       <div class="scrape-range"><label>开始 <input type="date" id="scrape-start" value="${esc(job && busy ? job.start : data.recommended_start)}" max="${esc(data.today)}"></label><label>结束 <input type="date" id="scrape-end" value="${esc(job && busy ? job.end : data.today)}" max="${esc(data.today)}"></label><button type="button" class="subtle" id="scrape-recommend">用推荐日期</button></div>
       <ul class="scrape-platforms">${data.platforms.map(p => platformRow(p, job)).join("")}</ul>${done}
       <div class="scrape-actions">${busy ? '<button type="button" class="secondary" id="scrape-stop">停止</button>' : `<button type="button" class="primary" id="scrape-start-run" ${data.token ? "" : "disabled"}>开始抓取</button>`}<span id="scrape-note" role="status"></span></div>`;

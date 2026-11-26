@@ -6,6 +6,7 @@ needed by the workbench; the user follows the returned OAuth link once if needed
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import re
@@ -16,7 +17,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 from uuid import uuid4
 
-from codex_bridge import BridgeError, CodexBridge
+from codex_bridge import BridgeError, BridgeUnavailable
 from codex_stills_bridge import CodexStillsBridge, DISABLED_FEATURES
 from elevenlabs_client import VoiceError
 
@@ -28,11 +29,18 @@ ACTION_LABELS = {"fetch": "读取页面", "query_data_sources": "查询发布日
                  "update_page": "更新排期页面", "create_file_upload": "准备上传成片", "get_tool_access": "检查访问权限"}
 
 
+def query_allowance_message(now=None):
+    """Notion's database-query allowance is hourly; name the local time by which a retry will work."""
+    ready = (now or datetime.now()) + timedelta(hours=1)
+    return (f"Notion 数据库查询额度暂时用完了（每小时限量），最晚约 {ready:%H:%M} 恢复，"
+            "到时再点上传即可；本地成品和文案都已保留，不用重新授权。")
+
+
 def unpack(result, action=""):
     if result.get("isError"):
         detail = " ".join(item.get("text", "") for item in result.get("content", []) if item.get("type") == "text")
         if "usage_limit_reached" in detail or "used up its Query Data Source allowance" in detail:
-            raise VoiceError(429, "Notion 数据库查询额度暂时用完了，约 1 小时内恢复，到时再点上传即可；本地成片和文案都已保留。")
+            raise VoiceError(429, query_allowance_message())
         # Say which step failed and what Notion said, so the cause is visible instead of a generic retry hint.
         step = ACTION_LABELS.get(action, action)
         said = re.sub(r"\s+", " ", detail).strip()[:240]
@@ -63,6 +71,26 @@ def page_properties(page):
         return json.loads(match[1]) if match else {}
     except ValueError:
         raise VoiceError(502, "无法读取 Notion 页面的属性，未覆盖原有内容。") from None
+
+
+def bridge_message(exc):
+    """BridgeError texts are already safe, locally written Chinese; say which side failed."""
+    code = getattr(exc, "code", "")
+    if code == "CODEX_CONFIG" or isinstance(exc, BridgeUnavailable):
+        return f"本机 Codex 启动失败：{exc}"
+    if code == "CODEX_AUTH":
+        return "本机 Codex 登录暂不可用，请打开 Codex 检查登录状态后再连接 Notion。"
+    return f"本机 Notion 连接暂不可用：{exc}"
+
+
+def login_failure(complete):
+    """Classify a finished OAuth attempt from Codex's completion notice, never echoing its text."""
+    detail = str(complete.get("error") or "").lower()
+    if any(word in detail for word in ("access_denied", "denied", "declined", "cancel", "rejected")):
+        return "你在 Notion 授权页面没有同意访问，未连接。需要时再点「连接 Notion」。"
+    if any(word in detail for word in ("timeout", "timed out", "expired")):
+        return "Notion 授权超时：5 分钟内没有在浏览器里完成授权，请重新点「连接 Notion」。"
+    return "Notion 授权没有完成（Codex 报告授权失败），请重新点「连接 Notion」。"
 
 
 class _NoRedirects(HTTPRedirectHandler):
@@ -175,10 +203,10 @@ class NotionBridge:
             try:
                 base = {"features": {name: False for name in DISABLED_FEATURES}, "web_search": "disabled"}
                 def start(overrides):
+                    # Started and initialized there; a config.toml field this Codex does not know is tolerated only after read-back.
                     session = self.bridge._restricted_session(Path(directory), threading.Event(), lambda _: None,
                         None, overrides, guards, timeout)
                     sessions.append(session)
-                    CodexBridge._initialize(session)
                     return session
                 probe = start(base)
                 config = probe.request("config/read", {"cwd": directory, "includeLayers": False}).get("config") or {}
@@ -198,8 +226,8 @@ class NotionBridge:
                     if not session.thread_id:
                         raise VoiceError(502, "无法准备 Notion 连接，请更新本机 Codex 后重试。")
                 yield session, name
-            except BridgeError:
-                raise VoiceError(503, "本机 Notion 连接暂不可用，请检查 Codex 登录或重新连接 Notion。") from None
+            except BridgeError as exc:
+                raise VoiceError(503, bridge_message(exc)) from None
             finally:
                 for session in reversed(sessions):
                     session.close()
@@ -267,7 +295,11 @@ class NotionBridge:
                                 complete.update(params)
                             original(method, params)
                         session.notification = notification
-                        result = session.request("mcpServer/oauth/login", {"name": server, "timeoutSecs": 300})
+                        try:
+                            result = session.request("mcpServer/oauth/login", {"name": server, "timeoutSecs": 300})
+                        except BridgeError as exc:
+                            # Raised here so connection() does not relabel it as a startup failure.
+                            raise VoiceError(503, bridge_message(exc) if exc.code == "CODEX_AUTH" else f"无法开始 Notion 授权：{exc}") from None
                         url = result.get("authorizationUrl", "")
                         parsed = urlsplit(url)
                         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -275,11 +307,21 @@ class NotionBridge:
                         with self.lock:
                             self.login = {"status": "waiting", "authorization_url": url}
                         ready.set()
-                        while not complete:
-                            session.pump()
+                        try:
+                            while not complete:
+                                session.pump()
+                        except BridgeError as exc:
+                            if exc.code == "CODEX_TIMEOUT":
+                                raise VoiceError(504, "Notion 授权超时：5 分钟内没有在浏览器里完成授权，请重新点「连接 Notion」。") from None
+                            raise VoiceError(503, f"等待 Notion 授权时中断：{exc}") from None
                         with self.lock:
                             self.login = {"status": "connected" if complete.get("success") else "disconnected"}
+                            if not complete.get("success"):
+                                self.login["error"] = login_failure(complete)
                             self._remember(self.login["status"])
+                except VoiceError as exc:
+                    with self.lock:
+                        self.login = {"status": "disconnected", "error": str(exc)}
                 except Exception:
                     with self.lock:
                         self.login = {"status": "disconnected", "error": "Notion 授权未完成，请重新连接。"}

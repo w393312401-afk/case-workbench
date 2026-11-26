@@ -12,19 +12,32 @@ const libraryReferenceViews = {
   "reference-native": {id:"reference-native",label:"本土表达参考",content:"native",visible:true},
   "reference-legacy": {id:"reference-legacy",label:"旧库资料",content:"legacy",visible:true},
 };
+// Library sort keys in menu order. "updated" is the default; the URL and saved views only record the others.
+const librarySortNames = {updated:"最近更新",recent_sold:"近 28 天售出",recent_gmv:"近 28 天成交金额",posted:"发布日期",views:"播放量",impressions:"商品曝光",clicks:"商品点击",ctor:"CTOR",sold:"售出件数",sold_per_k:"每千次播放售出",gmv:"成交金额"};
+const libraryStatusKeys = ["selling", "new", "stopped", "unknown"];
+const libraryQuickFilterNames = {sold100:"售出 100 件以上",sold10:"售出 10 件以上",views100k:"播放 10 万以上",ready:"可直接用",tidy:"待整理"};
+function libraryStatusList(value) {
+  const values = Array.isArray(value) ? value : String(value || "").split(",");
+  return [...new Set(values.filter(item => libraryStatusKeys.includes(item)))];
+}
 function libraryViewFilters(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const text = (key, length=200) => typeof value[key] === "string" ? value[key].slice(0,length) : "";
   const base = text("baseView",100);
+  const statuses = libraryStatusList(value.salesStatuses?.length ? value.salesStatuses : value.salesStatus);
   return {
     baseView: Object.hasOwn(navigationDefaultIcons,base) || Object.hasOwn(libraryReferenceViews,base) || /^custom-[a-z0-9-]{8,80}$/.test(base) ? base : "all",
     query:text("query"), product:text("product",120), direction:text("direction"),
     archiveCategory:["positive","mixed","pending"].includes(value.archiveCategory) ? value.archiveCategory : "all",
+    salesStatus:statuses.length === 1 ? statuses[0] : "all", salesStatuses:statuses,
+    quickFilters:[...new Set((Array.isArray(value.quickFilters) ? value.quickFilters : []).filter(key => Object.hasOwn(libraryQuickFilterNames, key)))],
+    libraryCreator:text("libraryCreator",120).trim().replace(/^@+/, "").toLocaleLowerCase(),
     sourceType:["review","video_analysis","structure_template","traffic_reference"].includes(value.sourceType) ? value.sourceType : "all",
     contentOrigin:["self_produced","overseas_creator"].includes(value.contentOrigin) ? value.contentOrigin : "all",
+    textForm:value.textForm === "screen_only" ? "screen_only" : "all",
     archiveStatus:["archived","all"].includes(value.archiveStatus) ? value.archiveStatus : "active",
     variantType:["direction","execution"].includes(value.variantType) ? value.variantType : "all",
-    sort:["views","ctor","sold"].includes(value.sort) ? value.sort : "updated", sortDir:value.sortDir === "asc" ? "asc" : "desc",
+    sort:Object.hasOwn(librarySortNames, value.sort) ? value.sort : "updated", sortDir:value.sortDir === "asc" ? "asc" : "desc",
   };
 }
 
@@ -100,7 +113,7 @@ function saveNavigation(value) {
   navigationItems = normalized;
 }
 function openNavigationView(view) {
-  Object.assign(state,{view,query:"",libraryProduct:"",direction:"",variantType:"all",archiveCategory:"all",sourceType:"all",contentOrigin:"all",archiveStatus:navigationContent(view)==="archived"?"archived":"active",sort:"updated",sortDir:"desc",detailTab:"current",libraryScrollY:0});
+  Object.assign(state,{view,query:"",libraryProduct:"",direction:"",variantType:"all",archiveCategory:"all",salesStatus:"all",salesStatuses:[],quickFilters:[],libraryCreator:"",sourceType:"all",contentOrigin:"all",textForm:"all",archiveStatus:navigationContent(view)==="archived"?"archived":"active",sort:"updated",sortDir:"desc",detailTab:"current",libraryScrollY:0});
   const next = libraryHash();
   if (location.hash === next) { updateNav(); renderLibrary(); window.scrollTo(0,0); }
   else location.hash = next;

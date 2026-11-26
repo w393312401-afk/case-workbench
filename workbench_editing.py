@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -24,11 +25,13 @@ from uuid import uuid4
 from claude_bridge import EFFORTS as CLAUDE_EFFORTS, add_usage
 from codex_bridge import BridgeCancelled
 from ai_tasks import AITaskError
-from case_replica import handoff_section, until_filled
+from case_replica import handoff_section, needs_table, until_filled, written_proof
 from creation_store import CreationError
 from direction_store import now
 from edit_candidates import (INDEX_DIR, VisualIndex, add_in_progress_usage, build_candidates, compose_grid, merge_notes,
                              planned_spans, rank_by_relevance, refreshed_usage, remember, sample_frames, write_task_files)
+from edit_picks import EXAMPLE as PICKS_FORMAT, FILE as PICKS_FILE, PickCheck, waived_question
+from edit_rhythm import RHYTHM_CONTEXT_FILE, word_section, word_spans
 from edit_planning import ANALYSIS_WORKERS, analyze_candidates, mode_selection_rules, planner_settings
 from elevenlabs_client import VoiceError
 from production_operations import file_lock
@@ -42,10 +45,11 @@ from workbench_production import creator_project_base, meaning_markers, same_cre
 from task_activity import activity_label, record_activity, safe_error
 
 SKILL_NAME = "davinci-product-video-editing"
-MODES = {"explain": "解释画面逻辑", "sync": "音画同步", "montage": "主题蒙太奇", "replica": "1:1 复刻原片"}
+MODES = {"explain": "解释画面逻辑", "replica": "1:1 复刻原片"}
 EFFORTS = (None, *CLAUDE_EFFORTS)
 EDIT_TIMEOUT = 150 * 60
-RESOLVE_TOOLS = ("run_script", "search_scripting_api", "get_scripting_api", "get_scripting_docs", "get_resolve_status", "get_whats_new")
+RESOLVE_TOOLS = ("run_script", "search_scripting_api", "get_scripting_api", "get_scripting_docs", "get_resolve_status", "get_whats_new",
+                 "get_thumbnails", "get_image")
 FILE_TOOLS = ("Read", "Write", "Edit", "Glob", "Grep")
 # Resolve MCP tools a task never needs: unsandboxed scripts, LUT/DCTL writes and launching the application.
 RESOLVE_DENIED = tuple(f"mcp__resolve__{name}" for name in
@@ -64,7 +68,25 @@ AUDIO_HANDOFF = """
 
 逐片放入并链接原声，保留已有原声和配音。本次新增原声的片段音量和音频插件由工作台在交付前统一从对应素材继承，你只需放置并链接原声，不要另行复制这两项；已有不同插件或不同的非默认音量不会擅自覆盖。插件参数与动画若无法读取仍须人工核对。若本次额外要求明确指定不同的原声音量或插件，按该要求处理，并在最终 JSON 的 `audio_overrides` 数组中列出受影响的目标原声音频片段 UniqueId，工作台不会覆盖这些片段。
 
-放置每段原声时，记录它对应的具体素材片段：在最终 JSON 的 `audio_sources` 数组中逐片填写 `{"item_uid":"目标原声音频片段 UniqueId","timeline_uid":"素材时间线 UniqueId","source_item_uid":"素材视频片段 UniqueId"}`，后两项直接取自 candidates.json。同一媒体可能在素材时间线里有多段、不同片段的声音设置也可能不同，不能只记录文件名。入出点按半开区间使用，保留放置后 API 返回的真实片段身份。
+放置每段原声时，记录它对应的具体素材片段：在最终 JSON 的 `audio_sources` 数组中逐片填写 `{"item_uid":"目标原声音频片段 UniqueId","timeline_uid":"素材时间线 UniqueId","source_item_uid":"素材视频片段 UniqueId"}`，后两项直接取自 candidates.json。同一媒体可能在素材时间线里有多段、不同片段的声音设置也可能不同，不能只记录文件名。入出点按半开区间使用，保留放置后 API 返回的真实片段身份。每个时间线片段只取自一个素材片段，源区间不跨进相邻片段；要接相邻片段的延续画面时逐片放置、各填一项。
+""".strip()
+# Only the editor gets this, after planning: the planners pick nothing that is placed.
+PICKS_HANDOFF = f"""
+## 放置前核对（工作台会拦截）
+
+镜头全部定好后、第一次往目标时间线放片段之前，把这次要放的每个镜头按成片顺序写进当前目录 {PICKS_FILE}（一个 JSON 数组，覆盖写入完整数组），一个时间线片段一条：
+
+```json
+{PICKS_FORMAT}
+```
+
+`key` 是候选编号，`frames` 是这个镜头在时间线上占的帧数（按顺序累加即切点帧，也可以直接填 `start`/`end`），`shot_size` 选填景别（特写/近景/中景/全景），变速动作镜头可加 `"retimed": true`，`reason` 平时留空。
+
+你的脚本第一次调用 `AppendToTimeline` 时，工作台会同时核对两件事：
+1. **素材防复用**：选了用过的片段，而同标签、同磨削阶段里还有更少用且够长的片段没被选，或用过 3 次及以上没写 `reason`。
+2. **节奏与叙事流畅性**：切点不能落在口播词中间、不能在句首开口后晚到（0.5 秒内才换画面）、相邻两个非延续镜头不能是同一类画面标签、避免连续 3 个相同景别、开头第一意群避免仅用单个超过 3.2 秒的长镜头。
+
+任一项没通过时本次调用不会执行，并返回具体问题和建议切点帧号。按提示换片段、调帧数或景别；确实需要保留的，在这一条的 `reason` 写明原因（如“是另一把刀”“接上一个镜头的延续画面”“唯一的号召手势”“刻意一镜到底展示完整动作”），改好 {PICKS_FILE} 再放置。之后改了选择，先更新 {PICKS_FILE} 再放。这次不往时间线放素材画面（如只改字幕）就写空数组。写了 `reason` 的片段在最终回复里照列。
 """.strip()
 # A specific sound adjustment needs the editor to identify the clips it changed; a general request to
 # keep original sound does not exempt those clips from normal source inheritance.
@@ -79,12 +101,12 @@ FRAME_CHUNK = 15
 PREPARE_BUDGET = 8 * 60
 # Longest an edit that has planned waits for the project's next edit to queue its snapshot; it normally takes well under a second.
 HANDOVER_WAIT = 10
-NOTES_EXAMPLE = '[{"key": "候选编号", "summary": "动作、部件、工序阶段、景别，一句话", "subject": "主体，如刀型", "cta": false, "clear": true}]'
+NOTES_EXAMPLE = '[{"key": "候选编号", "summary": "动作、部件、工序阶段、景别，一句话", "subject": "主体，如刀型", "shot_size": "特写/近景/中景/全景", "angle": "俯拍/平拍/侧拍", "cta": false, "clear": true}]'
 
 
 RUN_LOG_PREFIX = {"EDT-": "edit:", "STS-": "stills:"}
 TOOL_LABELS = {"run_script": "执行达芬奇脚本", "get_resolve_status": "检查达芬奇连接", "search_scripting_api": "查达芬奇接口",
-               "get_scripting_api": "查达芬奇接口", "get_scripting_docs": "查达芬奇文档", "get_whats_new": "查达芬奇更新说明",
+               "get_scripting_api": "查达芬奇接口", "get_scripting_docs": "查达芬奇文档", "get_whats_new": "查达芬奇更新说明", "get_thumbnails": "看达芬奇画面", "get_image": "看达芬奇画面",
                "Read": "读取文件", "Write": "写入文件", "Edit": "修改文件", "Glob": "查找文件", "Grep": "搜索文件内容"}
 
 
@@ -109,10 +131,13 @@ def candidates_section(stats=None, error=""):
              "对照图位于 candidates/<候选编号>.jpg，同一片段按时间顺序含 3 或 6 帧。",
              *([f"- 另有 {stats['deferred']} 个需看图的片段这次来不及导出对照图，清单里标「无对照图」。"] if stats.get("deferred") else []),
              *([f"- 有 {stats['problems']} 个片段没能导出对照图。"] if stats.get("problems") else []),
+             *([f"- 磨削阶段：{stats['staged']} 个片段落在素材时间线的阶段区间里，清单的画面描述列写明是哪一段。"
+                "磨板的目数、磨料和工序先后按它判断，不凭片段位置或磨板外观推断；口播点到的目数要用同一段里的画面。"]
+               if stats.get("staged") else []),
              *(reuse_rules(stats) if stats.get("unused") is not None else []),
              "- 按交接明确选择的画面模式与本次当前个人技能选材。已核标签或已有描述已支持的信息可直接使用；"
              "只有依据未覆盖且影响理解的细节需要再看图，标签未写细节不等于缺素材。"
-             "这只针对选片段；动作镜头的入出点和速度按技能「动作镜头公式」由动作区间算出，不套分类上限，不导出静帧（要接下一镜头时最多看一张尾帧），优先于技能「定入出点」的看图步骤。"
+             "这只针对选片段；动作镜头的入出点和速度按技能「动作镜头公式」由动作区间算出，不套普通镜头的时长范围，不导出静帧（要接下一镜头时最多看一张尾帧），优先于技能「定入出点」的看图步骤。"
              "没有动作区间的片段，只截取一部分时入出点按技能「定入出点」看画面后再定，动作镜头看帧定出起止后同样代入公式，并在正文「待补动作区间」列出。"
              "入出点拿不准时先看帧定下来，交付前不留没看过画面的入出点；看过仍看不出动作是否完整时，放最接近的一段，不因此留空，也不写进 questions。",
              "- 看过对照图的片段，把描述写入当前目录 visual-notes.json（一个 JSON 数组，覆盖写入完整数组），工作台会存下来供以后复用。格式：",
@@ -131,6 +156,7 @@ def reuse_rules(stats):
             "- 剪完后工作台会按使用次数给素材时间线上的片段标色并在标记备注里写「已使用 N 次」，你不用自己标。"]
 
 
+REUSE_SKILL_MARK = '<a id="少用优先"></a>'
 REUSE_SKILL_NOTE = """
 
 ## 2026-10-16 用户重新启用：素材防复用（以本节为准）
@@ -176,6 +202,44 @@ def audio_questions(audio):
         position = (f"[{item['start']}, {item['end']}) 帧：" if item.get("start") is not None and item.get("end") is not None else "")
         questions.append("原声" + position + str(item.get("message") or "声音设置未确认。"))
     return questions
+
+
+VOICE_TAIL_PROBLEMS = {
+    "too_short": "画面比配音结尾短了 {gap} 帧，超过工作台自动补齐的范围，请在结尾补一个镜头或说明原因。",
+    "no_footage": "最后一个镜头「{clip}」素材前后都没有余量，画面比配音结尾短 {gap} 帧，请换一段更长的结尾镜头。",
+    "blocked": "最后一个镜头「{clip}」后面还有停用片段挡着，画面比配音结尾短 {gap} 帧，请手动补齐。",
+    "failed": "工作台没能把最后一个镜头「{clip}」延长 {gap} 帧到配音结尾，请在达芬奇里核对后手动补齐。",
+    "no_picture": "目标时间线上没有画面片段，无法核对画面是否覆盖到配音结尾。",
+}
+
+
+def voice_tail_problem(tail):
+    """The question for a delivery whose picture still stops before the voiceover's last frame, or None."""
+    if isinstance(tail, dict) and tail.get("status") == "extended" and tail.get("saved") is False:
+        return "最后一个镜头已延长到配音结尾，但工程保存未确认，请在达芬奇里保存。"
+    if not isinstance(tail, dict) or tail.get("status") in ("covered", "extended", "no_voice"):
+        return None
+    if tail.get("rollback_failed"):
+        clips = "、".join(f"「{name or '未命名镜头'}」" for name in tail["rollback_failed"])
+        return "补尾帧失败且未能确认恢复这些镜头，请在达芬奇里核对：" + clips
+    template = VOICE_TAIL_PROBLEMS.get(tail.get("status"))
+    if template is None:
+        return "画面是否覆盖到配音结尾未能确认：" + str(tail.get("error") or tail.get("status") or "未知")[:200]
+    gap = max(0, int(tail.get("target") or 0) - int(tail.get("picture_end") or 0))
+    return template.format(gap=gap, clip=tail.get("clip") or "")
+
+
+def voice_tail_handoff(take, timeline, fps):
+    """A voiceover rarely lasts whole frames; DaVinci reports the shorter whole count, so say where picture must reach."""
+    try:
+        exact = timeline.get("lead_frames", 0) + float(take.get("duration") or 0) * rate(fps)
+    except (TypeError, ValueError):
+        return ""
+    target = math.ceil(exact - 1e-6)
+    if exact <= 0 or target <= timeline["frames"]:
+        return ""
+    return (f"- 结尾：配音实际约 {exact:.2f} 帧，达芬奇只显示整 {timeline['frames']} 帧，最后不足 1 帧的尾音也要有画面："
+            f"最后一个镜头铺到第 {target} 帧（半开区间终点），交付时工作台会核对并自动补齐这一点差距。")
 
 
 def edit_summary(inspect, job, record, fps):
@@ -290,12 +354,12 @@ def project_key(config):
 def visual_hint(job, line, mode):
     """An order made from a case points every line at the original's shots; only the 1:1 mode may follow that."""
     proof = line.get("proof") or ""
-    if job.get("replica") and mode != "replica" and proof.startswith("照原片"):
-        return "无推荐（按当前模式选画面，不照原片镜头）"
+    if job.get("replica") and mode != "replica":
+        return written_proof(proof) or "无推荐（按当前模式选画面，不照原片镜头）"
     return proof or "无推荐"
 
 
-def handoff_markdown(job, take, timeline, config, *, mode, instruction, materials, notes, voice_label, ledger=None, baseline=None, reference="reference"):
+def handoff_markdown(job, take, timeline, config, *, mode, instruction, materials, notes, voice_label, ledger=None, baseline=None, reference="reference", triples=None, wav_path=None, rhythm_folder=None):
     # A timeline may have been built with its own format; older records carry only the product settings.
     fps, lead = timeline.get("fps") or config["fps"], timeline.get("lead_frames", 0)
     width, height = timeline.get("width") or config["width"], timeline.get("height") or config["height"]
@@ -322,9 +386,9 @@ def handoff_markdown(job, take, timeline, config, *, mode, instruction, material
              f"{fps} fps（{rate_text}），{width}×{height}",
              f"- 素材时间线：{'、'.join(materials) if materials else '未指定，按项目里带语义标记的素材时间线自行识别，并在最终回复说明用了哪些'}",
              f"- 配音：{voice_description}；音色 {voice_label}，模型 {take['model_id']}。配音内容、剪切和音量都不改，当前工程优先于生成时的配音区间。",
+             *([tail_line] if (tail_line := voice_tail_handoff(take, timeline, fps)) else []),
              f"- 意群标记：目标时间线上每个意群一个蓝色范围标记，customData 为 `workbench-group:{job['id']}:<编号>`，"
-             "区间记录意群及句后停顿（首个从第 0 帧起）；解释模式按意群组织画面，同步模式按关键语义对位，"
-             "主题蒙太奇可跨意群组织，标记只作计时参考。这些标记和配音轨不要删除、移动或改写。",
+             "区间记录意群及句后停顿（首个从第 0 帧起）；解释模式按意群组织画面。这些标记和配音轨不要删除、移动或改写。",
              f"- 选画面模式：{MODES[mode]}",
              f"- 本次额外要求：{instruction or '无'}", "", mode_selection_rules(mode),
              "## 完整口播（配音用，一行一个意群）", "", "```", *[line["spoken"] for line in job["lines"]], "```", ""]
@@ -338,6 +402,20 @@ def handoff_markdown(job, take, timeline, config, *, mode, instruction, material
                  f"{group['start']:.2f}–{group['end']:.2f}"]
         lines.append("| " + " | ".join(cell.replace("|", "／").replace("\n", " ") for cell in cells) + " |")
     lines.append("")
+    # Word frames come from the take as generated; a voiceover cut or moved in DaVinci no longer matches them.
+    voice_items = (voice_track(baseline) or {}).get("items", []) if baseline else None
+    voice_intact = voice_items is None or (len(voice_items) == 1 and voice_items[0]["start"] - baseline["start_frame"] == lead)
+    if triples and mode != "replica" and voice_intact:
+        spans = word_spans([line["spoken"] for line in job["lines"]], triples)
+        fps_value = rate(fps)
+        section = word_section(job["lines"], spans, fps_value, lead, wav_path=wav_path)
+        lines += [section] if section else []
+        if rhythm_folder and any(spans):
+            rhythm_lines = [{"number": line["number"], "start": marker["frame"], "end": marker["frame"] + marker["duration"]}
+                            for line, marker in zip(job["lines"], markers)]
+            (Path(rhythm_folder) / RHYTHM_CONTEXT_FILE).write_text(
+                json.dumps({"fps": fps_value, "lead": lead, "lines": rhythm_lines, "spans": spans}, ensure_ascii=False),
+                encoding="utf-8")
     if notes.get("opening") or notes.get("onscreen"):
         lines += ["## 写稿时给的开头（选材线索）", ""] + [f"- {item}" for item in (notes.get("opening"), notes.get("onscreen")) if item] + [""]
     if notes.get("pickups"):
@@ -353,9 +431,12 @@ def handoff_markdown(job, take, timeline, config, *, mode, instruction, material
               "从第 0 帧算；need 写对应口播、所需动作与部件、景别和时长）。",
               "- 剪完保存工程。最终回复先用几句话说明做了什么、哪些地方缺素材，最后附一个 json 代码块：",
               "- questions 只写必须由用户决定、你按默认规则也定不了的事，没有就写空数组。画面与要求的差异、选材理由、没看帧的提醒都不写进 questions，差异写在正文。",
+              "- segments 供工作台画时间轴对照：按成片顺序，每个镜头（或源帧相连、算一个镜头的几段）一项，start/end 是它在目标时间线上的帧（半开，从第 0 帧算，"
+              "前后相接铺满画面）；lines 是它落在的意群号；used 写用的片段编号和画面（如「MD055 侧面近景推磨」）；note 写和要求或原片差在哪，没有差别写空字符串。",
               "", "```json",
               '{"timeline": "目标时间线名", "shots": 0, "materials": ["实际用到的素材时间线"], '
-              '"gaps": [{"start": 0, "end": 0, "status": "missing", "need": "所需画面或待核实原因"}], "questions": ["需要用户确认的事"], "saved": true}',
+              '"gaps": [{"start": 0, "end": 0, "status": "missing", "need": "所需画面或待核实原因"}], "questions": ["需要用户确认的事"], '
+              '"segments": [{"start": 0, "end": 0, "lines": [1], "used": "片段编号和画面", "note": ""}], "saved": true}',
               "```", ""]
     return "\n".join(lines)
 
@@ -397,7 +478,7 @@ def retry_section(previous):
 
 
 class EditingWorkbenchMixin:
-    """Needs self.production, self.resolve, self.editor, self.edit_codex, self.creation, self.lock,
+    """Needs self.production, self.resolve, self.editor, self.edit_codex, self.edit_antigravity, self.creation, self.lock,
     self.edit_skill_dir and self.ledger_dir from the workbench."""
 
     def _edits(self):
@@ -413,7 +494,8 @@ class EditingWorkbenchMixin:
 
     def edit_client_status(self):
         providers = {}
-        for provider, attribute, label in (("claude", "editor", "Claude"), ("codex", "edit_codex", "Codex")):
+        for provider, attribute, label in (("claude", "editor", "Claude"), ("codex", "edit_codex", "Codex"),
+                                           ("antigravity", "edit_antigravity", "Antigravity API")):
             bridge = getattr(self, attribute, None)
             try:
                 state = bridge.status() if bridge is not None and callable(getattr(bridge, "status", None)) else {
@@ -421,28 +503,42 @@ class EditingWorkbenchMixin:
             except Exception:
                 state = {"available": False, "error": f"本机 {label} 连接暂时不可用。"}
             providers[provider] = {**state, "label": state.get("label") or label,
-                                   "usage_source": "current_client_account"}
+                                   "usage_source": "antigravity_api" if provider == "antigravity" else "current_client_account"}
         return {"providers": providers, "busy": self.edit_running(), "concurrency": True, "analysis_workers": ANALYSIS_WORKERS}
 
     def _edit_settings(self, body):
         settings = self.ai.resolve_default_settings(
             {**body, "model": None} if body.get("model") == "codex-default" else body,
-            effort_key="effort")
+            effort_key="effort", kind="editing")
         model, effort = settings["model"], settings["effort"]
         model = "codex-default" if model is None else model
         if not isinstance(model, str) or not model or len(model) > 200:
             raise VoiceError(400, "模型选择无效。")
-        provider = "claude" if model.startswith("claude-") else "codex"
+        provider = "antigravity" if model.startswith("antigravity:") else "claude" if model.startswith("claude-") else "codex"
         if body.get("provider", provider) != provider:
             raise VoiceError(400, "模型与客户端选择不一致。")
         if provider == "claude":
             if effort not in EFFORTS:
                 raise VoiceError(400, "思考强度选择无效。")
-        elif model == "codex-default" and effort is not None:
+        elif provider == "codex" and model == "codex-default" and effort is not None:
             raise VoiceError(400, "Codex 客户端默认模型须使用客户端默认思考强度。")
         if not self.edit_client_status()["providers"][provider].get("available"):
+            if provider == "antigravity":
+                raise VoiceError(503, "Antigravity API 剪辑连接暂不可用，请在设置中检查服务和 Claude Code。")
             label = "Claude" if provider == "claude" else "Codex"
             raise VoiceError(503, f"没有可用的 {label} 客户端，无法发起 AI 剪辑。")
+        if provider == "antigravity":
+            try:
+                catalog = self.edit_antigravity.models()
+            except Exception as exc:
+                raise VoiceError(503, "Antigravity API 模型配置暂不可用，请在设置中检查连接。") from exc
+            choice = next((entry for entry in catalog.get("models", []) if entry.get("id") == model), None)
+            if not choice:
+                raise VoiceError(400, "所选模型不是当前配置的 Antigravity 模型，请刷新后重新选择。")
+            if choice.get("available") is False:
+                raise VoiceError(503, "所选 Antigravity API 模型当前未就绪，请在设置中检查连接。")
+            if effort is not None and effort not in choice.get("reasoning_efforts", []):
+                raise VoiceError(400, "所选 Antigravity 模型不支持这个思考强度。")
         if provider == "codex" and model != "codex-default":
             try:
                 catalog = self.edit_codex.models()
@@ -530,10 +626,15 @@ class EditingWorkbenchMixin:
         return Path(self.edit_skill_dir)
 
     def _edit_reference(self, identifier, mode):
-        """The original's shot images of a 1:1 edit, ready before the lock is taken; None for the other modes."""
-        if mode != "replica":
-            return None
+        """The original's shot images of a 1:1 edit, ready before the lock is taken; None for the other modes.
+
+        A replica job whose 意群表 only names the original's shots has nothing else to cut by, so only 1:1 may cut it."""
         job = self.production.job(identifier)
+        if mode != "replica":
+            if needs_table(job):
+                raise VoiceError(409, "这张照原片制作单的意群表还只有原片镜头位置，其他模式没有画面依据会乱剪。"
+                                      "请先点「AI 补全脚本信息」补全意群表，或改用 1:1 复刻模式。")
+            return None
         if not job.get("replica"):
             raise VoiceError(400, "这张制作单不是照原片创建的，不能用 1:1 复刻模式。")
         return self.replica_frames(job)
@@ -552,8 +653,10 @@ class EditingWorkbenchMixin:
             config = self.production.product_settings(data, job["product"])
             timeline, take, notes, voice_label = self._edit_context(job, body.get("timeline"))
             config = with_location(config, timeline)
+        wav_path = (self.production.audio / take["wav"]) if take.get("wav") else None
         text = handoff_markdown(job, take, timeline, config, mode=mode, instruction=instruction, materials=materials,
-                                notes=notes, voice_label=voice_label, reference=str(reference or "reference"))
+                                notes=notes, voice_label=voice_label, reference=str(reference or "reference"),
+                                triples=self.take_triples(identifier, take), wav_path=wav_path)
         folder = self.production.root / "handoffs"
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{identifier}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
@@ -685,20 +788,26 @@ class EditingWorkbenchMixin:
                 folder = self.production.root / "edits" / edit_id
                 (folder / "stills").mkdir(parents=True)
                 shutil.copytree(self._edit_skill_dir(job), folder / "skill", ignore=shutil.ignore_patterns("agents"))
-                with open(folder / "skill" / "SKILL.md", "a", encoding="utf-8") as stream:
-                    stream.write(REUSE_SKILL_NOTE)
+                # The skill carries the rule itself since 2026-11-19; an order packaged on another computer may still
+                # bring a copy that calls it switched off.
+                if REUSE_SKILL_MARK not in (folder / "skill" / "SKILL.md").read_text(encoding="utf-8"):
+                    with open(folder / "skill" / "SKILL.md", "a", encoding="utf-8") as stream:
+                        stream.write(REUSE_SKILL_NOTE)
                 if reference:
                     shutil.copytree(reference, folder / "reference")
+                wav_path = (self.production.audio / take["wav"]) if take.get("wav") else None
                 handoff = ("# 待建线后自动剪辑\n\n等待建线请求 " + pending["request_id"] + " 完成；尚未启动 AI 剪辑。\n" if pending else
                     handoff_markdown(job, take, timeline, config, mode=mode, instruction=instruction, materials=materials,
-                                     notes=notes, voice_label=voice_label))
+                                     notes=notes, voice_label=voice_label, triples=self.take_triples(identifier, take),
+                                     wav_path=wav_path, rhythm_folder=folder))
                 if retried:
                     handoff += retry_section(retried)
                 (folder / "handoff.md").write_text(handoff, encoding="utf-8")
                 record = {"id": edit_id, "timeline_uid": timeline["unique_id"], "timeline_name": timeline["name"], "take_id": take["id"],
                           "mode": mode, "instruction": instruction, "materials": materials, "model": model, "effort": effort,
                           "provider": provider, "requested_model": model, "effective_model": None, "effective_effort": None,
-                          "client_label": "Claude" if provider == "claude" else "Codex", "usage_source": "current_client_account",
+                          "client_label": "Antigravity API（Claude Code 执行）" if provider == "antigravity" else "Claude" if provider == "claude" else "Codex",
+                          "usage_source": "antigravity_api" if provider == "antigravity" else "current_client_account",
                           "status": "running", "started_at": now(), "finished_at": "", "output": "", "error": "", "summary": None,
                           "report": None, "readback_error": "", "baseline": None, "baseline_at": "",
                           "execution_status": "running", "validation": None, "completion_policy": "skill_delivery"}
@@ -776,8 +885,10 @@ class EditingWorkbenchMixin:
                         job["timelines"] = [timeline]
                         timeline, take, _, _ = self._edit_context(job, timeline["unique_id"])
                         config = with_location(copy.deepcopy(pending["snapshot"]["config"]), timeline)
+                        wav_path = (self.production.audio / take["wav"]) if take.get("wav") else None
                         handoff = handoff_markdown(job, take, timeline, config, mode=mode, instruction=instruction, materials=materials,
-                                                   notes=pending["notes"], voice_label=pending["voice_label"])
+                                                   notes=pending["notes"], voice_label=pending["voice_label"],
+                                                   triples=self.take_triples(job_id, take), wav_path=wav_path, rhythm_folder=folder)
                         self.production.mutate("edit_bind_timeline", {"request_id": "bind-" + edit_id, "job_id": job_id,
                             "edit_id": edit_id, "operation_key": pending["operation_key"], "timeline_uid": timeline["unique_id"]})
                         (folder / "handoff.md").write_text(handoff, encoding="utf-8")
@@ -886,10 +997,11 @@ class EditingWorkbenchMixin:
             yield
 
     @contextmanager
-    def _edit_gate(self, share, edit_id, profile):
+    def _edit_gate(self, share, edit_id, profile, check=None):
         """The AI's Resolve MCP behind resolve_mcp_gate: each scripting call takes its own turn in the project's share,
-        so DaVinci serves the project's other edits while this one thinks."""
-        server = TurnServer(self._resolve_shares(), share, edit_id, self._edit_cancel[edit_id], EDIT_TIMEOUT)
+        so DaVinci serves the project's other edits while this one thinks. `check` is asked before a call that places
+        footage and may refuse it (edit_picks.PickCheck)."""
+        server = TurnServer(self._resolve_shares(), share, edit_id, self._edit_cancel[edit_id], EDIT_TIMEOUT, check=check)
         try:
             mcp = dict(profile.get("mcp") or {})
             if "resolve" in mcp:
@@ -1015,7 +1127,7 @@ class EditingWorkbenchMixin:
             if provider == "codex" and not hasattr(self, "edit_planner"):
                 from codex_edit_bridge import CodexEditPlannerBridge
                 self.edit_planner = CodexEditPlannerBridge(executable=getattr(self.edit_codex, "executable", None))
-            bridge = self.editor if provider == "claude" else self.edit_planner
+            bridge = self.edit_antigravity if provider == "antigravity" else self.editor if provider == "claude" else self.edit_planner
         self._edit_phase(edit_id, "planning", "正在并行选材")
         self._edit_stage(edit_id, "choice", "正在根据候选快照并行选择镜头。")
         model, effort = planner_settings(model, effort, provider)
@@ -1041,7 +1153,7 @@ class EditingWorkbenchMixin:
         """Run the selected client and keep its actual session settings, including on failure."""
         actual = {"effective_model": None, "effective_effort": None}
         self._edit_stage(task_id, "placement", "剪辑客户端正在执行选镜与放置；保存状态待客户端交付。")
-        bridge = self.editor if provider == "claude" else self.edit_codex
+        bridge = self.edit_antigravity if provider == "antigravity" else self.editor if provider == "claude" else self.edit_codex
         live, cancel = self._edits()[task_id], self._edit_cancel[task_id]
 
         def on_event(event):
@@ -1181,7 +1293,7 @@ class EditingWorkbenchMixin:
     def _visual_index(self, project):
         return VisualIndex(getattr(self, "visual_index_dir", None) or Path(self.ledger_dir).parent / INDEX_DIR, project)
 
-    def _prepare_candidates(self, edit_id, folder, config, timeline, materials, wanted_text="", project=None, rivals=()):
+    def _prepare_candidates(self, edit_id, folder, config, timeline, materials, wanted_text="", project=None, rivals=(), known=()):
         """List material clips and make contact images for the ones not seen before; Resolve's view is put back afterwards.
 
         Returns the handoff section and what was prepared. Only a stop request is raised; any other problem leaves the
@@ -1192,7 +1304,8 @@ class EditingWorkbenchMixin:
         try:
             self._edit_stage(edit_id, "materials", "正在读取素材片段清单。")
             listing = self.resolve.run("candidates", {**where(config), "materials": materials, "target_uid": timeline["unique_id"],
-                                                      "ignore_usage": [item["unique_id"] for item in rivals], "count_usage": True}, timeout=180, held=True)
+                                                      "ignore_usage": [item["unique_id"] for item in rivals], "count_usage": True,
+                                                      "material_names": list(known)}, timeout=180, held=True)
             if not isinstance(listing.get("materials"), list):
                 raise ValueError("达芬奇没有返回素材片段清单")
             adopt_project_location(config, listing)
@@ -1229,7 +1342,7 @@ class EditingWorkbenchMixin:
         stats["seconds"] = round((datetime.now() - started).total_seconds())
         return candidates_section(stats, stats["error"]), stats
 
-    def _refresh_usage(self, edit_id, folder, config, timeline, materials, project, rivals=()):
+    def _refresh_usage(self, edit_id, folder, config, timeline, materials, project, rivals=(), known=()):
         """Count footage use again right before the AI places shots, and rewrite the candidate list with the new counts.
 
         The snapshot may have been taken while earlier edits of the project were still planning, when only their first
@@ -1247,7 +1360,8 @@ class EditingWorkbenchMixin:
             self._progress(edit_id, "开剪前重新统计素材使用次数。")
             listing = self.resolve.run("candidates", {**where(config), "materials": materials, "target_uid": timeline["unique_id"],
                                                       "ignore_usage": [item["unique_id"] for item in rivals],
-                                                      "count_usage": True, "current_only": True}, timeout=180, held=True)
+                                                      "count_usage": True, "current_only": True,
+                                                      "material_names": list(known)}, timeout=180, held=True)
             if listing.get("usage_counted") is not True or not isinstance(listing.get("materials"), list):
                 raise ValueError("达芬奇没有返回素材使用次数")
             fresh = build_candidates(listing, count_usage=True)
@@ -1352,6 +1466,19 @@ class EditingWorkbenchMixin:
         except Exception as exc:
             return unavailable("原声设置处理未确认：" + (str(exc)[:200] or type(exc).__name__))
 
+    def _cover_voice_tail(self, edit_id, config, timeline):
+        """Let the picture reach the voiceover's final partial frame; never touches the voiceover itself."""
+        try:
+            self._progress(edit_id, "正在核对画面是否铺到配音结尾。")
+            reply = self.resolve.run("cover_voice_tail", {**where(config), "unique_id": timeline["unique_id"], "name": timeline["name"],
+                                                          "current_only": True}, timeout=60, held=True)
+            result = {key: value for key, value in reply.items() if key != "ok"}
+            if result.get("status") == "extended":
+                self._progress(edit_id, f"最后一个镜头已延长到配音结尾（第 {result.get('target')} 帧）。")
+            return result
+        except Exception as exc:
+            return {"status": "unavailable", "error": str(exc)[:300] or type(exc).__name__}
+
     def _snapshot_delivery(self, edit_id, folder, config, timeline):
         """Keep the target timeline as the client delivered it, to compare with the human polish later.
 
@@ -1372,13 +1499,38 @@ class EditingWorkbenchMixin:
         except Exception as exc:
             return {"error": str(exc)[:300] or type(exc).__name__}
 
-    def _mark_material_usage(self, edit_id, config):
+    def _project_materials(self, project, materials=()):
+        """Every timeline name picked as material for an edit in this DaVinci project, plus this edit's own.
+
+        Material timelines are no longer all named 「…素材」, so the picks on record are what tells them from
+        finished videos. An unreadable record only loses its own names."""
+        names = {name for name in materials or [] if isinstance(name, str) and name}
+        try:
+            data = self.production.records()
+            for job in data.get("jobs", []):
+                picked = [edit for edit in job.get("edits", []) if edit.get("materials")]
+                if not picked:
+                    continue
+                try:
+                    settings = self.production.product_settings(data, job["product"])
+                except Exception:
+                    continue
+                by_uid = {item.get("unique_id"): item for item in job.get("timelines", [])}
+                for edit in picked:
+                    timeline = by_uid.get(edit.get("timeline_uid"))
+                    if timeline and project_key(with_location(settings, timeline)) == project:
+                        names.update(name for name in edit["materials"] if isinstance(name, str) and name)
+        except Exception:
+            pass
+        return sorted(names)
+
+    def _mark_material_usage(self, edit_id, config, material_names=()):
         """After a finished edit, color material clips by use count and write the count into their marker notes.
 
         A failure is recorded and never fails the edit itself."""
         try:
             self._progress(edit_id, "正在按使用次数给素材片段标色。")
-            result = self.resolve.run("mark_usage", where(config), timeout=300, held=True)
+            result = self.resolve.run("mark_usage", {**where(config), "material_names": list(material_names)}, timeout=300, held=True)
             return {key: result.get(key) for key in ("clips", "used", "colored", "notes", "cleared", "failed", "finished", "unreadable", "counts")}
         except Exception as exc:
             return {"error": str(exc)[:300] or type(exc).__name__}
@@ -1441,7 +1593,7 @@ class EditingWorkbenchMixin:
     def _run_edit(self, job_id, edit_id, folder, handoff, profile, model, effort, config, timeline, baseline, provider="claude"):
         execution_status, output, error = "failed", "", ""
         preparation, notes, planning, usage, delivery, refresh = None, None, None, None, None, None
-        audio_baseline, audio_inheritance, resolve_turns = None, None, None
+        audio_baseline, audio_inheritance, resolve_turns, voice_tail, pick_check = None, None, None, None, None
         actual = {"effective_model": None, "effective_effort": None}
         stopped ="已按你的要求停止；达芬奇里可能留有做到一半的结果，请先核对。"
         try:
@@ -1453,11 +1605,12 @@ class EditingWorkbenchMixin:
                 # Taken once: the snapshot may add the folder and project id to config, which must not move this edit's queue.
                 project = project_key(config)
                 rivals = recut_rivals(job, timeline["unique_id"])
+                known = self._project_materials(project, materials)
                 with self._edit_selection_access(edit_id, project) as turn:
                     with self._edit_resolve_access(edit_id, "preparing", "整理候选画面", queued=turn.queued.set,
                                                    ahead_of=self._editing_places(project), project=project) as share, \
                             self._edit_turn(share, edit_id):
-                        section, preparation = self._prepare_candidates(edit_id, folder, config, timeline, materials, wanted, project, rivals)
+                        section, preparation = self._prepare_candidates(edit_id, folder, config, timeline, materials, wanted, project, rivals, known)
                     handoff = handoff_project_location(handoff, config).rstrip("\n") + "\n\n" + section
                     (folder / "handoff.md").write_text(handoff, encoding="utf-8")
                     try:
@@ -1486,14 +1639,19 @@ class EditingWorkbenchMixin:
                         state = self.resolve.run("status", where(config), timeout=30, held=True)
                         adopt_project_location(config, state)
                         handoff = handoff_project_location(handoff, config)
-                        refresh, note = self._refresh_usage(edit_id, folder, config, timeline, materials, project, rivals)
+                        refresh, note = self._refresh_usage(edit_id, folder, config, timeline, materials, project, rivals, known)
                         if note:
                             handoff = handoff.rstrip("\n") + "\n\n" + note
+                        # The shot list is checked before footage is placed whenever use counts or rhythm context exist;
+                        # a replica follows the original's shots, where the skill puts least-used-first and rhythm aside.
+                        if edit_record.get("mode") != "replica" and ((preparation or {}).get("unused") is not None or (folder / RHYTHM_CONTEXT_FILE).is_file()):
+                            pick_check = PickCheck(folder)
+                            handoff = handoff.rstrip("\n") + "\n\n" + PICKS_HANDOFF
                         handoff = handoff.rstrip("\n") + "\n\n" + AUDIO_HANDOFF + "\n"
                         (folder / "handoff.md").write_text(handoff, encoding="utf-8")
                         audio_baseline = self._capture_edit_audio_ids(edit_id, config, timeline)
                     # Between its scripting calls DaVinci serves this project's other edits; see resolve_share.
-                    with self._edit_gate(share, edit_id, profile) as (gated, gate):
+                    with self._edit_gate(share, edit_id, profile, check=pick_check) as (gated, gate):
                         execution_status, output, error, actual = self._run_edit_ai(edit_id, folder, PROMPT_PREFIX + handoff, gated, model, effort,
                             [{"name": SKILL_NAME, "path": str(folder / "skill" / "SKILL.md")}], stopped, provider)
                         if next(item for item in job.get("edits", []) if item["id"] == edit_id).get("mode") == "replica":
@@ -1516,9 +1674,10 @@ class EditingWorkbenchMixin:
                             previous = next((item for item in job.get("edits", []) if item["id"] == edit_record.get("retry_of")), None)
                             audio_inheritance = self._inherit_edit_audio(edit_id, folder, config, timeline, audio_baseline,
                                                                         final_report(output), edit_record.get("instruction"), previous)
+                            voice_tail = self._cover_voice_tail(edit_id, config, timeline)
                             # Taken before usage marking, which only touches the material timelines.
                             delivery = self._snapshot_delivery(edit_id, folder, config, timeline)
-                            usage = self._mark_material_usage(edit_id, config)
+                            usage = self._mark_material_usage(edit_id, config, known)
             except BridgeCancelled:
                 execution_status, error = "cancelled", "已按你的要求停止；还没开始剪辑，达芬奇里的时间线没有改动。"
         except Exception as exc:
@@ -1543,6 +1702,17 @@ class EditingWorkbenchMixin:
         if execution_status == "completed" and audio_inheritance and audio_inheritance.get("status") != "completed":
             status = "needs_repair"
             error = "原声音量或插件未能完整继承，请查看待确认事项；现有剪辑已保留。"
+        tail_problem = voice_tail_problem(voice_tail)
+        if execution_status == "completed" and tail_problem:
+            status = "needs_repair"
+            error = error or tail_problem
+            if report is not None:
+                questions = report.get("questions") if isinstance(report.get("questions"), list) else []
+                report["questions"] = list(dict.fromkeys([*questions, tail_problem]))
+        picks = pick_check.summary() if pick_check is not None else None
+        if report is not None and waived_question(picks):
+            questions = report.get("questions") if isinstance(report.get("questions"), list) else []
+            report["questions"] = list(dict.fromkeys([*questions, waived_question(picks)]))
         if execution_status == "completed":
             self._edit_stage(edit_id, "saved", "客户端已报告工程保存，正在登记交付。" if (report or {}).get("saved") is True else "客户端未确认工程保存，交付需要修正。",
                              status="running" if (report or {}).get("saved") is True else "failed")
@@ -1551,7 +1721,7 @@ class EditingWorkbenchMixin:
                   "summary": None, "report": report, "readback_error": "", "validation": None, "completion_policy": "skill_delivery",
                   "preparation": preparation, "planning": planning, "visual_notes": notes, "usage_marks": usage,
                   "delivery_snapshot": delivery, "usage_refresh": refresh, "audio_inheritance": audio_inheritance,
-                  "audio_baseline": audio_baseline, "resolve_turns": resolve_turns,
+                  "audio_baseline": audio_baseline, "resolve_turns": resolve_turns, "voice_tail": voice_tail, "pick_check": picks,
                   "ai_usage": edit_usage(live.get("editor_usage"), (planning or {}).get("usage")),
                   "stages":copy.deepcopy(live.get("stages", {})), "grid": copy.deepcopy(live.get("grid")), **actual}
         if execution_status == "completed" and (report or {}).get("saved") is True:

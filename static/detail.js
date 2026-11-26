@@ -29,6 +29,162 @@ function originalVideoAction(item) {
     : '<span class="original-video-unavailable" title="当前案例未保存原帖链接或视频 ID，可在编辑案例中补充。">未记录原视频链接</span>';
 }
 
+// 案例视频优先用 TikTok 官方播放器在页面里播放；打不开时自动改用本地视频。
+const CASE_VIDEO_SOURCE_KEY = "case-video-source";
+const TIKTOK_PLAYER_ORIGIN = "https://www.tiktok.com";
+const TIKTOK_READY_TIMEOUT_MS = 15000;
+function tiktokVideoId(item) {
+  const id = String(caseIdentity(item).video_id || "").trim();
+  if (/^\d{10,25}$/.test(id)) return id;
+  const match = String(item.original?.url || "").match(/^https?:\/\/(?:[a-z0-9-]+\.)*tiktok\.com\/[^?#]*\/video\/(\d{10,25})/i);
+  return match ? match[1] : "";
+}
+function preferredCaseVideoSource() {
+  try { return localStorage.getItem(CASE_VIDEO_SOURCE_KEY) === "local" ? "local" : "tiktok"; } catch { return "tiktok"; }
+}
+function rememberCaseVideoSource(source) {
+  try { localStorage.setItem(CASE_VIDEO_SOURCE_KEY, source); } catch {}
+}
+// 一个外观像 <video> 的容器：文案逐句跳转、片段循环照常用 currentTime / play / pause 控制它，
+// 实际通过 postMessage 指挥 TikTok 播放器。播放器报错或迟迟没有就绪时发出 tiktok-failed。
+function createTikTokPlayer(videoId, timeout = TIKTOK_READY_TIMEOUT_MS) {
+  const el = document.createElement("div");
+  el.id = "case-player";
+  el.className = "tiktok-player";
+  el.dataset.player = "tiktok";
+  el.dataset.noRate = "true";
+  const frame = document.createElement("iframe");
+  frame.src = `${TIKTOK_PLAYER_ORIGIN}/player/v1/${encodeURIComponent(videoId)}?autoplay=0&loop=0&rel=0&description=0&music_info=0&closed_caption=1`;
+  frame.title = "TikTok 原视频";
+  frame.allow = "autoplay; fullscreen; encrypted-media; picture-in-picture";
+  frame.allowFullscreen = true;
+  frame.referrerPolicy = "strict-origin-when-cross-origin";
+  el.append(frame);
+  let ready = false, failed = false, playerState = -1, time = 0, stamp = 0, duration = NaN, rate = 1;
+  const fire = name => el.dispatchEvent(new Event(name));
+  const send = (type, value) => {
+    const message = {type, "x-tiktok-player": true};
+    if (value !== undefined) message.value = value;
+    try { frame.contentWindow?.postMessage(message, "*"); } catch {}
+  };
+  const now = () => performance.now();
+  const playing = () => playerState === 1;
+  const position = () => {
+    const t = playing() ? time + (now() - stamp) / 1000 : time;
+    return Number.isFinite(duration) && duration > 0 ? Math.min(t, duration) : t;
+  };
+  const stop = () => { clearTimeout(timer); window.removeEventListener("message", onMessage); };
+  const fail = reason => {
+    if (failed) return;
+    failed = true;
+    stop();
+    el.dataset.failed = reason;
+    el.dispatchEvent(new CustomEvent("tiktok-failed", {detail: {reason}}));
+  };
+  function onMessage(event) {
+    if (!el.isConnected) { stop(); return; }
+    if (event.source !== frame.contentWindow) return;
+    let data = event.data;
+    if (typeof data === "string") { try { data = JSON.parse(data); } catch { return; } }
+    if (!data || typeof data !== "object") return;
+    const value = data.value;
+    if (data.type === "onPlayerReady") {
+      if (!ready) { ready = true; clearTimeout(timer); el.dataset.ready = "true"; fire("loadedmetadata"); }
+    } else if (data.type === "onCurrentTime" && value && typeof value === "object") {
+      const t = Number(value.currentTime), d = Number(value.duration);
+      if (Number.isFinite(t)) { time = t; stamp = now(); }
+      if (Number.isFinite(d) && d > 0 && d !== duration) { duration = d; fire("loadedmetadata"); fire("durationchange"); }
+      fire("timeupdate");
+    } else if (data.type === "onStateChange") {
+      const before = playerState;
+      time = position(); stamp = now(); playerState = Number(value);
+      if (playerState === 1 && before !== 1) { fire("play"); fire("playing"); }
+      else if (playerState === 2 && before !== 2) fire("pause");
+      else if (playerState === 0 && before !== 0) { if (Number.isFinite(duration)) time = duration; fire("pause"); fire("ended"); }
+    } else if (data.type === "onPlayerError") {
+      fail(`TikTok 报错 ${value?.errorCode ?? ""} ${value?.errorType ?? ""}`.trim());
+    } else if (data.type === "onError" && !ready) {
+      fail(`TikTok 播放出错 ${value ?? ""}`.trim());
+    }
+  }
+  window.addEventListener("message", onMessage);
+  const timer = setTimeout(() => { if (!ready) fail("播放器没有在限定时间内打开"); }, timeout);
+  Object.defineProperties(el, {
+    currentTime: {
+      get: position,
+      set(value) {
+        const t = Math.max(0, Number(value) || 0);
+        time = t; stamp = now();
+        if (playerState === 0) playerState = 2;
+        fire("seeking");
+        send("seekTo", t);
+        fire("seeked");
+        fire("timeupdate");
+      },
+    },
+    duration: {get: () => duration},
+    paused: {get: () => !playing() && playerState !== 3},
+    ended: {get: () => playerState === 0},
+    readyState: {get: () => (ready ? 1 : 0)},
+    playbackRate: {get: () => rate, set(value) { rate = 1; }},
+    play: {value() { send("play"); return Promise.resolve(); }},
+    pause: {value() { send("pause"); }},
+  });
+  return el;
+}
+function localCasePlayerMarkup(item) {
+  return `<video id="case-player" controls playsinline preload="metadata" src="${mediaURL(item.case_id, "video", item.current_event_id)}"></video>`;
+}
+function missingCaseVideoMarkup(item, reason = "") {
+  return `<div class="missing-media">${icon("video")}<span>${esc(reason || (item.assets?.video ? "原视频已移动或暂不可用" : "尚未关联视频"))}</span><span>拖入视频或点击下方导入按钮</span></div>`;
+}
+// 把播放区换成指定来源；refresh 为 true 时重新接上文案逐句跳转（首次渲染由 app.js 负责）。
+function setCasePlayer(item, source, {refresh = false, notice = ""} = {}) {
+  const wrap = $(".video-panel .player-wrap");
+  if (!wrap) return;
+  const old = $("#case-player");
+  try { old?.pause?.(); } catch {}
+  const id = tiktokVideoId(item), hasLocal = !!item.assets?.video?.exists;
+  let actual = "none";
+  if (source === "tiktok" && id) {
+    const player = createTikTokPlayer(id);
+    player.addEventListener("tiktok-failed", event => {
+      if (!player.isConnected || state.detail?.case_id !== item.case_id) return;
+      const why = event.detail?.reason ? `（原因：${event.detail.reason}）` : "";
+      console.warn("TikTok 播放器失败", id, event.detail);
+      if (hasLocal) setCasePlayer(item, "local", {refresh: true, notice: `TikTok 播放器没打开，已改用本地视频${why}。`});
+      else setCasePlayer(item, "none", {refresh: true, notice: `TikTok 播放器没打开，本地也没有这条视频${why}。`});
+    }, {once: true});
+    wrap.replaceChildren(player);
+    actual = "tiktok";
+  } else if (source !== "none" && hasLocal) {
+    wrap.innerHTML = localCasePlayerMarkup(item);
+    $("#case-player").addEventListener("error", () => {
+      // The player can fail after the user has already left this case.
+      const advice = $(".media-advice");
+      if (advice) advice.hidden = false;
+    });
+    actual = "local";
+  } else {
+    wrap.innerHTML = missingCaseVideoMarkup(item, source === "none" && id ? "TikTok 播放器没打开，也没有本地视频" : "");
+  }
+  wrap.dataset.source = actual;
+  updateCaseVideoSourceToggle(item);
+  if (refresh) window.TranscriptSync?.refresh(item);
+  if (notice) toast(notice, true);
+}
+function updateCaseVideoSourceToggle(item) {
+  const button = $("#case-video-source");
+  if (!button) return;
+  const actual = $(".video-panel .player-wrap")?.dataset.source;
+  const both = !!tiktokVideoId(item) && !!item.assets?.video?.exists;
+  button.hidden = !both;
+  const toLocal = actual === "tiktok";
+  button.textContent = toLocal ? "改用本地" : "改用 TikTok";
+  button.title = toLocal ? "改用本机保存的视频播放（记住这个选择）" : "改用 TikTok 播放器在页面里播放（记住这个选择）";
+  button.setAttribute("aria-label", button.title);
+}
+
 function metricNumber(value) {
   const match = String(value ?? "")
     .trim()
@@ -237,6 +393,7 @@ function refreshDetailSalesData(summary) {
   const item = state.detail;
   if (!item || item.case_id !== summary.case_id) return;
   item.sales_data = structuredClone(summary.sales_data);
+  if (summary.sales_digest) item.sales_digest = summary.sales_digest;
   const section = $("#detail-section-performance");
   const template = document.createElement("template");
   template.innerHTML = renderPerformanceSection(item);
@@ -520,8 +677,9 @@ function renderDetail(item) {
   const displayedTranscript = transcriptDisplay(item);
   $("#detail-other").remove();
   $("#detail-body").innerHTML =
-    `<div class="detail-layout"><div class="video-panel" data-video-drop><div class="player-wrap">${validVideo ? `<video id="case-player" controls playsinline preload="metadata" src="${mediaURL(item.case_id, "video", item.current_event_id)}"></video>` : `<div class="missing-media">${icon("video")}<span>${item.assets?.video ? "原视频已移动或暂不可用" : "尚未关联视频"}</span><span>拖入视频或点击下方导入按钮</span></div>`}</div><div class="panel-caption"><span>当前有效视频</span>${validVideo ? `<button class="subtle" id="open-video-folder">${icon("folder")}打开所在文件夹</button>` : ""}</div>${originalVideoAction(item)}<p class="asset-name">${esc(item.assets?.video?.name || "")}</p><p class="video-copy-state ${validVideo && item.assets.video.owned ? "is-saved" : ""}">${item.assets?.video?.owned ? (validVideo ? "已保存案例库副本" : "案例库视频副本暂不可用，请重新导入。") : item.assets?.video ? "当前视频尚未备份到本案例；保存或重新导入可备份。" : "导入视频后，自动复制一份到案例库。"}</p><button type="button" class="secondary detail-video-import" id="detail-video-import">${icon("video")}${validVideo ? "导入或更换视频" : "导入视频"}<span>也可拖到这里</span></button><div data-inline-section="assets" class="detail-assets-inline"></div><div class="context-note media-advice" hidden>当前浏览器无法播放此视频，可打开所在文件夹使用本地播放器。</div></div><div class="detail-main">${["current", "script", "data"].map(tab => renderDetailSections(item, tab)).join("")}<div id="detail-other" role="tabpanel" aria-labelledby="detail-tab-history" hidden></div></div>${renderDetailSide(item)}</div>`;
+    `<div class="detail-layout"><div class="video-panel" data-video-drop><div class="player-wrap"></div><div class="panel-caption"><span>当前有效视频</span>${validVideo ? `<button class="subtle" id="open-video-folder">${icon("folder")}打开所在文件夹</button>` : ""}</div>${originalVideoAction(item)}<p class="asset-name">${esc(item.assets?.video?.name || "")}</p><p class="video-copy-state ${validVideo && item.assets.video.owned ? "is-saved" : ""}">${item.assets?.video?.owned ? (validVideo ? "已保存案例库副本" : "案例库视频副本暂不可用，请重新导入。") : item.assets?.video ? "当前视频尚未备份到本案例；保存或重新导入可备份。" : "导入视频后，自动复制一份到案例库。"}</p><button type="button" class="secondary detail-video-import" id="detail-video-import">${icon("video")}${validVideo ? "导入或更换视频" : "导入视频"}<span>也可拖到这里</span></button><div data-inline-section="assets" class="detail-assets-inline"></div><div class="context-note media-advice" hidden>当前浏览器无法播放此视频，可打开所在文件夹使用本地播放器。</div></div><div class="detail-main">${["current", "script", "data"].map(tab => renderDetailSections(item, tab)).join("")}<div id="detail-other" role="tabpanel" aria-labelledby="detail-tab-history" hidden></div></div>${renderDetailSide(item)}</div>`;
   $("#detail-body").dataset.rendered = "true";
+  setCasePlayer(item, tiktokVideoId(item) && (preferredCaseVideoSource() === "tiktok" || !validVideo) ? "tiktok" : "local");
   const rail = document.createElement("div");
   rail.className = "detail-rail";
   $(".detail-layout").prepend(rail);
@@ -556,14 +714,6 @@ function renderDetail(item) {
       kind: "video",
       event_id: item.current_event_id,
     }),
-  );
-  $("#case-player")?.addEventListener(
-    "error",
-    () => {
-      // The player can fail after the user has already left this case.
-      const advice = $(".media-advice");
-      if (advice) advice.hidden = false;
-    },
   );
   switchDetailTab(item);
 }
@@ -685,7 +835,18 @@ function mountVideoWorkspace(item) {
     originalLink.lastChild.textContent = "原视频";
     modes.append(originalLink);
   }
+  const sourceToggle = document.createElement("button");
+  sourceToggle.type = "button";
+  sourceToggle.id = "case-video-source";
+  sourceToggle.className = "video-source-toggle";
+  sourceToggle.onclick = () => {
+    const next = $(".video-panel .player-wrap")?.dataset.source === "tiktok" ? "local" : "tiktok";
+    rememberCaseVideoSource(next);
+    setCasePlayer(item, next, {refresh: true});
+  };
+  modes.append(sourceToggle);
   panel.append(modes, body);
+  updateCaseVideoSourceToggle(item);
   const compact = matchMedia("(max-width: 900px), (max-height: 650px)");
   // One choice for every case, kept across visits; screens without a choice start by size.
   const memoryKey = "case-video-mode";
@@ -707,11 +868,11 @@ function mountVideoWorkspace(item) {
     const mode = ["fixed", "floating", "collapsed"].includes(selectedMode) ? selectedMode : compact.matches ? "collapsed" : "fixed";
     panel.dataset.mode = mode;
     body.hidden = mode === "collapsed";
-    modes.querySelectorAll("button").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.mode === mode)));
+    modes.querySelectorAll("button[data-mode]").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.mode === mode)));
     if (body.hidden) $("#case-player")?.pause();
     requestMeasure();
   };
-  modes.querySelectorAll("button").forEach(button => button.onclick = () => {
+  modes.querySelectorAll("button[data-mode]").forEach(button => button.onclick = () => {
     selectedMode = button.dataset.mode;
     try { localStorage.setItem(memoryKey, selectedMode); } catch {}
     applyMode();

@@ -17,11 +17,37 @@ function harness() {
     },
   });
   vm.runInContext(`${implementation}\nthis.api = api;`, context);
-  const finish = (index, data = {items: [{id: 'one'}]}, status = 200) => calls[index].resolve({
-    ok: status < 400, status, json: async () => data,
+  const finish = (index, data = {items: [{id: 'one'}]}, status = 200, etag = null) => calls[index].resolve({
+    ok: status < 400, status, headers: {get: name => (name === 'ETag' ? etag : null)},
+    text: async () => JSON.stringify(data), json: async () => data,
   });
   return {api: context.api, calls, finish};
 }
+
+test('a read sends the tag of the answer it holds and rebuilds an unchanged answer without a body', async () => {
+  const {api, calls, finish} = harness();
+  const first = api('/api/creation');
+  assert.equal(calls[0].options.headers['If-None-Match'], undefined);
+  finish(0, {items: [{id: 'one'}]}, 200, '"tag-1"');
+  (await first).items[0].id = 'edited by the page';
+  const second = api('/api/creation'), fresh = api('/api/creation', {cache: 'no-store'});
+  assert.equal(calls[1].options.headers['If-None-Match'], '"tag-1"');
+  assert.equal(calls[2].options.headers['If-None-Match'], '"tag-1"', 'a forced read still asks the server, with the tag');
+  for (const index of [1, 2]) calls[index].resolve({ok: false, status: 304, headers: {get: () => null}, text: async () => ''});
+  assert.equal(JSON.stringify(await second), '{"items":[{"id":"one"}]}', 'the kept text, not the copy the page changed');
+  assert.equal(JSON.stringify(await fresh), '{"items":[{"id":"one"}]}');
+  const write = api('/api/scripts', {method: 'POST', body: {note: 'save'}});
+  assert.equal(calls[3].options.headers['If-None-Match'], undefined, 'writes never carry a tag');
+  finish(3, {ok: true});
+  await write;
+  const changed = api('/api/creation');
+  finish(4, {items: []}, 200, '"tag-2"');
+  assert.equal(JSON.stringify(await changed), '{"items":[]}');
+  const third = api('/api/creation');
+  assert.equal(calls[5].options.headers['If-None-Match'], '"tag-2"');
+  finish(5, {items: []}, 200, '"tag-2"');
+  await third;
+});
 
 test('overlapping plain reads share the network request and own independent data', async () => {
   const {api, calls, finish} = harness();

@@ -32,8 +32,10 @@ class TimelinePreviewBrowserTests(unittest.TestCase):
         self.context = self.browser.new_context(viewport={"width": 1280, "height": 900})
         self.addCleanup(self.context.close)
         self.page = self.context.new_page()
+        self.media_requests = []
         self.page.route("**/*", lambda route: route.fulfill(content_type="text/html", body='<main><section id="publication"></section></main>'))
         def serve_video(route):
+            self.media_requests.append(dict(route.request.headers))
             start, end, status = 0, len(self.video) - 1, 200
             match = re.fullmatch(r"bytes=(\d+)-(\d*)", route.request.headers.get("range", ""))
             if match:
@@ -85,8 +87,8 @@ class TimelinePreviewBrowserTests(unittest.TestCase):
         self.ready()
         self.page.locator('[data-preview-kind]', has_text='半成品预览').wait_for()
         player = self.page.locator('[data-timeline-preview] video')
-        self.page.wait_for_function("document.querySelector('[data-timeline-preview] video').readyState >= 2")
         player.evaluate('async (video) => {video.muted=true;await video.play();video.currentTime=1;}')
+        self.page.wait_for_function("document.querySelector('[data-timeline-preview] video').readyState >= 2")
         self.page.wait_for_function("document.querySelector('[data-timeline-preview] video').currentTime > 1.05")
         self.assertEqual(self.page.locator('[name="post_id"]').input_value(), '7999999999999999901')
         self.assertIn('Second.mp4', self.page.locator('[data-preview-video]').inner_text())
@@ -158,7 +160,8 @@ class TimelinePreviewBrowserTests(unittest.TestCase):
         self.page.locator('[data-publication-timeline="one"]').click()
         self.page.locator('[data-publication-timeline="two"]').click()
         player = self.page.locator('[data-timeline-preview] video')
-        self.assertEqual(player.get_attribute('preload'), 'auto')
+        self.assertEqual(player.get_attribute('preload'), 'none')
+        player.evaluate('async video => {video.muted=true;await video.play();video.pause();}')
         self.page.wait_for_function("document.querySelector('[data-timeline-preview] video').readyState >= 2")
         player.evaluate('video => video.currentTime = 1.2')
         self.page.wait_for_function("!document.querySelector('[data-timeline-preview] video').seeking")
@@ -167,6 +170,32 @@ class TimelinePreviewBrowserTests(unittest.TestCase):
         self.page.wait_for_function("document.querySelector('[data-timeline-preview] video').getAttribute('src').includes('original-web1')")
         self.page.wait_for_function("document.querySelector('[data-timeline-preview] video').currentTime >= 1.15")
         self.assertTrue(player.evaluate('video => video.paused'))
+
+    def test_hidden_preview_downloads_only_after_play_and_status_refresh_keeps_the_player(self):
+        self.ready()
+        self.page.evaluate("""async () => {
+          const host = document.querySelector('#publication');host.hidden = true;
+          await VideoPublication.mount(host,{job:window.job,api:window.api});
+        }""")
+        self.page.wait_for_function("document.querySelector('[data-timeline-preview] video').getAttribute('src')")
+        player = self.page.locator('[data-timeline-preview] video')
+        self.assertEqual(player.get_attribute('preload'), 'none')
+        self.page.wait_for_timeout(300)
+        self.assertEqual(self.media_requests, [], 'A hidden task preview must not consume video bandwidth')
+        self.page.evaluate("document.querySelector('#publication').hidden = false")
+        player.evaluate('async video => {video.muted=true;await video.play();video.pause();video.currentTime=.8;}')
+        self.page.wait_for_function("!document.querySelector('[data-timeline-preview] video').seeking")
+        self.assertTrue(self.media_requests)
+        self.assertTrue(any('range' in headers for headers in self.media_requests))
+        self.page.evaluate("window.savedPlayer = document.querySelector('[data-timeline-preview] video')")
+        count, source = len(self.media_requests), player.get_attribute('src')
+        self.page.locator('[data-preview-import]').click()
+        self.ready()
+        self.page.locator('[data-preview-progress]', has_text='预览已更新').wait_for()
+        self.assertTrue(self.page.evaluate("window.savedPlayer === document.querySelector('[data-timeline-preview] video')"))
+        self.assertEqual(player.get_attribute('src'), source)
+        self.assertGreaterEqual(player.evaluate('video => video.currentTime'), .75)
+        self.assertEqual(len(self.media_requests), count)
 
 
 if __name__ == '__main__':

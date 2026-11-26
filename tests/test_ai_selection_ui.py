@@ -158,6 +158,21 @@ class AISelectionBrowserTests(unittest.TestCase):
         reopened = self.request("POST", url, {"round_id": round_id, "variant_index": 1, "choice": ""})
         self.assertEqual(reopened[2]["task"]["management_state"], "pending_selection")
 
+    def test_whole_task_can_be_deleted_from_its_page(self):
+        task = self.create_task("整任务删除临时任务", action="variants")
+        path = self.store.folder(self.identifier) / "collaboration" / task["task_id"] / "task.json"
+        page = self.open_ai_list()
+        entry = page.locator(f'[data-ai-task-id="{task["task_id"]}"]')
+        entry.wait_for()
+        entry.locator("a").click()
+        page.locator("#ai-task-menu > summary").click()
+        page.locator("#ai-task-delete").click()
+        self.assertIn("采用稿", page.locator("#ai-delete-count").inner_text())
+        self.assertTrue(path.is_file())
+        page.locator("#confirm-ai-delete").click()
+        page.wait_for_function(f"() => !location.hash.includes('{task['task_id']}')")
+        self.assertFalse(path.exists())
+
     def test_management_state_archive_history_and_restore_keep_answers(self):
         before_case = self.store.read_case(self.identifier)
         task = self.create_task("长期管理临时任务")

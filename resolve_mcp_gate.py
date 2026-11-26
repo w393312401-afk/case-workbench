@@ -14,6 +14,8 @@ import sys
 import threading
 
 UNGATED = {"search_scripting_api", "get_scripting_api", "get_scripting_docs", "get_whats_new"}
+# A script that puts footage on a timeline. Before it runs the workbench checks the editor's shot list (edit_picks).
+PLACING = ("AppendToTimeline",)
 
 
 class Turns:
@@ -43,6 +45,21 @@ class Turns:
             self._send("release")
         except OSError:
             self.sock = None
+
+    def picks(self):
+        """Why a placing call may not run, or "". Only a refusal the workbench wrote (a JSON string) stops the call:
+        a workbench still running without this check, or a lost connection, lets it through."""
+        try:
+            ok, text = self._send("picks")
+        except OSError:
+            self.sock = None
+            return ""
+        if ok or not text.startswith('"'):
+            return ""
+        try:
+            return str(json.loads(text))
+        except ValueError:
+            return ""
 
 
 def main(argv):
@@ -98,6 +115,12 @@ def main(argv):
                     and (message.get("params") or {}).get("name") not in UNGATED):
                 key = json.dumps(message["id"])
                 with state:
+                    script = json.dumps((message.get("params") or {}).get("arguments"), ensure_ascii=False)
+                    refusal = turns.picks() if any(word in script for word in PLACING) else ""
+                    if refusal:
+                        write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {
+                            "content": [{"type": "text", "text": refusal}], "isError": True}}, ensure_ascii=False).encode("utf-8"))
+                        continue
                     if not gated:
                         ok, text = turns.acquire()
                         if not ok:

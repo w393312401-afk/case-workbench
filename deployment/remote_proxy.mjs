@@ -24,6 +24,7 @@ const HOP_HEADERS = new Set([
   'te', 'trailer', 'transfer-encoding', 'upgrade', 'expect',
 ]);
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const REMOTE_REQUEST_HEADER = 'x-workbench-remote';
 
 class RequestError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -204,7 +205,7 @@ function guardRequest(request, config) {
     throw new RequestError(403, 'A same-origin browser request is required.');
   }
   // Restart is allowed remotely (fly, 2026-10-15); the workbench still refuses it while work is running.
-  if (/^\/api\/(?:service\/shutdown|remote-account)(\/|$)/.test(pathname)
+  if (/^\/api\/(?:service\/shutdown|remote-account|keys|ai\/antigravity|ai\/claude\/logout)(\/|$)/.test(pathname)
       || (!SAFE_METHODS.has(request.method) && /^\/api\/ai\/claude\/(login|callback|key|install)(\/|$)/.test(pathname))) {
     throw new RequestError(403, 'This action is available only on the local workbench.');
   }
@@ -216,7 +217,7 @@ function filterHeaders(headers) {
   for (const token of String(headers.connection || '').split(',')) blocked.add(token.trim().toLowerCase());
   const result = Object.create(null);
   for (const [name, value] of Object.entries(headers)) {
-    if (!blocked.has(name) && !/^(cf-|x-forwarded-|x-original-|proxy-)/.test(name)
+    if (name !== REMOTE_REQUEST_HEADER && !blocked.has(name) && !/^(cf-|x-forwarded-|x-original-|proxy-)/.test(name)
         && !['forwarded', 'x-real-ip', 'true-client-ip', 'x-rewrite-url'].includes(name)) result[name] = value;
   }
   return result;
@@ -390,6 +391,7 @@ export function createRemoteProxy(config, { resolveKey, upstream, now = Date.now
       } else await authenticate(jwt);
       if (request.destroyed || response.destroyed) return;
       const headers = filterHeaders(request.headers);
+      headers[REMOTE_REQUEST_HEADER] = '1';
       if (headers['sec-fetch-site'] === 'cross-site') delete headers['sec-fetch-site'];
       headers.host = target.host;
       if (request.headers.origin) headers.origin = target.origin;

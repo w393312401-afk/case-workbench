@@ -20,7 +20,7 @@ from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from claude_bridge import ClaudeBridge, ModelRouter  # noqa: E402
+from claude_bridge import ClaudeBridge, LoginFlowError, ModelRouter  # noqa: E402
 from codex_bridge import BridgeCancelled, BridgeError, BridgeUnavailable  # noqa: E402
 
 SECRET = "sk-ant-test-secret-that-must-never-appear"
@@ -287,6 +287,48 @@ class ClaudeBridgeTests(unittest.TestCase):
             bridge.models()
             self.assertEqual(len(calls), 6)
 
+    def test_new_model_alias_and_dotted_version_appear_after_cache_expiry_and_run(self):
+        bridge, metadata, calls = self.catalog_bridge()
+        self.assertNotIn("claude-alias:fable", {row["id"] for row in bridge.models()["models"]})
+        metadata["models"].extend([
+            {"value": "fable", "resolvedModel": "claude-fable-5.2", "displayName": "Fable"},
+            {"value": "claude-fable-5.2", "resolvedModel": "claude-fable-5.2", "displayName": "Fable 5.2"},
+        ])
+        self.assertNotIn("claude-alias:fable", {row["id"] for row in bridge.models()["models"]})
+        self.assertEqual(len(calls), 1)
+        bridge._model_cache_until = 0
+        models = {row["id"]: row for row in bridge.models()["models"]}
+        self.assertEqual(models["claude-alias:fable"]["name"], "Claude Fable 5.2")
+        self.assertEqual(models["claude-fable-5.2"]["name"], "Claude Fable 5.2")
+        self.assertTrue(models["claude-alias:fable"]["available"])
+        self.assertTrue(models["claude-fable-5.2"]["available"])
+        for model, expected in (("claude-alias:fable", "fable"), ("claude-fable-5.2", "claude-fable-5.2")):
+            with self.subTest(model=model):
+                self.run_bridge(bridge, model=model)
+                argv = self.launches[-1]["arguments"]
+                self.assertEqual(argv[argv.index("--model") + 1], expected)
+
+    def test_new_aliases_require_verified_catalog_entries_and_filter_unsafe_values(self):
+        bridge, metadata, _ = self.catalog_bridge()
+        metadata["models"].extend([
+            {"value": "fable", "resolvedModel": "claude-fable-5.2"},
+            {"value": "fable;injected", "resolvedModel": "claude-fable-5.2"},
+            {"value": "--danger", "resolvedModel": "claude-fable-5.2"},
+            {"value": SECRET, "resolvedModel": "claude-fable-5.2"},
+        ])
+        models = bridge.models()["models"]
+        self.assertIn("claude-alias:fable", {row["id"] for row in models})
+        self.assertNotIn("fable;injected", json.dumps(models))
+        self.assertNotIn("--danger", json.dumps(models))
+        self.assertNotIn(SECRET, json.dumps(models))
+        for model in ("claude-alias:missing", "claude-alias:fable;injected"):
+            with self.subTest(model=model), self.assertRaises(BridgeError):
+                self.run_bridge(bridge, model=model)
+        metadata["models"] = [row for row in metadata["models"] if row.get("value") != "fable"]
+        bridge.refresh_models()
+        with self.assertRaises(BridgeError):
+            self.run_bridge(bridge, model="claude-alias:fable")
+
     def test_client_default_is_not_the_catalog_recommended_model_when_settings_differ(self):
         for configured, expected in ((None, "Claude Opus 5.5"), ("default", "Claude Opus 5.5"),
                                      ("haiku", "Claude Haiku 5.5"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
@@ -391,6 +433,251 @@ class ClaudeBridgeTests(unittest.TestCase):
         serialized = json.dumps(value, ensure_ascii=False)
         for secret in (SECRET, LOGIN_CODE, LOGIN_STATE):
             self.assertNotIn(secret, serialized)
+
+    def logout_runner(self, arguments, **options):
+        if "logout" in arguments:
+            self.auth_calls.append((arguments, options))
+            self.auth = {"loggedIn": False, "authMethod": "none"}
+            return subprocess.CompletedProcess(arguments, 0, SECRET, SECRET)
+        return self.auth_runner(arguments, **options)
+
+    def test_disconnect_uses_official_logout_and_verifies_uncached_auth_status(self):
+        bridge = self.bridge()
+        self.assertTrue(bridge.status()["available"])
+        bridge.models()
+        self.assertIsNotNone(bridge._model_cache)
+        bridge.command_runner = self.logout_runner
+        self.auth_calls.clear()
+        routing = {name: SECRET for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                                             "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_GATEWAY")}
+        with patch.dict(os.environ, routing), \
+                patch.object(Path, "read_text", side_effect=AssertionError("authorization files must stay with the CLI")):
+            state = bridge.disconnect()
+        self.assertFalse(state["available"])
+        self.assertIs(state["logged_in"], False)
+        self.assertFalse(state["login_pending"])
+        self.assert_login_secrets_absent(state)
+        self.assertEqual(len(self.auth_calls), 2)
+        arguments, options = self.auth_calls[0]
+        self.assertEqual(arguments, [str(self.executable), "--safe-mode", "--restricted", "auth", "logout"])
+        self.assertIn("status", self.auth_calls[1][0])
+        self.assertEqual(options["stdin"], subprocess.DEVNULL)
+        self.assertTrue(options["capture_output"])
+        self.assertEqual(options["timeout"], bridge.startup_timeout)
+        self.assertFalse(options.get("shell", False))
+        self.assertEqual(options["creationflags"], subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        for _, called_options in self.auth_calls:
+            for name in routing:
+                self.assertNotIn(name, called_options["env"])
+        self.assertIsNone(bridge._status_cache)
+        self.assertIsNone(bridge._model_cache)
+        self.assertIsNone(bridge._model_cache_key)
+        self.assertFalse(bridge._auth_changing)
+
+    def test_disconnect_cancels_pending_login_and_allows_fresh_authorization(self):
+        bridge = self.bridge(scenario=lambda process: None)
+        first = self.start_pending_login(bridge)
+        process = self.processes[-1]
+        bridge.command_runner = self.logout_runner
+        state = bridge.disconnect()
+        self.assertTrue(process.terminated or process.killed)
+        self.assertFalse(state["login_pending"])
+        self.assertIsNone(bridge.login_details()["attempt_id"])
+        self.assertIsNone(bridge.login_details()["url"])
+        with self.assertRaises(LoginFlowError):
+            bridge.submit_login_callback(first["attempt_id"], self.login_callback())
+        try:
+            next_attempt = self.start_pending_login(bridge)
+            self.assertNotEqual(first["attempt_id"], next_attempt["attempt_id"])
+            self.assertTrue(bridge.login_details()["pending"])
+        finally:
+            bridge.close()
+            self.wait_for_login(bridge)
+
+    def test_disconnect_retains_a_pending_process_if_stopping_it_fails(self):
+        bridge = self.bridge(scenario=lambda process: None)
+        self.start_pending_login(bridge)
+        process = self.processes[-1]
+        bridge.command_runner = self.logout_runner
+        with patch.object(bridge, "_stop_login_process", side_effect=subprocess.TimeoutExpired(SECRET, 1)):
+            with self.assertRaises(LoginFlowError) as raised:
+                bridge.disconnect()
+        self.assertEqual(raised.exception.status, 503)
+        self.assert_login_secrets_absent(str(raised.exception))
+        self.assertIs(bridge._login_process, process)
+        self.assertIsNone(bridge._login_attempt)
+        self.assertFalse(any("logout" in arguments for arguments, _ in self.auth_calls))
+        self.assertFalse(bridge.disconnect()["login_pending"])
+        self.assertTrue(process.terminated or process.killed)
+        self.assertIsNone(bridge._login_process)
+
+    def test_disconnect_errors_are_safe_and_always_release_the_auth_guard(self):
+        cases = (subprocess.TimeoutExpired(SECRET, 1, output=SECRET), OSError(SECRET), 1)
+        for failure in cases:
+            with self.subTest(failure_type=type(failure).__name__):
+                bridge = self.bridge()
+                self.auth = dict(AUTHENTICATED)
+                bridge.status()
+
+                def runner(arguments, **options):
+                    if "logout" in arguments:
+                        if isinstance(failure, Exception):
+                            raise failure
+                        return subprocess.CompletedProcess(arguments, failure, SECRET, SECRET)
+                    return self.auth_runner(arguments, **options)
+
+                bridge.command_runner = runner
+                with self.assertRaises(LoginFlowError) as raised:
+                    bridge.disconnect()
+                self.assertEqual(raised.exception.status, 503)
+                self.assert_login_secrets_absent(str(raised.exception))
+                self.assertIsNone(bridge._status_cache)
+                self.assertFalse(bridge._auth_changing)
+                bridge.command_runner = self.logout_runner
+                self.assertIs(bridge.disconnect()["logged_in"], False)
+
+    def test_disconnect_does_not_claim_success_if_auth_is_still_present_or_unreadable(self):
+        for auth in (dict(AUTHENTICATED), {}, {"loggedIn": "false"}, {"loggedIn": None}, None):
+            with self.subTest(auth=auth):
+                bridge = self.bridge()
+                self.auth = auth
+
+                def runner(arguments, **options):
+                    if "logout" in arguments:
+                        return subprocess.CompletedProcess(arguments, 0, "", "")
+                    return self.auth_runner(arguments, **options)
+
+                bridge.command_runner = runner
+                with self.assertRaises(LoginFlowError) as raised:
+                    bridge.disconnect()
+                self.assertEqual(raised.exception.status, 503)
+                self.assert_login_secrets_absent(str(raised.exception))
+                self.assertFalse(bridge._auth_changing)
+
+    def test_disconnect_requires_the_native_client(self):
+        bridge = self.bridge()
+        self.executable.unlink()
+        with self.assertRaises(LoginFlowError) as raised:
+            bridge.disconnect()
+        self.assertEqual(raised.exception.status, 503)
+        self.assertEqual(self.auth_calls, [])
+
+    def test_disconnect_rejects_running_native_work_without_interrupting_it(self):
+        bridge = self.bridge(scenario=lambda process: None)
+        failures = []
+
+        def execute():
+            try:
+                self.run_bridge(bridge)
+            except BridgeCancelled:
+                pass
+            except Exception as error:
+                failures.append(error)
+
+        thread = threading.Thread(target=execute, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 2
+        while not self.processes and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(self.processes)
+        self.assertTrue(self.processes[-1].started.wait(1))
+        try:
+            with self.assertRaises(LoginFlowError) as raised:
+                bridge.disconnect()
+            self.assertEqual(raised.exception.status, 409)
+            self.assertIsNone(self.processes[-1].poll())
+            self.assertFalse(any("logout" in arguments for arguments, _ in self.auth_calls))
+        finally:
+            self.cancel.set()
+            thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(bridge._active_runs, 0)
+        bridge.command_runner = self.logout_runner
+        self.assertIs(bridge.disconnect()["logged_in"], False)
+
+    def test_disconnect_blocks_new_login_run_and_duplicate_logout_while_command_is_pending(self):
+        bridge = self.bridge()
+        entered, release = threading.Event(), threading.Event()
+        result = {}
+
+        def runner(arguments, **options):
+            if "logout" in arguments:
+                entered.set()
+                release.wait(3)
+            return self.logout_runner(arguments, **options)
+
+        bridge.command_runner = runner
+
+        def disconnect():
+            try:
+                result["state"] = bridge.disconnect()
+            except Exception as error:
+                result["error"] = error
+
+        thread = threading.Thread(target=disconnect, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            for operation in (bridge.start_login, bridge.disconnect, lambda: self.run_bridge(bridge)):
+                with self.subTest(operation=operation), self.assertRaises(LoginFlowError) as raised:
+                    operation()
+                self.assertEqual(raised.exception.status, 409)
+            self.assertEqual(self.launches, [])
+        finally:
+            release.set()
+            thread.join(timeout=2)
+        self.assertNotIn("error", result)
+        self.assertIs(result["state"]["logged_in"], False)
+        self.assertFalse(bridge._auth_changing)
+
+    def test_api_executor_cannot_disconnect_subscription_and_native_logout_does_not_stop_it(self):
+        from antigravity_bridge import AntigravityBridge
+        from antigravity_edit_bridge import AntigravityEditBridge
+
+        native = self.bridge(scenario=lambda process: None)
+        native.command_runner = self.logout_runner
+        api_source = AntigravityBridge(settings_reader=lambda: {"enabled": True}, key_reader=lambda: SECRET)
+        api = AntigravityEditBridge(self.runtime, api_bridge=api_source, executable=str(self.executable),
+                                    command_runner=self.auth_runner, process_factory=native.process_factory)
+        failures = []
+
+        def execute():
+            try:
+                self.run_bridge(api)
+            except BridgeCancelled:
+                pass
+            except Exception as error:
+                failures.append(error)
+
+        with self.assertRaises(LoginFlowError):
+            api.disconnect()
+        self.assertFalse(any("logout" in arguments for arguments, _ in self.auth_calls))
+        thread = threading.Thread(target=execute, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 2
+        while not self.processes and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertTrue(self.processes)
+        self.assertTrue(self.processes[-1].started.wait(1))
+        try:
+            self.assertIs(native.disconnect()["logged_in"], False)
+            self.assertIsNone(self.processes[-1].poll())
+            self.assertTrue(api.status()["available"])
+        finally:
+            self.cancel.set()
+            thread.join(timeout=2)
+            api.close()
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+
+    def test_failed_run_validation_does_not_leave_a_stale_busy_counter(self):
+        bridge = self.bridge()
+        with self.assertRaises(BridgeError):
+            self.run_bridge(bridge, prompt="")
+        self.assertEqual(bridge._active_runs, 0)
+        bridge.command_runner = self.logout_runner
+        self.assertIs(bridge.disconnect()["logged_in"], False)
 
     def login_callback(self, **parameters):
         return LOGIN_REDIRECT + "?" + urlencode({"code": LOGIN_CODE, "state": LOGIN_STATE, **parameters})
@@ -1001,6 +1288,43 @@ class ClaudeBridgeTests(unittest.TestCase):
         self.assertEqual(images[0]["source"], {"type": "base64", "media_type": "image/jpeg", "data": "aGVsbG8="})
         self.assertIn({"type": "skills_submitted", "skills": selected}, self.events)
 
+    def test_cache_split_sends_repeated_parts_where_later_calls_can_reuse_them(self):
+        bridge = self.bridge(frame_extractor=lambda path, cancel: [("画面 1", "aGVsbG8=")])
+        self.run_bridge(bridge, prompt="固定参考。任务资料。本次要求。", cache_split=(5, 10), require_image_view=True, video_path="original.mp4")
+        self.assertTrue(self.launches[-1]["files"]["--system-prompt-file"]["text"].endswith("\n\n固定参考。"))
+        content = self.processes[-1].received[0]["message"]["content"]
+        self.assertEqual(content[0], {"type": "text", "text": "任务资料。", "cache_control": {"type": "ephemeral", "ttl": "1h"}})
+        self.assertEqual([block["type"] for block in content], ["text", "text", "image", "text"])
+        self.assertEqual(content[-1], {"type": "text", "text": "本次要求。"})
+
+    def test_prompt_without_cache_split_is_sent_as_before(self):
+        self.run_bridge(prompt="固定参考。任务资料。本次要求。")
+        self.assertNotIn("固定参考", self.launches[-1]["files"]["--system-prompt-file"]["text"])
+        self.assertEqual(self.processes[-1].received[0]["message"]["content"], [{"type": "text", "text": "固定参考。任务资料。本次要求。"}])
+
+    def test_refused_cache_point_is_retried_without_it(self):
+        def scenario(process):
+            if "cache_control" not in process.received[0]["message"]["content"][0]:
+                return success(process)
+            process.emit({"type": "result", "subtype": "success", "is_error": True,
+                          "result": "API Error: 400 messages.1.content.0.cache_control.ttl: not accepted"})
+            process.exit(1)
+
+        self.assertEqual(self.run_bridge(self.bridge(scenario), prompt="任务资料。本次要求。", cache_split=(0, 5)),
+                         "🔴Stop guessing the angle#knifetok")
+        self.assertEqual(len(self.processes), 2)
+        self.assertEqual(self.processes[-1].received[0]["message"]["content"],
+                         [{"type": "text", "text": "任务资料。"}, {"type": "text", "text": "本次要求。"}])
+
+    def test_other_failures_are_not_retried(self):
+        def scenario(process):
+            process.emit({"type": "result", "subtype": "success", "is_error": True, "result": "API Error: 500 overloaded"})
+            process.exit(1)
+
+        with self.assertRaises(BridgeError):
+            self.run_bridge(self.bridge(scenario), prompt="任务资料。本次要求。", cache_split=(0, 5))
+        self.assertEqual(len(self.processes), 1)
+
     def test_missing_skill_or_video_frames_stop_before_launch(self):
         with self.assertRaises(BridgeError):
             self.run_bridge(skills=[{"name": "missing", "path": str(self.runtime / "missing" / "SKILL.md")}])
@@ -1162,6 +1486,29 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(router.run("p", model=None), "claude")
         self.assertEqual(router.models()["models"][0]["provider"], "codex")
         self.assertTrue(router.status()["available"])
+
+    def test_router_hands_the_cache_split_only_to_a_service_that_takes_it(self):
+        calls = []
+
+        class Fake:
+            def __init__(self, name, **flags):
+                self.name = name
+                self.__dict__.update(flags)
+
+            def status(self):
+                return {"available": True, "label": self.name}
+
+            def run(self, prompt, **options):
+                calls.append(options)
+                return self.name
+
+        router = ModelRouter(Fake("codex"), Fake("claude", accepts_cache_split=True))
+        router.run("p", model="claude-opus", cache_split=(1, 2))
+        self.assertEqual(calls[-1]["cache_split"], (1, 2))
+        router.run("p", model="gpt-5", cache_split=(1, 2))
+        self.assertNotIn("cache_split", calls[-1])
+        ModelRouter(Fake("codex"), Fake("claude")).run("p", model="claude-opus", cache_split=(1, 2))
+        self.assertNotIn("cache_split", calls[-1])
 
 
 if __name__ == "__main__":

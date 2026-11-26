@@ -12,7 +12,7 @@ import threading
 from urllib.parse import quote, urlencode
 
 from ai_resolution import ai_task_resolutions
-from ai_tasks import made_variants, variant_progress
+from ai_tasks import made_here, made_variants, variant_progress
 from creation_store import CreationError, CreationStore
 from direction_store import fingerprint, now, product_key
 from elevenlabs_client import VoiceError
@@ -287,6 +287,14 @@ def _calendar_state(posted, own, kind):
     return own.get("calendar_uploaded") is True
 
 
+def _local_day(stamp):
+    try:
+        moment = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment.astimezone().date() if moment.tzinfo else moment.date()
+
+
 def _finished(kind, stage, published_on, archived, today=None):
     """已完结: a video posted more than FINISH_AFTER_DAYS ago, or one marked 不发了. Archived rows stay 已归档."""
     if kind != "video" or archived:
@@ -397,6 +405,12 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
     used_script_ids = {row.get("script_id") for row in job_rows if row.get("script_id")}
     adopted_pairs = {_provenance(row) for row in script_rows if _provenance(row)}
     made_drafts = made_variants(script_rows)
+    # Useful drafts become orders, so a round whose last order is from an earlier day has been screened.
+    today, order_days = datetime.now().date(), {}
+    for job in job_rows:
+        pair, day = _provenance(by_script.get(job.get("script_id")) or {}), _local_day(job.get("created_at"))
+        if pair and day and not job.get("archived"):
+            order_days[pair] = max(day, order_days.get(pair, day))
     result = []
 
     def make(identifier, row, kind, related_scripts, related_tasks, production_ids, state):
@@ -431,8 +445,10 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
         else:
             destination = _hash("production", row["id"], step)
         record_links = []
+        # A deleted task leaves its scripts and orders behind; there is nothing left to open.
         for task_id in related_tasks:
-            record_links.append(_link("协作记录", _hash("ai", task_id)))
+            if task_id in by_task:
+                record_links.append(_link("协作记录", _hash("ai", task_id)))
         for script in related_scripts:
             record_links.append(_link(f"采用稿版本详情 · 第 {script.get('version', 1)} 版", _hash("content", script["id"])))
         if production_ids:
@@ -514,7 +530,8 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
             "reviewed": ("reviewed", "已复盘", "查看复盘关联", "", False, True),
             "filmed": ("filmed", "已拍摄", "继续制作", "", True, False),
             "archived": ("archived", "已归档", "查看历史版本", "", False, True),
-        }.get(status, ("adopted", "待制作", "开始制作", "", True, False))
+        # Not a to-do: what is worth making gets an order, the rest of the saved drafts just wait in 全部.
+        }.get(status, ("adopted", "待制作", "开始制作", "", False, False))
         make(f"script:{family}", latest, "script", versions, related_tasks, [], state)
         # Never merged or settled: a script sharing a title with existing orders only says so, for the user to judge.
         # Orders made from an earlier version of this same script are its own history, not another script.
@@ -540,8 +557,9 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
                         row.get("latest_round_id") or row.get("round_id"))
         linked = any(pair[0] == task_id for pair in adopted_pairs)
         new_candidate = bool(latest_round and (task_id, latest_round) not in adopted_pairs)
-        progress = variant_progress(row, latest_round, made_drafts.get((task_id, latest_round), set())) if writing else None
-        owed = progress["to_make"] if progress and disposition in {"pending_selection", "adopted"} else 0
+        progress = variant_progress(row, latest_round, made_here(made_drafts, task_id, latest_round, row.get("latest_round_chain"))) if writing else None
+        owed = progress["to_make"] if progress and disposition in {"pending_selection", "adopted", "finished"} else 0
+        screened = writing and disposition in {"pending_selection", "needs_revision"} and order_days.get((task_id, latest_round), today) < today
         if linked and not row.get("archived") and disposition not in {"needs_revision", "finished"} and status not in {"running", "queued", "failed", "interrupted"} and not new_candidate and not owed:
             continue
         if not writing:
@@ -557,10 +575,10 @@ def build_content_items(tasks, scripts, jobs, management=None, detached=False, v
                 state = (status or "unknown", {"failed": f"{result_kind}失败", "interrupted": f"{result_kind}已中断", "cancelled": f"{result_kind}已停止"}.get(status, "待处理"), f"查看并继续{result_kind}", "", True, False)
         elif status in {"running", "queued"}:
             state = (status, "生成中" if status == "running" else "排队中", "查看生成进度", "", False, False)
-        elif disposition == "finished":
-            state = ("finished", "已完结", "查看协作记录", "", False, True)
         elif owed:
             state = ("pending_selection", f"还有 {owed} 条要做", "去开始制作", "", True, False)
+        elif disposition == "finished" or screened:
+            state = ("finished", "已完结", "查看协作记录", "", False, True)
         elif disposition in {"adopted", "abandoned"}:
             state = (disposition, "已采纳" if disposition == "adopted" else "已放弃", "查看协作记录", "", False, True)
         elif disposition == "needs_revision":

@@ -52,6 +52,7 @@ def run(config_path):
         raise TransferError("工作台服务正在启动或暂时无法连接，本次未尝试离线复制；下次可运行时会补备份。", 409)
     try:
         service = DataTransfer(config["skill_root"], config["runtime_root"], config["app_root"])
+        service.manager.recover_interrupted_restores()
         service.due_backup()
     finally:
         lease.close()

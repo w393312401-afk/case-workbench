@@ -11,6 +11,7 @@ import threading
 import time
 
 from codex_bridge import BridgeCancelled
+from desktop_windows import foreground_window
 from elevenlabs_client import VoiceError
 
 WORKER = Path(__file__).resolve().parent / "resolve_worker.py"
@@ -73,10 +74,10 @@ def resolve_process_running(image="resolve.exe"):
         return None
 
 
-def resolve_window_ready(image="resolve.exe"):
-    """Whether Resolve's main window is up: its title then reads "DaVinci Resolve ... - <project>"."""
+def _resolve_main_window(image):
+    """Return the main project window, zero if absent, or None when detection is unavailable."""
     if os.name != "nt":
-        return True
+        return None
     import ctypes
     from ctypes import wintypes
 
@@ -87,7 +88,7 @@ def resolve_window_ready(image="resolve.exe"):
         kernel32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
         kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
         user32.IsWindowVisible.argtypes = user32.GetWindowTextLengthW.argtypes = (wintypes.HWND,)
-        user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+        user32.GetClassNameW.argtypes = user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
         user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
         found = []
 
@@ -107,67 +108,26 @@ def resolve_window_ready(image="resolve.exe"):
                                 found.append(hwnd)
                         finally:
                             kernel32.CloseHandle(handle)
+                    elif image == "resolve.exe" and ctypes.get_last_error() == 5:
+                        # Some desktops allow window queries but deny process inspection.
+                        window_class = ctypes.create_unicode_buffer(128)
+                        user32.GetClassNameW(hwnd, window_class, len(window_class))
+                        if window_class.value.startswith("Qt") and window_class.value.endswith("QWindowIcon"):
+                            found.append(hwnd)
             return True
 
         user32.EnumWindows(visit, 0)
-        return bool(found)
+        return found[0] if found else 0
     except (OSError, AttributeError, ctypes.ArgumentError):
-        return True
+        return None
+
+
+def resolve_window_ready(image="resolve.exe"):
+    return _resolve_main_window(image) != 0
 
 
 def focus_resolve_window(image="resolve.exe"):
-    """Bring the main Resolve window to the foreground; best effort, returns whether a window was raised."""
-    if os.name != "nt":
-        return False
-    import ctypes
-    from ctypes import wintypes
-
-    try:
-        user32, kernel32 = ctypes.WinDLL("user32", use_last_error=True), ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        kernel32.QueryFullProcessImageNameW.argtypes = (wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
-        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-        user32.GetWindowTextLengthW.argtypes = user32.IsWindowVisible.argtypes = user32.IsIconic.argtypes = (wintypes.HWND,)
-        user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
-        user32.GetWindow.argtypes = (wintypes.HWND, wintypes.UINT)
-        user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
-        user32.SetForegroundWindow.argtypes = user32.BringWindowToTop.argtypes = (wintypes.HWND,)
-        user32.keybd_event.argtypes = (wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t)
-        found = []
-
-        def is_resolve(pid):
-            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-            if not handle:
-                return False
-            try:
-                buffer, size = ctypes.create_unicode_buffer(520), wintypes.DWORD(520)
-                return bool(kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size))) and buffer.value.lower().endswith("\\" + image)
-            finally:
-                kernel32.CloseHandle(handle)
-
-        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-        def visit(hwnd, _):
-            if user32.IsWindowVisible(hwnd) and not user32.GetWindow(hwnd, 4) and user32.GetWindowTextLengthW(hwnd):  # GW_OWNER
-                pid = wintypes.DWORD()
-                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if is_resolve(pid.value):
-                    found.append(hwnd)
-            return True
-
-        user32.EnumWindows(visit, 0)
-        if not found:
-            return False
-        hwnd = found[0]
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        # A tap on Alt lets a background process take the foreground.
-        user32.keybd_event(0x12, 0, 0, 0)
-        user32.keybd_event(0x12, 0, 2, 0)
-        user32.BringWindowToTop(hwnd)
-        return bool(user32.SetForegroundWindow(hwnd))
-    except (OSError, AttributeError, ctypes.ArgumentError):
-        return False
+    return foreground_window(_resolve_main_window(image))
 
 
 def open_resolve():
@@ -292,18 +252,21 @@ class ResolveBridge:
                 continue
         raise VoiceError(504, "已替你打开达芬奇，但等了 3 分钟还没连上。请确认它已启动，并在偏好设置 → 系统 → 常规里把“外部脚本使用”设为“本地”。")
 
-    def run(self, command, payload=None, timeout=180, held=False):
-        """`held` means the caller already holds the lock, as a running editing task does for its whole run."""
+    def run(self, command, payload=None, timeout=180, held=False, launch=True):
+        """`held` means the caller already holds the lock, as a running editing task does for its whole run.
+
+        `launch=False` never starts a closed DaVinci: the call then simply fails, for clean-up steps that are optional."""
         if not held and not self.lock.acquire(blocking=False):
             raise VoiceError(409, "达芬奇正在执行另一项工作台操作（可能是 AI 剪辑），请完成后再试。")
         try:
-            self._open_if_closed()
+            if launch:
+                self._open_if_closed()
             result = self._call(command, payload, timeout)
         finally:
             if not held:
                 self.lock.release()
         if not result.get("ok"):
             raise VoiceError(409, result.get("error") or "达芬奇操作没有完成。")
-        if command == "open" and self.runner is subprocess.run:
-            focus_resolve_window()
+        if command == "open" and os.name == "nt" and self.runner is subprocess.run and not focus_resolve_window():
+            raise VoiceError(409, "时间线已在达芬奇中打开，但窗口未能切到前台。请从任务栏切换到达芬奇。")
         return result

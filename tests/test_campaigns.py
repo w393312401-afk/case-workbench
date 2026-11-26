@@ -38,7 +38,24 @@ class CampaignStoreTests(unittest.TestCase):
         checked = {key: fall[key] for key in ("id", "name", "start", "end", "confidence", "source_label", "source_url", "note")}
         self.store.mutate({"action": "save", "revision": self.store.public()["revision"], "campaign": {**checked, "verified": True}})
         self.assertEqual(names(date(2026, 10, 10)), {fall["name"]: "running"})
-        self.assertEqual(set(self.store.for_writing(date(2026, 10, 10))[0]), {"name", "start", "end", "status"})
+        self.assertEqual(set(self.store.for_writing(date(2026, 10, 10))[0]), {"name", "start", "end", "status", "body_cta"})
+        cta = lambda day: {row["name"]: row["body_cta"] for row in self.store.for_writing(day)}
+        self.assertEqual(cta(date(2026, 11, 5)), {bfcm: False}, "Six days before it starts the script still closes on its everyday line")
+        self.assertEqual(cta(date(2026, 11, 6)), {bfcm: True})
+        self.assertEqual(cta(date(2026, 11, 30)), {bfcm: True})
+
+    def test_body_cta_window_includes_five_days_before_and_ends_with_campaign(self):
+        expected = [(date(2026, 11, 5), "upcoming", False),
+                    (date(2026, 11, 6), "upcoming", True),
+                    (date(2026, 11, 10), "upcoming", True),
+                    (date(2026, 11, 11), "running", True),
+                    (date(2026, 11, 30), "running", True)]
+        for today, status, body_cta in expected:
+            with self.subTest(today=today):
+                campaign = next(row for row in self.store.for_writing(today) if row["name"].startswith("Black Friday"))
+                self.assertEqual((campaign["status"], campaign["body_cta"]), (status, body_cta))
+        self.assertFalse(any(row["name"].startswith("Black Friday")
+                             for row in self.store.for_writing(date(2026, 12, 1))))
 
     def test_builtin_2026_nodes_say_how_well_their_dates_are_backed(self):
         result = self.store.public()

@@ -1,6 +1,9 @@
 """The photo window imports the selected timeline, reports progress and permits a retry after failure."""
+import io
 from pathlib import Path
 import unittest
+
+from PIL import Image
 
 from playwright.sync_api import sync_playwright
 
@@ -30,8 +33,9 @@ class PhotoCarouselBrowserTests(unittest.TestCase):
         self.page.on("pageerror", lambda error: self.errors.append(str(error)))
         self.addCleanup(lambda: self.assertEqual([], self.errors))
         self.page.goto("http://127.0.0.1:43219/photo-test")
-        for name in ("style.css", "buttons.css", "production.css", "photo-carousel.css"):
+        for name in ("style.css", "buttons.css", "production.css", "reviews-layout.css", "photo-carousel.css"):
             self.page.add_style_tag(path=str(STATIC / name))
+        self.page.add_script_tag(path=str(STATIC / "review-zh.js"))
         self.page.add_script_tag(path=str(STATIC / "photo-carousel.js"))
         self.page.evaluate("""async () => {
           window.calls = [];window.detail = {exists:false};window.toast = () => {};
@@ -53,6 +57,13 @@ class PhotoCarouselBrowserTests(unittest.TestCase):
         self.page.locator('[data-photo-open]').click()
         return self.page.locator('dialog.photo-carousel-dialog')
 
+    def step(self, dialog, key):
+        dialog.locator(f'[data-photo-tab="{key}"]').click()
+        dialog.locator(f'[data-photo-tab="{key}"][aria-selected="true"]').wait_for()
+
+    def current_step(self, dialog):
+        return dialog.locator('[data-photo-tab][aria-selected="true"]').get_attribute('data-photo-tab')
+
     def ready(self):
         self.page.evaluate("""() => {window.detail = {exists:true,id:'PHS-111111111111',video:{name:'Second-无字版.mp4',duration:3},
           frames_job:{status:'done',count:15},works:[],versions:[],ai:{status:'idle'},
@@ -68,10 +79,15 @@ class PhotoCarouselBrowserTests(unittest.TestCase):
         self.assertEqual(dialog.locator('[data-photo-video]').count(), 0)
         self.assertEqual(self.page.evaluate('window.calls'), [{
             'path':'/api/production/jobs/PRD-111111111111/photo-set/from-resolve', 'body':{'timeline_uid':'two'}}])
+        self.assertEqual(self.current_step(dialog), 'video')
+        self.assertTrue(dialog.locator('[data-photo-tab="plan"]').is_disabled())
         self.ready()
-        dialog.locator('[data-photo-resolve-progress]', has_text='字幕和屏显轨已恢复').wait_for()
+        dialog.locator('[data-photo-plan]').wait_for()  # done importing moves on to 选版 by itself
+        self.assertEqual(self.current_step(dialog), 'plan')
+        self.assertIn('done', dialog.locator('[data-photo-tab="video"]').get_attribute('class'))
+        self.step(dialog, 'video')
+        self.assertIn('字幕和屏显轨已恢复', dialog.locator('[data-photo-resolve-progress]').inner_text())
         self.assertIn('Second-无字版.mp4', dialog.inner_text())
-        self.assertTrue(dialog.locator('[data-photo-plan]').is_visible())
         self.assertTrue(dialog.locator('[data-photo-resolve]').is_enabled())
         self.assertEqual(len(self.page.evaluate('window.calls')), 1)
 
@@ -172,11 +188,12 @@ class PhotoCarouselBrowserTests(unittest.TestCase):
         self.assertTrue(dialog.locator('[data-photo-resolve]').is_disabled())
         self.assertEqual(len(self.page.evaluate('window.calls')), 1)
         self.ready()
-        dialog.locator('[data-photo-resolve-progress]', has_text='字幕和屏显轨已恢复').wait_for()
+        dialog.locator('[data-photo-plan]').wait_for()
 
     def test_failure_keeps_previous_video_and_retry_available(self):
         self.ready()
         dialog = self.open()
+        self.step(dialog, 'video')
         dialog.locator('[data-photo-resolve]').click()
         self.page.evaluate("window.detail.resolve_import = {status:'failed',error:'素材离线，请重新链接后重试。'}")
         dialog.locator('[data-photo-resolve-error]', has_text='素材离线').wait_for()
@@ -233,7 +250,7 @@ class PhotoCarouselBrowserTests(unittest.TestCase):
         self.assertIn('换第 2 格', dialog.locator('.photo-control').nth(1).inner_text())
         self.assertIn('is-active', dialog.locator('[data-photo-cell="2"]').get_attribute('class'))
         self.assertEqual(self.page.evaluate('window.calls'), [])  # selecting a cell saves nothing
-        self.assertIn('?cell=2', dialog.locator('[data-photo-cell="2"] img').get_attribute('src'))
+        self.assertIn('/frame/9.jpg?full=1', dialog.locator('[data-photo-cell="2"] img').get_attribute('src'))  # cell 2's own frame
         dialog.locator('[data-photo-frame="0.4"]').click()
         dialog.locator('[data-photo-layout="grid"]').click()
         dialog.locator('[data-photo-cell="4"]').wait_for()
@@ -270,6 +287,102 @@ class PhotoCarouselBrowserTests(unittest.TestCase):
             self.page.emulate_media(color_scheme=scheme)
             self.page.set_viewport_size({'width':width,'height':850})
             self.assertTrue(dialog.locator('[data-photo-layout="grid"]').is_visible())
+            self.assertTrue(dialog.evaluate('(el) => el.scrollWidth <= el.clientWidth'))
+
+    def editable(self, delay=0):
+        """Three plain slides on real pictures (a 90×160 frame), and an api that applies each slide edit, after `delay` ms."""
+        self.collage()
+        jpeg = io.BytesIO()
+        Image.new("RGB", (90, 160), (40, 120, 200)).save(jpeg, "JPEG")
+        self.page.route("**/frame/**", lambda route: route.fulfill(content_type="image/jpeg", body=jpeg.getvalue()))
+        self.page.evaluate("""(delay) => {
+          window.detail.work.slides = ['ONE','TWO','THREE'].map(t => ({...window.detail.work.slides[1],title_lines:[t]}));
+          const old = window.api;
+          window.api = async (path,options) => {
+            const m = path.match(/slides.([0-9]+)$/);
+            if (m && options) {
+              window.calls.push({path,body:structuredClone(options.body)});
+              await new Promise(done => setTimeout(done,delay));
+              const slide = window.detail.work.slides[Number(m[1]) - 1], {cell,...change} = options.body;
+              Object.assign(slide,change);
+              if (slide.zoom === 1) delete slide.zoom;
+              window.detail.updated_at = String(Math.random());
+              return structuredClone(window.detail);
+            }
+            return old(path,options);
+          };
+          const root = document.querySelector('#publication');
+          root.innerHTML = PhotoCarousel.markup('two');
+          return PhotoCarousel.bind(root,{job:window.job,api:window.api,uid:'two'});
+        }""", delay)
+
+    def test_an_edit_asks_again_only_for_the_slide_it_changed(self):
+        self.editable()
+        dialog = self.open()
+        dialog.locator('[data-photo-select="3"]').wait_for()
+        strip = lambda: dialog.locator('[data-photo-strip] img').evaluate_all('(els) => els.map(el => el.getAttribute("src"))')
+        before = strip()
+        self.assertEqual(len(set(before)), 3)
+        dialog.locator('[data-photo-select="2"]').click()
+        dialog.locator('[data-photo-position="split"]').click()
+        dialog.locator('[data-photo-position="split"].is-current').wait_for()
+        after = strip()
+        self.assertEqual((after[0], after[2]), (before[0], before[2]))  # untouched slides keep their address: no new request
+        self.assertNotEqual(after[1], before[1])
+        self.assertIn('w=540', dialog.locator('.photo-preview').get_attribute('src'))
+
+    def test_frame_clicks_while_saving_show_at_once_and_the_last_one_is_kept(self):
+        self.editable(delay=400)
+        dialog = self.open()
+        dialog.locator('[data-photo-frame="0.4"]').wait_for()
+        dialog.locator('[data-photo-frame="0.4"]').click()
+        crop = dialog.locator('[data-photo-crop]')
+        self.assertIn('is-pending', crop.get_attribute('class'))  # the picked frame is up before the save returns
+        self.assertIn('/frame/3.jpg', crop.locator('.photo-crop-raw').get_attribute('src'))
+        self.assertNotIn('is-busy', dialog.locator('[data-photo-body]').get_attribute('class'))
+        dialog.locator('[data-photo-frame="0.8"]').click()
+        dialog.locator('[data-photo-frame="1"]').click()
+        self.page.wait_for_function('window.calls.length === 2')
+        self.page.wait_for_timeout(500)
+        self.assertEqual([call['body'] for call in self.page.evaluate('window.calls')],
+                         [{'image':{'kind':'frame','t':0.4}}, {'image':{'kind':'frame','t':1}}])
+        dialog.locator('[data-photo-frame="1"].is-current').wait_for()
+        self.assertIn('视频 1 秒', dialog.locator('.photo-editor h3').inner_text())
+
+    def test_zoom_by_slider_wheel_and_reset_scales_the_picture_and_saves(self):
+        self.editable()
+        dialog = self.open()
+        crop = dialog.locator('[data-photo-crop]')
+        raw = crop.locator('.photo-crop-raw')
+        self.page.wait_for_function('document.querySelector(".photo-crop-raw").naturalWidth > 0')
+        width = lambda: raw.evaluate('(el) => el.getBoundingClientRect().width')
+        cell = crop.bounding_box()['width']
+        self.assertAlmostEqual(width(), cell, delta=2)  # covers the 3:4 window at 1×
+        self.assertTrue(dialog.locator('[data-photo-zoom-reset]').is_disabled())
+        dialog.locator('[data-photo-zoom]').fill('2')
+        dialog.locator('[data-photo-zoom-value]', has_text='2.0×').wait_for()
+        self.page.wait_for_function('window.calls.length === 1')
+        self.assertEqual(self.page.evaluate('window.calls[0]'), {'path':'/api/photo-sets/PHS-111111111111/slides/1', 'body':{'zoom':2}})
+        dialog.locator('.photo-editor h3', has_text='放大 2.0×').wait_for()
+        self.page.wait_for_function('document.querySelector(".photo-crop-raw").naturalWidth > 0')
+        self.assertAlmostEqual(width(), 2 * cell, delta=3)
+        crop.hover()
+        self.page.mouse.wheel(0, -240)
+        self.page.wait_for_function('window.calls.length === 2')
+        self.assertGreater(self.page.evaluate('window.calls[1].body.zoom'), 2)
+        self.assertNotIn('crop_x', self.page.evaluate('window.calls[1].body'))
+        dialog.locator('[data-photo-zoom-reset]').click()
+        self.page.wait_for_function('window.calls.length === 3')
+        self.assertEqual(self.page.evaluate('window.calls[2].body'), {'zoom':1})
+        dialog.locator('[data-photo-zoom-reset][disabled]').wait_for()
+        crop.focus()
+        self.page.keyboard.press('+')
+        self.page.wait_for_function('window.calls.length === 4')
+        self.assertEqual(self.page.evaluate('window.calls[3].body'), {'zoom':1.1})
+        for scheme, size in (('light', 1280), ('dark', 1280), ('dark', 390)):
+            self.page.emulate_media(color_scheme=scheme)
+            self.page.set_viewport_size({'width':size,'height':850})
+            self.assertTrue(dialog.locator('[data-photo-zoom]').is_visible())
             self.assertTrue(dialog.evaluate('(el) => el.scrollWidth <= el.clientWidth'))
 
     def arrangeable(self):
@@ -436,13 +549,63 @@ class PhotoCarouselBrowserTests(unittest.TestCase):
 
     def test_version_cards_name_their_writing_and_the_editor_says_second_line(self):
         self.collage()
-        self.page.evaluate("""() => {window.detail.writings = {self:'达人自述',qa:'顾虑问答',list:'理由清单'};
+        self.page.evaluate("""() => {window.detail.writings = {self:'达人自述',kit:'整套配置',qa:'顾虑问答',list:'理由清单'};
           window.detail.versions = [{key:'A',writing:'self',name_zh:'进阶',buyer_zh:'有磨石的人',slides:[{title_lines:['I FOUND IT'],body_lines:['One stone gets it sharp.'],frame_time:0.2}]},
-                                    {key:'B',writing:'qa',name_zh:'问答',buyer_zh:'有磨石的人',slides:[{title_lines:['WHY?'],body_lines:[],frame_time:0.2}]}];}""")
+                                    {key:'B',writing:'kit',name_zh:'整套',buyer_zh:'爱刀的人',slides:[{title_lines:['THE FULL KIT.'],body_lines:[],frame_time:0.2}]}];}""")
         dialog = self.open()
+        self.step(dialog, 'plan')
         dialog.locator('.photo-version').first.wait_for()
-        self.assertEqual(dialog.locator('.photo-chip.is-writing').all_inner_texts(), ['达人自述', '顾虑问答'])
+        self.assertEqual(dialog.locator('.photo-chip.is-writing').all_inner_texts(), ['达人自述', '整套配置'])
+        self.step(dialog, 'make')
         self.assertIn('第二行', dialog.locator('label:has([data-photo-body-lines])').inner_text())
+
+    def test_backup_frames_swap_in_one_click_and_final_step_has_no_check_list(self):
+        self.collage()
+        self.page.evaluate("""() => {const s = window.detail.work.slides;
+          Object.assign(s[0],{layout:'single',cells:[],alternates:[0.2,1.2,2]});}""")
+        dialog = self.open()
+        row = dialog.locator('.photo-alternates')
+        row.wait_for()
+        self.assertEqual(row.locator('[data-photo-frame]').count(), 3)
+        self.assertIn('is-current', row.locator('[data-photo-frame="0.2"]').get_attribute('class'))
+        row.locator('[data-photo-frame="1.2"]').click()
+        self.assertEqual(self.page.evaluate('window.calls')[-1],
+                         {'path':'/api/photo-sets/PHS-111111111111/slides/1', 'body':{'image':{'kind':'frame','t':1.2}}})
+        self.step(dialog, 'final')
+        dialog.locator('[data-photo-export]').wait_for()
+        self.assertEqual(dialog.locator('[data-photo-checks]').count(), 0)  # pre-export reminder removed 2026-11-25
+        self.assertNotIn('导出前', dialog.locator('.photo-step').last.inner_text())
+        self.step(dialog, 'make')
+        dialog.locator('.photo-editor').first.wait_for()
+        dialog.locator('[data-photo-select="2"]').click()
+        self.assertIn('第 2 张', dialog.locator('.photo-editor h3').inner_text())
+        self.assertEqual(dialog.locator('.photo-alternates').count(), 0)  # slide 2 has no backups
+        self.page.set_viewport_size({'width':390,'height':850})
+        self.assertTrue(dialog.evaluate('(el) => el.scrollWidth <= el.clientWidth'))
+
+    def test_plan_has_no_switch_for_more_writings(self):
+        self.ready()
+        dialog = self.open()
+        dialog.locator('[data-photo-plan]').wait_for()
+        self.assertEqual(dialog.locator('[data-photo-plan]').inner_text(), 'AI 出逐张表')
+        self.assertEqual(dialog.locator('[data-photo-all]').count(), 0)  # both writings are always written
+        dialog.locator('[data-photo-plan]').click()
+        self.page.wait_for_function("() => window.calls.some(call => call.path.endsWith('/plan'))")
+        call = [c for c in self.page.evaluate('window.calls') if c['path'].endswith('/plan')][-1]
+        self.assertNotIn('all', call['body'])
+
+    def test_plan_language_starts_from_the_set_and_goes_with_the_plan(self):
+        self.ready()
+        self.page.evaluate("""() => Object.assign(window.detail,{market:'uk',markets:[{id:'us',label:'美国 · 英语'},{id:'uk',label:'英国 · 英语'},{id:'de',label:'德国 · 德语'}]})""")
+        dialog = self.open()
+        select = dialog.locator('[data-photo-market]')
+        select.wait_for()
+        self.assertEqual(select.input_value(), 'uk')
+        select.select_option('de')
+        dialog.locator('[data-photo-plan]').click()
+        self.page.wait_for_function("() => window.calls.some(call => call.path.endsWith('/plan'))")
+        call = [c for c in self.page.evaluate('window.calls') if c['path'].endswith('/plan')][-1]
+        self.assertEqual(call['body']['market'], 'de')
 
     def test_publish_copy_is_the_video_style_list_and_copies_english_or_both(self):
         self.collage()
@@ -450,6 +613,7 @@ class PhotoCarouselBrowserTests(unittest.TestCase):
           titles_zh:['我找到了进阶方案',''],caption_en:'One stone gets it sharp.\\nThis gets the finish.',caption_zh:'一块磨石能磨利。'});
           window.copied = [];window.copyText = (text,message) => window.copied.push([text,message]);}""")
         dialog = self.open()
+        self.step(dialog, 'final')
         dialog.locator('[data-photo-copy-title="0"]').wait_for()
         self.assertIn('我找到了进阶方案', dialog.locator('[data-photo-copy-title="0"]').inner_text())
         dialog.locator('[data-photo-copy-title="1"]').click()
@@ -492,6 +656,157 @@ class PhotoCarouselBrowserTests(unittest.TestCase):
             self.page.set_viewport_size({'width':width,'height':850})
             self.assertTrue(dialog.locator('[data-photo-pick]').is_visible())
             self.assertTrue(dialog.evaluate('(el) => el.scrollWidth <= el.clientWidth'))
+
+    def test_window_is_a_right_drawer_that_closes_from_the_page_beside_it(self):
+        dialog = self.open()
+        dialog.locator('[data-photo-resolve]').wait_for()
+        self.page.wait_for_function("() => Math.round(document.querySelector('dialog.photo-carousel-dialog').getBoundingClientRect().right) === innerWidth")  # done sliding in
+        box = dialog.bounding_box()
+        self.assertAlmostEqual(box['x'] + box['width'], 1280, delta=1)
+        self.assertAlmostEqual(box['width'], 960, delta=1)
+        self.assertAlmostEqual(box['height'], 850, delta=1)
+        self.page.mouse.click(100, 400)  # the dimmed page beside the drawer
+        self.assertEqual(self.page.locator('dialog.photo-carousel-dialog').count(), 0)
+        dialog = self.open()
+        dialog.locator('[data-photo-resolve]').click()  # clicks inside keep it open
+        self.assertEqual(self.page.locator('dialog.photo-carousel-dialog').count(), 1)
+        self.page.keyboard.press('Escape')
+        self.assertEqual(self.page.locator('dialog.photo-carousel-dialog').count(), 0)
+
+    def test_opening_another_replaces_the_drawer(self):
+        self.open().locator('[data-photo-resolve]').wait_for()
+        self.page.evaluate("() => PhotoCarousel.open({job:window.job,api:window.api,uid:'one',timelineName:'First'})")
+        self.assertEqual(self.page.locator('dialog.photo-carousel-dialog').count(), 1)
+        self.assertEqual(self.page.locator('dialog.photo-carousel-dialog h2').inner_text(), 'First')
+
+    def test_editor_columns_follow_the_drawer_width(self):
+        self.collage()
+        dialog = self.open()
+        dialog.locator('[data-photo-crop]').wait_for()
+        columns = lambda: dialog.locator('.photo-editor-grid').evaluate('(el) => getComputedStyle(el).gridTemplateColumns.split(" ").length')
+        self.assertEqual(columns(), 2)
+        dialog.evaluate("(el) => el.style.setProperty('--drawer-width', '600px')")
+        self.page.wait_for_function("() => getComputedStyle(document.querySelector('.photo-editor-grid')).gridTemplateColumns.split(' ').length === 1")
+        self.assertTrue(dialog.evaluate('(el) => el.scrollWidth <= el.clientWidth'))
+
+
+    def test_unfinalize_and_delete_ask_first_inside_the_drawer(self):
+        self.collage()
+        self.page.evaluate("""() => {
+          Object.assign(window.detail,{can_delete:true,works:[{key:'A',name_zh:'对比',status:'done',exports:1,openable:true}]});
+          Object.assign(window.detail.work,{status:'done',exports:[{name:'PVR-20261115-A对比',at:'x'}]});
+          const original = window.api;
+          window.api = async (path,options) => {
+            if (path.endsWith('/unfinalize')) {
+              window.calls.push({path,body:structuredClone(options.body)});
+              if (options.body.preview) return {key:'A',exports:1,files:24,bytes:3145728,notion_page:true};
+              Object.assign(window.detail.work,{status:'doing',exports:[]});
+              window.detail.works[0] = {...window.detail.works[0],status:'doing',exports:0};
+              return {...structuredClone(window.detail),warnings:[]};
+            }
+            if (path.endsWith('/photo-delete')) {
+              window.calls.push({path,body:structuredClone(options.body)});
+              if (options.body.preview) return {versions:1,exports:0,files:30,bytes:2097152,notion_pages:0};
+              window.detail = {exists:false};
+              return {deleted:true,warnings:[]};
+            }
+            return original(path,options);
+          };
+          const root = document.querySelector('#publication');
+          root.innerHTML = PhotoCarousel.markup('two');
+          return PhotoCarousel.bind(root,{job:window.job,api:window.api,uid:'two'});
+        }""")
+        dialog = self.open()
+        undo = dialog.locator('[data-photo-unfinalize]')
+        undo.wait_for()
+        self.assertTrue(dialog.locator('[data-photo-delete-all]').is_visible())
+        undo.click()
+        confirm = dialog.locator('.photo-delete-confirm')
+        confirm.wait_for()
+        for piece in ('撤销第 A 版定稿', '1 个成品文件夹', '24 个文件', '3 MB', '不能恢复', 'Notion 上的页面不会删'):
+            self.assertIn(piece, confirm.inner_text())
+        confirm.locator('[data-photo-unfinalize-cancel]').click()
+        self.assertEqual(dialog.locator('.photo-delete-confirm').count(), 0)
+        undo.click()
+        dialog.locator('[data-photo-unfinalize-confirm]').click()
+        dialog.locator('[data-photo-tab="make"][aria-selected="true"]').wait_for()  # back to being made, so back to 制作
+        self.step(dialog, 'final')
+        dialog.locator('[data-photo-export]', has_text='定稿导出').wait_for()
+        self.assertEqual(dialog.locator('[data-photo-unfinalize]').count(), 0)
+        self.assertEqual([call['body'] for call in self.page.evaluate('window.calls') if call['path'].endswith('/unfinalize')],
+                         [{'key':'A','preview':True}, {'key':'A','preview':True}, {'key':'A'}])
+        dialog.locator('[data-photo-delete-all]').click()
+        confirm = dialog.locator('.photo-delete-confirm')
+        confirm.wait_for()
+        self.assertIn('30 个文件', confirm.inner_text())
+        self.assertTrue(confirm.evaluate('(el) => el.getBoundingClientRect().left') >= dialog.evaluate('(el) => el.getBoundingClientRect().left'))
+        confirm.locator('[data-photo-delete-confirm]').click()
+        dialog.wait_for(state='detached')
+        self.assertEqual(self.page.evaluate('window.calls.at(-1).body'), {'timeline':'two'})
+        self.page.locator('[data-photo-carousel] [data-photo-open]', has_text='做图文').wait_for()
+
+    def test_steps_land_where_the_set_is_and_follow_it_forward(self):
+        self.page.evaluate("""() => {
+          const version = (key,recommended) => ({key,name_zh:'版'+key,buyer_zh:'有磨石的人',recommended,slides:[{title_lines:['HI'],body_lines:[],frame_time:0.2}]});
+          window.detail = {exists:true,id:'PHS-111111111111',video:{name:'v.mp4',duration:2},frames_job:{status:'done',count:10},ai:{status:'done'},
+            versions:[version('A',false),version('B',true)],works:[],updated_at:'x',styles:{bar:'黑色字条'},positions:{},sizes:{},layouts:{single:'单图'}};
+          window.api = async (path,options) => {
+            if (path.endsWith('/frames')) return {items:[]};
+            if (options) {
+              window.calls.push({path,body:structuredClone(options.body)});
+              if (path.endsWith('/choose')) Object.assign(window.detail,{works:[{key:'B',name_zh:'版B',status:'doing',exports:0,openable:true}],
+                work:{key:'B',name_zh:'版B',status:'doing',style:'bar',exports:[],slides:[{title_lines:['HI'],body_lines:[],image:{kind:'frame',t:0.2},crop_x:.5,crop_y:.5}]}});
+              if (path.endsWith('/export')) {Object.assign(window.detail.work,{status:'done',exports:[{name:'PVR-B'}]});window.detail.works[0].status = 'done';
+                return {...structuredClone(window.detail),export:{name:'PVR-B'}};}
+            }
+            return structuredClone(window.detail);
+          };
+          const root = document.querySelector('#publication');
+          root.innerHTML = PhotoCarousel.markup('two');
+          return PhotoCarousel.bind(root,{job:window.job,api:window.api,uid:'two'});
+        }""")
+        dialog = self.open()
+        dialog.locator('.photo-version').first.wait_for()
+        self.assertEqual(self.current_step(dialog), 'plan')  # video in, nothing chosen yet
+        self.assertEqual(dialog.locator('[data-photo-tab]').all_inner_texts()[1].split('\n')[:2], ['2', '选版'])
+        for key in ('make', 'final'):
+            tab = dialog.locator(f'[data-photo-tab="{key}"]')
+            self.assertTrue(tab.is_disabled())
+            self.assertEqual(tab.get_attribute('title'), '先在「选版」里选一版开始做')
+        self.assertEqual(dialog.locator('[data-photo-resolve]').count(), 0)  # one step at a time
+        dialog.locator('[data-photo-choose]').click()
+        dialog.locator('[data-photo-tab="make"][aria-selected="true"]').wait_for()  # choosing moves on to 制作
+        dialog.locator('.photo-editor').wait_for()
+        self.assertIn('B 版 · 1 张', dialog.locator('[data-photo-tab="make"]').inner_text())
+        self.assertIn('done', dialog.locator('[data-photo-tab="plan"]').get_attribute('class'))
+        dialog.locator('[data-photo-next="final"]').click()
+        dialog.locator('[data-photo-export]').click()
+        dialog.locator('[data-photo-export]', has_text='再导出一次').wait_for()
+        self.assertEqual(self.current_step(dialog), 'final')
+        self.assertIn('1/1 版已定稿', dialog.locator('[data-photo-tab="final"]').inner_text())
+        dialog.locator('[data-photo-tab="final"]').press('Home')  # arrow keys and Home/End move between open steps
+        self.assertEqual(self.current_step(dialog), 'video')
+        dialog.locator('[data-close]').click()
+        dialog = self.open()
+        dialog.locator('[data-photo-export]').wait_for()  # a finalized set opens on 定稿
+        self.assertEqual(self.current_step(dialog), 'final')
+
+    def test_step_bar_stays_pinned_and_finished_sets_can_still_move_between_steps(self):
+        self.collage()
+        self.page.evaluate("() => Object.assign(window.detail,{finished_at:'2026-11-08T12:00:00+00:00'})")
+        dialog = self.open()
+        dialog.locator('.photo-finished-strip').wait_for()
+        self.assertTrue(dialog.locator('[data-photo-undo]').is_disabled())
+        dialog.locator('[data-photo-body]').evaluate('(el) => el.scrollTop = el.scrollHeight')
+        bar, body = dialog.locator('.photo-steps').bounding_box(), dialog.locator('[data-photo-body]').bounding_box()
+        self.assertAlmostEqual(bar['y'], body['y'], delta=1)
+        self.assertGreater(bar['height'], 60)  # a long step must not squeeze the bar
+        self.step(dialog, 'final')
+        self.step(dialog, 'video')
+        self.assertTrue(dialog.locator('[data-photo-next="plan"]').count() == 0)
+        self.page.set_viewport_size({'width':390,'height':850})
+        self.assertTrue(dialog.evaluate('(el) => el.scrollWidth <= el.clientWidth'))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -20,6 +20,30 @@ POLARITIES = {"positive", "negative", "mixed", "unknown"}
 STATUSES = {"unverified", "user_reported", "source_checked"}
 INDEX_SCHEMA_VERSION = 4
 CONTENT_ORIGIN_LABELS = {"self_produced": "自制内容参考", "overseas_creator": "达人内容参考"}
+
+
+def search_values(text):
+    """The words a person can find a case by: every text and number in an index search field, without the JSON keys.
+
+    The stored search fields are JSON so the index keeps its shape; a substring search over them also hit field
+    names such as "title" or "conclusion" in every case."""
+    found = []
+
+    def walk(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, str):
+            if value.strip():
+                found.append(value)
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            found.append(str(value))
+
+    walk(json.loads(text))
+    return "\n".join(found)
 # Explicit aliases already used for this product. Do not infer a product from
 # a SKU mentioned in an accessory/compatibility label or from a case title.
 DIRECTION_PRODUCT_ALIASES = {

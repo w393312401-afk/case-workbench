@@ -30,11 +30,11 @@ ACTIVE_TASKS = {"queued", "running", "stopping"}
 # Business records that exist only on this machine; copied on every start.
 BACKUP_SOURCES = (("runtime_root", ("directions", "creation", "ai-tasks", "reviews", "revisions", "navigation-assignments.json",
                                     "production", "library", "performance", "evidence", "davinci-ledger",
-                                    "task-activity.sqlite", "ai-preferences.json")),
+                                    "task-activity.sqlite", "ai-preferences.json", "ai-kind-preferences.json", "hook-bank", "benchmark", "script-reviews")),
                   ("skill_root", ("cases", "references", "sources", "deleted_case_sources.json")))
 # These keep records next to gigabytes of media. Images, video and WAV (rebuilt from the MP3 take) stay with the
 # full backup in data_backup.py, as do caches and one-off database copies. MP3 takes are paid output and stay here.
-BACKUP_RECORDS_ONLY = frozenset({"production", "library", "performance", "evidence"})
+BACKUP_RECORDS_ONLY = frozenset({"production", "library", "performance", "evidence", "hook-bank"})
 BACKUP_MEDIA_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".m4v", ".webm", ".wav"})
 BACKUP_SKIP_NAMES = ("clip-cache", "thumb-cache", "public-exports", "tiering-*", "*.before-*", "*.lock", "*.tmp")
 BACKUP_KEEP = 14
@@ -278,10 +278,10 @@ def prune(folder, pattern, keep):
 
 
 def _deflate(entry):
-    """Compress one file with the same settings as ZipFile; zlib releases the GIL, so threads run side by side."""
+    """Compress one file quickly with deflate; zlib releases the GIL, so threads run side by side."""
     path, name = entry
     data = path.read_bytes()
-    compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -15)
+    compressor = zlib.compressobj(zlib.Z_BEST_SPEED, zlib.DEFLATED, -15)
     info = zipfile.ZipInfo.from_file(path, name)
     return info.date_time, info.external_attr, zlib.crc32(data), len(data), compressor.compress(data) + compressor.flush()
 
@@ -331,11 +331,19 @@ def backup_files(source):
         return [source]
     if not source.is_dir():
         return []
-    files = sorted(path for path in source.rglob("*") if path.is_file())
-    if source.name not in BACKUP_RECORDS_ONLY:
-        return files
-    return [path for path in files if path.suffix.casefold() not in BACKUP_MEDIA_SUFFIXES
-            and not any(fnmatch(part, pattern) for part in path.relative_to(source).parts for pattern in BACKUP_SKIP_NAMES)]
+    records_only = source.name in BACKUP_RECORDS_ONLY
+    found = []
+    for root, dirs, files in os.walk(source):
+        if records_only:
+            dirs[:] = [name for name in dirs if not any(fnmatch(name, pattern) for pattern in BACKUP_SKIP_NAMES)]
+        root_path = Path(root)
+        for name in files:
+            if records_only and (Path(name).suffix.casefold() in BACKUP_MEDIA_SUFFIXES
+                                 or any(fnmatch(name, pattern) for pattern in BACKUP_SKIP_NAMES)):
+                continue
+            found.append(root_path / name)
+    found.sort()
+    return found
 
 
 def archive_sizes(path):
@@ -421,15 +429,17 @@ def backup_business_data(root, config):
     return target
 
 
-def rotate_server_log(root):
-    log = root / "server.log"
+def rotate_server_log(root, name="server.log"):
+    """Also used for gateway.log, which had no limit and reached 42 MB by 2026-11-15."""
+    log = root / name
     if not log.is_file() or log.stat().st_size < LOG_LIMIT:
         return None
     folder = root / "archive" / "logs"
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / f"server-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    stem = Path(name).stem
+    target = folder / f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}.log"
     log.replace(target)
-    prune(folder, "server-*.log", LOG_KEEP)
+    prune(folder, f"{stem}-*.log", LOG_KEEP)
     return target
 
 
@@ -501,11 +511,13 @@ def task_host_status(root, config, host):
 
 def prepare_stopped_engine(root, config):
     """Only a stopped data owner can be copied into a coherent startup backup."""
+    from data_backup import BackupManager
     from data_lease import ServerLease
     lease = ServerLease(config["runtime_root"])
     if not lease.acquire():
         raise RuntimeError("后台任务服务仍占用数据，尚未启动第二个实例；请稍后再试。")
     try:
+        BackupManager(config["skill_root"], config["runtime_root"], root).recover_interrupted_restores()
         prepare_start(root, config)
     finally:
         lease.close()
@@ -587,7 +599,7 @@ def refresh_task_host_on_idle(root, config):
                     if error.code != 409:
                         raise
                     # A new job arrived after the read-only probe. The host keeps it and we wait.
-            time.sleep(2)
+            time.sleep(.5)
         wait_for_port_release(host["port"], timeout=30)
         wait_for_task_host_release(config)
         ensure_task_host(root, config, locked=True)
@@ -605,6 +617,76 @@ def wait_for_task_host_release(config, timeout=30):
         if time.monotonic() >= deadline:
             raise RuntimeError("原任务引擎仍在结束保存，尚未启动新实例；请稍后重试。")
         time.sleep(.1)
+
+
+class _NoControlRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+
+
+def local_control_opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoControlRedirect())
+
+
+def request_service_shutdown(url, token, expected_pid=None):
+    request = urllib.request.Request(url + "/api/service/shutdown", data=b"{}",
+                                     headers={"Content-Type": "application/json", "X-Workbench-Token": token})
+    try:
+        with local_control_opener().open(request, timeout=10) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as error:
+        try:
+            message = json.load(error).get("error")
+        except (ValueError, OSError):
+            message = None
+        raise RuntimeError(message or "服务暂时无法重启，请等待当前操作完成后重试。") from error
+    except (TimeoutError, urllib.error.URLError) as error:
+        timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
+        reason = "超时" if timed_out else "失败"
+        raise RuntimeError(f"等待旧服务关闭{reason}，尚未启动新实例。请稍后重新双击TK工作台。") from error
+    if not result.get("ok") or (expected_pid is not None and result.get("pid") != expected_pid):
+        raise RuntimeError("服务未确认关闭，尚未启动第二个实例。")
+
+
+def loopback_listener_pid(port):
+    """Use the Windows listener table when a gateway's launch arguments are unavailable."""
+    result = subprocess.run(["netstat.exe", "-ano", "-p", "tcp"], capture_output=True,
+                            timeout=5, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    address = f"127.0.0.1:{port}".encode("ascii")
+    for row in result.stdout.splitlines():
+        fields = row.split()
+        if len(fields) == 5 and fields[:3] == [b"TCP", address, b"0.0.0.0:0"] and fields[4].isdigit():
+            return int(fields[4])
+    return None
+
+
+def shutdown_registered_gateway(root, config, url):
+    """Only the actual listener paired with this installation's live task host may be adopted."""
+    host = task_host_manifest(root, config)
+    if not host:
+        return False
+    try:
+        with local_control_opener().open(url + "/api/service/status", timeout=5) as response:
+            body = response.read(65537)
+        if len(body) > 65536:
+            return False
+        status = json.loads(body)
+    except (OSError, ValueError):
+        return False
+    if (not isinstance(status, dict) or status.get("role") != "gateway"
+            or type(status.get("pid")) is not int or status["pid"] <= 0 or status["pid"] == host["pid"]
+            or status.get("port") != config["port"]
+            or not correct_service(status, config) or not status.get("shutdown_supported")
+            or status.get("task_host_pid") != host["pid"] or status.get("task_host_launch_id") != host["launch_id"]):
+        return False
+    if loopback_listener_pid(config["port"]) != status["pid"]:
+        return False
+    engine = task_host_status(root, config, host)
+    token = engine.get("token")
+    if not isinstance(token, str) or not token or status.get("token") != token:
+        return False
+    request_service_shutdown(url, token, expected_pid=status["pid"])
+    return True
 
 
 def restart(root, config, no_browser=False):
@@ -651,32 +733,21 @@ def restart(root, config, no_browser=False):
                 token = state.get("token")
             if not isinstance(token, str) or not token:
                 raise RuntimeError("无法核对工作台连接凭据，尚未关闭旧服务。")
-            request = urllib.request.Request(url + "/api/service/shutdown", data=b"{}",
-                                             headers={"Content-Type": "application/json", "X-Workbench-Token": token})
-            try:
-                with urllib.request.urlopen(request, timeout=10) as response:
-                    result = json.load(response)
-            except urllib.error.HTTPError as error:
-                try:
-                    message = json.load(error).get("error")
-                except (ValueError, OSError):
-                    message = None
-                raise RuntimeError(message or "服务暂时无法重启，请等待当前操作完成后重试。") from error
-            except (TimeoutError, urllib.error.URLError) as error:
-                timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
-                reason = "超时" if timed_out else "失败"
-                raise RuntimeError(f"等待旧服务关闭{reason}，尚未启动新实例。请稍后重新双击TK工作台。") from error
-            if not result.get("ok"):
-                raise RuntimeError("服务未确认关闭，尚未启动第二个实例。")
+            request_service_shutdown(url, token)
             wait_for_process_exit(processes[0])
     elif port_open(config["port"]):
-        raise RuntimeError("工作台端口被其他程序占用，未结束该程序。")
+        if not (config.get("task_host_enabled") and shutdown_registered_gateway(root, config, url)):
+            raise RuntimeError("工作台端口被其他程序占用，未结束该程序。")
     wait_for_port_release(config["port"])
     if config.get("task_host_enabled"):
         ensure_task_host(root, config)
         command = [sys.executable, "-u", str(root / "service_gateway.py"), "--port", str(config["port"]),
                    "--skill-root", config["skill_root"], "--runtime-root", config["runtime_root"]]
         log_name = "gateway.log"
+        try:
+            rotate_server_log(root, log_name)  # the old gateway has exited, so nothing holds the file
+        except Exception as error:
+            log_housekeeping(root, f"切分 gateway.log 失败（不影响启动）：{error}")
     else:
         prepare_stopped_engine(root, config)
         command, log_name = [sys.executable, "-u", str(root / "server.py")], "server.log"
@@ -695,7 +766,7 @@ def restart(root, config, no_browser=False):
                 return child.pid
         except (OSError, ValueError):
             pass
-        time.sleep(.1)
+        time.sleep(.05)
     raise RuntimeError("工作台尚未就绪，请查看 server.log 后重试。")
 
 
@@ -720,5 +791,6 @@ def desktop_main():
     except Exception as error:
         with (ROOT / "launcher-error.log").open("a", encoding="utf-8") as log:
             log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {error}\n{traceback.format_exc()}\n")
-        ctypes.windll.user32.MessageBoxW(0, str(error), "TK工作台", 0x10)
+        if "--no-browser" not in sys.argv[1:]:
+            ctypes.windll.user32.MessageBoxW(0, str(error), "TK工作台", 0x10)
         return 1

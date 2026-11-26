@@ -55,6 +55,7 @@ class ContentFiltersBrowserTests(unittest.TestCase):
     def editor(self, page):
         editor = page.locator("#content-flow-filter-editor")
         if not editor.is_visible():
+            page.locator(".flow-main-menu > summary").click()
             page.locator("#content-flow-filter-toggle").click()
         expect(editor).to_be_visible()
         return editor
@@ -80,6 +81,7 @@ class ContentFiltersBrowserTests(unittest.TestCase):
         expect(editor).to_be_hidden()
 
     def dialog(self, page):
+        page.locator(".flow-main-menu > summary").click()
         page.locator("#content-flow-save-view").click()
         dialog = page.locator(".flow-view-dialog")
         expect(dialog).to_be_visible()

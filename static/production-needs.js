@@ -41,7 +41,10 @@ window.ProductionNeeds = (() => {
       const skill = edit.completion_policy === 'skill_delivery', validation = edit.validation;
       const reviewable = skill ? validation ? validation.scope === 'current_coverage' && validation.status === 'awaiting_review' && validation.saved === true && Array.isArray(summary?.picture_gaps) && !summary.picture_gaps.length : report.saved === true && !gaps.length : validation?.status === 'awaiting_review';
       const approved = edit.status === 'approved' || ['awaiting_review','completed'].includes(edit.status) && edit.approval && reviewable && !edit.result_pending && (edit.status !== 'completed' || skill);
-      if (approved || (record.status === 'approved' && manual?.take_id === selected.id && manual.timeline_uid === timeline.unique_id)) continue;
+      // Each timeline carries its own manual completion; the order-level receipt names only one of them.
+      const timelineManual = Object.hasOwn(timeline,'manual_completion') ? timeline.manual_completion?.at && timeline.manual_completion.take_id === selected.id :
+        record.status === 'approved' && manual?.take_id === selected.id && manual.timeline_uid === timeline.unique_id;
+      if (approved || timelineManual) continue;
       if (edit.status === 'running') continue;
       const fps = fpsOf(summary?.fps || timeline.fps);
       gaps.forEach((gap,index) => {

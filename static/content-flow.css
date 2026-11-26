@@ -8,6 +8,8 @@
 .flow-list[data-view=all] .flow-row{grid-template-columns:64px minmax(0,1fr) 72px 92px 44px 32px}
 .flow-list[data-view=publish] .flow-row{grid-template-columns:64px minmax(0,1fr) 72px 44px 32px}
 .flow-list[data-view=publish].is-selecting .flow-row{grid-template-columns:18px 64px minmax(0,1fr) 72px 44px 32px}
+/* 待处理 names the step a video is on (「剪辑审查 · 第 4/6 步」), so its stage column is wider than the other views. */
+@media(min-width:701px){.flow-list[data-view=attention] .flow-row{grid-template-columns:64px minmax(0,1fr) 72px 136px 140px 44px 32px}}
 .flow-row input[type=checkbox]{width:16px;height:16px;margin:0}
 .flow-kind,.flow-history{justify-self:start;max-width:100%;overflow:hidden;text-overflow:ellipsis;font-size:12px;line-height:1.4;color:var(--muted);background:var(--surface-alt);border:1px solid var(--line);padding:1px 6px;border-radius:5px;white-space:nowrap}
 .flow-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink);font-weight:550}.flow-title:hover{color:var(--accent-text)}
@@ -203,8 +205,9 @@ body:has(#content-flow-queue) main{padding-bottom:72px}
   .flow-toolbar>.flow-filters>.search:is(:focus-within,.has-query) input{border-color:var(--line);background:var(--surface);cursor:text}
 }
 .flow-subbar{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;margin:0 0 10px}
-.flow-subbar>#content-flow-result-count{flex:none;margin:0}
+.flow-subbar>#content-flow-result-count{flex:0 1 auto;min-width:0;margin:0}
 .flow-subbar>.flow-filter-summary{flex:1 1 auto;margin:0;min-height:0}
+.flow-today{flex:none;margin:0 0 0 auto;color:var(--muted);font-size:12px;white-space:nowrap}.flow-today[hidden]{display:none}.flow-today b{color:var(--ink);font-weight:600}
 .flow-saved-menu>summary{display:flex;align-items:center;gap:7px;width:auto;height:auto;min-height:var(--btn-h-sm);padding:3px 10px;border-radius:999px;color:var(--muted);font-size:12px;font-weight:500;white-space:nowrap}
 .flow-saved-menu>summary:hover{background:var(--fill-hover);color:var(--ink)}
 .flow-saved-menu>summary[data-active=true]{color:var(--blue-ink);background:var(--surface-tint);font-weight:550}
@@ -272,6 +275,12 @@ body:has(#content-flow-queue) main{padding-bottom:72px}
 .po-chip b{font-size:20px;line-height:1.3;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
 .po-chip.is-warning b{color:var(--warm-ink)}.po-chip.is-active b{color:var(--blue-ink)}.po-chip.is-success b{color:var(--success-ink)}.po-chip.is-muted b{color:var(--muted)}
 .po-batch{display:flex;align-items:center;gap:10px;margin:0 0 8px;font-size:13px;color:var(--muted)}
+.po-day{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
+.po-day label{display:flex;align-items:center;gap:6px}
+.po-day select{font:inherit;padding:3px 6px}
+.po-foreign{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.po-foreign label{display:flex;align-items:center;gap:4px}
+.po-foreign select{font:inherit;padding:3px 6px}
 .po-group-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .flow-list .flow-row.po-row,.flow-list[data-view] .flow-row.po-row{grid-template-columns:18px 64px minmax(0,1fr) auto}
 .po-row .flow-record-main{display:flex;flex-direction:column;gap:2px;min-width:0}.po-row .flow-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -289,3 +298,54 @@ body:has(#content-flow-queue) main{padding-bottom:72px}
 .needs-main{display:flex;flex-direction:column;gap:2px;min-width:0}.needs-main:hover .needs-title{text-decoration:underline}
 .needs-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:550}.needs-meta{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .needs-row time{font-size:12px;color:var(--muted-soft);white-space:nowrap}
+
+/* 图文标签：一行状态标签（要处理 / 各开放状态 / 已结束），每条时间线一行 */
+.po-strip{display:flex;flex-wrap:wrap;align-items:center;gap:4px 16px;margin:0 0 10px;padding:0 2px;border-bottom:1px solid var(--line)}
+.po-tab{display:inline-flex;align-items:center;gap:5px;min-height:32px;padding:0 2px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);font-size:13px;font-weight:500}
+.po-tab:hover{color:var(--ink)}.po-tab[aria-pressed=true]{color:var(--accent-text);border-bottom-color:var(--accent)}
+.po-tab small{display:inline;font-size:12px;font-weight:400;color:var(--muted-soft);font-variant-numeric:tabular-nums}
+.po-strip-note{margin-left:auto;font-size:12px;color:var(--muted-soft)}
+.po-old{margin-left:6px;padding:1px 6px;border-radius:5px;background:var(--surface-warm);color:var(--warm-ink);font-size:11px;font-weight:500;vertical-align:1px}
+.po-actions{align-items:center}
+.po-menu > summary{width:26px;height:26px}
+.po-menu [role=menu]{right:0;left:auto}
+.po-menu-danger{color:var(--danger-ink)}
+
+/* 待处理的「积压」：不是今天的事，但别忘了；每类一张卡 */
+.flow-backlog{margin:16px 0 0;border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}.flow-backlog[hidden]{display:none}
+.flow-backlog-title{display:flex;align-items:baseline;gap:8px;margin:0;padding:8px 14px;background:var(--surface-warm);color:var(--warm-ink);font-size:13px;font-weight:600}
+.flow-backlog-title small{font-weight:400;font-size:12px}
+.flow-backlog-card{display:flex;align-items:center;justify-content:space-between;gap:10px 16px;flex-wrap:wrap;padding:12px 14px;border-top:1px solid var(--line)}
+.flow-backlog-title + .flow-backlog-card{border-top:0}
+.flow-backlog-text{flex:1 1 320px;min-width:0;display:grid;grid-template-columns:auto 1fr;align-items:baseline;gap:2px 10px}
+.flow-backlog-text strong{font-size:14px;font-weight:600}
+.flow-backlog-card.is-danger strong{color:var(--danger-ink)}
+.flow-backlog-text small{font-size:12px;color:var(--muted-soft)}
+.flow-backlog-text p{grid-column:1/-1;margin:0;font-size:12px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
+.flow-backlog-actions{display:flex;gap:6px;flex-wrap:wrap}
+
+/* 2026-11-15 方案：视图改成下划线页签；步骤带进度点；组内只露两条 */
+.flow-toolbar>.flow-views{gap:18px;align-items:flex-end}
+.flow-toolbar>.flow-views>[data-flow-view]{min-height:34px;padding:0 2px;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);font-weight:500;box-shadow:none}
+.flow-toolbar>.flow-views>[data-flow-view]:hover{background:transparent;color:var(--ink)}
+.flow-toolbar>.flow-views>[data-flow-view][aria-pressed=true]{color:var(--accent-text);border-bottom-color:var(--accent);background:transparent}
+.flow-toolbar>.flow-views>[data-flow-view] small{margin-left:5px;color:var(--muted-soft)}
+.flow-filters .search{width:36px;transition:width .15s;overflow:hidden}
+.flow-filters .search:focus-within,.flow-filters .search:has(input:not(:placeholder-shown)){width:240px}
+.flow-stage.has-dots{display:flex;flex-direction:column;gap:4px}
+.flow-step-dots{display:flex;gap:3px}
+.flow-step-dots i{width:14px;height:4px;border-radius:2px;background:var(--line-strong)}
+.flow-step-dots i.is-done{background:var(--success-ink)}
+.flow-step-dots i.is-current{background:var(--accent)}
+.flow-group-more{display:block;width:100%;padding:8px 14px;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--accent-text);font-size:12px;text-align:left;cursor:pointer}
+.flow-group-more:hover{background:var(--fill-hover)}
+@media(max-width:700px){.flow-toolbar>.flow-views{gap:12px}.flow-filters .search{width:100%}}
+/* 手机：图文一行里左边勾选，中间状态+标题+说明，右边「做 / 不做」并排，一屏能看更多条。 */
+@media(max-width:700px){
+.flow-list .flow-row.po-row,.flow-list[data-view] .flow-row.po-row{grid-template-columns:18px minmax(0,1fr) auto;row-gap:0;padding:6px 8px}
+.po-row>.flow-select{grid-column:1;grid-row:1/3}
+.po-row .flow-stage{grid-column:2;grid-row:1;font-size:11px;line-height:1.4}
+.po-row .flow-record-main{grid-column:2;grid-row:2}
+.po-actions{grid-column:3;grid-row:1/3;justify-content:flex-end}
+.po-actions button{min-height:34px;padding:0 12px}
+}

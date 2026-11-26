@@ -38,6 +38,7 @@ class PreviewTests(unittest.TestCase):
         self.app.production = type("Production", (), {})()
         self.app.production.root = Path(self.temp.name) / "production"
         self.app.production.job = lambda identifier: copy.deepcopy(self.job)
+        self.app.production._read_catalog = lambda: {"jobs": [self.job]}
         self.app.resolve = ResolveBridge(runner=self.runner)
         self.previews = TimelinePreviews(self.app, optimizer=lambda source, output, progress: source)
 
@@ -143,6 +144,18 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual((done["status"], done["video"]["kind"]), ("done", "成片预览"))
         self.assertEqual(len(self.calls), 1)
 
+    def test_corrupt_preview_record_survives_startup_and_can_be_rebuilt(self):
+        folder = self.previews._folder(JOB, "one")
+        folder.mkdir(parents=True)
+        record = folder / "preview.json"
+        record.write_text("{", encoding="utf-8")
+        self.previews = TimelinePreviews(self.app, optimizer=lambda source, output, progress: source)
+        self.assertFalse(self.previews.busy())
+        self.assertEqual(self.previews.detail(JOB, "one")["status"], "failed")
+        self.assertEqual(self.previews.detail(JOB, "two")["status"], "idle")
+        self.assertEqual(record.read_text(encoding="utf-8"), "{")
+        self.assertEqual(self.start("one")[1]["status"], "done")
+
     def test_export_failure_keeps_the_review_and_previous_video_without_repeating_the_request(self):
         _, previous = self.start()
         self.failed = True
@@ -210,21 +223,33 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(video["kind"], "已导出视频")
         self.assertEqual(self.previews.video_file(JOB, "one", video["version"]).read_bytes(), b"existing-video")
 
+    def test_existing_export_with_ambiguous_name_is_not_assigned_to_a_timeline(self):
+        exports = self.app.production.root / "exports"
+        exports.mkdir()
+        (exports / "First.mp4").write_bytes(b"old-video")
+        other = {"id": "PRD-ffffffffffff", "timelines": [{"unique_id": "other", "name": "first", "project": "Another"}]}
+        self.app.production._read_catalog = lambda: {"jobs": [self.job, other]}
+        self.assertIsNone(self.previews.detail(JOB, "one")["video"])
+
     def test_open_location_selects_the_previews_hd_file_in_explorer(self):
         import server
         workbench = type("Bench", (), {"allow_open": True, "video_previews": self.previews})()
-        with patch.object(server.os, "name", "nt"), patch.object(server.subprocess, "Popen") as popen:
+        with patch.object(server, "reveal_file", return_value=True) as reveal:
             with self.assertRaises(server.ApiError):
                 server.Workbench.open_location(workbench, {"target": "preview", "job_id": JOB, "timeline_uid": "one"})
             _, done = self.start()
-            server.Workbench.open_location(workbench, {"target": "preview", "job_id": JOB, "timeline_uid": "one"})
+            body = {"target": "preview", "job_id": JOB, "timeline_uid": "one"}
+            with patch.object(server, "os") as windows:
+                windows.name = "nt"
+                self.assertTrue(server.Workbench.open_location(workbench, body)["ok"])
+                reveal.assert_called_once_with(self.previews.export_file(JOB, "one"))
+                reveal.return_value = False
+                with self.assertRaisesRegex(server.ApiError, "前台的资源管理器"):
+                    server.Workbench.open_location(workbench, body)
             with self.assertRaises(server.ApiError):
                 server.Workbench.open_location(workbench, {"target": "preview", "job_id": "../x", "timeline_uid": "one"})
         self.assertEqual(done["status"], "done")
-        command = popen.call_args.args[0]
-        self.assertEqual(command[:2], ["explorer.exe", "/select,"])
-        self.assertEqual(Path(command[2]), self.previews.export_file(JOB, "one"))
-        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(reveal.call_count, 2)
 
     def test_unknown_or_archived_binding_and_unexpected_input_are_rejected(self):
         for body in ({"timeline_uid": "missing"}, {"timeline_uid": "one", "textless": True}):

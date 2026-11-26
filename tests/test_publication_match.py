@@ -41,7 +41,7 @@ class Bench(PublicationMatchMixin, VideoPublishMixin):
         self.state_cache = {}
         self.titles = {}
 
-    def _video_publish_copy(self, job):
+    def _video_publish_copy(self, job, *, titles_only=False):
         return {"titles": self.titles.get(job["id"], [])}
 
     def save_script_status(self, identifier, body, *, video_job_id=None):
@@ -97,6 +97,27 @@ class PublicationMatchTests(unittest.TestCase):
         self.assertEqual(headline_key("🔴Short#tag"), "")
         self.assertEqual(posted_on(FIRST), "2026-10-17")
         self.assertEqual(posted_on("12345678", "2026-10-02T03:00:00Z"), "2026-10-02")
+
+    def test_waiting_slots_read_only_titles_and_scripts(self):
+        with patch.object(self.bench, "_video_publish_copy", wraps=self.bench._video_publish_copy) as publish_copy, \
+                patch.object(self.bench.creation, "scripts_readonly", wraps=self.bench.creation.scripts_readonly) as scripts, \
+                patch.object(self.bench.creation, "public", side_effect=AssertionError("matching must not build the creation view")):
+            slots = self.bench._publication_slots(self.bench._video_publications().read())
+        self.assertEqual([slot["job_id"] for slot in slots], [WAITING])
+        self.assertIn(headline_key(TITLE), slots[0]["keys"])
+        self.assertIn(FIRST, slots[0]["refused"])
+        publish_copy.assert_called_once()
+        self.assertEqual(publish_copy.call_args.kwargs, {"titles_only": True})
+        scripts.assert_called_once_with()
+
+    def test_publication_detail_reuses_its_catalog_for_candidates(self):
+        original_read = VideoPublicationStore.read
+        with patch.object(VideoPublicationStore, "read", autospec=True, side_effect=original_read) as read:
+            detail = self.bench.video_publication_detail(WAITING)
+        self.assertTrue(detail["can_register"])
+        self.assertEqual(detail["timeline_uid"], WAITING + "-tl")
+        self.assertEqual(detail["candidates"], [])
+        read.assert_called_once()
 
     def test_a_unique_post_registers_by_itself_and_undo_returns_the_script(self):
         made = self.bench.auto_register_publications([pushed(NEW)])

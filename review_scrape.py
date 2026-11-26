@@ -33,6 +33,7 @@ import urllib.request
 import api_keys
 import plugin_comments
 from direction_store import product_key
+from performance_store import product_models, product_short
 from review_store import PARSERS, ReviewError
 from review_taxonomy import PLATFORM_LABELS
 
@@ -40,6 +41,7 @@ KEY_NAME = "APIFY_TOKEN"
 API = "https://api.apify.com/v2"
 POLL_SECONDS = 10
 DEFAULT_DAYS = 30  # a platform the library has nothing from yet
+SALES_VIDEOS = 30  # videos suggested from the sales data when the library has no TikTok video source
 # Actor that made each platform's earlier exports, the most results one run may bill, and the
 # wording of one target on the page.
 PLATFORMS = {
@@ -275,8 +277,50 @@ class ReviewScraper:
             if target and target not in seen[platform]:
                 seen[platform].add(target)
                 found[platform]["targets"].append(target)
-        if not found["reddit"]["targets"] and found["reddit"]["latest"]:
-            found["reddit"]["targets"] = [f"sharpal {product}"]
+        # A platform the library has nothing from yet starts from what the sales data knows about the product.
+        sales = None
+        for name in ("tiktok_video", "tiktok_shop"):
+            if not found[name]["targets"]:
+                sales = self._from_sales(product) if sales is None else sales
+                if sales[name]:
+                    found[name].update(targets=sales[name], suggested=True)
+        if not found["reddit"]["targets"]:
+            found["reddit"].update(targets=[f"sharpal {product}"], suggested=not found["reddit"]["latest"])
+        return found
+
+    def _from_sales(self, product):
+        """Scrape targets read from the sales data: the product's TikTok Shop pages and the videos
+        linking it that drew the most comments (own and creator videos)."""
+        found = {"tiktok_video": [], "tiktok_shop": []}
+        database = getattr(getattr(self.app, "performance", None), "database", None)
+        if not database or not Path(database).is_file():
+            return found
+        like = f"%{product}%"
+        try:
+            with closing(sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as connection:
+                videos = connection.execute("""
+                    SELECT video_id, MAX(account), MAX(products), MAX(comments) FROM periods WHERE products LIKE ?1 GROUP BY video_id
+                    UNION ALL SELECT video_id, MAX(account), MAX(products), MAX(comments) FROM creator_periods WHERE products LIKE ?1 GROUP BY video_id
+                    UNION ALL SELECT video_id, MAX(account), MAX(products), SUM(comments) FROM daily WHERE products LIKE ?1 GROUP BY video_id""",
+                    (like,)).fetchall()
+                listed = connection.execute("SELECT DISTINCT product_id, product FROM photo_periods WHERE product LIKE ?1", (like,)).fetchall()
+        except sqlite3.Error:
+            return found
+        shops, ranked = {}, {}
+        for product_id, name in listed:
+            if product_short(name) == product and re.fullmatch(r"\d{10,}", str(product_id or "")):
+                shops[str(product_id)] = True
+        for video_id, account, products, comments in videos:
+            if product not in product_models(products):
+                continue
+            for name, product_id in re.findall(r"([^()]*)\((\d{10,})\)", products or ""):
+                if product_short(name.strip(" ,")) == product:
+                    shops[product_id] = True
+            if video_id and account and (comments or 0) > 0:
+                url = f"https://www.tiktok.com/@{str(account).lstrip('@')}/video/{video_id}"
+                ranked[url] = max(ranked.get(url, 0), comments)
+        found["tiktok_shop"] = [f"https://www.tiktok.com/view/product/{product_id}" for product_id in shops]
+        found["tiktok_video"] = sorted(ranked, key=lambda url: -ranked[url])[:SALES_VIDEOS]
         return found
 
     def overview(self, product):
@@ -294,7 +338,8 @@ class ReviewScraper:
             platforms.append({"platform": name, "label": PLATFORM_LABELS[name], "actor": spec["actor"], "limit": spec["limit"],
                               "target_label": spec["target"], "latest": latest,
                               "recommended_start": latest or (date.today() - timedelta(days=DEFAULT_DAYS)).isoformat(),
-                              "targets": saved.get(name, library[name]["targets"]), "edited": name in saved})
+                              "targets": saved.get(name, library[name]["targets"]), "edited": name in saved,
+                              "suggested": name not in saved and bool(library[name].get("suggested"))})
         starts = [row["recommended_start"] for row in platforms if row["targets"]]
         job = data.get("job")
         return {"product": product, "token": bool(self.client.token_provider()), "token_name": KEY_NAME, "today": today,

@@ -21,7 +21,7 @@ window.WorkbenchLinks = (() => {
     const ownerPath = location.hash.split('?')[0], product = record.product || record.context?.product || script?.product || window.WorkbenchShell?.product() || '';
     // A photo post's figures are in 图文, not in the video tables.
     const postDataURL = (id,photo) => pageURL(`#videos?${photo ? 'photo' : 'video'}=${encodeURIComponent(id)}`,product);
-    let sequence = 0;
+    let sequence = 0, started = false;
     const current = seq => host.isConnected && ownerPath === location.hash.split('?')[0] && sequence === seq;
     // Orders and version details keep provenance behind a single secondary fold.
     const fold = true;
@@ -38,15 +38,19 @@ window.WorkbenchLinks = (() => {
       if (!fold) host.innerHTML = body;
       else {
         const kinds = [...new Set(groups.flatMap(group => group.links.map(link => link.kind)))], total = groups.reduce((sum,group) => sum + group.links.length,0);
-        host.innerHTML = `${alerts.map(note => `<p class="workflow-alert" role="status">${esc(note)}</p>`).join('')}<details class="workflow-fold" ${foldOpen() ? 'open' : ''}><summary><span class="workflow-fold-title">关联任务与输出</span><span class="workflow-fold-kinds">${kinds.map(item => `<span class="workflow-kind" data-workflow-kind="${esc(item)}">${esc(kindNames[item] || '关联')}</span>`).join('')}</span><small>${busy && !groups.length ? '读取中…' : `${total} 项${reason ? ` · <span class="workflow-fold-attention">需核对：${esc(reason)}</span>` : alerts.length ? ' · 需核对' : ''}`}</small></summary>${variant.map(note => `<p class="workflow-alert workflow-fold-alert" role="status">${esc(note)}</p>`).join('')}${body}</details>`;
+        host.innerHTML = `${alerts.map(note => `<p class="workflow-alert" role="status">${esc(note)}</p>`).join('')}<details class="workflow-fold" ${foldOpen() ? 'open' : ''}><summary><span class="workflow-fold-title">关联任务与输出</span><span class="workflow-fold-kinds">${kinds.map(item => `<span class="workflow-kind" data-workflow-kind="${esc(item)}">${esc(kindNames[item] || '关联')}</span>`).join('')}</span><small>${!started ? '展开查看关联' : busy && !groups.length ? '读取中…' : `${total} 项${reason ? ` · <span class="workflow-fold-attention">需核对：${esc(reason)}</span>` : alerts.length ? ' · 需核对' : ''}`}</small></summary>${variant.map(note => `<p class="workflow-alert workflow-fold-alert" role="status">${esc(note)}</p>`).join('')}${body}</details>`;
         host.classList.add('workflow-links-folded');
-        host.querySelector('details').addEventListener('toggle',event => {try {localStorage.setItem(foldKey,event.currentTarget.open ? '1' : '0');} catch {}});
+        host.querySelector('details').addEventListener('toggle',event => {
+          try {localStorage.setItem(foldKey,event.currentTarget.open ? '1' : '0');} catch {}
+          if (event.currentTarget.open && !started) void load();
+        });
       }
       onAttention?.(reason || (alerts.length ? '需核对' : ''));
       host.querySelector('[data-workflow-retry]').onclick = () => void load();
       host.querySelector('[data-workflow-copy]')?.addEventListener('click',() => copyText(groups.flatMap(group => group.links.map(link => `${group.title} · ${link.title}\n${link.note || ''}\n${link.href}`)).join('\n\n'),'关联信息已复制'));
     };
     async function load() {
+      started = true;
       const seq = ++sequence, groups = [], notes = [], seen = new Set();show([],[],true);
       const add = (groupTitle,link) => {
         const key = `${link.kind}:${link.href}`;if (seen.has(key)) return;seen.add(key);
@@ -64,7 +68,7 @@ window.WorkbenchLinks = (() => {
       if (sourceReview?.video_id && sourceReview.product && inProduct(sourceReview,product)) add('来源与版本',{kind:'review',title:'来源复盘与下一轮',note:[sourceReview.video_id,sourceReview.window_end,sourceReview.reviewed_at ? '保留发起时结论' : ''].filter(Boolean).join(' · '),href:window.FeedbackChain?.sourceURL(sourceReview) || pageURL(`#videos?video=${encodeURIComponent(sourceReview.video_id)}&feedback_window=${encodeURIComponent(sourceReview.window_end || '')}`,sourceReview.product)});
       // Adopted text and its version-detail link live with the inline copy/history,
       // rather than adding another stop beside the writing output.
-      if (source.task_id && source.task_id !== record.task_id) add('来源与版本',{kind:'task',title:'查看完整写稿输出',note:source.round_id ? '直接查看采纳时的那一轮' : '来源 AI 任务',href:pageURL(`#ai/${encodeURIComponent(source.task_id)}${source.round_id ? '?round='+encodeURIComponent(source.round_id) : ''}`,product)});
+      if (source.task_id && !source.task_deleted && source.task_id !== record.task_id) add('来源与版本',{kind:'task',title:'查看完整写稿输出',note:source.round_id ? '直接查看采纳时的那一轮' : '来源 AI 任务',href:pageURL(`#ai/${encodeURIComponent(source.task_id)}${source.round_id ? '?round='+encodeURIComponent(source.round_id) : ''}`,product)});
       const caseId = fullScript?.case_id || record.case_id;
       if (caseId) add('来源与版本',{kind:'case',title:'关联案例',note:caseId,href:pageURL(`#case/${encodeURIComponent(caseId)}`,product)});
       if (source.case_id && source.case_id !== caseId) add('来源与版本',{kind:'case',title:'写稿参考案例',note:source.case_id,href:pageURL(`#case/${encodeURIComponent(source.case_id)}`,product)});
@@ -124,7 +128,9 @@ window.WorkbenchLinks = (() => {
       }
       if (direction && !exactVariants.length) {
         add('执行变体',{kind:'direction',title:'查看所属方向',note:direction,href:pageURL(`#directions/${encodeURIComponent(direction)}`,product)});
-        if (loaded.progress) notes.push(variants.length > 1 ? '这条记录对应多个变体，需先核对归属。' : '尚未核对到唯一执行变体，可在方向页核对关联。');
+        // A writing task holds several drafts and a saved copy nobody produced was never made: only what was produced owes one variant.
+        const owed = kind === 'video' || (kind === 'script' && (fullScript?.video_id || fullScript?.production_usage?.length));
+        if (loaded.progress && owed) notes.push(variants.length > 1 ? '这条记录对应多个变体，需先核对归属。' : '尚未核对到唯一执行变体，可在方向页核对关联。');
       }
       const ownVideo = fullScript?.video_id;
       if (ownVideo) {
@@ -140,7 +146,10 @@ window.WorkbenchLinks = (() => {
       groups.sort((a,b) => ['执行变体','来源与版本','采用稿','本版制作与输出','同变体的其他输出','测试与发布'].indexOf(a.title) - ['执行变体','来源与版本','采用稿','本版制作与输出','同变体的其他输出','测试与发布'].indexOf(b.title));
       show(groups,notes);
     }
-    void load();
+    // A closed order provenance fold must not read every production job and
+    // direction in the background while the video task itself is opening.
+    if (kind === 'video' && !foldOpen()) show([]);
+    else void load();
   }
   return {mount,productionURL};
 })();

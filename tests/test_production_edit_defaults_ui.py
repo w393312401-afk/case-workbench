@@ -18,7 +18,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
 
     def open_page(self, **kwargs):
         page = fixture.ProductionValidationBrowserTests.open_page(self, **kwargs)
-        page.locator('.production-steps [data-step="edit"]').click()
+        page.locator('.production-steps [data-step~="edit"]').click()
         return page
 
     def ai_options_route(self, route):
@@ -50,6 +50,14 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.options_error = ""
         self.hold_options, self.pending_options = False, []
 
+    def add_api_model(self):
+        model = "antigravity:claude-sonnet-5-5-medium"
+        self.catalog["models"].append({"id": model, "name": "Antigravity Sonnet", "provider": "antigravity",
+                                        "available": True, "reasoning_efforts": []})
+        self.clients["providers"]["antigravity"] = {"available": True, "label": "Antigravity API 已就绪",
+                                                       "usage_source": "antigravity_api"}
+        return model
+
     def start_and_keep(self, form, effort):
         form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
         bar = form.locator("[data-effort-confirm]")
@@ -65,7 +73,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         expect(form.locator('[name="model"]')).to_have_value("claude-opus")
         expect(form.locator('[name="effort"]')).to_have_value("high")
         form.locator('[name="instruction"]').fill("开头使用切纸结果")
-        form.locator('[name="mode"]').select_option("sync")
+        self.assertEqual(form.locator('select[name="mode"]').count(), 0)
         self.start_and_keep(form, "high")
         page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
         self.assertEqual(len(self.calls), 1)
@@ -73,7 +81,61 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.assertNotIn("model", body)
         self.assertNotIn("effort", body)
         self.assertEqual((body["instruction"], body["mode"], body["materials"]),
-                         ("开头使用切纸结果", "sync", ["蓝点折刀成品素材"]))
+                         ("开头使用切纸结果", "explain", ["蓝点折刀成品素材"]))
+
+    def test_api_global_default_is_offered_and_used_for_editing(self):
+        model = self.add_api_model()
+        self.catalog["default_settings"] = {"model": model, "reasoning_effort": None}
+        self.clients["providers"]["claude"]["available"] = False
+        self.clients["providers"]["codex"]["available"] = False
+        page = self.open_page()
+        form = page.locator("#edit-form")
+        expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Antigravity Sonnet · 模型默认思考强度")
+        expect(form.locator('[name="model"]')).to_have_value(model)
+        expect(form.locator('[name="effort"]')).to_have_value("")
+        expect(form.locator('[name="effort"]')).to_be_disabled()
+        expect(form.locator('[name="effort"]')).to_have_text("模型默认")
+        self.assertEqual(form.locator(f'option[value="{model}"]').count(), 1)
+        expect(form.locator("[data-edit-provider-status]")).to_have_text("Antigravity API可用于 AI 剪辑。")
+        expect(form.locator("[data-edit-usage]")).to_contain_text("使用 Antigravity 服务额度/计费，由本机 Claude Code 执行剪辑")
+        expect(form.locator("[data-edit-usage]")).not_to_contain_text("订阅额度")
+        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
+        self.assertNotIn("model", self.calls[0]["body"])
+        self.assertNotIn("effort", self.calls[0]["body"])
+
+    def test_api_override_submits_model_without_native_reasoning_effort(self):
+        model = self.add_api_model()
+        page = self.open_page()
+        form = page.locator("#edit-form")
+        expect(form.locator('[name="effort"]')).to_have_value("high")
+        form.locator('[data-edit-provider="antigravity"]').click()
+        expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
+        form.locator('[data-edit-default-refresh]').click()
+        expect(form.locator('[data-edit-provider="antigravity"]')).to_have_attribute('aria-pressed', 'true')
+        expect(form.locator('[name="model"]')).to_have_value('')
+        expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
+        form.locator('[name="model"]').select_option(model)
+        expect(form.locator('[name="effort"]')).to_have_value("")
+        expect(form.locator('[name="effort"]')).to_be_disabled()
+        expect(form.locator("[data-edit-usage]")).to_contain_text("使用 Antigravity 服务额度/计费")
+        form.get_by_role('button', name='开始 AI 剪辑', exact=True).click()
+        page.wait_for_function("() => document.querySelector('#toast')?.textContent.includes('已加入剪辑任务')")
+        self.assertEqual((self.calls[0]["body"]["model"], self.calls[0]["body"]["effort"]), (model, None))
+
+    def test_api_default_waits_for_its_edit_executor_without_falling_back(self):
+        model = self.add_api_model()
+        self.catalog["default_settings"] = {"model": model, "reasoning_effort": None}
+        self.clients["providers"]["antigravity"] = {"available": False, "error": "未找到 Claude Code 执行程序"}
+        page = self.open_page()
+        form = page.locator("#edit-form")
+        expect(form.locator('[name="model"]')).to_have_value(model)
+        expect(form.locator("[data-edit-provider-status]")).to_contain_text("未找到 Claude Code 执行程序")
+        expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
+        self.clients["providers"]["antigravity"]["available"] = True
+        form.locator('[data-edit-default-refresh]').click()
+        expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_enabled()
+        expect(form.locator('[name="model"]')).to_have_value(model)
 
     def test_low_effort_default_is_used_without_an_override(self):
         self.catalog["default_settings"] = {"model": "claude-sonnet", "reasoning_effort": "medium"}
@@ -94,6 +156,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         expect(form.locator('[name="model"]')).to_have_value("")
         expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
         expect(form.locator('[data-copy-handoff]')).to_be_enabled()
+        form.locator('[data-edit-provider="claude"]').click()
         expect(form.locator('option[value="claude-sonnet"]')).to_have_attribute("disabled", "")
         form.locator('[name="model"]').select_option("claude-opus")
         self.assertEqual(form.locator('[name="effort"] option').evaluate_all("rows => rows.map(row => row.value)"), ["", "low", "medium", "high", "xhigh", "max"])
@@ -106,10 +169,10 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         self.catalog["default_settings"] = {"model": "gpt-6.1-sol", "reasoning_effort": "unsupported"}
         page = self.open_page()
         form = page.locator("#edit-form")
+        form.locator('[data-edit-provider="claude"]').click()
         form.locator('[name="model"]').select_option("claude-opus")
         form.locator('[name="effort"]').select_option("max")
         form.locator('[name="instruction"]').fill("保留这段额外要求")
-        form.locator('[name="mode"]').select_option("montage")
         self.catalog["default_settings"] = {"model": "claude-sonnet", "reasoning_effort": "high"}
         page.evaluate("window.dispatchEvent(new Event('focus'))")
         expect(form.locator("[data-edit-default]")).to_contain_text("使用全局默认：Claude Sonnet · high")
@@ -121,7 +184,6 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         expect(form.locator('[name="model"]')).to_have_value("")
         expect(form.get_by_role('button', name='开始 AI 剪辑', exact=True)).to_be_disabled()
         expect(form.locator('[name="instruction"]')).to_have_value("保留这段额外要求")
-        expect(form.locator('[name="mode"]')).to_have_value("montage")
         self.assertEqual(self.calls, [])
 
     def test_codex_native_default_uses_its_own_client_and_inherits_effort(self):
@@ -158,6 +220,7 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         page = self.open_page()
         form = page.locator("#edit-form")
         expect(form.locator("[data-edit-override]")).to_be_visible()
+        form.locator('[data-edit-provider="codex"]').click()
         form.locator('[name="model"]').select_option("gpt-6.1-sol")
         self.assertEqual(form.locator('[name="effort"] option').evaluate_all("rows => rows.map(row => row.value)"),
                          ["", "low", "medium", "high", "xhigh", "max", "ultra"])
@@ -236,6 +299,22 @@ class ProductionEditDefaultsBrowserTests(unittest.TestCase):
         unknown_card = page.locator('[data-edit-id="EDT-111111111111"]')
         expect(unknown_card).to_contain_text("申请模型：gpt-6.1-sol · 实际型号尚未回报")
         expect(unknown_card).not_to_contain_text("实际模型：")
+
+    def test_api_edit_receipt_uses_service_billing_label(self):
+        model = self.add_api_model()
+        completed = fixture.ProductionValidationBrowserTests.edit(self, "awaiting_review")
+        completed.update(provider="antigravity", client_label="Antigravity API", model=model, requested_model=model,
+                         effective_model="claude-sonnet-5-5-medium", effective_effort=None, effort=None,
+                         output="已按标记剪辑。", ai_usage={"editor": {"runs": 1, "turns": 3, "input_tokens": 100, "output_tokens": 20},
+                                                              "total": {"cost_usd": 1.234}})
+        self.payload["job"]["edits"] = [completed]
+        page = self.open_page()
+        card = page.locator('[data-edit-id="EDT-0123456789ab"]')
+        expect(card).to_contain_text("Antigravity API")
+        expect(card).to_contain_text("使用 Antigravity 服务额度/计费")
+        expect(card).not_to_contain_text("Claude 订阅额度")
+        expect(card.locator(".edit-usage")).to_contain_text("客户端估算约 $1.23；实际费用以 Antigravity 为准")
+        expect(card.locator(".edit-usage")).not_to_contain_text("按 API 价约")
 
     def test_loading_or_failed_defaults_block_start_but_not_handoff(self):
         self.hold_options = True

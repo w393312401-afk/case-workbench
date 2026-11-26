@@ -39,8 +39,7 @@ class DirectionClarityTests(unittest.TestCase):
     def show_detail(self, page, data):
         page.route("**/api/direction-catalog/202H-S1?**",
                    lambda route: route.fulfill(status=200, json=copy.deepcopy(data)))
-        page.evaluate("location.hash='#/202H/directions/202H-S1'")
-        page.locator("#direction-definition").wait_for()
+        catalog_ui.show_direction(page)
 
     def test_list_keeps_counts_without_long_evidence_or_sales_metrics_and_still_searches_evidence(self):
         page = self.open_page()
@@ -55,22 +54,23 @@ class DirectionClarityTests(unittest.TestCase):
         page.route("**/api/direction-catalog?**",
                    lambda route: route.fulfill(status=200, json=copy.deepcopy(data)))
         page.evaluate("async()=>await route(true,true)")
-        row = page.locator('[data-direction-id="202H-S1"]')
+        row = page.locator('#dir-list [data-direction-id="202H-S1"]')
         summary = row.locator(".dir-sub").inner_text()
         self.assertNotIn("方向 202H-S1", summary)  # the code badge already names it
-        self.assertIn("3 条视频", summary)
         self.assertNotIn("唯一可检索证据", summary)
-        self.assertNotIn("987", summary)
-        self.assertNotIn("12345", summary)
-        self.assertNotIn("CTOR", summary)
-        evidence = row.locator("details.dir-evidence")
-        self.assertIsNone(evidence.get_attribute("open"))
-        self.assertFalse(evidence.get_by_text(self.evidence, exact=True).is_visible())
-        evidence.locator("summary").click()
-        evidence.get_by_text(self.evidence, exact=True).wait_for()
+        # A direction in the list keeps its orders (as a figure and a bar) and how much was made for it; rates stay
+        # with the direction opened beside it.
+        self.assertIn("3 条视频", summary)
+        self.assertEqual(row.locator(".dx-num").inner_text(), "987单")
+        page.wait_for_function("document.querySelector('#dir-list [data-bar]').style.width==='100%'")
+        self.assertNotIn("7.99%", row.inner_text())
+        self.assertNotIn("12345", row.inner_text())
+        # Evidence is read on the direction page; the row keeps the chain only.
+        self.assertEqual(row.locator("details.dir-evidence").count(), 0)
         page.locator('[name="q"]').fill("唯一可检索证据")
-        page.wait_for_function("()=>document.querySelectorAll('.dir-row').length===1")
-        self.assertEqual(page.locator(".dir-row").get_attribute("data-direction-id"), "202H-S1")
+        page.wait_for_function("()=>new URLSearchParams(location.hash.split('?')[1]).get('q')==='唯一可检索证据'")
+        self.assertEqual(page.locator("#dir-list .dir-row").count(), 1)
+        self.assertEqual(page.locator("#dir-list .dir-row").get_attribute("data-direction-id"), "202H-S1")
         for width in (1280, 390):
             with self.subTest(width=width):
                 page.set_viewport_size({"width": width, "height": 900})
@@ -88,13 +88,13 @@ class DirectionClarityTests(unittest.TestCase):
                 page.set_viewport_size({"width": width, "height": 900})
                 geometry = page.evaluate("""()=>({
                     definition:document.querySelector('#direction-definition').getBoundingClientRect().top,
-                    supporting:document.querySelector('.dir-aside').getBoundingClientRect().top,
+                    supporting:document.querySelector('#direction-variants').getBoundingClientRect().top,
                     overflowing:document.documentElement.scrollWidth>document.documentElement.clientWidth
                 })""")
                 self.assertLess(geometry["definition"], geometry["supporting"])
                 self.assertFalse(geometry["overflowing"])
         evidence.locator("summary").click()
-        evidence.get_by_text(self.evidence, exact=True).wait_for()
+        evidence.get_by_text(self.evidence, exact=False).wait_for()
         self.assertFalse(page.evaluate(
             "document.documentElement.scrollWidth>document.documentElement.clientWidth"))
 
@@ -113,15 +113,10 @@ class DirectionClarityTests(unittest.TestCase):
         last.get_by_text("完整顾虑正文 9", exact=True).wait_for()
         self.assertTrue(last.locator("[data-variant-progression]").is_visible())
         self.assertEqual(page.locator("details.dir-variant[open]").count(), 1)
-        toggle = page.locator("#direction-variants-toggle")
-        toggle.click()
-        self.assertEqual(page.locator("details.dir-variant[open]").count(), 9)
-        toggle.click()
-        self.assertEqual(page.locator("details.dir-variant[open]").count(), 0)
         self.assertFalse(page.evaluate(
             "document.documentElement.scrollWidth>document.documentElement.clientWidth"))
 
-    def test_test_cards_and_completed_plans_have_one_full_record_with_history_disclosure(self):
+    def test_judgement_is_one_row_of_choices_and_test_cards_are_no_longer_shown(self):
         page = self.open_page(width=390)
         data = self.detail_data()
         def test_plan(identifier, status, hypothesis):
@@ -136,28 +131,38 @@ class DirectionClarityTests(unittest.TestCase):
             {"id": "PLAN-old", "action": "stop", "status": "done", "note": "已结束的普通安排"},
         ]
         self.show_detail(page, data)
-        tests = page.locator("#direction-tests")
+        self.assertEqual(page.locator("#direction-tests, [data-show-tests]").count(), 0)
+        self.assertEqual(page.get_by_text("进行中测试的完整假设").count(), 0)
+        # The open decision is the pressed choice, with its note beside it; finished ones and test cards stay out.
         plans = page.locator("#direction-plans")
-        for hypothesis in ("进行中测试的完整假设", "已完成测试的完整假设", "已取消测试的完整假设"):
-            self.assertNotIn(hypothesis, plans.text_content())
-            self.assertEqual(tests.get_by_text(hypothesis, exact=True).count(), 1)
-        tests.get_by_text("进行中测试的完整假设", exact=True).wait_for()
-        self.assertFalse(tests.get_by_text("已完成测试的完整假设", exact=True).is_visible())
-        self.assertFalse(tests.get_by_text("已取消测试的完整假设", exact=True).is_visible())
-        history = tests.locator("details.direction-tests-history")
-        self.assertIsNone(history.get_attribute("open"))
-        history.locator(":scope > summary").click()
-        tests.get_by_text("已完成测试的完整假设", exact=True).wait_for()
-        tests.get_by_text("已取消测试的完整假设", exact=True).wait_for()
-        plans.get_by_text("下一轮只改变开头", exact=True).wait_for()
-        self.assertFalse(plans.get_by_text("已结束的普通安排", exact=True).is_visible())
-        plans.locator("details.dir-plan-history > summary").click()
-        plans.get_by_text("已结束的普通安排", exact=True).wait_for()
-        plans.locator("[data-show-tests]").click()
-        page.wait_for_function("""()=>{
-            const rect=document.querySelector('#direction-tests').getBoundingClientRect();
-            return rect.top>=0&&rect.top<innerHeight;
-        }""")
+        self.assertEqual(plans.locator("button").all_inner_texts(), ["加码", "换执行", "观察", "停测"])
+        self.assertEqual(plans.locator("[aria-pressed=true]").all_inner_texts(), ["加码"])
+        page.locator(".dx-plan-line").get_by_text("下一轮只改变开头", exact=True).wait_for()
+        self.assertEqual(page.get_by_text("已结束的普通安排", exact=True).count(), 0)
+
+    def test_one_click_judgement_reaches_the_list_and_stopping_moves_the_direction_to_paused(self):
+        page = self.open_page()
+        page.locator("#direction-pane:not([aria-busy]) #direction-plans").wait_for()
+        pressed = lambda: page.locator("#direction-plans [aria-pressed=true]").all_inner_texts()
+        plans = lambda: [(plan["action"], plan["status"]) for plan in self.server.app.creation.public()["plans"]]
+        status = lambda: next(item for item in self.catalog()["directions"] if item["direction_id"] == "202H-S1")["status"]
+        self.assertEqual(pressed(), ["观察"])
+        # 加码 is saved on the click, with no dialog and no reason asked for.
+        page.locator('#direction-plans [data-direction-plan="scale"]').click()
+        page.locator('#dir-list [data-direction-id="202H-S1"] .state-tag').get_by_text("加码中", exact=True).wait_for()
+        page.locator('#direction-plans [data-direction-plan="scale"][aria-pressed=true]').wait_for()
+        self.assertEqual(page.locator("dialog[open]").count(), 0)
+        self.assertEqual(plans(), [("scale", "pending")])
+        # 停测 asks once, settles the open plan and moves the direction under 已暂停.
+        page.once("dialog", lambda dialog: dialog.accept())
+        page.locator('#direction-plans [data-direction-plan="stop"]').click()
+        page.locator('#dir-list .dx-list.is-paused [data-direction-id="202H-S1"]').wait_for()
+        page.locator('#direction-plans [data-direction-plan="stop"][aria-pressed=true]').wait_for()
+        self.assertEqual((plans(), status()), ([("scale", "cancelled")], "paused"))
+        # Any other choice brings it back.
+        page.locator('#direction-plans [data-direction-plan="observe"]').click()
+        page.locator('#dir-list .dx-list:not(.is-paused) [data-direction-id="202H-S1"]').wait_for()
+        self.assertEqual((pressed(), status()), (["观察"], "testing"))
         self.assertFalse(page.evaluate(
             "document.documentElement.scrollWidth>document.documentElement.clientWidth"))
 

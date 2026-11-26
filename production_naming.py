@@ -4,10 +4,13 @@ from __future__ import annotations
 import re
 
 
-_SEPARATORS = " \t\r\n｜|·:：—–-、，,"
+_SEPARATORS = " \t\r\n｜|·:：—–-、，,。"
+# 「1:1 复刻」 says how the order was made, not what it is about; the header's replica link already says so.
 _GENERIC_PREFIX = re.compile(
-    r"^(?:(?:执行变体|变体|版本)\s*[#＃]?\s*(?:\d+|[A-Za-z])|第\s*\d+\s*条)"
-    r"(?=$|[\s｜|·:：—–\-、，,])", re.IGNORECASE)
+    r"^(?:(?:执行变体|变体|版本)\s*[#＃]?\s*(?:\d+|[A-Za-z])|第\s*\d+\s*条|1:1\s*复刻)"
+    r"(?=$|[\s｜|·:：—–\-、，,。])", re.IGNORECASE)
+# A variant's note on its direction chain (「方向链：S1 定角不用猜 → 每次补磨」) describes the plan, not this script.
+_DIRECTION_NOTE = re.compile(r"^方向链\s*[:：]")
 _CHINESE = re.compile(r"[\u3400-\u9fff]")
 
 
@@ -41,6 +44,8 @@ def production_topic(item):
             topic = suffix.lstrip(_SEPARATORS)
     while match := _GENERIC_PREFIX.match(topic):
         topic = topic[match.end():].lstrip(_SEPARATORS)
+    if _DIRECTION_NOTE.match(topic):
+        topic = ""
     if not topic:
         lines = item.get("lines") or []
         opening = lines[0] if lines and isinstance(lines[0], dict) else {}

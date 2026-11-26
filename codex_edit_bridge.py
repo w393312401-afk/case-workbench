@@ -7,11 +7,12 @@ Resolve scripting tools, while keeping native Codex model selection intact.
 from __future__ import annotations
 
 from codex_bridge import BridgeError
-from codex_stills_bridge import CodexStillsBridge, STILLS_TIMEOUT, _JobFiles, _file_specs
+from codex_stills_bridge import CodexStillsBridge, RESOLVE_TOOLS, STILLS_TIMEOUT, _JobFiles, _file_specs
 
 EDIT_TIMEOUT = 150 * 60
 PLANNER_TIMEOUT = 30 * 60
 PLANNER_FILE_TOOLS = {"Read", "Glob", "Grep"}
+EDIT_RESOLVE_TOOLS = RESOLVE_TOOLS | {"get_thumbnails", "get_image"}
 
 
 class CodexEditBridge(CodexStillsBridge):
@@ -38,7 +39,8 @@ class CodexEditBridge(CodexStillsBridge):
             raise BridgeError("剪辑时限无效。")
         if profile.get("dirs"):
             raise BridgeError("剪辑文件权限仅限本次任务目录，不能增加源区间账本或其他目录。")
-        settings = CodexStillsBridge._profile({**profile, "dirs": [], "timeout": min(timeout, STILLS_TIMEOUT)})
+        settings = CodexStillsBridge._profile({**profile, "dirs": [], "timeout": min(timeout, STILLS_TIMEOUT)},
+                                              resolve_tools=EDIT_RESOLVE_TOOLS)
         return {**settings, "timeout": timeout}
 
     def _file_tools(self, settings):

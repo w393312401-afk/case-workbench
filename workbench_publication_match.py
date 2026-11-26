@@ -82,7 +82,7 @@ class PublicationMatchMixin:
         """Posts already registered to any video order, and the script each video ID is bound to."""
         taken = {record["post_id"] for entry in data["jobs"].values()
                  for record in (entry.get("publication"), *entry.get("history", [])) if record}
-        bound = {str(script.get("video_id")): script["id"] for script in self.creation.public()["scripts"] if script.get("video_id")}
+        bound = {str(script.get("video_id")): script["id"] for script in self.creation.scripts_readonly() if script.get("video_id")}
         return taken, bound
 
     @staticmethod
@@ -120,7 +120,7 @@ class PublicationMatchMixin:
                 except VoiceError:
                     continue
                 if keys is None:
-                    keys = {headline_key(line) for line in ((self._video_publish_copy(job) or {}).get("titles") or [])} - {""}
+                    keys = {headline_key(line) for line in ((self._video_publish_copy(job, titles_only=True) or {}).get("titles") or [])} - {""}
                 if not keys:
                     break
                 built = str(row.get("built_at") or "")[:10]
@@ -241,10 +241,10 @@ class PublicationMatchMixin:
         self.save_video_publication(slot["job_id"], body, auto={"source": post["source"], "title": post["title"][:300], "matched_at": now()})
         return {"job_id": slot["job_id"], "timeline_uid": slot["timeline_uid"], "post_id": post["post_id"]}
 
-    def publication_candidates(self, job_id, timeline_uid):
+    def publication_candidates(self, job_id, timeline_uid, *, publications=None):
         """Posts that fit this waiting timeline, for one-click registration; empty when it is registered or not ready."""
         store = self._video_publications()
-        data = store.read()
+        data = store.read() if publications is None else publications
         slots = self._publication_slots(data)
         mine = [slot for slot in slots if slot["job_id"] == job_id and slot["timeline_uid"] == timeline_uid]
         if not mine:

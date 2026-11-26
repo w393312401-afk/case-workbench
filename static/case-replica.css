@@ -12,3 +12,10 @@
 .replica-optimize small{flex-basis:100%;color:var(--muted-soft)}
 /* The case page has its own 导入视频 beside the video; narrow top bars keep room for the campaign countdown instead. */
 @media(max-width:1280px){.topbar-right:has(#replica-top:not([hidden])) #import-video-top{display:none}}
+.replica-mode{margin:0;padding:10px 14px;border:1px solid var(--line);border-radius:8px;display:grid;gap:8px}
+.replica-mode legend{padding:0 4px;color:var(--muted-soft)}
+.replica-mode label{display:flex;align-items:flex-start;gap:8px;cursor:pointer}
+.replica-mode input{margin-top:3px;flex:0 0 auto}
+.replica-mode small{display:block;color:var(--muted-soft)}
+.replica-model{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
+.replica-model small{flex-basis:100%;color:var(--muted-soft)}

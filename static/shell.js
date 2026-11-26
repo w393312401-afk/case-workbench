@@ -22,7 +22,7 @@ window.keepReadingPlace = change => {
   const navigationStorageKey = "workbench-navigation-v1";
   // The library keeps one independent filter context; other lists keep theirs per global product.
   const listMemoryKey = "workbench-list-filters-v1";
-  const pageLabels = { home: "工作概览", library: "案例库", directions: "卖点与方向", videos: "带货数据", reviews: "用户声音", content: "内容列表", ai: "协作记录", scripts: "采用稿", production: "制作详情", settings: "设置" };
+  const pageLabels = { home: "工作概览", library: "案例库", hooks: "开头库", directions: "卖点与方向", videos: "带货数据", reviews: "用户声音", content: "内容列表", ai: "协作记录", scripts: "采用稿", production: "制作详情", settings: "设置" };
   let navigationRoute = null, restoringList = null;
   let breadcrumbSource = null, breadcrumbHTML = null;
   let actionSource = null, actionHTML = null;
@@ -37,12 +37,37 @@ window.keepReadingPlace = change => {
     const saved = localStorage.getItem(storageKey);
     if (saved !== null) current = normalizeProduct(saved);
   } catch { /* The URL remains the source of truth without storage. */ }
+  // The two products used most recently sit side by side next to the picker (198H｜202H｜⋯), so going back and forth
+  // is one click. Their order follows the model number, not recency, so the buttons do not swap places on every switch.
+  const recentKey = "workbench-product-recent-v1";
+  let recentProducts = [];
+  try {
+    const saved = JSON.parse(localStorage.getItem(recentKey) || "[]");
+    // Stored values are already normalized; normalizeProduct cannot run this early (its cache is declared below).
+    if (Array.isArray(saved)) recentProducts = [...new Set(saved.filter(value => typeof value === "string" && value.trim()))].slice(0, 6);
+  } catch { /* The quick buttons then start from the product list. */ }
+  // Where each product was last left in each part of the workbench, so switching back to a product returns to the
+  // order, script or case that was open there instead of its list. Kept per browser tab.
+  const placesKey = "workbench-product-places-v1";
+  let productPlaces = {};
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(placesKey) || "{}");
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) productPlaces = saved;
+  } catch { /* Switching then opens the list, as before. */ }
 
+  // Lists call this once or more per row on every paint; the answer for a given spelling never changes.
+  const normalizedProducts = new Map();
   function normalizeProduct(value) {
-    const text = String(value || "").trim();
-    if (!text || text === "all") return "";
-    const codes = [...new Set((text.match(/(?<![A-Z0-9])\d{3}[A-Z](?![A-Z0-9])/gi) || []).map(code => code.toUpperCase()))];
-    return codes.length === 1 ? codes[0] : text;
+    const key = typeof value === "string" ? value : String(value || "");
+    let found = normalizedProducts.get(key);
+    if (found === undefined) {
+      const text = key.trim();
+      const codes = !text || text === "all" ? [] : [...new Set((text.match(/(?<![A-Z0-9])\d{3}[A-Z](?![A-Z0-9])/gi) || []).map(code => code.toUpperCase()))];
+      found = !text || text === "all" ? "" : codes.length === 1 ? codes[0] : text;
+      if (normalizedProducts.size > 5000) normalizedProducts.clear();
+      normalizedProducts.set(key, found);
+    }
+    return found;
   }
   function productOf(value) {
     if (typeof value === "string") return normalizeProduct(value);
@@ -82,7 +107,7 @@ window.keepReadingPlace = change => {
       params.delete("scope");
       params.delete("archived");
     }
-    if (!["home", "library", "case", "directions", "videos", "reviews", "content", "ai", "scripts", "production", "settings"].includes(page)) { page = "library"; tail = []; }
+    if (!["home", "library", "case", "directions", "videos", "reviews", "content", "ai", "scripts", "production", "settings", "hooks"].includes(page)) { page = "library"; tail = []; }
     if (page === "case" && (!canonical || chosen) && typeof state !== "undefined") {
       const item = state.cases.find(row => row.case_id === tail[0]);
       if (item?.product) chosen = productOf(item);
@@ -200,8 +225,31 @@ window.keepReadingPlace = change => {
     }
     return { hash: format(remembered), scroll: Math.max(0, window.scrollY), state: snapshot };
   }
+  // Orders, scripts and tasks belong to one part (内容创作), cases to the library; other pages are their own part.
+  function placeSection(parsed) {
+    if (parsed.page === "case") return "library";
+    if (["scripts", "production"].includes(parsed.page) || parsed.page === "ai" && parsed.tail.length) return "content";
+    return parsed.page;
+  }
+  function notePlace(parsed) {
+    const key = parsed.product || "all", section = placeSection(parsed);
+    const places = productPlaces[key] && typeof productPlaces[key] === "object" ? productPlaces[key] : {};
+    const hash = format(parsed);
+    if (places[section] === hash) return;
+    productPlaces[key] = { ...places, [section]: hash };
+    try { sessionStorage.setItem(placesKey, JSON.stringify(productPlaces)); } catch { /* Switching then opens the list. */ }
+  }
+  function placeFor(product, section) {
+    const saved = productPlaces[product || "all"]?.[section];
+    if (typeof saved !== "string" || !/^#\/[^/]+\/[^/?]+/.test(saved)) return null;
+    const parsed = parse(saved, product);
+    if (parsed.product !== product || placeSection(parsed) !== section) return null;
+    // A list keeps the filters it was last left with, which can be newer than the address it was opened at.
+    return !parsed.tail.length && savedListContext(parsed.page, product)?.hash || format(parsed);
+  }
   function beginNavigation(incoming) {
     restoringList = null;
+    notePlace(incoming);
     const previous = navigationRoute;
     // Opening a bare list address in a fresh page brings back the filters that list was last left with.
     if (!previous && !incoming.tail.length && ![...incoming.params].length) {
@@ -328,6 +376,8 @@ window.keepReadingPlace = change => {
       productMarkup = null;
     }
     try { localStorage.setItem(storageKey, current); } catch { /* URL-only operation is supported. */ }
+    // The first product ever shown counts as chosen, so the buttons start from it.
+    if (!recentProducts.length) noteRecentProduct(current);
     if (typeof state !== "undefined") state.product = current;
     renderProducts();
     if (previous !== current) window.dispatchEvent(new CustomEvent("workbench:productchange", { detail: { product: current } }));
@@ -406,7 +456,62 @@ window.keepReadingPlace = change => {
     const text = `${value} ${productLabel(value)}`.toLocaleLowerCase();
     return query.toLocaleLowerCase().split(/\s+/).filter(Boolean).every(part => text.includes(part));
   }
+  function quickProducts() {
+    const visible = visibleProducts();
+    if (visible.length < 2) return [];
+    const chosen = recentProducts.filter(value => visible.includes(value)).slice(0, 2);
+    for (const value of visible) {
+      if (chosen.length >= 2) break;
+      if (!chosen.includes(value)) chosen.push(value);
+    }
+    return sortedProducts(chosen);
+  }
+  function renderProductQuick() {
+    if (typeof esc !== "function") return;
+    const codes = quickProducts();
+    // Phones show just the number (198 / 202) unless both share it.
+    const short = code => {
+      const digits = /^(\d{3})[A-Z]$/.exec(code)?.[1];
+      return digits && codes.filter(other => other.startsWith(digits)).length === 1 ? digits : code;
+    };
+    const markup = codes.map(code => `<button type="button" class="product-quick-option${code === current ? " is-current" : ""}" data-product-quick="${esc(code)}" aria-pressed="${code === current}" aria-label="${esc(productLabel(code))}" title="${code === current ? "当前产品" : "切换到"} ${esc(productLabel(code))}"><span data-short="${esc(short(code))}">${esc(code)}</span></button>`).join("");
+    for (const group of document.querySelectorAll("[data-product-quick-group]")) {
+      if (group.dataset.markup !== markup) { group.innerHTML = markup; group.dataset.markup = markup; }
+      group.hidden = !codes.length;
+    }
+    const picker = document.querySelector(".sidebar .global-product");
+    if (!picker) return;
+    const before = picker.className;
+    picker.classList.toggle("has-quick", codes.length > 0);
+    // 全部产品 or a product picked from ⋯ that is not one of the two still shows its name on the trigger.
+    picker.classList.toggle("quick-off", codes.length > 0 && !codes.includes(current));
+    if (picker.className !== before) window.dispatchEvent(new CustomEvent("workbench:productquick"));
+  }
+  function mountProductQuick() {
+    const combo = document.querySelector(".sidebar .global-product .product-combo");
+    if (!combo || document.querySelector("[data-product-quick-group]")) return;
+    const group = '<div class="product-quick" role="group" aria-label="常用产品" data-product-quick-group hidden></div>';
+    combo.insertAdjacentHTML("beforebegin", group);
+    // With the sidebar folded into the icon rail, the same two buttons sit in the top bar.
+    document.querySelector("#navigate-up")?.insertAdjacentHTML("afterend", group.replace('class="product-quick"', 'class="product-quick product-quick-topbar"'));
+    document.addEventListener("click", event => {
+      const button = event.target.closest?.("[data-product-quick]");
+      if (!button) return;
+      event.preventDefault();
+      const code = button.dataset.productQuick;
+      // On phones the ⋯ arrow is small, so tapping the product already chosen opens the full list too.
+      const picker = button.closest(".global-product");
+      if (code === current && picker && !picker.classList.contains("quick-tight") && matchMedia("(max-width:760px)").matches) {
+        openProductCombo(!combo.open);
+        return;
+      }
+      if (code !== current) setProduct(code);
+      window.dispatchEvent(new CustomEvent("workbench:productpickerclose"));
+    });
+    renderProductQuick();
+  }
   function renderProductCombo() {
+    renderProductQuick();
     filterPickers.forEach(picker => picker.refresh());
     if (manager.dialog?.open) renderProductManager();
   }
@@ -585,9 +690,9 @@ window.keepReadingPlace = change => {
     const title = options.title || "选择筛选项", label = options.label || title;
     const multiple = !!options.multiple;
     const value = options.getValue || (() => multiple ? [...picker.selectedOptions].map(row => row.value).filter(Boolean) : picker.value);
-    const choices = options.getChoices || (() => [...picker.options].filter(row => !row.hidden && !row.closest("optgroup[hidden]")).map(row => ({ value: row.value, label: row.label, disabled: row.disabled || !!row.closest("optgroup[disabled]"), group: row.closest("optgroup")?.label || "" })));
+    const choices = options.getChoices || (() => [...picker.options].filter(row => !row.hidden && !row.closest("optgroup[hidden]")).map(row => ({ value: row.value, label: row.label, description: row.dataset.description || "", disabled: row.disabled || !!row.closest("optgroup[disabled]"), group: row.closest("optgroup")?.label || "" })));
     const choiceLabel = options.getLabel || (code => choices().find(row => row.value === code)?.label || code);
-    let opened = false, active = -1, rows = [], destroyed = false, invalid = false, resetTimer;
+    let opened = false, active = -1, rows = [], destroyed = false, invalid = false, resetTimer, measuredDisplay = options.display;
     const listeners = new AbortController();
     const listen = (target, type, callback, settings = {}) => target?.addEventListener(type, callback, { ...settings, signal: listeners.signal });
     const original = { tabIndex: picker.getAttribute("tabindex"), ariaHidden: picker.getAttribute("aria-hidden") };
@@ -633,7 +738,7 @@ window.keepReadingPlace = change => {
       const query = search.value.trim(), selected = value();
       const isSelected = code => multiple ? (code ? selected.includes(code) : !selected.length) : code === selected;
       const parts = query.toLocaleLowerCase().split(/\s+/).filter(Boolean);
-      const entries = choices().filter(row => (options.preserveNative || row.value) && parts.every(part => `${row.value} ${row.label}`.toLocaleLowerCase().includes(part)));
+      const entries = choices().filter(row => (options.preserveNative || row.value) && parts.every(part => `${row.value} ${row.label} ${row.description || ""}`.toLocaleLowerCase().includes(part)));
       const codes = entries.map(row => row.value);
       const ordered = options.preserveNative ? codes : codes.includes(selected) ? [selected, ...codes.filter(code => code !== selected)] : codes;
       const previous = rows[active];
@@ -645,7 +750,8 @@ window.keepReadingPlace = change => {
         const heading = options.group?.(code, selected) || (options.preserveNative ? entries.find(row => row.value === code)?.group : "") || "";
         if (heading && heading !== group) markup += `<li class="${classes("group")}" role="presentation">${heading}</li>`;
         group = heading;
-        markup += `<li id="${prefix}-option-${index}" role="option" class="${classes("option")}${isSelected(code) ? " is-current" : ""}" data-picker-value="${esc(code)}"${options.product ? ` data-product="${esc(code)}"` : ""} aria-selected="${isSelected(code)}"${disabled.has(code) ? ' aria-disabled="true"' : ""} title="${esc(choiceLabel(code))}"><span>${esc(choiceLabel(code))}</span><span class="${classes("check")}" aria-hidden="true">${isSelected(code) ? "✓" : ""}</span></li>`;
+        const description = entries.find(row => row.value === code)?.description || "";
+        markup += `<li id="${prefix}-option-${index}" role="option" class="${classes("option")}${isSelected(code) ? " is-current" : ""}" data-picker-value="${esc(code)}"${options.product ? ` data-product="${esc(code)}"` : ""} aria-selected="${isSelected(code)}"${disabled.has(code) ? ' aria-disabled="true"' : ""} title="${esc(choiceLabel(code))}"><span>${esc(choiceLabel(code))}${description ? `<small class="product-picker-description">${esc(description)}</small>` : ""}</span><span class="${classes("check")}" aria-hidden="true">${isSelected(code) ? "✓" : ""}</span></li>`;
       });
       if (!markup) markup = `<li class="${classes("empty")}" role="presentation">${esc(options.emptyText || "没有找到匹配的选项")}<br><small>${esc(options.emptyHint || "试试其他关键词")}</small></li>`;
       if (list.innerHTML !== markup) list.innerHTML = markup;
@@ -675,6 +781,11 @@ window.keepReadingPlace = change => {
       panel.style.maxHeight = `${Math.max(0, upward ? above : below)}px`;
       panel.style.top = `${upward ? Math.max(top + 12, box.top - panel.offsetHeight - 8) : box.bottom + 8}px`;
     }
+    // refresh() runs for every select whenever the page around it changes. It must only write what actually
+    // differs: a write between two selects makes the next one's style read recompute the whole page, and a page
+    // with a dozen selects and a few thousand nodes then spends over a second here on every navigation.
+    const setText = (node, text) => { if (node.textContent !== text) node.textContent = text; };
+    const setAttr = (node, name, text) => { if (node.getAttribute(name) !== text) node.setAttribute(name, text); };
     function refresh() {
       if (destroyed) return;
       const selected = value(), entries = choices().map(row => [row.value, row.label]);
@@ -683,34 +794,38 @@ window.keepReadingPlace = change => {
       if (!options.preserveNative) {
         const markup = entries.map(([code, text]) => `<option value="${esc(code)}">${esc(text)}</option>`).join("");
         if (picker.innerHTML !== markup) picker.innerHTML = markup;
-        picker.value = selected;
+        if (multiple || picker.value !== selected) picker.value = selected;
       }
-      const unavailable = picker.hidden || picker.dataset.guestHidden === "true" || picker.dataset.publicHidden === "true" || getComputedStyle(picker).display === "none";
+      // The caller that builds several controls in a row measured this before building the first one.
+      const display = measuredDisplay ?? getComputedStyle(picker).display;
+      measuredDisplay = undefined;
+      const unavailable = picker.hidden || picker.dataset.guestHidden === "true" || picker.dataset.publicHidden === "true" || display === "none";
       if (root.hidden !== unavailable) root.hidden = unavailable;
       if (trigger.disabled !== picker.matches(":disabled")) trigger.disabled = picker.matches(":disabled");
       const selectedLabel = multiple ? (!selected.length ? choiceLabel("") : selected.length === 1 ? choiceLabel(selected[0]) : `已选 ${selected.length} 个${label}`) : choiceLabel(selected);
       const selectedTitle = multiple && selected.length ? selected.map(choiceLabel).join("、") : selectedLabel;
-      trigger.querySelector("span").textContent = selectedLabel;
+      const caption = trigger.querySelector("span");
+      setText(caption, selectedLabel);
       // A phone's top bar has room for the model only; the full name stays in the title and label.
-      if (options.getShortLabel) trigger.querySelector("span").dataset.short = options.getShortLabel(selected);
-      trigger.title = selectedTitle;
+      if (options.getShortLabel) { const short = options.getShortLabel(selected); if (caption.dataset.short !== short) caption.dataset.short = short; }
+      if (trigger.title !== selectedTitle) trigger.title = selectedTitle;
       const controlLabel = options.getControlLabel?.() || label;
-      trigger.setAttribute("aria-label", `${controlLabel}，当前：${selectedTitle}`);
+      setAttr(trigger, "aria-label", `${controlLabel}，当前：${selectedTitle}`);
       if (options.preserveNative) {
-        panel.querySelector("strong").textContent = controlLabel;
-        search.placeholder = `搜索${controlLabel}`;
-        search.setAttribute("aria-label", `搜索${controlLabel}`);
-        list.setAttribute("aria-label", controlLabel);
+        setText(panel.querySelector("strong"), controlLabel);
+        if (search.placeholder !== `搜索${controlLabel}`) search.placeholder = `搜索${controlLabel}`;
+        setAttr(search, "aria-label", `搜索${controlLabel}`);
+        setAttr(list, "aria-label", controlLabel);
         for (const attribute of ["aria-describedby", "aria-details"]) {
           const description = picker.getAttribute(attribute);
-          if (description) trigger.setAttribute(attribute, description); else trigger.removeAttribute(attribute);
+          if (description) setAttr(trigger, attribute, description); else if (trigger.hasAttribute(attribute)) trigger.removeAttribute(attribute);
         }
-        trigger.setAttribute("aria-required", String(picker.required));
+        setAttr(trigger, "aria-required", String(picker.required));
         if (invalid && picker.validity.valid) invalid = false;
-        trigger.setAttribute("aria-invalid", String(invalid));
+        setAttr(trigger, "aria-invalid", String(invalid));
         const message = root.querySelector(".product-picker-validation");
-        message.hidden = !invalid;
-        if (invalid) message.textContent = picker.validationMessage || "请选择一项";
+        if (message.hidden !== !invalid) message.hidden = !invalid;
+        if (invalid) setText(message, picker.validationMessage || "请选择一项");
       }
       if (opened && (unavailable || trigger.disabled || !root.getClientRects().length || picker.parentElement?.closest('[hidden],[inert],[data-guest-hidden="true"],[data-public-hidden="true"]'))) setOpen(false);
       if (opened) { renderList(); position(); }
@@ -858,6 +973,7 @@ window.keepReadingPlace = change => {
     const picker = document.querySelector("#global-product");
     if (!picker || document.querySelector(".product-combo")) return;
     combo = createProductPicker(picker, { getValue: () => current, manage: openProductManager });
+    mountProductQuick();
     renderProductCombo();
   }
   function selectLabel(picker) {
@@ -872,21 +988,31 @@ window.keepReadingPlace = change => {
     const names = { "production-status": "制作状态", "production-scope": "制作范围", "sort-filter": "排序", "sort-direction": "排序顺序", "source-type-filter": "资料类型" };
     return names[picker.id] || picker.title || "选择选项";
   }
+  // scope: one node or a list of nodes; every select in them is handled in one measure-then-build pass.
   function enhanceSelects(scope = document) {
-    const candidates = [...(scope.matches?.("select") ? [scope] : []), ...scope.querySelectorAll("select")];
+    const candidates = [...new Set((Array.isArray(scope) ? scope : [scope]).flatMap(node =>
+      [...(node.matches?.("select") ? [node] : []), ...node.querySelectorAll("select")]))];
+    // Measure every new select before building any control: building one changes the page, and measuring the
+    // next one after that would lay the whole page out again, once per select.
+    const measured = [];
     for (const picker of candidates) {
       const multiple = picker.multiple && picker.hasAttribute("data-multi-filter");
       if (!picker.isConnected || (picker.multiple && !multiple) || picker.size > 1 || selectControllers.has(picker)) continue;
-      const computed = getComputedStyle(picker), box = picker.getBoundingClientRect();
-      const fontSize = computed.fontSize, controlHeight = Math.max(30, Math.min(42, parseFloat(computed.height) || 38));
-      const parentStyle = getComputedStyle(picker.parentElement);
+      const computed = getComputedStyle(picker), parentStyle = getComputedStyle(picker.parentElement);
+      measured.push({picker, multiple, width: picker.getBoundingClientRect().width, fontSize: computed.fontSize, display: computed.display,
+        controlHeight: Math.max(30, Math.min(42, parseFloat(computed.height) || 38)),
+        inline: parentStyle.display.includes("flex") && parentStyle.flexDirection.startsWith("row")});
+    }
+    for (const {picker, multiple, width, fontSize, display, controlHeight, inline} of measured) {
+      if (selectControllers.has(picker)) continue;
       const controller = createFilterPicker(picker, {
+        display,
         prefix: `workbench-select-${++selectSequence}`, preserveNative: true, multiple,
         title: selectLabel(picker), getControlLabel: () => selectLabel(picker),
         getLabel: code => [...picker.options].find(row => row.value === code)?.label || code,
       });
-      if (box.width > 0) controller.root.style.setProperty("--select-width", `${Math.ceil(box.width)}px`);
-      if (parentStyle.display.includes("flex") && parentStyle.flexDirection.startsWith("row")) controller.root.classList.add("is-inline");
+      if (width > 0) controller.root.style.setProperty("--select-width", `${Math.ceil(width)}px`);
+      if (inline) controller.root.classList.add("is-inline");
       if (picker.parentElement.matches("label")) picker.parentElement.classList.add("workbench-select-label");
       controller.root.style.setProperty("--select-font-size", fontSize);
       controller.root.style.setProperty("--select-height", `${controlHeight}px`);
@@ -941,18 +1067,36 @@ window.keepReadingPlace = change => {
           if (picker.isConnected) added.add(picker);
         }
       }
-      for (const node of added) if (node.isConnected) enhanceSelects(node);
+      // One pass for everything new in this batch of changes: a pass per added node laid the page out once each.
+      const fresh = [...added].filter(node => node.isConnected);
       for (const picker of pending) {
         const enhanced = enhancedSelects.get(picker);
-        if (!enhanced) { enhanceSelects(picker); continue; }
+        if (!enhanced) { fresh.push(picker); continue; }
         if ((picker.multiple && !picker.hasAttribute("data-multi-filter")) || picker.size > 1) enhanced.destroy();
         else enhanced.refresh();
       }
+      if (fresh.length) enhanceSelects(fresh);
     });
-    selectObserver.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["disabled", "hidden", "required", "multiple", "size", "value", "selected", "label", "class", "style", "aria-label", "aria-labelledby", "aria-describedby", "aria-details", "data-guest-hidden", "data-public-hidden"] });
+    selectObserver.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["disabled", "hidden", "required", "multiple", "size", "value", "selected", "label", "class", "style", "aria-label", "aria-labelledby", "aria-describedby", "aria-details", "data-guest-hidden", "data-public-hidden", "data-description"] });
+  }
+  // Only a product chosen here (the two buttons or the list) counts: opening an order, script or task of another
+  // product also switches the product, and must not push 198H/202H off the buttons.
+  function noteRecentProduct(code) {
+    if (!code || recentProducts[0] === code) return;
+    recentProducts = [code, ...recentProducts.filter(value => value !== code)].slice(0, 6);
+    try { localStorage.setItem(recentKey, JSON.stringify(recentProducts)); } catch { /* Recents last for this page only. */ }
   }
   function setProduct(value) {
-    let parsed = parse();
+    const target = normalizeProduct(value), here = parse();
+    noteRecentProduct(target);
+    // Going back to a product returns to where it was left in this part of the workbench (the same order, script
+    // or case), instead of that product's list.
+    if (target !== here.product) {
+      notePlace(here);
+      const place = placeFor(target, placeSection(here));
+      if (place) { location.hash = place; return; }
+    }
+    let parsed = here;
     if (parsed.page === "case" || parsed.page === "production") parsed = parse(parentURL(parsed));
     parsed.product = normalizeProduct(value);
     if (["content", "ai", "scripts", "production", "directions"].includes(parsed.page)) parsed.tail = [];
@@ -1210,6 +1354,114 @@ window.keepReadingPlace = change => {
     }).observe(connection);
     syncRail();
     applyPreference();
+    fitPhoneTopbar(phoneScreen);
+    fitDesktopTopbar(phoneScreen);
+  }
+
+  // Desktop: beside a docked panel (or in a narrow window) the top bar can be narrower than its contents; the
+  // campaign runway used to shrink to nothing while its words spilled over the breadcrumb. Keep the font size and
+  // step things aside one at a time until it fits: account name, breadcrumb parents, a compact runway, then the
+  // breadcrumb, then the runway itself (its summary stays in the link's title).
+  function fitDesktopTopbar(phone) {
+    const bar = document.querySelector(".topbar");
+    if (!bar) return;
+    const steps = ["squeeze-account", "squeeze-crumbs", "squeeze-runway", "squeeze-no-crumbs", "squeeze-no-runway"];
+    let frame = 0;
+    const overflowing = node => node && node.getClientRects().length && node.scrollWidth > node.clientWidth + 1;
+    const crowded = () => {
+      if (bar.scrollWidth > bar.clientWidth + 1) return true;
+      // The runway clips its content (shell.css) and right-aligns it when narrow, so overflow runs off its left
+      // edge where scrollWidth misses it: compare the count and words with the room instead.
+      const body = bar.querySelector(".campaign-runway:not([hidden]) .runway-body");
+      if (body && body.getClientRects().length) {
+        const parts = [...body.querySelectorAll(":scope > .runway-count, :scope > .runway-words")].filter(node => node.getClientRects().length);
+        const gap = parseFloat(getComputedStyle(body).columnGap) || 0;
+        const need = parts.reduce((sum, node) => sum + node.getBoundingClientRect().width, 0) + gap * Math.max(0, parts.length - 1);
+        if (need > body.clientWidth + 1) return true;
+      }
+      const crumbs = bar.querySelector("#breadcrumb");
+      return Boolean(overflowing(crumbs?.querySelector("ol")) || overflowing(crumbs));
+    };
+    const fit = () => {
+      frame = 0;
+      bar.classList.remove(...steps);
+      if (phone.matches) return;
+      for (const step of steps) {
+        if (!crowded()) break;
+        bar.classList.add(step);
+      }
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(fit); };
+    new ResizeObserver(schedule).observe(bar);
+    const runway = bar.querySelector(".campaign-runway");
+    if (runway) new MutationObserver(schedule).observe(runway, { attributes: true, attributeFilter: ["hidden", "class"], childList: true, subtree: true, characterData: true });
+    new MutationObserver(schedule).observe(bar, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
+    window.addEventListener("workbench:productquick", schedule);
+    phone.addEventListener("change", schedule);
+    window.addEventListener("resize", schedule);
+    schedule();
+  }
+
+  // Phones: the product picker is fixed at the top left and the top-bar buttons sit at the right. Their width
+  // depends on what is shown (account button on the public site, a live campaign pill wider than a coming one),
+  // so size the picker to the gap that is really left instead of a fixed reservation; it used to cover the campaign
+  // pill and the leftmost button. When even the picker's minimum does not fit, the campaign pill steps aside.
+  function fitPhoneTopbar(phone) {
+    const bar = document.querySelector(".topbar"), right = bar?.querySelector(".topbar-right");
+    const picker = document.querySelector(".sidebar .global-product");
+    if (!bar || !right || !picker) return;
+    const minimum = 60, roomy = 84, gap = 4;
+    let frame = 0;
+    const leftmost = () => {
+      let left = Infinity;
+      for (const node of [bar.querySelector(".campaign-runway"), ...right.children]) {
+        const box = node?.getBoundingClientRect();
+        if (box?.width) left = Math.min(left, box.left);
+      }
+      return left;
+    };
+    const fit = () => {
+      frame = 0;
+      if (!phone.matches || document.body.classList.contains("public-text-mode")) {
+        picker.style.removeProperty("width");
+        picker.classList.remove("is-tight", "quick-tight");
+        document.body.classList.remove("topbar-crowded");
+        return;
+      }
+      const start = picker.getBoundingClientRect().left || 10;
+      document.body.classList.remove("topbar-crowded");
+      let room = leftmost() - start - gap;
+      // 198｜202｜⌄ needs about 110px; 全部产品 or a third product uses the single
+      // picker. Like the picker's own minimum, the two buttons come before the campaign pill, which steps aside.
+      const quick = picker.classList.contains("has-quick") && !picker.classList.contains("quick-off"), quickRoom = 110;
+      if (room < (quick ? quickRoom : minimum) && bar.querySelector(".campaign-runway:not([hidden])")) {
+        const before = room;
+        document.body.classList.add("topbar-crowded");
+        room = leftmost() - start - gap;
+        // Hiding the pill did not make room for the two buttons either: keep it and use the single picker.
+        if (room < quickRoom && before >= minimum) {
+          document.body.classList.remove("topbar-crowded");
+          room = before;
+        }
+      }
+      const tight = picker.classList.contains("has-quick") && (!quick || room < quickRoom);
+      picker.classList.toggle("quick-tight", tight);
+      picker.classList.toggle("is-tight", room < roomy);
+      picker.style.width = `${Math.max(minimum, Math.min(quick && !tight ? 150 : 220, Math.floor(room)))}px`;
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(fit); };
+    const watch = new ResizeObserver(schedule);
+    watch.observe(right);
+    const runway = bar.querySelector(".campaign-runway");
+    if (runway) {
+      watch.observe(runway);
+      new MutationObserver(schedule).observe(runway, { attributes: true, attributeFilter: ["hidden", "class"] });
+    }
+    new MutationObserver(schedule).observe(right, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden"] });
+    window.addEventListener("workbench:productquick", schedule);
+    phone.addEventListener("change", schedule);
+    window.addEventListener("resize", schedule);
+    schedule();
   }
   function update() {
     const parsed = parse();

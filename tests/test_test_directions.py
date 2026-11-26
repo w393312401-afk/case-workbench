@@ -166,19 +166,11 @@ class DirectionBrowserTests(unittest.TestCase):
         page.locator("#compare-selected").click()
         page.locator("#case-comparison").get_by_text("只换钩子", exact=True).wait_for()
         page.locator("#close-comparison").click()
+        # The per-case table on the direction page left on 2026-11-22; cases are compared from the library above.
         page.locator("#directions-nav").click()
         page.locator(".direction-card-link").first.click()
-        page.locator(".dir-case-performance > summary").click()
-        page.locator(".direction-group").first.wait_for()
-        self.assertEqual(page.locator(".direction-group").count(), 1)
-        self.assertEqual(page.locator(".direction-observations tbody tr").count(), 2)
-        self.assertEqual(page.locator(".direction-observations").get_by_text("0.94%", exact=True).count(), 0)
-        sales_cells = page.locator(".direction-sales-status").all_inner_texts()
-        self.assertEqual(len(sales_cells), 2)
-        self.assertTrue(all(text in ("未匹配到视频", "暂不可用") for text in sales_cells))
-        page.locator(".direction-cohorts summary").click()
-        page.locator(".direction-cohorts").get_by_text("V2", exact=False).wait_for()
-        page.locator(".direction-cohorts").get_by_text("V3", exact=False).wait_for()
+        page.locator("#direction-definition").wait_for()
+        self.assertEqual(page.locator(".dir-case-performance, .direction-observations").count(), 0)
 
     def test_ordinary_edit_keeps_direction_version_and_historical_metrics(self):
         self.add_direction()
@@ -217,11 +209,7 @@ class DirectionBrowserTests(unittest.TestCase):
         self.assertTrue(page.url.endswith("#/202H/directions"), page.url)
         self.assertEqual(page.locator(".dir-row.has-direction").count(), 2)
         page.locator(f'[data-direction-id="{DIRECTION["direction_id"]}"] .direction-card-link').click()
-        page.locator(".direction-duplicate").first.get_by_text("同一视频跨方向登记", exact=False).wait_for()
-        self.assertEqual(page.locator(".direction-duplicate").first.locator("li").count(), 4)
-        for detail in page.locator(".direction-record-details").all():
-            detail.locator("summary").click()
-        page.locator(".direction-observations").get_by_text("原产品名 202H", exact=True).wait_for()
+        page.locator("#direction-definition").wait_for()
 
     def test_direction_table_fits_desktop_and_long_text_does_not_overflow_page(self):
         current = copy.deepcopy(self.store.read_case(self.identifier)["current"])
@@ -240,50 +228,27 @@ class DirectionBrowserTests(unittest.TestCase):
         page = self.open_page("#directions?product=202H")
         page.set_viewport_size({"width": 1265, "height": 900})
         page.locator(".direction-card-link").first.click()
-        page.locator(".dir-case-performance > summary").click()
-        page.locator(".direction-table tbody tr").wait_for()
-        self.assertEqual(page.locator(".direction-observations .case-table").count(), 0)
-        self.assertEqual(page.locator(".direction-table thead th").all_text_contents(),
-                         ["当前案例", "播放量", "商品点击", "售出件数", "CTOR", "统计窗口", "销售数据表"])
-        for width in (1265, 1511):
-            with self.subTest(desktop_width=width):
+        page.locator("#direction-definition").wait_for()
+        # The per-case table left on 2026-11-22; long titles and ids must still fit the page.
+        self.assertEqual(page.locator(".direction-table").count(), 0)
+        for width in (1265, 1511, 390):
+            with self.subTest(width=width):
                 page.set_viewport_size({"width": width, "height": 900})
-                geometry = page.locator(".direction-observations").evaluate("""element => {
-                  const table = element.querySelector('table'), cells = [...table.querySelectorAll('thead th')];
-                  return {available:element.clientWidth, table:table.getBoundingClientRect().width,
-                          widths:cells.map(cell => cell.getBoundingClientRect().width),
-                          rowHeight:table.querySelector('tbody tr').getBoundingClientRect().height};
-                }""")
-                self.assertLessEqual(geometry["table"], geometry["available"] + 1)
-                self.assertGreaterEqual(geometry["widths"][0], 200)
-                self.assertTrue(all(60 <= cell_width <= 100 for cell_width in geometry["widths"][1:5]))
-                self.assertLess(geometry["rowHeight"], 140)
-        self.assertFalse(page.locator(".dir-aside-more").evaluate("el => el.open"))
-        self.assertFalse(page.locator(".direction-definition-details").evaluate("el => el.open"))
-        d = current["test_direction"]
-        self.assertEqual(page.locator(".direction-preview").text_content().strip(),
-                         "方向链 " + " → ".join([d["main_difference"], d["concern"], d["closing"]]))
-        page.locator(".direction-definition-details summary").click()
-        page.locator(".direction-definition-details .direction-definition").get_by_text(DIRECTION["concern"], exact=False).wait_for()
-        page.locator(".direction-definition-details .direction-definition").get_by_text(DIRECTION["closing"], exact=False).wait_for()
-        page.set_viewport_size({"width": 390, "height": 844})
-        self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391, page.evaluate("""() => [...document.querySelectorAll('#content *')].filter(el => el.getBoundingClientRect().right > innerWidth + 1 && !el.closest('.direction-observations') && el.getBoundingClientRect().width).map(el => ({tag:el.tagName, cls:el.className, right:el.getBoundingClientRect().right, text:el.textContent.slice(0,80)}))"""))
-        container = page.locator(".direction-observations")
-        self.assertEqual(container.get_attribute("tabindex"), "0")
-        self.assertGreater(container.evaluate("el => el.scrollWidth"), container.evaluate("el => el.clientWidth"))
-        container.focus()
-        page.keyboard.press("ArrowRight")
-        page.wait_for_function("() => document.querySelector('.direction-observations').scrollLeft > 0")
+                self.assertFalse(page.evaluate("document.documentElement.scrollWidth>document.documentElement.clientWidth"))
 
-    def test_exact_direction_filter_has_candidates_and_clear_action(self):
+    def test_a_link_naming_one_direction_opens_it_beside_the_whole_list(self):
         self.add_direction()
-        page = self.open_page("#directions?product=202H&direction=missing-direction")
-        page.get_by_role("heading", name="当前筛选没有匹配的卖点", exact=True).wait_for()
-        self.assertEqual(page.locator(".dir-row.has-direction").count(), 0)
-        self.assertEqual(page.locator('#direction-filters [name="direction"]').input_value(), "missing-direction")
-        page.locator(".dir-scope").get_by_role("link", name="看全部", exact=True).click()
+        # An older link that narrowed the list to one direction now opens that direction.
+        page = self.open_page(f"#directions?product=202H&direction={DIRECTION['direction_id']}")
+        page.locator("#direction-definition").wait_for()
+        self.assertTrue(page.url.endswith(f"#/202H/directions/{DIRECTION['direction_id']}"), page.url)
+        # One that no longer exists says so in its place; the list behind it stays whole.
+        page.evaluate("location.hash='#/202H/directions?direction=missing-direction'")
+        page.locator("#direction-pane [role=alert]").get_by_text("这条方向不存在", exact=False).wait_for()
+        # Going back lands on the whole list: the old narrowing is not remembered as the list's address.
+        page.locator("#navigate-up").click()
         page.locator(".dir-row.has-direction").first.wait_for()
-        self.assertEqual(page.locator('#direction-filters [name="direction"]').count(), 0)
+        self.assertTrue(page.url.endswith("#/202H/directions"), page.url)
 
 
 class DirectionFrozenTaskTests(unittest.TestCase):

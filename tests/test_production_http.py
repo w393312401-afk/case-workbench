@@ -36,6 +36,52 @@ class ProductionHTTPTests(unittest.TestCase):
         self.assertEqual(task["status"], "completed")
         return task
 
+    def test_job_bundles_exact_adopted_version_and_only_its_compact_family(self):
+        app = self.server.app
+        source = {"task_id": "AIT-0123456789ab", "round_id": "AIR-0123456789ab", "product": "202H",
+                  "candidate_text": CANDIDATE, "snapshot": {"private_frozen_input": "large hidden source"}}
+        def save(text, parent=None):
+            return app.creation.mutate("script", {"request_id": uuid4().hex,
+                "revision": app.creation.public()["revision"], "script": {"product": "202H", "title": text,
+                "text": text, "translation_zh": "保留准确版本。", "confirmed": True,
+                **({"parent_id": parent["id"]} if parent else {})}}, source)["script"]
+        first = save("This order uses version one.")
+        second = save("A later version for another order.", first)
+        unrelated = save("Unrelated family must not be returned.")
+        job = self.ok("POST", "/api/production/jobs", {"request_id": uuid4().hex,
+            "revision": app.production.public()["revision"], "job": {"script_id": first["id"]}})["job"]
+        detail = self.ok("GET", f"/api/production/jobs/{job['id']}")
+        family = detail["script_catalog"]
+        self.assertEqual(detail["script"]["id"], first["id"])
+        self.assertEqual(detail["script"]["text"], first["text"])
+        self.assertEqual({row["id"] for row in family["scripts"]}, {first["id"], second["id"]})
+        self.assertNotIn(unrelated["id"], {row["id"] for row in family["scripts"]})
+        self.assertEqual(family["revision"], app.creation.public()["revision"])
+        for script in [detail["script"], *family["scripts"]]:
+            self.assertNotIn("snapshot", script["source"])
+            self.assertNotIn("candidate_text", script["source"])
+            self.assertIsInstance(script["production_usage"], list)
+        before = app.creation.script_context(first["id"])
+        before["script"]["source"]["snapshot"]["private_frozen_input"] = "unsaved caller edit"
+        before["catalog"]["scripts"][0]["text"] = "unsaved catalog edit"
+        self.assertEqual(app.creation.get_script(first["id"])["text"], first["text"])
+        self.assertEqual(app.creation.get_script(first["id"])["source"]["snapshot"], source["snapshot"])
+        # A second store changes the family: the next order read must use the fresh snapshot.
+        other = type(app.creation)(app.creation.root.parent)
+        data = other.read()
+        data["scripts"] = [row for row in data["scripts"] if row["id"] != second["id"]]
+        other.write(data)
+        fresh = self.ok("GET", f"/api/production/jobs/{job['id']}")
+        self.assertEqual([row["id"] for row in fresh["script_catalog"]["scripts"]], [first["id"]])
+        self.assertNotEqual(fresh["script_catalog"]["revision"], family["revision"])
+        data = other.read()
+        data["scripts"] = [row for row in data["scripts"] if row["id"] != first["id"]]
+        other.write(data)
+        missing = self.ok("GET", f"/api/production/jobs/{job['id']}")
+        self.assertIsNone(missing["script"])
+        self.assertIsNone(missing["script_catalog"])
+        self.assertEqual(missing["job"]["lines"], detail["job"]["lines"])
+
     def test_script_without_a_table_is_filled_in_by_hand(self):
         script = self.ok("POST", "/api/scripts", {"revision": self.revision("/api/creation?product=202H"), "request_id": uuid4().hex,
             "script": {"product": "202H", "title": "手动", "text": "One kit.\nGrab it below.", "translation_zh": "一套。\n下面拿。",

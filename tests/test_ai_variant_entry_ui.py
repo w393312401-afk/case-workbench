@@ -184,7 +184,7 @@ class AIVariantEntryBrowserTests(unittest.TestCase):
 
         self.open_entry(page, index=0)
         self.assertEqual(self.selected(page), [0])
-        self.assertEqual(page.locator("#submit-ai-create").inner_text(), "开始协作")
+        self.assertEqual(page.locator("#submit-ai-create").inner_text(), "开始写稿")
         self.assertEqual(page.locator("#ai-create-instruction").input_value(), "")
         self.submit_failed(page)
         self.assertNotEqual(self.posts[1]["request_id"], original["request_id"])
@@ -192,12 +192,12 @@ class AIVariantEntryBrowserTests(unittest.TestCase):
 
         self.open_entry(page)
         self.assertEqual(self.selected(page), [0, 2])
-        self.assertEqual(page.locator("#submit-ai-create").inner_text(), "开始协作")
+        self.assertEqual(page.locator("#submit-ai-create").inner_text(), "开始写稿")
         page.locator("#cancel-ai-create").click()
 
         self.open_entry(page, plan="PLAN-first")
         self.assertEqual(self.selected(page), [])
-        self.assertEqual(page.locator("#submit-ai-create").inner_text(), "开始协作")
+        self.assertEqual(page.locator("#submit-ai-create").inner_text(), "开始写稿")
         page.locator("#cancel-ai-create").click()
 
         self.open_entry(page, index=2)
@@ -218,7 +218,7 @@ class AIVariantEntryBrowserTests(unittest.TestCase):
         original = copy.deepcopy(self.posts[0])
         page.locator("#cancel-ai-create").click()
         self.open_entry(page, plan="PLAN-second")
-        self.assertEqual(page.locator("#submit-ai-create").inner_text(), "开始协作")
+        self.assertEqual(page.locator("#submit-ai-create").inner_text(), "开始写稿")
         self.assertEqual(page.locator("#ai-create-instruction").input_value(), "按测试卡 PLAN-second 写稿")
         page.locator("#cancel-ai-create").click()
         self.open_entry(page, plan="PLAN-first")

@@ -42,6 +42,10 @@ def make_test_server(skill, runtime):
         server = SERVER.make_server(skill, runtime, port=0, allow_open=False)
         if server.server_port not in CHROMIUM_BLOCKED_PORTS:
             track_connections(server)
+            # New orders are judged by AI in a background thread; disposable servers opt out unless a test asks.
+            server.app.auto_variant_attribution = False
+            # Reviews are translated on their own (on screen and after a sync); disposable servers never call the real AI.
+            server.app.review_translations.auto_translate = False
             return server
         server.server_close()
     raise RuntimeError("Could not bind a browser-safe ephemeral test port")
@@ -124,6 +128,39 @@ def new_case_snapshot(video):
     current = snapshot(video)
     current["metrics"]["video_id"] = "7664986913497009440"
     return current
+
+
+class CaseDeletionStagingTests(unittest.TestCase):
+    def test_attachment_failure_or_interruption_restores_the_archived_case(self):
+        for failure in (PermissionError("fixture locked attachment"), KeyboardInterrupt("fixture stopped after staging")):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                skill, runtime = root / "skill", root / "runtime"
+                video = runtime / "evidence" / "fixture.mp4"
+                video.parent.mkdir(parents=True)
+                video.write_bytes(b"fixture video")
+                store = SERVER.CaseStore(skill)
+                record = store.add({"title": "归档记录", "product": "SHARPAL 202H",
+                                    "original": {"text": "fixture", "source": "unit test"},
+                                    "feedback": {"kind": "editorial", "text": "fixture"}, "current": snapshot(video)})
+                identifier = record["case_id"]
+                store.set_archived(identifier, True)
+                manager = SERVER.DeletionManager(skill, runtime)
+                preview = manager.preview(identifier)
+                replace = os.replace
+
+                def fail_attachment(source, destination):
+                    if Path(source) == video:
+                        raise failure
+                    return replace(source, destination)
+
+                expected = KeyboardInterrupt if isinstance(failure, KeyboardInterrupt) else SERVER.DeletionError
+                with patch("case_deletion.os.replace", side_effect=fail_attachment), self.assertRaises(expected):
+                    manager.delete(identifier, preview["revision"], preview["plan_token"], identifier)
+                restarted = SERVER.DeletionManager(skill, runtime)
+                self.assertTrue(restarted.store.read_case(identifier)["archived"])
+                self.assertEqual(video.read_bytes(), b"fixture video")
+                self.assertFalse(list((skill / ".case-delete-staging").glob("*/transaction.json")))
 
 
 class WorkbenchHTTPTests(unittest.TestCase):
@@ -243,6 +280,33 @@ class WorkbenchHTTPTests(unittest.TestCase):
         stale = self.request("GET", "/api/state?since=stale")[2]
         self.assertNotIn("unchanged", stale)
         self.assertEqual(len(stale["cases"]), len(state["cases"]))
+
+    def test_unchanged_answer_is_not_sent_again_and_large_answers_are_compressed(self):
+        import gzip
+        status, headers, first = self.request("GET", "/api/state")
+        tag = headers.get("ETag")
+        self.assertEqual(status, 200)
+        self.assertTrue(tag and tag.startswith('"'), headers)
+        self.assertEqual(headers["Cache-Control"], "no-store")  # the tag never lets a browser store business data
+        self.assertRegex(headers["Server-Timing"], r"^total;dur=\d+, cpu;dur=\d+$")
+        status, headers, body = self.request("GET", "/api/state", headers={"If-None-Match": tag})
+        self.assertEqual((status, body, headers.get("ETag"), headers["Cache-Control"]), (304, b"", tag, "no-store"))
+        status, _, again = self.request("GET", "/api/state", headers={"If-None-Match": '"another-tag"'})
+        self.assertEqual((status, again), (200, first))
+        # A write never answers 304, whatever tag accompanies it.
+        status, _, _ = self.request("POST", "/api/content/views", body={"product": "", "action": "none"},
+                                    headers={"If-None-Match": tag})
+        self.assertNotEqual(status, 304)
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            connection.request("GET", "/api/state", headers={"Accept-Encoding": "gzip"})
+            response = connection.getresponse()
+            packed = response.read()
+            self.assertEqual(response.getheader("Content-Encoding"), "gzip")
+            self.assertEqual(response.getheader("ETag"), tag)  # the tag names the content, not its encoding
+            self.assertEqual(json.loads(gzip.decompress(packed)), first)
+        finally:
+            connection.close()
 
     def test_cached_state_still_sees_outside_changes(self):
         first = self.request("GET", "/api/state")[2]

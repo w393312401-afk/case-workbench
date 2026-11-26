@@ -43,7 +43,7 @@ class ContentSavedViewsBrowserTests(unittest.TestCase):
     def refresh(self, page):
         with page.expect_response(lambda response: "/api/content/views?" in response.url
                                   and response.request.method == "GET"):
-            page.locator("#content-flow-refresh").click()
+            page.locator(".flow-main-menu > summary").click(); page.locator("#content-flow-refresh").click()
 
     def save(self, page, name, update=False):
         dialog = self.dialog(page)

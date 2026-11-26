@@ -144,7 +144,8 @@ window.WorkbenchSearch = (() => {
 
   function pointResults(term, data) {
     return (data.selling_points || []).filter(matchesProduct).filter(point => normalize(`${point.code || ""} ${point.title || ""}`).includes(term)).map(point => {
-      const params = new URLSearchParams({ q: point.title || point.code || "" });
+      // A selling point is found in the table, which is its own tab on the page.
+      const params = new URLSearchParams({ tab: "points", q: point.title || point.code || "" });
       if (point.product) params.set("product", point.product);
       return { key: `point:${point.product || ""}:${point.code || point.title}`, title: point.title || point.code, description: `${point.code ? `${point.code} · ` : ""}${point.product || "卖点"}`, route: `#directions?${params}` };
     }).sort(byRank(term)).slice(0, LIMIT);

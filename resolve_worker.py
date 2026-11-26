@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 from pathlib import Path
 import re
@@ -195,9 +196,10 @@ def located(project):
     return {"project_id": optional(project, "GetUniqueId") or "", **({"folder": LOCATION["folder"]} if "folder" in LOCATION else {})}
 
 
-def library(project):
-    """The project's material timelines: what a creator's footage is cut from."""
-    return [item.GetName() for item in timelines(project) if "素材" in item.GetName() and not SKIPPED_TIMELINES.search(item.GetName())]
+def library(project, request=None):
+    """The project's material timelines: what a creator's footage is cut from, named 「…素材」 or picked before."""
+    known = known_materials(request or {})
+    return [item.GetName() for item in timelines(project) if is_material(item.GetName(), known)]
 
 
 def status(resolve, request):
@@ -217,6 +219,29 @@ def same_setting(actual, wanted):
         return abs(float(actual) - float(wanted)) < 1e-6
     except (TypeError, ValueError):
         return str(actual) == str(wanted)
+
+
+SETTINGS_ATTEMPTS, SETTINGS_PAUSE = 4, .5
+
+
+def apply_timeline_settings(target, project, wanted, *, known_different=False):
+    """Give a new timeline its own frame rate and size, judged by reading the settings back.
+
+    In a project whose default is 2160x3840, Resolve answered False to SetSettings on a just-created timeline:
+    every such build from 2026-11-10 to 11-18 stopped here and then went through on the same request moments
+    later. So read the settings back and try again briefly before giving up."""
+    def applied():
+        return all(same_setting(optional(target, "GetSetting", setting) or project.GetSetting(setting), value)
+                   for setting, value in wanted.items())
+    if not known_different and applied():
+        return True
+    for attempt in range(SETTINGS_ATTEMPTS):
+        if optional(target, "SetSettings", {"useCustomSettings": "1", **wanted}) or applied():
+            return True
+        time.sleep(SETTINGS_PAUSE)
+        if applied():
+            return True
+    return False
 
 
 def folder(media_pool, name):
@@ -263,6 +288,20 @@ def optional(obj, method, *args):
         return function(*args) if callable(function) else None
     except Exception:
         return None
+
+
+def exact_end(item):
+    """Where a clip really ends. A voiceover WAV rarely lasts a whole number of frames: GetEnd() drops the
+    remainder, while the clip on the timeline still plays (and shows) that part of a frame."""
+    value = optional(item, "GetEnd", True)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return float(item.GetEnd())
+    return float(value)
+
+
+def covering_frame(value):
+    """The first whole frame at or after a fractional end: picture must reach it to cover the last partial frame."""
+    return int(math.ceil(value - 1e-6))
 
 
 def pool_clips(media_pool):
@@ -342,7 +381,7 @@ def build_recoverable(resolve, request):
     media_pool = project.GetMediaPool()
     path = Path(recovery_file)
     digest = hashlib.sha256(json.dumps({k: v for k, v in request.items() if k not in
-        {"command", "recovery_file", "operation_path"}}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        {"command", "recovery_file", "operation_path", "material_names"}}, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     existing = path.exists()
     if existing:
         try:
@@ -363,7 +402,7 @@ def build_recoverable(resolve, request):
         if not target:
             raise WorkerError("原请求建好的时间线已不在当前工程中，请核实，未重复建线。")
         # Return the recorded outcome; never treat later manual edits as a different build result.
-        return {**journal["result"], **located(project), "project": project.GetName(), "materials": library(project), "recovered": True}
+        return {**journal["result"], **located(project), "project": project.GetName(), "materials": library(project, request), "recovered": True}
     if journal.get("stage") in {"creating", "created", "placing", "placed", "marking", "renaming", "saving"} and not target:
         raise WorkerError("上次建线结果尚未确认，找不到原请求的时间线；请核实，未重复建线。")
     if target and journal.get("checkpoint"):
@@ -380,7 +419,7 @@ def build_recoverable(resolve, request):
             result["warnings"] = ["时间线已建好，但工程保存未确认，请手动保存后重新核验。"]
         journal.update(stage="completed", result=result)
         durable_json(path, journal)
-        return {**result, **located(project), "project": project.GetName(), "materials": library(project), "recovered": True}
+        return {**result, **located(project), "project": project.GetName(), "materials": library(project, request), "recovered": True}
 
     if target and existing:
         guard_build_setup(target, journal, request)
@@ -443,10 +482,8 @@ def build_recoverable(resolve, request):
         raise WorkerError("没能打开原请求的时间线，未重复建线。")
     wanted = {"timelineFrameRate": request["fps"], "timelineResolutionWidth": str(request["width"]),
               "timelineResolutionHeight": str(request["height"])}
-    if any(not same_setting(optional(target, "GetSetting", setting) or project.GetSetting(setting), value)
-           for setting, value in wanted.items()):
-        if not target.SetSettings({"useCustomSettings": "1", **wanted}):
-            raise WorkerError("原请求时间线的帧率或分辨率没有设置成功。")
+    if not apply_timeline_settings(target, project, wanted):
+        raise WorkerError("原请求时间线的帧率或分辨率没有设置成功。")
     track = request["track_index"]
     while target.GetTrackCount("audio") < track:
         if not target.AddTrack("audio", "mono"):
@@ -502,7 +539,7 @@ def build_recoverable(resolve, request):
         result["warnings"] = ["时间线已建好，但工程保存未确认，请手动保存后重新核验。"]
     journal.update(stage="completed", result=result)
     durable_json(path, journal)
-    return {**result, **located(project), "project": project.GetName(), "materials": library(project), "recovered": existing}
+    return {**result, **located(project), "project": project.GetName(), "materials": library(project, request), "recovered": existing}
 
 
 def build(resolve, request):
@@ -530,9 +567,9 @@ def build(resolve, request):
         project.SetCurrentTimeline(created_timeline)
         wanted = {"timelineFrameRate": request["fps"], "timelineResolutionWidth": str(request["width"]),
                   "timelineResolutionHeight": str(request["height"])}
-        if any(not same_setting(project.GetSetting(key), value) for key, value in wanted.items()):
-            if not created_timeline.SetSettings({"useCustomSettings": "1", **wanted}):
-                raise WorkerError("新时间线的帧率或分辨率没有设置成功。")
+        if (any(not same_setting(project.GetSetting(key), value) for key, value in wanted.items()) and
+                not apply_timeline_settings(created_timeline, project, wanted, known_different=True)):
+            raise WorkerError("新时间线的帧率或分辨率没有设置成功。")
         track = request["track_index"]
         while created_timeline.GetTrackCount("audio") < track:
             if not created_timeline.AddTrack("audio", "mono"):
@@ -555,7 +592,7 @@ def build(resolve, request):
         result["saved"] = bool(resolve.GetProjectManager().SaveProject()) if request.get("save", True) else False
         if not result["saved"]:
             result["warnings"] = ["时间线已建好，但达芬奇没有确认保存工程，请在达芬奇里手动保存一次。"]
-        return {**result, **located(project), "project": project.GetName(), "materials": library(project)}
+        return {**result, **located(project), "project": project.GetName(), "materials": library(project, request)}
     except Exception:
         if created_timeline:
             media_pool.DeleteTimelines([created_timeline])
@@ -657,7 +694,8 @@ def inspect(resolve, request):
             tracks[kind].append({"index": index, "name": timeline.GetTrackName(kind, index),
                                  "enabled": optional(timeline, "GetIsTrackEnabled", kind, index),
                                  "locked": optional(timeline, "GetIsTrackLocked", kind, index),
-                                 "items": [{**inspect_item(item), "speed": optional(item, "GetSpeed")} for item in items]})
+                                 "items": [{**inspect_item(item), "speed": optional(item, "GetSpeed"),
+                                            **({"end_exact": exact_end(item)} if kind == "audio" else {})} for item in items]})
     markers = [{"frame": frame, "color": info.get("color"), "name": info.get("name"), "note": info.get("note"),
                 "duration": info.get("duration"), "custom": info.get("customData")} for frame, info in (timeline.GetMarkers() or {}).items()]
     dedup_enabled = request.get("deduplicate_source_ranges") is True
@@ -1033,8 +1071,9 @@ def comment_comp(clip_comp, frames, template):
     return re.sub(r"(RenderRange|GlobalRange) = \{ 0, \d+ \}", rf"\1 = {{ 0, {frames - 1} }}", text)
 
 
-def fill_comment_card(comp, name, lines):
-    """Write the name and comment; each extra line grows the card downward from where the template puts it, and carries the bubble's tail along."""
+def fill_comment_card(comp, name, lines, card_width=None):
+    """Write the name and comment; each extra line grows the card downward from where the template puts it, and carries the bubble's tail along.
+    card_width (share of the frame, worked out by the workbench from the words) narrows the card to its text, keeping its left edge and tail."""
     tools = {key: comp.FindTool(key) for key in ("CardShape", "Username", "Comment")}
     if not all(tools.values()):
         raise WorkerError("评论贴纸模板缺少节点，评论贴纸没有加。")
@@ -1047,7 +1086,13 @@ def fill_comment_card(comp, name, lines):
         tail = comp.FindTool("MessageTailShape")
         for point in ("Point1", "Point2", "Point3") if tail else ():
             down(tail, point, shift)
+    width = tools["CardShape"].GetInput("Width")
+    if card_width and isinstance(width, (int, float)) and 0 < card_width < width:
+        center = tools["CardShape"].GetInput("Center")
+        tools["CardShape"].SetInput("Width", card_width)
+        tools["CardShape"].SetInput("Center", {1: center[1] - (width - card_width) / 2, 2: center[2]})
     text = "\n".join(lines)
+    # The name line carries only the commenter's name (2026-11-18), even on a template still reading "Reply to @username's comment".
     tools["Username"].SetInput("StyledText", name)
     tools["Comment"].SetInput("StyledText", text)
     if tools["Username"].GetInput("StyledText") != name or tools["Comment"].GetInput("StyledText") != text:
@@ -1139,7 +1184,7 @@ def place_comment_card(project, timeline, track, old, request):
             if not item.ImportFusionComp(str(built)):
                 discard("达芬奇没能导入评论贴纸模板，评论贴纸没有加。")
         try:
-            fill_comment_card(item.GetFusionCompByIndex(1), request["username"], request["lines"])
+            fill_comment_card(item.GetFusionCompByIndex(1), request["username"], request["lines"], request.get("card_width"))
         except WorkerError as problem:
             discard(str(problem))
         if cut_layout(timeline, track) != before or timeline.GetEndFrame() != end:
@@ -1255,12 +1300,37 @@ def is_action_marker(info):
     return str(info.get("customData") or "").startswith(ACTION_PREFIX)
 
 
+def source_shift(item):
+    """1 when Resolve reports this clip's source range one frame early, otherwise 0.
+
+    At a fractional frame rate GetSourceStartFrame comes back one below the frame the clip really begins on, for about
+    a fifth of the clips cut from one long file. GetLeftOffset counts the frames trimmed off the head and stays exact,
+    so a difference of exactly one is this misreport. AppendToTimeline takes real frame numbers: a shot placed from the
+    reported one opens on the last frame of the neighbouring clip. Any other difference (media that does not begin at
+    frame 0) says nothing about the range and is left alone."""
+    left, source = optional(item, "GetLeftOffset"), optional(item, "GetSourceStartFrame")
+    return 1 if left is not None and source is not None and left - source == 1 else 0
+
+
+def true_source(item, value):
+    """The half-open source range a misreported clip really shows; None for a clip that reads true.
+
+    At normal speed a clip shows as many source frames as it is long on the timeline, whichever end the report got
+    wrong; a retimed clip keeps its reported length."""
+    if not source_shift(item) or value.get("source_end") is None:
+        return None
+    start, length = value["source_start"] + 1, value["end"] - value["start"]
+    reported = value["source_end"] - value["source_start"]
+    return [start, start + length] if abs(reported - length) <= 1 else [start, value["source_end"] + 1]
+
+
 def clip_actions(item):
     """Action ranges from this clip's own range markers, in source frames. The marker is the record, so a range the
     user dragged, renamed or deleted in DaVinci is read back as it now stands."""
     left, source = optional(item, "GetLeftOffset"), optional(item, "GetSourceStartFrame")
     if left is None or source is None:
         return []
+    source += source_shift(item)
     length = item.GetEnd() - item.GetStart()
     found = []
     for frame, info in sorted((optional(item, "GetMarkers") or {}).items()):
@@ -1269,6 +1339,40 @@ def clip_actions(item):
             found.append({"name": str(info["name"]).replace(ACTION_PARTIAL, "").strip(), "start": source + frame - left,
                           "end": source + end - left, "complete": ACTION_PARTIAL not in str(info["name"])})
     return found
+
+
+def timeline_stages(timeline):
+    """Sharpening stages from the material timeline's own range markers, in timeline frames and in order.
+
+    The marker is the record: the grit the user typed over a placeholder in DaVinci, or a range they dragged, is read
+    back as it now stands. Marker frames count from the timeline's start."""
+    start = optional(timeline, "GetStartFrame") or 0
+    found = []
+    for frame, info in sorted((optional(timeline, "GetMarkers") or {}).items()):
+        name = str(info.get("name") or "").strip()
+        if str(info.get("customData") or "").startswith(STAGE_PREFIX) and name:
+            left = start + int(frame)
+            found.append({"name": name, "start": left, "end": left + max(int(info.get("duration") or 1), 1)})
+    return [{**stage, "index": number, "count": len(found)} for number, stage in enumerate(found, 1)]
+
+
+def clip_stage(stages, start, end):
+    """The stage covering most of a clip, without its frames; None when no stage reaches the clip."""
+    best = max(stages, key=lambda stage: min(stage["end"], end) - max(stage["start"], start), default=None)
+    if not best or min(best["end"], end) <= max(best["start"], start):
+        return None
+    return {"name": best["name"], "index": best["index"], "count": best["count"]}
+
+
+def known_materials(request):
+    """Timeline names the workbench knows as material timelines of this project: those ever picked for an edit."""
+    return {name for name in request.get("material_names") or [] if isinstance(name, str) and name}
+
+
+def is_material(name, known=()):
+    """A material timeline is named 「…素材」 or was picked as material for an edit; the user's newer ones carry
+    short names (日本菊, 迷你刀), so the name alone no longer tells."""
+    return not SKIPPED_TIMELINES.search(name) and ("素材" in name or name in known)
 
 
 def candidates(resolve, request):
@@ -1282,14 +1386,15 @@ def candidates(resolve, request):
         chosen = [item for item in every if "素材" in item.GetName() and not SKIPPED_TIMELINES.search(item.GetName())]
     materials, media_ids, media_paths = [], set(), set()
     for timeline in chosen:
-        clips = []
+        clips, stages = [], timeline_stages(timeline)
         for index in range(1, timeline.GetTrackCount("video") + 1):
             for item in timeline.GetItemListInTrack("video", index) or []:
                 value = inspect_item(item, minimal=True)
                 if not value["media_id"] and not value["media_path"]:
                     continue
                 markers = clip_markers(item)
-                value.update(track=index, actions=clip_actions(item), labels=[info["name"] for _, info in markers],
+                value.update(track=index, actions=clip_actions(item), stage=clip_stage(stages, value["start"], value["end"]),
+                             true_source=true_source(item, value), labels=[info["name"] for _, info in markers],
                              verified_labels=[info["name"] for frame, info in markers if clip_label(item, value["uid"], frame, info)])
                 clips.append(value)
                 media_ids.add(value["media_id"])
@@ -1297,13 +1402,14 @@ def candidates(resolve, request):
         materials.append({"name": timeline.GetName(), "unique_id": timeline.GetUniqueId(), "start_frame": timeline.GetStartFrame(),
                           "fps": str(timeline.GetSetting("timelineFrameRate")), "drop": drop_frame(timeline), "clips": clips})
     excluded = {item.GetUniqueId() for item in chosen} | {request.get("target_uid")} | set(request.get("ignore_usage") or [])
+    known = known_materials(request)
     dedup_enabled = request.get("deduplicate_source_ranges") is True
     # Use counting reads the same finished timelines as the archived deduplication, but never removes a candidate.
     scan = dedup_enabled or request.get("count_usage") is True
     used, complete = [], scan
     for other in every if scan else []:
         name = other.GetName()
-        if other.GetUniqueId() in excluded or "素材" in name or SKIPPED_TIMELINES.search(name):
+        if other.GetUniqueId() in excluded or is_material(name, known) or SKIPPED_TIMELINES.search(name):
             continue
         try:
             for index in range(1, other.GetTrackCount("video") + 1):
@@ -1312,6 +1418,9 @@ def candidates(resolve, request):
                     if not value["media_id"] and not value["media_path"]:
                         complete = complete and is_title(item)
                     elif value["media_id"] in media_ids or (value["media_path"] and os.path.normcase(value["media_path"]) in media_paths):
+                        real = true_source(item, value)
+                        if real:  # Otherwise the shot would count as a use of the clip before the one it came from.
+                            value.update(source_start=real[0], source_end=real[1])
                         used.append({"timeline_name": name, **value})
         except Exception:
             complete = False
@@ -1326,6 +1435,7 @@ USAGE_COLORS = ("Orange", "Apricot", "Yellow", "Lime", "Olive", "Green", "Teal",
 USAGE_MARKER = "material_usage_v1"
 ACTION_PREFIX = "material_action_v1"  # davinci-clip-labeling's range markers: one action each, name is the action.
 ACTION_PARTIAL = "（不完整）"
+STAGE_PREFIX = "grit_range_v1"  # davinci-clip-labeling's timeline range markers: one sharpening stage each, name is the grit.
 USAGE_LINE = re.compile("^已使用 \\d+ 次$")  # 已使用 N 次
 
 
@@ -1375,15 +1485,17 @@ def usage_counts(clips, uses):
 def mark_usage(resolve, request):
     """Color every material clip by how many finished timelines used it, and write the count into its marker notes.
 
-    Finished timelines are all timelines except material, backup and draft ones. A clip that is no longer used loses
+    Finished timelines are all timelines except material, backup and draft ones; material ones are those named
+    「…素材」 plus the request's material_names. A clip that is no longer used loses
     only the color and note line this command wrote; clips never marked are left alone."""
     project = request_project(resolve, request)
     every = timelines(project)
-    materials = [item for item in every if "素材" in item.GetName() and not SKIPPED_TIMELINES.search(item.GetName())]
+    known = known_materials(request)
+    materials = [item for item in every if is_material(item.GetName(), known)]
     uses, unreadable = [], []
     for other in every:
         name = other.GetName()
-        if "素材" in name or SKIPPED_TIMELINES.search(name):
+        if is_material(name, known) or SKIPPED_TIMELINES.search(name):
             continue
         try:
             for index in range(1, other.GetTrackCount("video") + 1):
@@ -2357,17 +2469,17 @@ def import_timeline(resolve, request):
         offline = [name for name, state in clips if state and state != "Online"]
         if offline:
             shown = "、".join(dict.fromkeys(offline[:5]))
-            raise WorkerError(f"导入后有 {len(offline)} 个片段在这台电脑上找不到素材（{shown}{' 等' if len(offline) > 5 else ''}），"
-                              "已撤掉这条导入的时间线，原时间线没动。请确认这台电脑的工程里有这些素材后再上传。")
+            raise WorkerError(f"导入后有 {len(offline)} 个片段在这台电脑上找不到素材（{shown}{' 等' if len(offline) > 5 else ''}）。"
+                              "请确认这台电脑的工程里有这些素材后再上传。")
         if not any(counts.get(f"video{index}") for index in range(1, imported.GetTrackCount("video") + 1)):
-            raise WorkerError("导入的时间线里没有视频片段，已撤掉，原时间线没动。")
+            raise WorkerError("导入的时间线里没有视频片段。")
         relinked = check_voice(project, media_pool, source, imported, request, float(optional(source, "GetSetting", "timelineFrameRate") or 30))
         names = {item.GetName() for item in timelines(project)}
         wanted, number = request["name"], 2
         while wanted in names:
             wanted, number = f"{request['name']}-{number}", number + 1
         if not imported.SetName(wanted):
-            raise WorkerError("达芬奇没能给导入的时间线改名，已撤掉，原时间线没动。")
+            raise WorkerError("达芬奇没能给导入的时间线改名。")
         warnings = []
         for key, label in (("timelineFrameRate", "帧率"), ("timelineResolutionWidth", "宽度"), ("timelineResolutionHeight", "高度")):
             mine, theirs = optional(imported, "GetSetting", key), optional(source, "GetSetting", key)
@@ -2384,11 +2496,20 @@ def import_timeline(resolve, request):
                   "tracks": counts, "clips": len(clips), "fonts": fonts, "missing_fonts": missing, "warnings": warnings,
                   "voice_relinked": relinked,
                   **located(project)}
-    except Exception:
+    except Exception as exc:
         if imported is not None and imported.GetUniqueId() not in before:
-            if previous and project.GetCurrentTimeline() is not None and project.GetCurrentTimeline().GetUniqueId() == imported.GetUniqueId():
-                project.SetCurrentTimeline(previous)
-            media_pool.DeleteTimelines([imported])
+            imported_id = imported.GetUniqueId()
+            try:
+                current = project.GetCurrentTimeline()
+                if previous and current is not None and current.GetUniqueId() == imported_id:
+                    project.SetCurrentTimeline(previous)
+                removed = media_pool.DeleteTimelines([imported])
+                still_present = any(item.GetUniqueId() == imported_id for item in timelines(project))
+            except Exception:
+                removed, still_present = False, True
+            if not removed or still_present:
+                raise WorkerError(f"{exc} 达芬奇未确认撤销本次导入，请先核对时间线（{imported_id}）再重试。") from exc
+            raise WorkerError(f"{exc} 已撤掉本次导入的时间线。") from exc
         raise
     finally:
         if previous:
@@ -2419,11 +2540,125 @@ def export_drt(resolve, request):
     return {"name": timeline.GetName(), "size": path.stat().st_size, "voice_files": voices}
 
 
+def timeline_ids(resolve, request):
+    """The open project's timeline ids, so a delete confirmation can say which of an order's timelines are here."""
+    project = current_project(resolve)
+    return {"project": project.GetName(), "project_id": optional(project, "GetUniqueId") or "",
+            "unique_ids": [item.GetUniqueId() for item in timelines(project)]}
+
+
+def delete_timelines(resolve, request):
+    """Delete the listed timelines (by id) from the open project only; never switches projects.
+
+    Ids not in the open project are reported as missing; the caller tells the user to remove those by hand."""
+    wanted = list(dict.fromkeys(str(uid) for uid in request.get("unique_ids") or [] if uid))
+    project = current_project(resolve)
+    present = {item.GetUniqueId(): item for item in timelines(project)}
+    doomed = [present[uid] for uid in wanted if uid in present]
+    deleted = []
+    if doomed:
+        ids = {item.GetUniqueId() for item in doomed}
+        current = project.GetCurrentTimeline()
+        if current is not None and current.GetUniqueId() in ids:
+            keep = next((item for item in timelines(project) if item.GetUniqueId() not in ids), None)
+            if keep is not None:
+                project.SetCurrentTimeline(keep)
+        project.GetMediaPool().DeleteTimelines(doomed)
+        remaining = {item.GetUniqueId() for item in timelines(project)}
+        deleted = [uid for uid in wanted if uid in ids and uid not in remaining]
+    return {"project": project.GetName(), "deleted": deleted, "missing": [uid for uid in wanted if uid not in present],
+            "failed": [uid for uid in wanted if uid in present and uid not in deleted],
+            "saved": bool(resolve.GetProjectManager().SaveProject()) if deleted else None}
+
+
+VOICE_TAIL_LIMIT = 3  # Frames the workbench may add to the closing shot by itself; a longer shortfall is a real gap.
+
+
+def cover_voice_tail(resolve, request):
+    """Make the picture last until the voiceover's final (partial) frame after an edit.
+
+    The closing shot is lengthened at its end when its footage allows; otherwise it is moved later and opened at
+    its head by the same frames. The voiceover is never touched. Anything else is reported, not forced."""
+    project = request_project(resolve, request)
+    timeline = find_timeline(project, request)
+    start = timeline.GetStartFrame()
+    audio_tracks = timeline.GetTrackCount("audio")
+    voice_index = next((index for index in range(1, audio_tracks + 1)
+                        if timeline.GetTrackName("audio", index) == request.get("track_name", "配音")), 2 if audio_tracks >= 2 else None)
+    voices = (timeline.GetItemListInTrack("audio", voice_index) or []) if voice_index else []
+    if not voices:
+        return {"status": "no_voice", "extended": []}
+    voice_end = max(exact_end(item) for item in voices) - start
+    target = covering_frame(voice_end)
+    pictures = []
+    for index in range(1, timeline.GetTrackCount("video") + 1):
+        if timeline.GetTrackName("video", index) in (HOOK_TRACK, CAMPAIGN_TRACK, COMMENT_TRACK):
+            continue
+        if optional(timeline, "GetIsTrackEnabled", "video", index) is False:
+            continue
+        pictures += [(index, item) for item in timeline.GetItemListInTrack("video", index) or [] if optional(item, "GetClipEnabled") is not False]
+    base = {"voice_end": round(voice_end, 3), "target": target, "extended": []}
+    if not pictures:
+        return {**base, "status": "no_picture", "picture_end": 0}
+    picture_end = max(item.GetEnd() for _, item in pictures) - start
+    base["picture_end"] = picture_end
+    gap = target - picture_end
+    if gap <= 0:
+        return {**base, "status": "covered"}
+    if gap > VOICE_TAIL_LIMIT:
+        return {**base, "status": "too_short"}
+    closing = [(index, item) for index, item in pictures if item.GetEnd() - start == picture_end]
+    adjustments = []
+    for index, item in closing:
+        if any(other.GetStart() - start < target and other.GetEnd() - start > picture_end
+               for other in timeline.GetItemListInTrack("video", index) or [] if other is not item):
+            return {**base, "status": "blocked", "clip": optional(item, "GetName") or ""}
+        name, right, left = optional(item, "GetName") or "", item.GetRightOffset(), item.GetLeftOffset()
+        if right is not None and right >= gap:
+            how = "tail"
+        elif left is not None and left >= gap and callable(getattr(timeline, "MoveItems", None)):
+            how = "head"
+        else:
+            return {**base, "status": "no_footage", "clip": name}
+        adjustments.append((index, item, name, item.GetStart(), item.GetEnd(), left, right, how))
+    attempted = []
+    try:
+        for adjustment in adjustments:
+            index, item, name, old_start, _, left, right, how = adjustment
+            attempted.append(adjustment)
+            if how == "tail":
+                changed = item.SetRightOffset(right - gap, False, True)
+            else:
+                changed = (timeline.MoveItems([item], {"trackIndex": index, "startFrame": old_start + gap}, True)
+                           and item.GetStart() == old_start + gap and item.SetLeftOffset(left - gap, False, True))
+            if not changed or (item.GetStart(), item.GetEnd()) != (old_start, start + target):
+                raise WorkerError("尾帧延长未通过读回核验。")
+            base["extended"].append({"track": index, "clip": name, "frames": gap, "how": how})
+    except Exception:
+        failed_name = name
+        unrestored = []
+        for index, item, name, old_start, old_end, left, right, how in reversed(attempted):
+            try:
+                if how == "tail" and item.GetRightOffset() != right:
+                    item.SetRightOffset(right, False, True)
+                if how == "head" and item.GetLeftOffset() != left:
+                    item.SetLeftOffset(left, False, True)
+                if how == "head" and item.GetStart() != old_start:
+                    timeline.MoveItems([item], {"trackIndex": index, "startFrame": old_start}, True)
+                if (item.GetStart(), item.GetEnd(), item.GetLeftOffset(), item.GetRightOffset()) != (old_start, old_end, left, right):
+                    unrestored.append(name)
+            except Exception:
+                unrestored.append(name)
+        return {**base, "extended": [], "status": "failed", "clip": failed_name, "rollback_failed": unrestored}
+    return {**base, "status": "extended", "saved": bool(resolve.GetProjectManager().SaveProject())}
+
+
 COMMANDS = {"ping": lambda resolve, request: {}, "status": status, "build": build, "open": open_timeline, "inspect": inspect, "restore": restore,
             "import_timeline": import_timeline, "export_drt": export_drt,
+            "timeline_ids": timeline_ids, "delete_timelines": delete_timelines,
             "candidates": candidates, "frames": frames, "reveal": reveal, "mark_usage": mark_usage,
             "read_subtitles": read_subtitles, "replace_subtitles": replace_subtitles, "add_hook": add_hook, "add_campaign_card": add_campaign_card, "remove_campaign_card": remove_campaign_card, "add_comment_sticker": add_comment_sticker, "read_comment_template": read_comment_template,
-            "edit_audio_baseline": edit_audio_baseline, "inherit_edit_audio": inherit_edit_audio,
+            "edit_audio_baseline": edit_audio_baseline, "inherit_edit_audio": inherit_edit_audio, "cover_voice_tail": cover_voice_tail,
             "export_textless": export_textless, "restore_textless": restore_textless, "export_preview": export_preview,
             "render_preview": render_preview}
 

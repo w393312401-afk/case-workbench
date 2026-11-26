@@ -68,6 +68,8 @@ class GuestFullStartupTests(unittest.TestCase):
             for name in ("public-mode.js", "public-mode.css"):
                 shutil.copy2(ROOT / "deployment/text-only" / name, self.bundle_site / name)
         self.context = self.browser.new_context(viewport={"width": 1280, "height": 900})
+        # 这些用例测的是本地视频播放器；TikTok 播放器另有 test_case_tiktok_player_ui。
+        self.context.add_init_script("try { localStorage.setItem('case-video-source', 'local'); } catch {}")
         self.addCleanup(self.context.close)
         self.page = self.context.new_page()
         self.page.set_default_timeout(10000)

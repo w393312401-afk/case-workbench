@@ -60,22 +60,55 @@ class ReviewOpportunityBrowserTests(unittest.TestCase):
         self.data["items"]=[self.item,pending]
         self.render()
         block=self.page.locator(".opportunity-skeleton").first
+        # Each topic is one row; the skeleton opens under 看骨架与证据, its rows under 看骨架.
+        for summary in self.page.locator(".opportunity-detail>summary").all(): summary.click()
+        block.locator(".skeleton-body>summary").click()
         self.assertIn("<b>夹不住短刀</b>",block.inner_text())
         self.assertIn("要拍：夹上后用手晃",block.inner_text())
         self.assertIn("缺收口理由",block.inner_text())
         self.assertIn("别说所有刀都能夹",block.locator(".skeleton-note").inner_text())
-        self.assertIn("评论有变化",block.inner_text())
-        self.assertEqual(block.get_by_role("button",name="按骨架新建方向").count(),1)
-        self.assertEqual(self.page.get_by_role("button",name="给本页 1 个主题出三段骨架").count(),1)
+        self.assertIn("评论有变化",block.locator(".skeleton-stale").get_attribute("title"))
+        # A stale skeleton offers to regenerate first instead of a disabled write button.
+        self.assertEqual(block.get_by_role("button",name="按骨架新建方向").count(),0)
+        self.assertEqual(block.get_by_role("button",name="先重新生成再写稿").count(),1)
+        # The stale skeleton counts as work: both topics are offered for (re)generation, and the header says one is out of date.
+        self.assertEqual(self.page.get_by_role("button",name="全部重新生成（2 个）").count(),1)
+        self.assertIn("1 个骨架已过期",self.page.locator(".skeleton-stale-count").inner_text())
         self.assertEqual(self.page.get_by_role("button",name="AI 出三段骨架").count(),1)
         self.assertLessEqual(self.page.evaluate("document.documentElement.scrollWidth"),390)
         self.assertEqual(self.page.evaluate("window.starts"),[])
+
+    def test_outdated_sources_cannot_reuse_a_skeleton_and_new_generation_restores_actions(self):
+        self.item["directions"]=[{"direction_id":"202H-S1","product":"202H","main_difference":"导杆引导","scripts":0,"published":0}]
+        self.item["skeleton"]={"status":"done","state":"complete","stale":True,
+            "stale_reason":"旧骨架缺少资料版本，重新生成后可带入写稿",
+            "opening":[{"pain_zh":"担心用坏","quotes":["abc"]}],
+            "middle":[{"code":"S1","title":"导杆引导","answer_zh":"沿设定路径推磨","quotes":[]}],
+            "closing":{"code":"B3","title":"注册后四年质保","reason_zh":"售后理由"},
+            "gaps":[],"notes":[],"verdict":{"kind":"existing","direction_id":"202H-S1","label":"补进现有方向"}}
+        self.render()
+        self.page.locator(".opportunity-detail>summary").first.click()
+        self.assertEqual(self.page.get_by_role("button",name="用 202H-S1 写稿").count(),0)
+        self.assertEqual(self.page.get_by_role("button",name="先重新生成再写稿").count(),1)
+        self.assertEqual(self.page.locator(".skeleton-stale").inner_text(),"已过期")
+        self.assertIn("旧骨架缺少资料版本",self.page.locator(".skeleton-stale").get_attribute("title"))
+        self.assertEqual(self.page.evaluate("window.starts"),[])
+        self.item["skeleton"]["stale"]=False
+        self.item["skeleton"].pop("stale_reason")
+        self.item["skeleton"]["closing"]["title"]="4 年质保"
+        self.render()
+        self.page.locator(".opportunity-detail>summary").first.click()
+        action=self.page.get_by_role("button",name="用 202H-S1 写稿")
+        self.assertTrue(action.is_enabled())
+        self.assertEqual(self.page.locator(".skeleton-stale").count(),0)
+        action.click()
+        self.assertEqual(self.page.evaluate("window.starts[0].direction_id"),"202H-S1")
 
     def test_evidence_is_literal_mobile_fits_and_read_does_not_start_ai(self):
         self.render()
         self.assertEqual(self.page.evaluate("window.starts"),[])
         self.assertEqual(self.page.locator(".opportunity-evidence img").count(),0)
-        self.assertIn("<img",self.page.locator(".opportunity-excerpt").inner_text())
+        self.assertIn("<img",self.page.locator(".opportunity-excerpt").text_content())
         self.assertEqual(self.page.locator('a[href^="javascript:"]').count(),0)
         self.assertLessEqual(self.page.evaluate("document.documentElement.scrollWidth"),390)
         self.page.get_by_role("button",name="带证据写稿").click()
@@ -90,13 +123,17 @@ class ReviewOpportunityBrowserTests(unittest.TestCase):
         self.page.get_by_role("button",name="带证据写稿").click()
         started=self.page.evaluate("window.starts[0]")
         self.assertEqual((started["product"],started["direction_id"],started["plan_note"]),("202H","202H-S1",self.item["draft_instruction"]))
+        # Evidence folds under the row and behind 证据评论; open them and the quote to reach its action.
+        self.page.locator(".opportunity-detail>summary").first.click()
+        self.page.locator(".opportunity-quotes-fold>summary").click()
+        self.page.locator(".opportunity-evidence>summary").first.click()
         self.page.get_by_role("button",name="关联这条评论").click()
         self.assertEqual(self.page.evaluate("window.links[0].id"),"abc")
 
     def test_all_products_empty_and_failure_have_actions(self):
         self.data["requires_product"]=True
         self.render()
-        self.assertTrue(self.page.get_by_role("heading",name="先选择一个产品").is_visible())
+        self.assertTrue(self.page.get_by_role("heading",name="先选一个产品").is_visible())
         self.assertEqual(self.page.locator("[data-opportunity-write]").count(),0)
         self.data["requires_product"]=False;self.data["items"]=[];self.data["total"]=0
         self.render()

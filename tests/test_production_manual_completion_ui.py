@@ -48,13 +48,13 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
 
     def open_edit_step(self, **kwargs):
         page = self.open_page(**kwargs)
-        page.locator('.production-steps [data-step="edit"]').click()
+        page.locator('.production-steps [data-step~="edit"]').click()
         page.locator("#edit-panel").wait_for()
         return page
 
     def assert_completed(self, page, open_note=None):
         page.locator("[data-revoke-job-completion]").wait_for()
-        step = page.locator('.production-steps [data-step="edit"]')
+        step = page.locator('.production-steps [data-step~="edit"]')
         if open_note:
             # Another current timeline is still uncut, so the step stays open and counts what is done.
             step.get_by_text(open_note, exact=True).wait_for()
@@ -88,7 +88,7 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         self.assertEqual(self.payload["job"]["edits"], [])
         page.reload()
         # After a reload the tab that still has work opens first; the completed one is one click away.
-        page.locator('.production-steps [data-step="edit"]').click()
+        page.locator('.production-steps [data-step~="edit"]').click()
         page.locator('.production-focus [data-timeline-focus="uid-selected-new"]').click()
         self.assert_completed(page, "1/2 条剪完")
         self.assertEqual(len(self.calls), 1)
@@ -114,7 +114,7 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         self.assertEqual(self.calls[1]["body"]["timeline_uid"], "uid-own")
         self.assertEqual(self.calls[1]["body"]["completion_at"], "2026-10-13T10:30:00+08:00")
         self.assertNotIn("manual_completion", self.payload["job"])
-        self.assertNotIn("done", page.locator('.production-steps [data-step="edit"]').get_attribute("class").split())
+        self.assertNotIn("done", page.locator('.production-steps [data-step~="edit"]').get_attribute("class").split())
         page.reload()
         page.locator("[data-complete-job]").wait_for()
         self.assertEqual(page.locator("[data-revoke-job-completion]").count(), 0)
@@ -177,7 +177,7 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         self.payload["job"].update(status="approved", manual_completion=self.receipt())
         page = self.open_page()
         header, next_state = page.locator(".page-heading .script-status"), page.locator("[data-next-state]")
-        publish_note = page.locator('.production-steps [data-step="publish"] small')
+        publish_note = page.locator('.production-steps [data-step~="publish"] small')
         header.get_by_text("已人工完成", exact=True).wait_for()
         publication = {"id": "VPU-111111111111", "post_id": "7697632860966030623", "published_on": "2026-10-17",
                        "account": "fixture", "script_version": 1, "registered_at": "2026-10-19T05:27:48Z", "source": {},
@@ -191,7 +191,7 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         # A registration of an earlier version leaves the header on the review state, like the step.
         publication["source_current"] = False
         page.reload()
-        page.locator('.production-steps [data-step="publish"] small', has_text="登记版本需核对").wait_for()
+        page.locator('.production-steps [data-step~="publish"] small', has_text="登记版本需核对").wait_for()
         self.assertEqual(header.inner_text(), "已人工完成")
         # So is a registration whose bound film is missing: header, step and next action all ask for a check.
         publication.update(source_current=True, file={"name": "final.mp4", "size": 10}, file_available=False)
@@ -273,7 +273,7 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         page = self.open_page(post=post)
         requested = []
         page.on("request", lambda request: requested.append(request.url) if "/publication" in request.url and request.method == "GET" else None)
-        page.locator('.production-steps [data-step="publish"]').click()
+        page.locator('.production-steps [data-step~="publish"]').click()
         # The shared 「当前时间线」 strip replaces the panel's own switch and carries each timeline's publication state.
         strip = page.locator(".production-focus")
         strip.locator('[data-timeline-focus="uid-own"] [data-focus-publish]').wait_for()
@@ -317,7 +317,7 @@ class ProductionManualCompletionBrowserTests(ProductionValidationBrowserTests):
         page = self.open_page(post=post)
         requested = []
         page.on("request", lambda request: requested.append(request.url) if "/publication" in request.url and request.method == "GET" else None)
-        page.locator('.production-steps [data-step="publish"]').click()
+        page.locator('.production-steps [data-step~="publish"]').click()
         strip = page.locator(".production-focus")
         form = page.locator("#video-publication-panel .video-publication-form")
         form.wait_for()

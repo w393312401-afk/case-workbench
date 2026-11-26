@@ -68,7 +68,7 @@ class LauncherTests(unittest.TestCase):
         child = mocks["spawn"].return_value
         child.pid, child.poll.return_value = 202, None
         mocks["browser"] = stack.enter_context(patch.object(LAUNCHER.webbrowser, "open"))
-        mocks["urlopen"] = stack.enter_context(patch.object(LAUNCHER.urllib.request, "urlopen"))
+        mocks["urlopen"] = stack.enter_context(patch.object(LAUNCHER, "local_control_opener")).return_value.open
         mocks["urlopen"].side_effect = lambda *args, **kwargs: io.BytesIO(b'{"ok": true}')
         mocks["clock"] = stack.enter_context(patch.object(LAUNCHER.time, "monotonic", side_effect=range(30)))
         stack.enter_context(patch.object(LAUNCHER.time, "sleep"))
@@ -432,6 +432,14 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(dialog.call_args.args[1], message)
         self.assertIn(message, (self.root / "launcher-error.log").read_text(encoding="utf-8"))
 
+    def test_web_helper_logs_errors_and_exits_without_waiting_for_a_dialog(self):
+        with patch.object(LAUNCHER, "ROOT", self.root), patch.object(sys, "argv", ["launcher.pyw", "--no-browser"]), \
+             patch.object(LAUNCHER, "main", side_effect=RuntimeError("fixture failure")), \
+             patch.object(LAUNCHER.ctypes.windll.user32, "MessageBoxW") as dialog:
+            self.assertEqual(LAUNCHER.desktop_main(), 1)
+        dialog.assert_not_called()
+        self.assertIn("fixture failure", (self.root / "launcher-error.log").read_text(encoding="utf-8"))
+
     def test_active_task_records_prevent_restart_without_changing_them(self):
         path = Path(self.config["skill_root"]) / "cases" / "PVR-000000000001" / "collaboration" / "AIT-000000000001" / "task.json"
         path.parent.mkdir(parents=True)
@@ -520,6 +528,13 @@ class StartHousekeepingTests(unittest.TestCase):
             target = LAUNCHER.rotate_server_log(self.root)
         self.assertFalse(log.exists())
         self.assertEqual(target.read_bytes(), b"x" * 10)
+
+    def test_large_gateway_log_moves_to_archive_under_its_own_name(self):
+        (self.root / "gateway.log").write_bytes(b"g" * 10)
+        with patch.object(LAUNCHER, "LOG_LIMIT", 5):
+            target = LAUNCHER.rotate_server_log(self.root, "gateway.log")
+        self.assertTrue(target.name.startswith("gateway-"))
+        self.assertFalse((self.root / "gateway.log").exists())
 
     def test_housekeeping_failure_is_logged_without_blocking_start(self):
         with patch.object(LAUNCHER, "backup_business_data", side_effect=OSError("disk full")):
@@ -793,6 +808,50 @@ class TaskHostLauncherTests(unittest.TestCase):
             backup.assert_not_called()
             self.assertIn(str(self.root / "service_gateway.py"), mocks["spawn"].call_args.args[0])
             mocks["stop_legacy_process"].assert_not_called()
+
+    def test_listener_pid_uses_the_exact_local_address_and_ignores_client_connections(self):
+        rows = (b"  TCP  127.0.0.1:287670  0.0.0.0:0  LISTENING  99\r\n"
+                b"  TCP  127.0.0.1:28767  127.0.0.1:50000  ESTABLISHED  98\r\n"
+                b"  TCP  127.0.0.1:28767  0.0.0.0:0  LISTENING  101\r\n")
+        with patch.object(LAUNCHER.subprocess, "run", return_value=Mock(stdout=rows)):
+            self.assertEqual(LAUNCHER.loopback_listener_pid(28767), 101)
+            self.assertIsNone(LAUNCHER.loopback_listener_pid(8767))
+
+    def test_web_restart_can_verify_its_gateway_outside_the_process_inventory(self):
+        host = self.host()
+        self.write_host(host)
+        status = self.status(role="gateway", port=self.config["port"], task_host_pid=host["pid"],
+                             task_host_launch_id=host["launch_id"])
+        with ExitStack() as stack:
+            mocks = self.restart_mocks(stack, responses=[self.status(202)])
+            mocks["port_open"].return_value = True
+            mocks["urlopen"].side_effect = [io.BytesIO(json.dumps(status).encode()), io.BytesIO(b'{"ok":true,"pid":101}')]
+            stack.enter_context(patch.object(LAUNCHER, "loopback_listener_pid", return_value=101))
+            stack.enter_context(patch.object(LAUNCHER, "task_host_status", return_value={"token": status["token"]}))
+            stack.enter_context(patch.object(LAUNCHER, "ensure_task_host", return_value=host))
+            self.assertEqual(LAUNCHER.restart(self.root, {**self.config, "task_host_enabled": True}, no_browser=True), 202)
+            mocks["stop_legacy_process"].assert_not_called()
+            mocks["wait_for_port_release"].assert_called_once_with(self.config["port"])
+            self.assertTrue(mocks["urlopen"].call_args.args[0].full_url.endswith("/api/service/shutdown"))
+
+    def test_unrelated_listener_cannot_be_adopted_as_the_registered_gateway(self):
+        host = self.host()
+        self.write_host(host)
+        status = self.status(role="gateway", port=self.config["port"], task_host_pid=host["pid"],
+                             task_host_launch_id=host["launch_id"])
+        for change in ({"pid": 999}, {"role": "task-host"}, {"task_host_launch_id": "other"},
+                       {"paths": {}}, {"token": "other"}, {"port": 123}):
+            with self.subTest(change=change), ExitStack() as stack:
+                mocks = self.restart_mocks(stack)
+                mocks["urlopen"].side_effect = [io.BytesIO(json.dumps({**status, **change}).encode())]
+                mocks["port_open"].return_value = True
+                stack.enter_context(patch.object(LAUNCHER, "loopback_listener_pid", return_value=101))
+                stack.enter_context(patch.object(LAUNCHER, "task_host_status", return_value={"token": status["token"]}))
+                with self.assertRaisesRegex(RuntimeError, "其他程序占用"):
+                    LAUNCHER.restart(self.root, {**self.config, "task_host_enabled": True}, no_browser=True)
+                mocks["urlopen"].assert_called_once_with("http://127.0.0.1:28767/api/service/status", timeout=5)
+                mocks["stop_legacy_process"].assert_not_called()
+                mocks["spawn"].assert_not_called()
 
     def test_live_task_host_is_reused_without_spawning_or_backup(self):
         host = self.host()

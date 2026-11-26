@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import copy
 from datetime import datetime
 import difflib
@@ -28,6 +28,7 @@ import zipfile
 
 import comment_sticker
 import markets
+from codex_bridge import BridgeCancelled
 from creation_store import CreationError
 from direction_store import fingerprint, now, product_key
 from elevenlabs_client import DEFAULT_MODEL, MODELS, VOICE_ID, VoiceError, clean_settings, model
@@ -47,6 +48,7 @@ VOICE_TRACK = 2  # Existing timelines keep source audio on A1 (stereo) and the v
 MAX_LEAD_SECONDS = 10
 QUEUE_GRACE = 5  # Brief DaVinci holds (status reads, clip reveals) end before a build is reported as queued.
 TIMELINE_WAIT = 150 * 60  # As long as an AI edit may hold DaVinci.
+TIMELINE_AUTO_RECOVER_PAUSE = 2  # seconds before resuming a build DaVinci refused part-way
 MAX_TIMELINE_FILE = 3 * 1024 * 1024  # A .drt holds edit decisions only; 4 MB JSON bodies carry it base64-encoded.
 OPTION_KEYS = {"code", "name", "fps", "width", "height", "lead_seconds", "markers"}
 
@@ -78,6 +80,23 @@ def creator_project_base(project, creator):
 
 def same_creator_project(first, second, creator):
     return creator_project_base(first, creator).casefold() == creator_project_base(second, creator).casefold()
+
+
+def material_hints(picks, project, creator, limit=8):
+    """The material timelines this creator's project was last cut from: the names of its latest edits, newest
+    first, and the latest edit's own set.
+
+    A creator's footage timelines are often short names (水果刀, 绿蜘蛛折), which a build does not recognise
+    by name; and while another order holds DaVinci, or another creator's project is open, these picks are all
+    the workbench knows about the project."""
+    key = (creator_project_base(project, creator).casefold(), str(creator or "").casefold())
+    names, last = [], []
+    rows = [row for row in picks if (creator_project_base(row["project"], row["creator"]).casefold(),
+                                      row["creator"].casefold()) == key]
+    for row in rows[:limit]:
+        last = last or list(row["materials"])
+        names += [name for name in row["materials"] if name not in names]
+    return names, last
 
 
 def known_location(data, creator, project):
@@ -158,6 +177,47 @@ def map_groups(lines, triples):
              "end": None if span[1] is None else round(span[1], 3),
              "coverage": round(span[2] / totals[number], 3) if totals[number] else 0.0}
             for number, span in enumerate(spans)]
+
+
+def word_times(spoken_lines, triples):
+    """Start second of each whitespace-separated word of the shown lines, from the voice's own character timing.
+
+    Shown lines are matched to the voiced characters the same way as `map_groups`, so readings that were swapped in
+    for the voice only leave their own words unmatched; those are interpolated between matched neighbours in the
+    line. A line with no matched word at all gets None, and the page then estimates from the group span.
+    """
+    words = [str(line or "").split() for line in spoken_lines]
+    target = [(char.lower(), number, index) for number, line in enumerate(words) for index, word in enumerate(line) for char in word]
+    source = [(char.lower(), start) for text, start, _ in triples for char in text if not char.isspace()]
+    matcher = difflib.SequenceMatcher(None, [item[0] for item in target], [item[0] for item in source], autojunk=False)
+    found = [[None] * len(line) for line in words]
+    for block in matcher.get_matching_blocks():
+        for offset in range(block.size):
+            _, number, index = target[block.a + offset]
+            start = source[block.b + offset][1]
+            if math.isfinite(start) and (found[number][index] is None or start < found[number][index]):
+                found[number][index] = start
+    result = []
+    for times in found:
+        known = [(index, value) for index, value in enumerate(times) if value is not None]
+        if not known:
+            result.append(None)
+            continue
+        filled = []
+        for index, value in enumerate(times):
+            if value is None:
+                before = next((item for item in reversed(known) if item[0] < index), None)
+                after = next((item for item in known if item[0] > index), None)
+                if before and after:
+                    value = before[1] + (after[1] - before[1]) * (index - before[0]) / (after[0] - before[0])
+                else:
+                    value = (before or after)[1]
+            filled.append(round(value, 3))
+        # Matching can pick a stray earlier character; times never run backwards inside a line.
+        for index in range(1, len(filled)):
+            filled[index] = max(filled[index], filled[index - 1])
+        result.append(filled)
+    return result
 
 
 def _short(value, limit):
@@ -446,20 +506,30 @@ class ProductionWorkbenchMixin:
         if settle_uk:
             settle_uk(identifier)
         with self.lock:
-            catalog = self.production.public()
-            job = next((item for item in catalog["jobs"] if item["id"] == identifier), None)
-            if not job:
-                raise VoiceError(404, "这张制作单不存在。")
+            catalog = self.production.job_context(identifier)
+            job = catalog["job"]
             # A deleted counterpart leaves no link behind, and the 美国版 can make a new 英国版.
-            known_jobs = {item["id"] for item in catalog["jobs"]}
+            known_jobs = catalog["known_job_ids"]
             if (job.get("uk_version") or {}).get("status") == "created" and job["uk_version"].get("job_id") not in known_jobs:
                 job.pop("uk_version")
             if (job.get("derived_from") or {}).get("job_id") not in known_jobs:
                 job.pop("derived_from", None)
-            readings = [item for item in catalog["readings"] if item["product"] == job["product"]]
+            readings = catalog["readings"]
             try:
-                full = self.creation.get_script(job["script_id"])
-                script = {key: full.get(key) for key in ("id", "title", "status", "version", "product", "direction_id")}
+                adopted = self.creation.script_context(job["script_id"])
+                full, script_catalog = adopted["script"], adopted["catalog"]
+                resolve_links = getattr(self, "_resolved_script_variant_links", None)
+                attach_link = getattr(self, "_attach_script_variant_link", None)
+                read_usage = getattr(self, "_script_production_usage", None)
+                links = resolve_links(script_catalog["variant_links"]) if resolve_links else {}
+                usage = read_usage(job["product"]) if read_usage else None
+                for row in script_catalog["scripts"]:
+                    row["script_id"] = row["id"]
+                    if usage is not None:
+                        row["production_usage"] = usage.get(row["id"], [])
+                    if attach_link:
+                        attach_link(row, links)
+                script = next(row for row in script_catalog["scripts"] if row["id"] == job["script_id"])
                 index = (job.get("source") or {}).get("variant_index")
                 candidate = (full.get("source") or {}).get("candidate_text") or ""
                 chosen = next((item for item in parse_variants(candidate) if type(index) is int and item["index"] == index), None)
@@ -472,22 +542,31 @@ class ProductionWorkbenchMixin:
                     markdown = supplement_markdown(job)
                 variant = {"label": job.get("variant_label", ""), "markdown": markdown, "manual": manual} if markdown else None
             except CreationError:
-                script, variant = None, None
+                script, variant, script_catalog = None, None, None
             job["voicing"] = identifier in self._voicing()
             job["voicing_live"] = copy.deepcopy(self._voice_live().get(identifier))
+            chain = getattr(self, "produce", None)
+            job["producing"] = chain.status(identifier) if chain else None
             recovery = self._timeline_state(job, self._production_operations().public(identifier), detail=True)
             job["recovery_operations"] = recovery
             job.setdefault("timelines", [])
+            empty = [item for item in job["timelines"] if isinstance(item, dict) and item.get("materials") == []]
+            picks = self.production.material_picks() if empty else []
+            for item in empty:
+                hints, last = material_hints(picks, item.get("project") or "", item.get("creator") or "")
+                if hints:
+                    item.update(material_hints=hints, material_last=last)
             self._production_edit_state(job)
             settle_resolved_activity(self, "job", job)
             return {"job": job, "revision": catalog["revision"], "readings": readings, "tts": self._tts(job, readings),
                     "historical_baseline_restore": True,
                     "recovery_operations": recovery,
-                    "script": script, "variant": variant, "voices": catalog["voices"], "defaults": catalog["defaults"],
+                    "script": script, "script_catalog": script_catalog,
+                    "variant": variant, "voices": catalog["voices"], "defaults": catalog["defaults"],
                     "models": copy.deepcopy(MODELS), "default_model": DEFAULT_MODEL, "markets": markets.public(),
-                    "creators": catalog["settings"]["creators"],
-                    "product_settings": self.production.product_settings(catalog, job["product"]),
-                    "material_combos": self.production.material_combos(catalog, job["product"]),
+                    "creators": catalog["creators"],
+                    "product_settings": catalog["product_settings"],
+                    "material_combos": catalog["material_combos"],
                     "today": datetime.now().strftime("%y%m%d")}
 
     def production_variants(self, task_id, round_id):
@@ -502,6 +581,12 @@ class ProductionWorkbenchMixin:
             raise VoiceError(409, "这一轮候选里没有识别到可配音的口播：既没有「口播（配音用）」代码块，也没有可识别的 English/口播 段落。")
         picked = variant_directions(turn["output"])
         variants = [{**variant, "suggested_direction": picked[position] if position < len(picked) else ""} for position, variant in enumerate(variants)]
+        if getattr(self, "reviews", None):
+            for variant in variants:
+                comments = comment_sticker.adoption_comments(self, {"candidate_text": turn["output"], "variant_index": variant["index"]}, task)
+                variant["comment_review_id"] = comments["selected_id"]
+                variant["comment_choices"] = [{"id": row["id"], "username": comment_sticker.username(row), "text": row["text"]}
+                                              for row in comments["candidates"]]
         return {"task_id": task_id, "round_id": round_id, "task_revision": task.get("revision"), "variants": variants}
 
     def eleven_status(self):
@@ -532,7 +617,7 @@ class ProductionWorkbenchMixin:
         result = self.production.mutate("reading", body)
         return {**result, "catalog": self.production_catalog()}
 
-    def create_production_job(self, body):
+    def create_production_job(self, body, fill_settings=None):
         if not isinstance(body, dict):
             raise VoiceError(400, "制作单参数格式无效。")
         prior = self.production.replay("job", body)
@@ -576,7 +661,16 @@ class ProductionWorkbenchMixin:
                                    "variant_index": source["variant_index"] if "variant_index" in source else chosen["index"] if chosen else None}}
             if replica:
                 self.apply_replica(resolved, lines, chinese, replica)
-            return self.production.mutate("job", body, resolved)
+            result = self.production.mutate("job", body, resolved)
+        # Off by default since 2026-11-22: only the variant rows on the direction page read it. The 「AI 判定归属」
+        # route still works on request; set auto_variant_attribution = True on the workbench to turn this back on.
+        attribute = getattr(self, "queue_variant_attribution", None)
+        if attribute and getattr(self, "auto_variant_attribution", False) and getattr(getattr(self, "ai", None), "bridge", None):
+            attribute("production", result["job"]["id"])
+        fill = getattr(self, "auto_fill_replica", None)
+        if fill and not prior:
+            fill(result["job"], fill_settings)
+        return result
 
     def _script_market(self, source):
         """The market the script was written for; a hand-entered script or an unreadable task falls back to the default."""
@@ -609,7 +703,11 @@ class ProductionWorkbenchMixin:
     def save_job_lines(self, identifier, body):
         if not isinstance(body, dict):
             raise VoiceError(400, "意群表参数格式无效。")
-        return self.production.mutate("job_lines", {**body, "job_id": identifier})
+        result = self.production.mutate("job_lines", {**body, "job_id": identifier})
+        sync = getattr(self, "_sync_job_to_script_quietly", None)
+        if sync:
+            sync(identifier)  # what was filled by hand goes back onto the adopted copy too
+        return result
 
     def archive_job(self, identifier, body):
         if not isinstance(body, dict):
@@ -702,6 +800,8 @@ class ProductionWorkbenchMixin:
         if not isinstance(market, str) or market not in markets.MARKETS:
             raise VoiceError(400, "配音语言无效，请重新选择。")
         with operations.guard("take", body) as record:
+            if record and record.get("take_id") in self.production.job(identifier).get("deleted_take_ids", []):
+                raise VoiceError(409, "这版配音已删除，不能恢复或重复登记。")
             prior = self.production.replay("take", body)
             if prior:
                 if record and record.get("state") != "committed":
@@ -813,6 +913,39 @@ class ProductionWorkbenchMixin:
             raise VoiceError(404, "配音文件不存在。")
         return path
 
+    def take_triples(self, identifier, take):
+        """The take's saved character timing as (text, start, end) seconds; empty when none was kept. Never calls the voice service."""
+        source = (take or {}).get("alignment_source") or ""
+        try:
+            folder = (self.production.audio / str(identifier) / str(take["id"])).resolve()
+            if not folder.is_relative_to(self.production.audio.resolve()):
+                raise ValueError("bad folder")
+            if source in {"tts", "tts_normalized"}:
+                saved = json.loads((folder / "alignment.json").read_text(encoding="utf-8"))
+                return _triples_tts(saved.get("alignment" if source == "tts" else "normalized_alignment"))
+            if source == "forced":
+                saved = json.loads((folder / "forced_alignment.json").read_text(encoding="utf-8"))
+                return _triples_forced(saved.get("response")) if saved.get("state") == "completed" else []
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+            pass
+        return []
+
+    def production_take_words(self, identifier, take_id):
+        """Per-word start times for the 提词器, read from the take's saved alignment; never calls the voice service."""
+        if not JOB_ID.fullmatch(str(identifier)) or not TAKE_ID.fullmatch(str(take_id)):
+            raise VoiceError(404, "这版配音不存在。")
+        with self.lock:
+            job = next((item for item in self.production.public()["jobs"] if item["id"] == identifier), None)
+            take = next((item for item in (job or {}).get("takes") or [] if item.get("id") == take_id), None)
+            if not take:
+                raise VoiceError(404, "这版配音不存在。")
+            lines = [{"number": line.get("number"), "spoken": line.get("spoken") or ""} for line in job.get("lines") or []]
+            source = take.get("alignment_source") or ""
+        triples = self.take_triples(identifier, take)
+        times = word_times([line["spoken"] for line in lines], triples) if triples else [None] * len(lines)
+        return {"take_id": take_id, "source": source if triples else "",
+                "lines": [{"number": line["number"], "words": value} for line, value in zip(lines, times)]}
+
     def resolve_status(self):
         # A closed DaVinci answers at once; asking its scripting API would first wait several seconds.
         if self.resolve.closed():
@@ -842,7 +975,16 @@ class ProductionWorkbenchMixin:
 
         def run():
             try:
-                report(result=self._build_timeline(body, report))
+                try:
+                    result = self._build_timeline(body, report)
+                except VoiceError as exc:
+                    if not self._timeline_auto_recoverable(identifier, body, exc):
+                        raise
+                    # The worker refused a step after it journaled; the same request resumes from that journal
+                    # and never builds a second timeline, so try it once more before asking anyone.
+                    time.sleep(TIMELINE_AUTO_RECOVER_PAUSE)
+                    result = self._build_timeline(body, report)
+                report(result=result)
             except BaseException as exc:
                 report(error=exc)
 
@@ -851,6 +993,18 @@ class ProductionWorkbenchMixin:
         if "error" in outcome:
             raise outcome["error"]
         return outcome["result"]
+
+    def _timeline_auto_recoverable(self, identifier, body, error):
+        """A build DaVinci answered (not one that hung or timed out) that stopped after touching DaVinci."""
+        if getattr(error, "status", None) != 409:
+            return False
+        try:
+            record = self._production_operations().read("timeline", body)
+        except VoiceError:
+            return False
+        return bool(record and record.get("state") == "uncertain" and not record.get("auto_recovered") and
+                    self._production_operations().recovery_file(record).exists() and
+                    self._production_operations().update(record, "uncertain", auto_recovered=True))
 
     def cancel_timeline(self, identifier, body):
         """Withdraw a build still waiting for DaVinci; one already running is left to finish."""
@@ -866,9 +1020,13 @@ class ProductionWorkbenchMixin:
 
     @contextmanager
     def _timeline_turn(self, identifier, request_id, creator, report, snapshot=None):
-        """Wait for DaVinci in the same first-come line as AI edits, then hold it for the build."""
+        """Wait for DaVinci in the same first-come line as AI edits, then hold it for the build.
+
+        While AI edits of the build's own DaVinci project share it (resolve_share), the build joins that share and
+        takes one short turn between their scripting calls instead of waiting for every one of those edits to end."""
         lock = getattr(self.resolve, "lock", None)
         cancel, ticket, acquired, queued = threading.Event(), object(), False, False
+        shares, key, owner = self._build_share(creator, snapshot) if lock is not None else (None, None, None)
         live = {"request_id": request_id, "creator": creator, "stage": "waiting", "since": now(), "cancel": cancel}
         if snapshot:
             payload = snapshot["payload"]
@@ -882,8 +1040,21 @@ class ProductionWorkbenchMixin:
             if lock is not None:
                 self._edit_resolve_waiters.append(ticket)
         started = time.monotonic()
+        joined = ExitStack()
         try:
             while lock is not None:
+                share = shares.join(key) if shares is not None else None
+                if share is not None:
+                    joined.callback(shares.leave, share, owner)
+                    with self.lock:  # no longer waiting in the line: the project's other edits may join meanwhile
+                        if ticket in self._edit_resolve_waiters:
+                            self._edit_resolve_waiters.remove(ticket)
+                    try:
+                        joined.enter_context(shares.turn(share, owner, cancel=cancel,
+                                                         timeout=max(1, TIMELINE_WAIT - (time.monotonic() - started))))
+                    except BridgeCancelled as exc:
+                        raise QueueCancelled(409, "已取消排队，没有建时间线，达芬奇里没有改动。") from exc
+                    break
                 with self.lock:
                     if cancel.is_set():
                         raise QueueCancelled(409, "已取消排队，没有建时间线，达芬奇里没有改动。")
@@ -906,6 +1077,7 @@ class ProductionWorkbenchMixin:
                 live["stage"] = "building"
             yield
         finally:
+            joined.close()
             if acquired:
                 lock.release()
             with self.lock:
@@ -913,6 +1085,15 @@ class ProductionWorkbenchMixin:
                     self._edit_resolve_waiters.remove(ticket)
                 if self._timeline_live().get(identifier) is live:
                     self._timeline_live().pop(identifier)
+
+    def _build_share(self, creator, snapshot):
+        """The open DaVinci share a build may join: AI edits of the same project as this build (resolve_share)."""
+        shares = getattr(self, "_resolve_shares", None)
+        if shares is None or not snapshot or not creator:
+            return None, None, None
+        from workbench_editing import project_key  # the editing mixin imports this module
+        key = project_key({"project": snapshot["payload"]["project"], "creator": creator})
+        return shares(), key, "build:" + str(snapshot.get("take_id") or "")
 
     def _build_timeline(self, body, report):
         identifier = body["job_id"]
@@ -972,7 +1153,11 @@ class ProductionWorkbenchMixin:
                 with self._timeline_turn(identifier, body["request_id"], creator, report, snapshot):
                     operation = operations.update(operation, "inflight", error="")
                     started = True
-                    result = self.resolve.run("build", payload, held=True)
+                    try:
+                        known = material_hints(self.production.material_picks(), payload["project"], creator)[0]
+                    except Exception:
+                        known = []
+                    result = self.resolve.run("build", {**payload, "material_names": known}, held=True)
             except Exception as exc:
                 # The worker journals its identity before it changes anything in DaVinci. Without that journal
                 # nothing was built, so the request ends cleanly instead of blocking the job as uncertain.
@@ -1172,6 +1357,10 @@ class ProductionWorkbenchMixin:
             return row
         if request["review_id"]:
             row = next((item for item in comment_sticker.options(self, job) if str(item["id"]) == request["review_id"]), None)
+            if not row and getattr(self, "reviews", None) is not None:
+                # One picked from the library search on the panel, not one the script was written with.
+                found = self.reviews.review(request["review_id"])
+                row = found if isinstance(found, dict) and comment_sticker.pick([found]) else None
             if not row:
                 raise VoiceError(409, "这条评论已经找不到了，请重新选一条，或者自己写。")
             return row
@@ -1202,9 +1391,18 @@ class ProductionWorkbenchMixin:
         picture = self.reviews.avatars.file(review["avatar"]) if review.get("avatar") else None
         avatar = comment_sticker.avatar_canvas(picture, self.production.root / "comment-stickers" / f"{hashlib.sha256(str(review['id'] or name).encode()).hexdigest()[:20]}.png", name, metrics)
         where = {"project": record["project"], "unique_id": record["unique_id"], "name": record["name"], **timeline_location(record)}
+        fit = comment_sticker.card_width(template.read_text(encoding="utf-8"), name, lines)
         done = self.resolve.run("add_comment_sticker", {**where, "username": name, "lines": lines, "avatar": str(avatar), "template": str(template),
+                                                        **({"card_width": fit} if fit else {}),
                                                         "first_line": (job.get("lines") or [{}])[0].get("spoken", "")}, timeout=120)
         message = ("评论贴纸已加" if done["created"] else "评论贴纸已更新") if done["saved"] else "评论贴纸已写入，但工程没有保存，请到达芬奇保存"
+        use = comment_sticker.video_use(job, record, {"review_id": review.get("id"), "at": now()})
+        if use:  # a used comment goes into the 摘录篮 with where it was used; never fails the sticker
+            try:
+                if self.reviews.note_used([use])["added"]:
+                    message += "，评论已放进摘录篮"
+            except Exception:
+                pass
         return self.production.mutate("timeline_comment_sticker", request, {"at": now(), "status": "saved" if done["saved"] else "unsaved", "created": done["created"], "review_id": review["id"],
                                                                             "username": name, "text": " ".join(lines), "start": done["start"], "end": done["end"], "message": message})
 

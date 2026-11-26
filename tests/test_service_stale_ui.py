@@ -121,6 +121,33 @@ class ServiceStaleTests(unittest.TestCase):
         self.assertEqual(restarts, [{}])
         self.assertEqual(status["task_host_pid"], 500)
 
+    def test_failed_helper_reenables_restart_as_soon_as_the_old_gateway_reports_it(self):
+        page = self.open_page("#production")
+        status = {"pid": 101, "code_stale": True, "restart_keeps_tasks": True}
+        page.route("**/api/service/status", lambda route: route.fulfill(json=status))
+        def fail_restart(route):
+            status["restart_failed"] = True
+            route.fulfill(json={"ok": True, "pid": 101})
+        page.route("**/api/service/restart", fail_restart)
+        page.evaluate("() => checkServiceFresh()")
+        restart = page.locator("[data-stale-restart]")
+        restart.click()
+        expect(page.locator("[data-stale-text]")).to_contain_text("网页服务重启失败")
+        expect(restart).to_be_enabled()
+
+    def test_unanswered_restart_submission_has_a_deadline(self):
+        page = self.open_page("#production")
+        page.clock.install()
+        page.route("**/api/service/status", lambda route: route.fulfill(json={
+            "pid": 101, "code_stale": True, "restart_keeps_tasks": True}))
+        page.route("**/api/service/restart", lambda route: None)
+        page.evaluate("() => checkServiceFresh()")
+        restart = page.locator("[data-stale-restart]")
+        restart.click()
+        page.clock.fast_forward(60001)
+        expect(page.locator("[data-stale-text]")).to_contain_text("尚未等到网页服务就绪")
+        expect(restart).to_be_enabled()
+
     def test_restart_endpoint_never_interrupts_running_work(self):
         from unittest import mock
         app, launched = self.server.app, []

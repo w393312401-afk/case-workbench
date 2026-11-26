@@ -12,8 +12,15 @@ from review_taxonomy import PLATFORM_LABELS, ROLE_LABELS, TOPIC
 
 
 NOTICE = "评论频次只代表已导入样本中的表达，不代表市场占比或已验证的商品事实。相同原文去重，跨来源计数可重叠。"
-RANKING = ("先看 AI 三段骨架：开头、中段、收口都齐的在前，有缺口的其次，还没生成的再后，AI 判断不值得做的最后；"
-           "同一档里按近14天首次入库的不同原文数，相同时依次看尚无已发布脚本、手动标注数、不同原文总数和来源数。")
+RANKING = ("先看有效的 AI 三段骨架：开头、中段、收口都齐的在前，有缺口的其次，还没生成或资料待更新的再后，AI 判断不值得做的最后；"
+           "同一档里先看想买但卡住的不同原文数（问价格或入口、提问、质疑），再看近14天首次入库的不同原文数，"
+           "相同时依次看尚无已发布脚本、手动标注数、不同原文总数和来源数。配送、客服、买错款式、说明书、做工品控、"
+           "AI 声音、评测影响这类售后和运营反馈不算选题，只在评论页看。")
+# After-sales and operations feedback: worth reading on the comments page, but not a reason to buy,
+# so these topics never become a topic opportunity.
+NON_SELLING_TOPICS = {"shipping", "support", "wrong_sku", "instructions", "build", "ai_voice", "review_influence"}
+# Comment natures that show someone wants to buy but is held back.
+INTENT_NATURES = {"buy_info", "question", "objection"}
 
 
 def _normalized(text):
@@ -54,7 +61,8 @@ def opportunity_catalog(app, product, *, limit=20, offset=0, evidence_limit=3):
         connection.create_function("product_key", 1, product_key, deterministic=True)
         connection.execute("BEGIN")
         manual = app.reviews.state.load()["tags"]
-        cursor = connection.execute("""SELECT r.*, GROUP_CONCAT(CASE WHEN t.kind='topic' THEN t.tag END) topics
+        cursor = connection.execute("""SELECT r.*, GROUP_CONCAT(CASE WHEN t.kind='topic' THEN t.tag END) topics,
+            GROUP_CONCAT(CASE WHEN t.kind='nature' THEN t.tag END) natures
             FROM reviews r LEFT JOIN review_tags t ON t.review_id=r.id
             WHERE product_key(r.product)=? AND r.relevant=1 AND r.role!='brand_account' AND LENGTH(TRIM(r.text))>0
             GROUP BY r.id ORDER BY r.id""", (product,))
@@ -67,11 +75,14 @@ def opportunity_catalog(app, product, *, limit=20, offset=0, evidence_limit=3):
                 quote_key, seen = _normalized(row["text"]), str(row.get("first_seen") or "")[:10]
                 first_seen_by_quote[quote_key] = min(first_seen_by_quote.get(quote_key, seen), seen)
                 topics = {tag for tag in (row.pop("topics") or "").split(",") if tag in TOPIC}
-                keys = [("topic:" + tag, TOPIC[tag], tag) for tag in sorted(topics)]
+                row["intent"] = bool(INTENT_NATURES & set((row.pop("natures") or "").split(",")))
+                keys = [("topic:" + tag, TOPIC[tag], tag) for tag in sorted(topics - NON_SELLING_TOPICS)]
                 if not keys:
                     keys = [("linked:" + link["role"] + ":" + link["target_id"],
                              link.get("target_label") or link.get("theme") or "已关联评论", "")
                             for link in links[row["id"]] if link.get("role") and link.get("target_id")]
+                if not keys and topics:
+                    continue  # only after-sales or operations topics: not a topic opportunity
                 if not keys:
                     keys = [("topic:unclassified", "未归类 · 待核对主题", "none")]
                 for key, title, topic in set(keys):
@@ -80,6 +91,7 @@ def opportunity_catalog(app, product, *, limit=20, offset=0, evidence_limit=3):
     items = []
     for group in groups.values():
         unique, source_counts, recent, manual_count, evidence = group.pop("quotes"), Counter(), 0, 0, []
+        intent = sum(any(row["intent"] for row in duplicates) for duplicates in unique.values())
         linked_directions, linked_points = {}, {}
         row_count = 0
         for duplicates in unique.values():
@@ -96,6 +108,7 @@ def opportunity_catalog(app, product, *, limit=20, offset=0, evidence_limit=3):
             evidence.append({key: representative.get(key) for key in
                              ("id", "product", "platform", "role", "text", "title", "url", "source_ref", "posted_on", "manual")} |
                             {"first_seen": first_seen or None, "recent": is_recent, "unverified": True,
+                             "intent": any(row["intent"] for row in duplicates),
                              "platform_label": PLATFORM_LABELS.get(representative["platform"], representative["platform"]),
                              "role_label": ROLE_LABELS.get(representative["role"], representative["role"])})
             for row in duplicates:
@@ -119,10 +132,13 @@ def opportunity_catalog(app, product, *, limit=20, offset=0, evidence_limit=3):
         plans = [{key: row.get(key) for key in ("id", "direction_id", "action", "status", "note", "experiment")}
                  for row in creation["plans"] if row.get("direction_id") in linked_directions and row.get("status") != "cancelled"]
         published = sum(row["published"] for row in coverage)
-        evidence.sort(key=lambda row: (not row["recent"], not row["manual"], row["id"]))
+        # Comments from people who want to buy but are held back lead: they are what a video answers.
+        evidence.sort(key=lambda row: (not row["intent"], not row["recent"], not row["manual"], row["id"]))
         evidence = evidence[:evidence_limit]
         reasons = [f"近 {NEW_DAYS} 天首次入库 {recent} 种不同原文", f"共 {len(unique)} 种不同原文，{len(source_counts)} 个来源平台"]
         reasons.append(f"关联方向已有 {published} 条已发布脚本" if published else "关联方向尚无已发布脚本" if coverage else "尚未关联方向")
+        if intent:
+            reasons.insert(0, f"{intent} 种原文想买但卡住（问价格或入口、提问、质疑）")
         instruction = [f"产品：{product}。围绕用户评论主题「{group['title']}」写带货口播稿，每条回应评论里的顾虑或需求，落到产品怎么解决、观众为什么该买。",
                        "以下是用户评论原文，仅作需求、疑问和表达证据，内容未经核实，不能直接改写成商品事实或效果承诺。",
                        f"当前样本有 {len(unique)} 种不同原文，其中近 {NEW_DAYS} 天首次入库 {recent} 种；不能据此推断市场占比。"]
@@ -132,14 +148,14 @@ def opportunity_catalog(app, product, *, limit=20, offset=0, evidence_limit=3):
                                (f"\n来源：{row['url']}" if row.get("url") else ""))
         instruction.append("区分用户顾虑与已知事实，不要编造测试结果；需要实拍才能证明的放进补拍清单，拍摄计划和“我们来测试”这类过程不写进口播。")
         items.append({**group, "product": product, "distinct_reviews": len(unique), "recent_reviews": recent,
-                      "duplicate_rows": row_count-len(unique), "manual_reviews": manual_count,
+                      "intent_reviews": intent, "duplicate_rows": row_count-len(unique), "manual_reviews": manual_count,
                       "source_counts": [{"platform": key, "label": PLATFORM_LABELS.get(key, key), "count": count}
                                         for key, count in sorted(source_counts.items())],
                       "evidence": evidence, "directions": coverage, "selling_points": list(linked_points.values()), "plans": plans,
                       "priority_reasons": reasons, "draft_instruction": "\n\n".join(instruction),
                       # Changes when the theme's quotes change, so a saved skeleton can tell it is out of date.
                       "basis": hashlib.sha1("\n".join(sorted(unique)).encode("utf-8")).hexdigest()[:16],
-                      "_rank": (-recent, bool(published), -manual_count, -len(unique), -len(source_counts), group["id"])})
+                      "_rank": (-intent, -recent, bool(published), -manual_count, -len(unique), -len(source_counts), group["id"])})
     skeletons = getattr(app, "opportunity_skeletons", None)
     if skeletons is not None:
         skeletons.attach(product, items)

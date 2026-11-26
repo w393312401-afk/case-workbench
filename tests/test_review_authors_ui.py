@@ -73,7 +73,8 @@ class ReviewAuthorPageTests(unittest.TestCase):
         self.assertEqual(card.locator(".rev-thread .rev-reply").count(), 2)
         self.assertIn("@only.handle", card.locator(".rev-thread").inner_text())
         self.assertEqual(page.locator("#rev-video").input_value(), LINKED)
-        card.get_by_role("button", name="复制引用", exact=True).click()
+        card.locator(".rev-menu > summary").click()  # 复制引用 sits in the card's ··· menu
+        card.get_by_role("menuitem", name="复制引用", exact=True).click()
         page.wait_for_function("() => navigator.clipboard.readText().then(text => text.includes('Updated Viewer · @blade.friend'))")
         page.locator("#rev-copy-all").click()
         page.wait_for_function("() => navigator.clipboard.readText().then(text => text.includes('用户声音摘录') && text.includes('@only.handle'))")
@@ -92,6 +93,8 @@ class ReviewAuthorPageTests(unittest.TestCase):
         self.card(page, "Does this fit a short blade?").get_by_role("button", name="已摘录", exact=True).wait_for()
         page.locator("#rev-basket-toggle").click()
         basket = page.locator("#material-basket-dialog")
+        # One line per item; the opened row holds the note and actions.
+        basket.locator("[data-material-expand]").click()
         field = basket.locator("[data-material-note]")
         field.fill("保留正在输入的备注，不要替换")
         field.evaluate("element => { window.originalNoteField = element; element.setSelectionRange(3, 8); }")
@@ -210,7 +213,11 @@ class ReviewAuthorPageTests(unittest.TestCase):
         self.count(page, "1 条")
         self.assertIn("未关联产品", page.locator(".rev-card .rev-head").inner_text())
         page.locator("#global-product").select_option("202H")
-        self.count(page, "10 条")
+        # Comments without a product count for every product (2026-11-19), marked, and can be folded away.
+        self.count(page, "11 条")
+        self.assertIn("未关联产品", self.card(page, "Feedback from an unassigned video.").inner_text())
+        page.locator("#rev-unlinked-quick").click()
+        self.count(page, "10 条 · 另有 1 条未关联产品，已收起")
         self.assertEqual(self.card(page, "Feedback from an unassigned video.").count(), 0)
 
 

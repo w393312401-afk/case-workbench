@@ -15,7 +15,7 @@ import re
 import shutil
 import stat
 import tempfile
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 from campaign_store import pacific_today
@@ -26,6 +26,7 @@ from elevenlabs_client import VoiceError
 from production_operations import durable_json, file_lock
 from production_store import (JOB_ID, active_timelines, current_timeline, skill_delivery_reviewable, text, timeline_manual_receipt,
                               timeline_running, timeline_task_status)
+from workbench_order_delete import _checked_path
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 CHUNK_BYTES = 8 * 1024 * 1024
@@ -356,7 +357,7 @@ class VideoPublishMixin:
                 return copy.deepcopy(item)
         return None
 
-    def script_registrations(self, script_id):
+    def script_registrations(self, script_id, *, publications=None):
         """Distinct posts registered for one script across video and picture orders, earliest first."""
         first = {}
 
@@ -365,7 +366,8 @@ class VideoPublishMixin:
                 stamp = str(record.get("registered_at") or record.get("updated_at") or "")
                 first[record["post_id"]] = min(stamp, first.get(record["post_id"], stamp))
 
-        for entry in self._video_publications().read().get("jobs", {}).values():
+        data = self._video_publications().read() if publications is None else publications
+        for entry in data.get("jobs", {}).values():
             for record in (*entry.get("history", []), entry.get("publication")):
                 note(record)
         return [post for post, _ in sorted(first.items(), key=lambda pair: (pair[1], pair[0]))]
@@ -374,7 +376,8 @@ class VideoPublishMixin:
         """The registration of one timeline (the current one unless another is named) and a line for each timeline of the order."""
         job = self.production.job(identifier)
         store = self._video_publications()
-        entry = copy.deepcopy(store.entry(store.read(), identifier))
+        publications = store.read()
+        entry = copy.deepcopy(store.entry(publications, identifier))
         revision = store.revision(entry)
         if timeline_uid is not None and (not isinstance(timeline_uid, str) or not timeline_uid.strip() or len(timeline_uid) > 500):
             raise VoiceError(400, "时间线标识无效。")
@@ -410,7 +413,7 @@ class VideoPublishMixin:
         candidates = []
         if source and not records and hasattr(self, "publication_candidates"):
             try:
-                candidates = self.publication_candidates(identifier, source["timeline"].get("unique_id"))
+                candidates = self.publication_candidates(identifier, source["timeline"].get("unique_id"), publications=publications)
             except (VoiceError, OSError, ValueError, KeyError):
                 candidates = []
         publish_copy = self._video_publish_copy(job)
@@ -420,8 +423,8 @@ class VideoPublishMixin:
         # Revision excludes presentation-only readback fields.
         return {"revision": revision, "source_signature": signature, "timeline_uid": uid, "can_register": bool(source),
                 "blocked_reason": reason, "source": source, "copy": publish_copy, "candidates": candidates,
-                "timelines": self._notion_marked(identifier, self._video_publication_timelines(job, store.entry(store.read(), identifier))),
-                "script_registrations": self.script_registrations(job["script_id"]), **entry}
+                "timelines": self._notion_marked(identifier, self._video_publication_timelines(job, store.entry(publications, identifier))),
+                "script_registrations": self.script_registrations(job["script_id"], publications=publications), **entry}
 
     def order_states(self, identifiers, *, skip_busy=False):
         """What each order needs now, summed over its current timelines, for the task panel: a timeline is 完成 once
@@ -570,7 +573,8 @@ class VideoPublishMixin:
                 return
             found.append({"kind": kind, "kind_label": label, "job_id": job_id, "job_title": job.get("title", ""), "timeline_uid": uid,
                           "timeline_name": line.get("name", ""), "product": job.get("product", ""), "message": str(message or "")[:200],
-                          "since": since or "", "hash": f"#production/{job_id}?step=publish"})
+                          "since": since or "", "hash": f"#production/{job_id}?step={'publish' if kind == 'notion' else 'cut'}" +
+                          (f"&photo={quote(uid, safe='')}" if kind == "carousel" else "")})
 
         for (job_id, uid), row in latest.items():
             if row.get("status") in {"failed", "interrupted"}:
@@ -593,6 +597,40 @@ class VideoPublishMixin:
         for row in found:
             counts[row["kind"]] = counts.get(row["kind"], 0) + 1
         return {"product": key, "items": found, "counts": counts}
+
+    def made_today(self, product="", today=None):
+        """How many finished videos and carousels went into Notion today (local date): each timeline and each carousel version
+        counts once, on the day of its first completed upload, so re-uploading an older one does not count again."""
+        from datetime import datetime
+        from direction_store import product_key
+        key = product_key(product) if product and product != "all" else ""
+        today = today or date.today()
+        products = {job["id"]: job.get("product") for job in self.production.records()["jobs"]}
+        uploads = getattr(self, "notion_uploads", None)
+
+        def count(store, work):
+            first = {}
+            try:
+                rows = store.read()["uploads"].values() if store is not None else []
+            except Exception:
+                return 0
+            for row in rows:
+                if row.get("status") != "completed" or not row.get("updated_at"):
+                    continue
+                if key and products.get(row.get("job_id")) != key:
+                    continue
+                try:
+                    stamp = datetime.fromisoformat(row["updated_at"])
+                    day = (stamp.astimezone() if stamp.tzinfo else stamp).date()
+                except (TypeError, ValueError):
+                    continue
+                identity = work(row)
+                first[identity] = min(first.get(identity, day), day)
+            return sum(1 for day in first.values() if day == today)
+
+        return {"date": today.isoformat(),
+                "videos": count(getattr(uploads, "store", None), lambda row: (row.get("job_id"), row.get("timeline_uid"))),
+                "photos": count(getattr(uploads, "photo_store", None), lambda row: (row.get("set_id"), row.get("work", "")))}
 
     def _notion_marked(self, identifier, lines):
         """Mark each timeline whose video has been uploaded to Notion: that upload is where its task ends."""
@@ -673,7 +711,7 @@ class VideoPublishMixin:
                 return {"publication_id": record["id"], "pin_cleared": body["pin_cleared"],
                         "revision": store.revision(store.entry(data, identifier))}
 
-    def _video_publish_copy(self, job):
+    def _video_publish_copy(self, job, *, titles_only=False):
         """Title-and-hashtag lines, Chinese text and English voice-over of the adopted script, for pasting at publish time."""
         from variant_parse import parse_variants, publish_titles, same_lines, screen_copy, screen_options, swap_notes, variant_script
         from production_store import supplement_markdown
@@ -684,8 +722,14 @@ class VideoPublishMixin:
         index = (job.get("source") or {}).get("variant_index")
         # A job filled in afterwards (by the AI 写稿 round or by hand) carries its own 发布文案.
         titles = (publish_titles(job.get("fill_markdown") or "", 0)
-                  or publish_titles((script.get("source") or {}).get("candidate_text") or "", index)
-                  or [line for line in (job.get("supplement") or {}).get("captions", []) if line.strip()])
+                  or publish_titles((script.get("source") or {}).get("candidate_text") or "", index))
+        # A replica job never shows the original's post title: its own three lines are written on first opening.
+        pending = not titles and bool(getattr(self, "replica_titles_pending", lambda _: False)(job))
+        if not titles and not pending:
+            titles = [line for line in (job.get("supplement") or {}).get("captions", []) if line.strip()]
+        # Matching needs only titles, not every waiting order's AI conversation or sticker comments.
+        if titles_only:
+            return {"titles": titles, "titles_pending": pending}
         candidate = (script.get("source") or {}).get("candidate_text") or ""
         chosen = next((item for item in parse_variants(candidate) if type(index) is int and item["index"] == index), None)
         matching = chosen and same_lines([line["spoken"] for line in chosen["lines"]],
@@ -695,9 +739,14 @@ class VideoPublishMixin:
             markdown = supplement_markdown(job)
         screen_en, screen_zh = screen_copy(markdown)
         swap = swap_notes(job["fill_markdown"], 0) if job.get("fill_markdown") else swap_notes(candidate, index) if matching else None
+        comments = [{"id": row["id"], "username": comment_sticker.username(row), "text": " ".join(comment_sticker.comment_lines(row["text"]))} for row in comment_sticker.options(self, job)]
+        if comments:
+            saved = self._title_translations()
+            for comment in comments:
+                comment["zh"] = saved.get(comment["text"], "")
         return {"script_id": script.get("id"), "version": script.get("version"), "swap": swap, **self._campaign_copy(swap),
-                "comment_stickers": [{"id": row["id"], "username": comment_sticker.username(row), "text": " ".join(comment_sticker.comment_lines(row["text"]))} for row in comment_sticker.options(self, job)],
-                "titles": titles,
+                "comment_stickers": comments,
+                "titles": titles, "titles_pending": pending,
                 "screen_en": screen_en, "screen_zh": screen_zh, "screen_options": screen_options(markdown),
                 "zh": script.get("translation_zh") or ("\n".join(line["zh"] for line in job["lines"]) if all(line.get("zh") for line in job["lines"]) else ""),
                 "en": script.get("text") or ""}
@@ -708,7 +757,10 @@ class VideoPublishMixin:
             saved = json.loads((self._video_publications().root / "title-translations.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
-        return saved if isinstance(saved, dict) else {}
+        if not isinstance(saved, dict):
+            return {}
+        # Readings saved before the wrapper was stripped still carry <translation> at their ends.
+        return {key: re.sub(r"</?translation>", "", value).strip() if isinstance(value, str) else value for key, value in saved.items()}
 
     def _chinese_readings(self, lines, failure):
         """The saved readings, after generating any of `lines` not read before."""
@@ -737,11 +789,43 @@ class VideoPublishMixin:
         """Chinese reading of the comment in the sticker row, for the eye only: the card keeps the commenter's words."""
         if not isinstance(body, dict):
             raise VoiceError(400, "参数格式无效。")
-        self.production.job(identifier)
+        job = self.production.job(identifier)
+        if body.get("options") is True:
+            comments = (self._video_publish_copy(job) or {}).get("comment_stickers") or []
+            lines = [item["text"] for item in comments]
+            saved = self._chinese_readings(lines, "评论的中文对照没生成成功，可以稍后再试。")
+            return {"comments_zh": {str(item["id"]): saved.get(item["text"], "") for item in comments}}
         line = re.sub(r"\s+", " ", str(body.get("text") or "")).strip()[:1000]
         if not line or not comment_sticker.drawable({"author_handle": "a", "text": line}):
             return {"zh": ""}
         return {"zh": self._chinese_readings([line], "评论的中文对照没生成成功，可以稍后再试。").get(line, "")}
+
+    def search_sticker_comments(self, identifier, body=None):
+        """The whole comment library searched for the sticker row, in English or by the Chinese translation."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        self.production.job(identifier)
+        if callable(getattr(self.reviews, "sync", None)):
+            self.reviews.sync()
+        return comment_sticker.search_library(self.reviews, body.get("q"))
+
+    def compose_sticker_comment(self, identifier, body=None):
+        """A comment and commenter the AI makes up from the user's hints, filled into the row for the user to edit and add.
+        Nothing is saved: it has no comment id, so it never goes into the 摘录篮."""
+        if not isinstance(body, dict):
+            raise VoiceError(400, "参数格式无效。")
+        hint = re.sub(r"\s+", " ", str(body.get("hint") or "")).strip()[:500]
+        if not hint:
+            raise VoiceError(400, "先写几个字：评论的意思、语气或用户名。")
+        job = self.production.job(identifier)
+        from case_breakdown_runner import run_prompt
+        prompt = comment_sticker.compose_prompt(hint, job.get("product") or "", ((job.get("lines") or [{}])[0] or {}).get("spoken", ""))
+        with tempfile.TemporaryDirectory() as workdir:
+            output = run_prompt(self, prompt, workdir, timeout=120)
+        row = comment_sticker.parse_composed(output)
+        if not row:
+            raise VoiceError(502, "AI 没编出能用的评论，换个说法再试一次。")
+        return row
 
     def _video_publication_links(self, data, job, post, timeline_uid=None):
         """一张制作单可以绑定多个视频，但同一个帖子只能绑定一张制作单；同一张制作单里一个帖子也只属于一条时间线。"""
@@ -1006,13 +1090,14 @@ class VideoPublishMixin:
         if not JOB_ID.fullmatch(str(identifier)):
             raise VoiceError(400, "制作单标识无效。")
         store = self._video_publications()
-        folder = store.root / "files" / identifier
-        folders = [folder] if folder.is_dir() and not folder.is_symlink() and folder.resolve().parent == (store.root / "files").resolve() else []
+        folder = _checked_path(store.root / "files" / identifier, store.root)
+        folders = [folder] if folder.is_dir() else []
         files = []
-        for path in (store.root / "operations").glob("*.json"):
+        for path in _checked_path(store.root / "operations", store.root).glob("*.json"):
+            _checked_path(path, store.root)
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
-                if (record.get("publication") or {}).get("job_id") == identifier and not path.is_symlink():
+                if (record.get("publication") or {}).get("job_id") == identifier:
                     files.append(path)
             except (OSError, ValueError, AttributeError):
                 continue
@@ -1023,7 +1108,17 @@ class VideoPublishMixin:
         if not JOB_ID.fullmatch(str(identifier)):
             raise VoiceError(400, "制作单标识无效。")
         store, warnings = self._video_publications(), []
-        with self.lock, file_lock(store.root / "catalog.lock", "发布资料正在保存，请稍后重试清理。"):
+        try:
+            guard = _checked_path(store.root / "catalog.lock", store.root)
+        except VoiceError as exc:
+            return [f"发布资料尚未清理：{exc}"]
+        with self.lock, file_lock(guard, "发布资料正在保存，请稍后重试清理。"):
+            try:
+                _checked_path(store.path, store.root)
+                backups = _checked_path(store.root / "backups", store.root)
+                folders, files = self.video_publication_footprint(identifier)
+            except VoiceError as exc:
+                return [f"发布资料尚未清理：{exc}"]
             def scrub(data):
                 data.get("jobs", {}).pop(identifier, None)
                 data["requests"] = {key: value for key, value in data.get("requests", {}).items()
@@ -1032,22 +1127,20 @@ class VideoPublishMixin:
             # Do not create another backup containing the just-deleted records.
             if store.path.exists():
                 durable_json(store.path, scrub(store.read()))
-            for path in (store.root / "backups").glob("*.json"):
+            for path in backups.glob("*.json"):
                 try:
+                    _checked_path(path, store.root)
                     durable_json(path, scrub(json.loads(path.read_text(encoding="utf-8"))))
-                except (OSError, ValueError, AttributeError) as exc:
+                except (OSError, ValueError, AttributeError, VoiceError) as exc:
                     warnings.append(f"视频发布备份尚未清理：{path.name}（{exc}）")
-            folders, files = self.video_publication_footprint(identifier)
             for folder in folders:
                 try:
-                    if folder.resolve().parent != (store.root / "files").resolve():
-                        raise OSError("文件夹不在成片目录内")
-                    shutil.rmtree(folder)
-                except OSError as exc:
+                    shutil.rmtree(_checked_path(folder, store.root))
+                except (OSError, VoiceError) as exc:
                     warnings.append(f"托管成片尚未清理：{folder}（{exc}）")
             for path in files:
                 try:
-                    path.unlink(missing_ok=True)
-                except OSError as exc:
+                    _checked_path(path, store.root).unlink(missing_ok=True)
+                except (OSError, VoiceError) as exc:
                     warnings.append(f"视频发布操作记录尚未清理：{path.name}（{exc}）")
         return warnings

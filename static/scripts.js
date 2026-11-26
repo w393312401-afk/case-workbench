@@ -28,7 +28,7 @@ window.CaseScripts = (() => {
   }
   const field = (name,label,value = '',options = {}) => `<label class="field"><span>${esc(label)}</span>${options.area ? `<textarea name="${name}" rows="${options.rows || 5}" ${options.required ? 'required' : ''} ${options.readonly ? 'readonly' : ''}>${esc(value)}</textarea>` : `<input name="${name}" type="${options.type || 'text'}" value="${esc(value)}" ${options.required ? 'required' : ''}>`}</label>`;
   function modalOpen() {return !!workspace.modal;}
-  function hasUnsavedInput() {return !!workspace.modal && (workspace.modal.busy || dirty());}
+  function hasUnsavedInput() {return !!workspace.modal && (workspace.modal.busy || dirty()) || !!workspace.lines && (workspace.lines.busy() || workspace.lines.dirty());}
   function dirty() {const modal = workspace.modal;return !!modal && modal.initial !== JSON.stringify([...new FormData(modal.form).entries()]);}
   function closeModal(force = false) {
     const modal = workspace.modal;if (!modal) return;
@@ -45,6 +45,11 @@ window.CaseScripts = (() => {
     dialog.addEventListener('cancel',event => {event.preventDefault();finish();});
   }
   function beforeNavigate(hash) {
+    const lines = workspace.lines;
+    if (lines && hash !== lines.hash) {
+      if (lines.busy() || lines.dirty() && !window.confirm('采用稿改到一半，离开就不保存了。确定离开？')) {history.replaceState(null,'',lines.hash);return false;}
+      workspace.lines = null;
+    }
     const modal = workspace.modal;if (!modal || hash === modal.hash) return true;
     if (modal.busy || dirty() || modal.pending) {
       history.replaceState(null,'',modal.hash);
@@ -88,7 +93,8 @@ window.CaseScripts = (() => {
   }
   // Adopted copy belongs to its content; old scripts URLs are normalized by the shell.
   async function route(keepScroll = false) {
-    if (keepScroll && workspace.modal) return;
+    if (keepScroll && (workspace.modal || workspace.lines?.container.isConnected)) return;
+    if (!keepScroll) workspace.lines = null;
     const hash = pageHash(), seq = ++workspace.sequence;
     const tail = hash.replace(/^#(?:content|scripts)\/?/,'').split('?')[0];
     if (!tail) {location.hash = url('#content');return;}
@@ -124,7 +130,12 @@ window.CaseScripts = (() => {
     return rows.sort((a,b) => (Number(b.version) || 1) - (Number(a.version) || 1) || String(b.created_at || '').localeCompare(String(a.created_at || '')));
   }
   function copyMarkup(script) {
-    return `<pre>${esc(script.text || '')}</pre>${script.translation_zh ? `<h3>中文对照</h3><pre>${esc(script.translation_zh)}</pre>` : ''}`;
+    const lines = value => String(value || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const spoken = lines(script.text), chinese = lines(script.translation_zh);
+    const pairs = spoken.length && spoken.length === chinese.length
+      ? `<div class="ai-variant-pairs">${spoken.map((line,index) => `<p>${esc(line)}</p><p class="ai-variant-zh">${esc(chinese[index])}</p>`).join('')}</div>`
+      : `<div class="ai-variant-pairs is-blocks"><p>${esc(script.text || '')}</p><p class="ai-variant-zh">${esc(script.translation_zh || '未提供对应中文')}</p></div>`;
+    return `<div class="ai-variant-script-labels" aria-hidden="true"><span>口播（配音用）</span><span>对应中文</span></div>${pairs}`;
   }
   function usageMarkup(script) {
     return `<p class="context-note">${esc(usageLabel(script))}</p>${(script.production_usage || []).map(use => `<a class="script-use-link" href="${esc(url(`#production/${encodeURIComponent(use.id)}`,script.product))}">视频制作单 · ${esc(use.id)}${use.archived ? ' · 已归档' : ''}</a>`).join('')}`;
@@ -167,9 +178,37 @@ window.CaseScripts = (() => {
     // In an order the lines table already carries every sentence and its Chinese, so the full copy waits behind a fold.
     const copy = `<div class="adopted-copy">${copyMarkup(script)}</div>`;
     const hint = '<details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">这张制作单使用以下稿件。修改会自动保留原稿，并生成新的待制作内容。</div></details>';
-    container.innerHTML = `<div class="section-title-row"><h2>${options.productionId ? `本次采用稿 · 第 ${esc(script.version || 1)} 版${hint}` : `采用稿 <small>第 ${esc(script.version || 1)} 版</small>`}</h2><div class="adopted-actions"><button type="button" class="subtle" data-adopted-copy>${icon('copy')}复制正文</button>${options.editable === false ? '' : '<button type="button" class="subtle" data-adopted-edit>编辑采用稿</button>'}</div></div>${options.productionId ? `<details class="adopted-copy-fold" data-adopted-copy-fold><summary>查看正文</summary>${copy}</details>` : copy}<div data-adopted-history><p class="context-note" role="status">正在读取版本历史…</p></div>`;
+    const reviewTarget = !options.productionId && window.ScriptReview?.supported(script.product) ? {kind:'script',script_id:scriptId(script),product:script.product,title:script.title || '采用稿'} : null;
+    const reviewButton = reviewTarget ? `<button type="button" class="secondary compact script-review-trigger" data-adopted-review data-script-review-key="${esc(window.ScriptReview.targetKey(reviewTarget))}" title="用 202H 审稿技能审查这份采用稿（四关体检、红线排雷与逐句画面）">口播审查</button>` : '';
+    container.innerHTML = `<div class="section-title-row"><h2>${options.productionId ? `本次采用稿 · 第 ${esc(script.version || 1)} 版${hint}` : `采用稿 <small>第 ${esc(script.version || 1)} 版</small>`}</h2><div class="adopted-actions">${reviewButton}<button type="button" class="subtle" data-adopted-copy>${icon('copy')}复制正文</button>${options.lineEdit ? `<button type="button" class="subtle" data-adopted-edit title="逐句改口播和中文；也可以双击某一句直接改">${icon('edit')}编辑</button>` : options.editable === false ? '' : '<button type="button" class="subtle" data-adopted-edit>编辑采用稿</button>'}</div></div>${options.productionId ? `<details class="adopted-copy-fold" data-adopted-copy-fold><summary>查看正文</summary>${copy}</details>` : copy}<div data-adopted-history><p class="context-note" role="status">正在读取版本历史…</p></div>`;
+    if (reviewTarget) {
+      $('[data-adopted-review]',container)?.addEventListener('click',() => window.ScriptReview?.open(reviewTarget,{
+        onEditScript: options.lineEdit ? () => openLines(container,script) : null,
+        onAdopted: result => {
+          const saved = result.script, edit = result.edit || {};
+          if (!saved) return;
+          toast(`已采纳审查，存为第 ${saved.version || ''} 版（${result.note || ''}）。${edit.table_kept === false ? '意群表的画面要求没能跟过去，开制作单时要补填。' : ''}`,edit.table_kept === false);
+          location.hash = scriptLink(saved);
+        },
+      }));
+      if (!options.skipReviewSync) void window.ScriptReview?.syncButtons(container);
+    }
+    // Drafts in a closed fold wait until they are opened, so a list of adopted copies costs no extra reads.
+    if (script.source?.task_id || script.filled) {
+      const body = $('.adopted-copy',container), fold = body.closest('details');
+      const showDraft = async () => {
+        try {const draft = await api(`/api/scripts/${encodeURIComponent(scriptId(script))}/draft`);if (current()) window.CaseAI?.mountDraftTabs?.(body,draft.markdown);}
+        catch {}  // The words themselves are already on the page.
+      };
+      if (!fold || fold.open) void showDraft();else fold.addEventListener('toggle',showDraft,{once:true});
+    }
     $('[data-adopted-copy]',container).onclick = () => copyText(script.text || '','采用稿已复制');
-    $('[data-adopted-edit]',container)?.addEventListener('click',() => void openManual(script));
+    $('[data-adopted-edit]',container)?.addEventListener('click',() => options.lineEdit ? openLines(container,script) : void openManual(script));
+    if (options.lineEdit) {
+      container.dataset.lineEdit = '';
+      container.ondblclick = event => {const at = lineAt(event);if (!at) return;window.getSelection()?.removeAllRanges();openLines(container,script,at);};
+      $$('.adopted-copy .ai-variant-pairs:not(.is-blocks) > p',container).forEach(cell => {cell.title = '双击改这一句';});
+    }
     const host = $('[data-adopted-history]',container);
     let historySequence = 0;
     async function loadHistory(provided) {
@@ -223,12 +262,12 @@ window.CaseScripts = (() => {
       }));
       keepReadingPlace(() => {container.hidden = !scripts.length && !requestedId;
       container.innerHTML = `${requestedId && !requested ? '<p class="context-note" role="status" data-requested-adopted-missing>指定的采用稿在这条写稿记录中已不可读。</p>' : ''}${scripts.length ? `<h2>已保存的采用稿</h2>${scripts.map(script => `<details class="task-adopted-copy" data-task-family="${esc(script.family_id || scriptId(script))}"><summary>${esc(script.title || '采用稿')} · 第 ${esc(script.version || 1)} 版</summary><div data-task-adopted="${esc(scriptId(script))}"></div>${taskProductionMarkup(script)}</details>`).join('')}` : ''}`;});
-      scripts.forEach(script => {
+      const mounted = scripts.map(script => {
         const body = $(`[data-task-adopted="${scriptId(script)}"]`,container);
         const saved = retained.get(script.family_id || scriptId(script));
         if (saved) body.closest('.task-adopted-copy').open = saved.open;
         $('[data-task-production]:is(button)',body.closest('.task-adopted-copy'))?.addEventListener('click',() => window.CaseProduction?.fromScript(script));
-        void mountAdopted(body,script,{catalogData:data,requestedId:requestedId === scriptId(script) ? requestedId : ''}).then(() => {
+        return mountAdopted(body,script,{catalogData:data,skipReviewSync:true,requestedId:requestedId === scriptId(script) ? requestedId : ''}).then(() => {
           if (!body.isConnected || taskMounts.get(container) !== token) return;
           if (saved) {
             const history = $('[data-script-versions]',body);if (history) history.open = saved.history;
@@ -240,6 +279,9 @@ window.CaseScripts = (() => {
           if (container.dataset.focusedAdopted === focusKey) return;
           container.dataset.focusedAdopted = focusKey;body.tabIndex = -1;body.focus({preventScroll:true});body.scrollIntoView({block:'start'});
         });
+      });
+      void Promise.all(mounted).then(() => {
+        if (container.isConnected && taskMounts.get(container) === token) void window.ScriptReview?.syncButtons(container);
       });
       token.pending = false;token.at = Date.now();
     } catch (error) {
@@ -260,8 +302,8 @@ window.CaseScripts = (() => {
     const versionMetadata = `<details class="section-card script-version-meta"><summary>版本记录</summary><dl class="script-facts"><dt>保存时间</dt><dd>${esc(readableDate(script.created_at))}</dd>${source.task_id ? '' : source.kind === 'case_replica' ? `<dt>录入方式</dt><dd>照原片复刻：${esc(source.case_title || source.case_id || '来源案例已删除')}</dd>` : '<dt>录入方式</dt><dd>手动整理的正文</dd>'}</dl>${variantAssociation(script)}${script.note ? `<p>${esc(script.note)}</p>` : ''}</details>`;
     $('#content').innerHTML = `<a class="back-link" href="${esc(window.WorkbenchShell?.parentURL?.() || url('#content',script.product))}">${icon('back')}返回内容列表</a><div class="page-heading"><div><span class="eyebrow">ADOPTED COPY</span><h1>${esc(script.title || '未命名脚本')}</h1><p>${esc(script.product)} · ${esc(scriptDirection(script) || '未指定方向')}${script.variant_link ? ` · 变体 ${script.variant_link.resolved_index + 1}` : ''} · <span class="script-status ${esc(scriptStatus(script))}">${esc(labels[scriptStatus(script)] || scriptStatus(script))}${isArchived(script) ? ' · 已归档' : ''}</span></p></div><div class="script-detail-actions"><button class="primary compact" id="script-production-toggle" type="button" aria-expanded="false" aria-controls="script-production-choices" disabled>正在读取制作单…</button><details class="script-more-actions" id="script-more-actions"><summary class="secondary compact menu-trigger">更多操作</summary><div><button type="button" id="script-derive">${icon('edit')}编辑采用稿</button><button type="button" id="script-case">${icon('library')}${script.case_id ? '补充案例结论' : '沉淀为案例'}</button><hr class="menu-sep"><button type="button" id="script-archive">${icon(isArchived(script) ? 'restore' : 'archive')}${isArchived(script) ? '恢复采用稿' : '归档采用稿'}</button></div></details></div></div><p class="context-note script-production-note" id="script-production-note" role="status" hidden></p><section class="section-card script-production-choices" id="script-production-choices" aria-label="选择制作单或制作形式" hidden></section><div class="script-detail-grid"><section class="section-card script-body" id="content-adopted-script"></section><aside><section class="section-card"><h2>拍摄与发布</h2><dl class="script-facts"><dt>采用稿编号</dt><dd>${esc(id)}</dd><dt>${postLabel}</dt><dd class="id-row"><span>${esc(script.video_id || '尚未登记')}</span>${copyIdButton(script.video_id,postLabel,{icon:true})}</dd><dt>发布日期</dt><dd>${esc(script.published_on || '尚未登记')}</dd></dl><button class="secondary" id="script-release">登记进度与视频</button><p class="context-note" id="script-release-note">${photo ? '同一图文按帖子 ID 匹配图文数据。' : '同一视频按视频 ID 匹配销售数据。拍摄不同版本时请分别登记。'}</p></section></aside></div>${versionMetadata}<section id="script-sales">${salesMarkup}</section>`;
     window.WorkbenchLinks?.mount({kind:'script',record:script,script});
-    void mountAdopted($('#content-adopted-script'),script,{editable:false});
-    $('#script-derive').onclick = () => openManual(script);
+    void mountAdopted($('#content-adopted-script'),script,{editable:false,lineEdit:true});
+    $('#script-derive').onclick = () => openLines($('#content-adopted-script'),script);
     $('#script-release').onclick = () => openStatus(script,data.revision);
     $('#script-archive').onclick = () => openArchive(script,data.revision);
     $('#script-case').onclick = () => openCase(script,script.case_id || '');
@@ -310,11 +352,134 @@ window.CaseScripts = (() => {
       }
       toggle.onclick = () => {panel.hidden = !panel.hidden;toggle.setAttribute('aria-expanded',String(!panel.hidden));};
       $('#script-produce').onclick = () => window.CaseProduction?.fromScript(script);
+      // 「我去拍了」执行池：在采用稿这一步就放进去（没有制作单就先建一张），配音设置、达人和素材到执行池里定。
+      $('#script-pool')?.remove();
+      if (window.AwayMode?.poolScript && !isArchived(script)) {
+        const pool = document.createElement('button');
+        pool.type = 'button';pool.className = 'secondary compact';pool.id = 'script-pool';
+        pool.textContent = '放进执行池';
+        pool.title = existing.length ? '把最新那张制作单放进「我去拍了」的执行池，出门时从配音一路跑到剪辑' : '先为这条稿建一张制作单，再放进「我去拍了」的执行池，出门时从配音一路跑到剪辑';
+        toggle.after(pool);
+        api('/api/away/pool').then(state => {if (existing.length && (state.pool || []).some(row => row.job_id === existing[0].id)) pool.textContent = '已在执行池';}).catch(() => {});
+        pool.onclick = async () => {
+          pool.disabled = true;
+          try {
+            await window.AwayMode.poolScript(script,existing);
+            pool.textContent = '已在执行池';
+            toast(existing.length ? '放进执行池了。配音设置、达人和素材在「我去拍了」的执行池里改。' : '建好制作单并放进执行池了。配音设置、达人和素材在「我去拍了」的执行池里改。');
+            if (!existing.length) void loadScriptProduction(script);
+          } catch (error) {toast(fail(error),true);}
+          pool.disabled = false;
+        };
+      }
     } catch (error) {
       if (seq !== workspace.sequence || hash !== pageHash() || !toggle.isConnected) return;
       note.textContent = `暂时无法核对已有制作单：${fail(error)}。重新读取后可继续或新建。`;note.hidden = false;
       toggle.textContent = '重新读取制作单';toggle.disabled = false;toggle.onclick = () => void loadScriptProduction(script);
     }
+  }
+  // 逐句改采用稿: the copy on the page turns into rows to rewrite, move, add or drop, the same way 改稿 works on a
+  // candidate. A line whose Chinese changed while its spoken words were left alone is spoken again by the writer when
+  // saved; typed spoken words are kept as typed. Saving makes the next version; orders keep the version they used.
+  const lineTranslates = row => row.force ?? (row.source ? row.zh.trim() !== row.origZh && row.spoken.trim() === row.origSpoken : !row.spoken.trim() && !!row.zh.trim());
+  const lineChanged = row => !row.source || row.spoken.trim() !== row.origSpoken || row.zh.trim() !== row.origZh || row.force != null;
+  function lineDraftDirty(draft) {return draft.rows.length !== draft.total || draft.rows.some((row,index) => row.source !== index + 1 || lineChanged(row));}
+  function openLines(container,script,focus = null) {
+    if (!container?.isConnected) return;
+    if (workspace.lines?.container === container) {workspace.lines.focus(focus);return;}
+    const copy = $('.adopted-copy',container);
+    const lines = value => String(value || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const spoken = lines(script.text), chinese = lines(script.translation_zh), paired = spoken.length === chinese.length;
+    if (!spoken.length || !copy) {void openManual(script);return;}
+    const rows = spoken.map((line,index) => ({source:index + 1,spoken:line,zh:paired ? chinese[index] : '',origSpoken:line,origZh:paired ? chinese[index] : '',force:null}));
+    const draft = {rows,total:rows.length,busy:false,requestId:null,signature:''};
+    const host = document.createElement('div');
+    host.className = 'ai-edit adopted-line-edit';copy.after(host);copy.hidden = true;
+    const actions = $('.adopted-actions',container);if (actions) actions.hidden = true;
+    const heading = $('.section-title-row h2 small',container), headingText = heading?.textContent;
+    if (heading) heading.textContent = `${headingText} · 正在编辑`;
+    const close = () => {
+      host.replaceWith();copy.hidden = false;if (actions) actions.hidden = false;if (heading) heading.textContent = headingText;
+      if (workspace.lines?.container === container) workspace.lines = null;
+    };
+    const paint = () => {
+      $$('[data-edit-row]',host).forEach((node,index) => {
+        const row = draft.rows[index], again = lineTranslates(row), touched = lineChanged(row);
+        node.classList.toggle('is-pending',again);node.classList.toggle('is-changed',touched);
+        $('.ai-edit-state',node).textContent = again ? '待重译' : !row.source ? '新增' : touched ? '手改，照你写的存' : '';
+        const toggle = $('[data-edit-act=translate]',node);toggle.setAttribute('aria-pressed',String(again));toggle.textContent = again ? '重译 ✓' : '重译';
+        $('[data-edit-act=revert]',node).hidden = !row.source || !touched;
+        $('[data-edit-act=up]',node).disabled = index === 0;$('[data-edit-act=down]',node).disabled = index === draft.rows.length - 1;
+        $('[data-edit-act=remove]',node).disabled = draft.rows.length < 2;
+      });
+      const count = draft.rows.filter(lineTranslates).length, dirty = lineDraftDirty(draft), save = $('[data-edit-save]',host);
+      const next = `第 ${(Number(script.version) || 1) + 1} 版`;
+      save.disabled = !dirty || draft.busy;
+      save.textContent = draft.busy ? (count ? `正在重译 ${count} 句…` : '正在保存…') : count ? `重译 ${count} 句并存为新版` : '存为新版';
+      $('.ai-edit-foot p',host).textContent = !dirty ? '还没有改动。' : `${count ? `${count} 句会按上下文重译成达人口吻，其余句子一个字不动。` : '没有要重译的句子，直接保存，不调用 AI。'}保存后是${next}，已有制作单继续用原来那版。`;
+      if (draft.busy) $$('textarea,[data-edit-act],[data-edit-cancel],[data-edit-whole]',host).forEach(node => {node.disabled = true;});
+    };
+    const render = (focusAt = null) => {
+      host.innerHTML = `<p class="ai-edit-hint">改右边的中文来理逻辑：改过中文的句子保存时会按整条稿的上下文重译成口播。想自己定说法，就直接改左边的口播。${paired ? '' : '<br>这版的中文和口播行数对不上，中文先留空了，逐句补上再保存。'}</p><div class="ai-edit-rows">${draft.rows.map((row,index) => `<div class="ai-edit-row" data-edit-row="${index}"><span class="ai-edit-no">${index + 1}</span><textarea data-edit-field="spoken" rows="1" maxlength="600" aria-label="第 ${index + 1} 句口播" placeholder="留空，按中文重译">${esc(row.spoken)}</textarea><textarea data-edit-field="zh" rows="1" maxlength="600" aria-label="第 ${index + 1} 句中文" placeholder="这一句要说什么">${esc(row.zh)}</textarea><div class="ai-edit-tools"><small class="ai-edit-state"></small><button type="button" data-edit-act="revert" title="放弃这一句的改动">还原</button><button type="button" data-edit-act="translate" aria-pressed="false" title="中文没改也让这一句按上下文重说一遍；再点一下取消"></button><button type="button" data-edit-act="up" aria-label="上移" title="上移">↑</button><button type="button" data-edit-act="down" aria-label="下移" title="下移">↓</button><button type="button" data-edit-act="add" aria-label="在下面加一句" title="在下面加一句">＋</button><button type="button" data-edit-act="remove" aria-label="删掉这一句" title="删掉这一句">✕</button></div></div>`).join('')}</div><div class="ai-edit-foot"><p></p><button type="button" class="subtle compact" data-edit-whole title="用整段文本框改，比如整段粘贴新稿">整段改</button><button type="button" class="secondary compact" data-edit-cancel>取消</button><button type="button" class="primary compact" data-edit-save></button></div>`;
+      paint();
+      if (focusAt) $$(`[data-edit-field=${focusAt.field || 'zh'}]`,host)[focusAt.index]?.focus();
+    };
+    const save = async () => {
+      const lines = draft.rows.map(row => ({source:row.source,spoken:row.spoken.trim(),zh:row.zh.trim(),translate:lineTranslates(row)}));
+      const blank = lines.findIndex(line => !line.zh), silent = lines.findIndex(line => !line.translate && !line.spoken);
+      if (blank >= 0) {toast(`第 ${blank + 1} 句还没有中文。`,true);$$('[data-edit-field=zh]',host)[blank]?.focus();return;}
+      if (silent >= 0) {toast(`第 ${silent + 1} 句还没有口播，填上或点「重译」。`,true);$$('[data-edit-field=spoken]',host)[silent]?.focus();return;}
+      // One id per set of lines, so a retry after a lost answer finds the version already saved.
+      const signature = JSON.stringify(lines);
+      if (draft.signature !== signature) {draft.signature = signature;draft.requestId = crypto.randomUUID();}
+      draft.busy = true;paint();
+      try {
+        const result = await api(`/api/scripts/${encodeURIComponent(scriptId(script))}/lines`,{method:'POST',body:{request_id:draft.requestId,lines}});
+        draft.busy = false;close();
+        const saved = result.script, edit = result.edit || {};
+        toast(`已存为第 ${saved.version || ''} 版${edit.translated?.length ? `，重译了 ${edit.translated.length} 句` : ''}。${edit.table_kept === false ? '意群表的画面要求没能跟过去，开制作单时要补填。' : ''}`,edit.table_kept === false);
+        location.hash = scriptLink(saved);
+      } catch (error) {
+        draft.busy = false;render();toast(fail(error),true);
+      }
+    };
+    host.addEventListener('input',event => {
+      const field = event.target.dataset.editField, row = draft.rows[Number(event.target.closest('[data-edit-row]')?.dataset.editRow)];
+      if (!field || !row) return;
+      row[field] = event.target.value.replace(/\s*\n\s*/g,' ');
+      // Typing the spoken words means they are the person's own; an asked-for retranslation no longer applies.
+      if (field === 'spoken') row.force = null;
+      paint();
+    });
+    host.addEventListener('keydown',event => {
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {event.preventDefault();if (!draft.busy) void save();}
+      else if (event.key === 'Enter' && event.target.dataset.editField) event.preventDefault();
+    });
+    host.addEventListener('click',event => {
+      if (draft.busy) return;
+      if (event.target.closest('[data-edit-cancel]')) {if (!lineDraftDirty(draft) || window.confirm('放弃这次改动？改过的内容不会保存。')) close();return;}
+      if (event.target.closest('[data-edit-whole]')) {if (!lineDraftDirty(draft) || window.confirm('换成整段改？这里逐句改的内容不会带过去。')) {close();void openManual(script);}return;}
+      if (event.target.closest('[data-edit-save]')) {void save();return;}
+      const button = event.target.closest('[data-edit-act]');if (!button) return;
+      const index = Number(button.closest('[data-edit-row]').dataset.editRow), row = draft.rows[index], act = button.dataset.editAct;
+      if (act === 'translate') {const auto = lineTranslates({...row,force:null});row.force = lineTranslates(row) ? (auto ? false : null) : (auto ? null : true);paint();return;}
+      if (act === 'revert') {Object.assign(row,{spoken:row.origSpoken,zh:row.origZh,force:null});render({index,field:'zh'});return;}
+      if (act === 'up' && index > 0) draft.rows.splice(index - 1,2,row,draft.rows[index - 1]);
+      else if (act === 'down' && index < draft.rows.length - 1) draft.rows.splice(index,2,draft.rows[index + 1],row);
+      else if (act === 'add') {draft.rows.splice(index + 1,0,{source:null,spoken:'',zh:'',origSpoken:'',origZh:'',force:null});render({index:index + 1,field:'zh'});return;}
+      else if (act === 'remove' && draft.rows.length > 1) draft.rows.splice(index,1);
+      render();
+    });
+    workspace.lines = {container,hash:location.hash,dirty:() => lineDraftDirty(draft),busy:() => draft.busy,close,focus:at => {if (at) $$(`[data-edit-field=${at.field}]`,host)[at.index]?.focus();}};
+    render(focus || {index:0,field:'zh'});
+    host.scrollIntoView({block:'nearest'});
+  }
+  // Double-clicking a sentence of the copy opens the editor with the cursor in that sentence.
+  function lineAt(event) {
+    const cell = event.target.closest('.adopted-copy .ai-variant-pairs:not(.is-blocks) > p');
+    if (!cell) return null;
+    const cells = [...cell.parentElement.children], position = cells.indexOf(cell);
+    return {index:Math.floor(position / 2),field:position % 2 ? 'zh' : 'spoken'};
   }
   async function openManual(parent = null) {
     const origin = location.hash;
@@ -338,7 +503,7 @@ window.CaseScripts = (() => {
       const data = await catalog(product), direction = task.context?.direction_id || task.direction_id || '';
       const title = task.case_title || task.context?.title || direction || `${product} 写稿`;
       // A round with no direction names the one the writer picked for each variant; the person confirms it here.
-      const [directions,variants] = direction && !pick ? [[],[]] : await Promise.all([
+      const [directions,variants] = await Promise.all([
         direction ? [] : api(`/api/direction-catalog?product=${encodeURIComponent(product)}`).then(result => (result.directions || []).filter(item => item.status !== 'archived')).catch(() => []),
         api(`/api/production/variants?task_id=${encodeURIComponent(task.task_id)}&round_id=${encodeURIComponent(round.round_id)}`).then(result => result.variants || []).catch(() => [])]);
       const suggested = variant => directions.some(item => item.direction_id === variant.suggested_direction) ? variant.suggested_direction : '';
@@ -346,11 +511,15 @@ window.CaseScripts = (() => {
       const picks = [...new Set((chosen ? [chosen] : variants).map(suggested))], only = picks.length === 1 ? picks[0] : '';
       const directionField = directions.length ? `<label class="field"><span>关联方向</span><select name="direction_id"><option value="">暂不指定</option>${directions.map(item => `<option value="${esc(item.direction_id)}" ${item.direction_id === only ? 'selected' : ''}>${esc(item.direction_id)} · ${esc(item.main_difference)}</option>`).join('')}</select></label>` : '';
       const chosenText = chosen ? chosen.lines.map(line => line.spoken).join('\n') : '', chosenZh = chosen?.lines.every(line => line.zh) ? chosen.lines.map(line => line.zh).join('\n') : '';
-      const body = `<p class="context-note">${chosen ? '已带入这条稿件的口播和中文，核对后保存。' : '从完整候选中选取一条准备采用的脚本，粘贴到「采用正文」。中文放入对照栏；多稿说明与评分不自动写入正文。'}</p><details ${chosen ? '' : 'open'} class="script-candidate-source"><summary>完整候选 · 第 ${(task.rounds || []).findIndex(item => item.round_id === round.round_id)+1} 轮</summary><pre>${esc(round.output)}</pre><button type="button" class="secondary" id="script-use-selection">把选中的候选文字填入正文</button></details>${field('title','脚本标题',chosen ? `${title} ${chosen.label}` : title,{required:true})}${directionField}${field('text','采用正文',chosenText,{area:true,rows:9,required:true})}${field('translation_zh','中文对照',chosenZh,{area:true})}<p class="context-note">${esc(product)}${direction ? ` · ${esc(direction)}` : ''} · 保存完整候选来源，正文以你核对的内容为准。</p>`;
+      const comments = chosen?.comment_choices || variants[0]?.comment_choices || [], commentId = chosen?.comment_review_id || '';
+      const commentField = comments.length ? `<label class="field"><span>开头评论贴纸</span><select name="comment_review_id"><option value="__choose__" ${commentId ? '' : 'selected'}>请选择本稿开头评论</option><option value="">不使用评论贴纸</option>${comments.map(row => `<option value="${esc(row.id)}" ${String(row.id) === commentId ? 'selected' : ''}>${esc(row.username)}：${esc(row.text)}</option>`).join('')}</select><small>确认开头对应的评论；保存后会随稿件保留。</small></label>` : '';
+      const body = `<p class="context-note">${chosen ? '已带入这条稿件的口播和中文，核对后保存。' : '从完整候选中选取一条准备采用的脚本，粘贴到「采用正文」。中文放入对照栏；多稿说明与评分不自动写入正文。'}</p><details ${chosen ? '' : 'open'} class="script-candidate-source"><summary>完整候选 · 第 ${(task.rounds || []).findIndex(item => item.round_id === round.round_id)+1} 轮</summary><pre>${esc(round.output)}</pre><button type="button" class="secondary" id="script-use-selection">把选中的候选文字填入正文</button></details>${field('title','脚本标题',chosen ? `${title} ${chosen.label}` : title,{required:true})}${directionField}${commentField}${field('text','采用正文',chosenText,{area:true,rows:9,required:true})}${field('translation_zh','中文对照',chosenZh,{area:true})}<p class="context-note">${esc(product)}${direction ? ` · ${esc(direction)}` : ''} · 保存完整候选来源，正文以你核对的内容为准。</p>`;
       const modal = showModal(writeBack ? '核对正文后写回案例' : '保存采用稿',body,writeBack ? '核对并继续写回' : '保存采用稿',async modal => {
         const values = Object.fromEntries(new FormData(modal.form));
+        const commentReviewId = values.comment_review_id;delete values.comment_review_id;
+        if (commentReviewId === '__choose__') {setError(modal,'请确认这条稿的开头评论，或选择不使用评论贴纸。');return;}
         try {
-          const result = await post(modal,'/api/scripts',{revision:modal.revision,script:{...values,product,direction_id:direction || values.direction_id || '',confirmed:true},source:{task_id:task.task_id,round_id:round.round_id,task_revision:modal.taskRevision,...(chosen ? {variant_index:chosen.index} : {})}});
+          const result = await post(modal,'/api/scripts',{revision:modal.revision,script:{...values,product,direction_id:direction || values.direction_id || '',confirmed:true},source:{task_id:task.task_id,round_id:round.round_id,task_revision:modal.taskRevision,...(chosen ? {variant_index:chosen.index} : {}),...(commentReviewId === undefined ? {} : {comment_review_id:commentReviewId})}});
           const saved = result.script;closeModal(true);toast(result.reused ? '这条候选之前已采纳，已打开原来的采用稿。' : '采用稿已保存，来源已自动保留。');
           if (writeBack) await openCase(saved,task.case_id || '');else location.hash = scriptLink(saved);
         } catch (error) {

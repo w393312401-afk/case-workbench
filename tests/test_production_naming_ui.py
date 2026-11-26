@@ -70,15 +70,18 @@ class ProductionNamingDetailBrowserTests(unittest.TestCase):
                                "creator": "Zack", "markers": 1, "frames": 60, "fps": "29.97", "built_at": "2026-10-21"}])
         self.payload["job"] = public_job(job)
         page = self.open_page(width=390)
-        expected = "Zack261021-202-4｜一块石头只是开始"
-        expect(page.locator("[data-production-title]")).to_have_text(expected)
+        # The heading leads with the topic; the timeline code sits beside it as a tag, and the full name stays in the tooltip.
+        title = page.locator("[data-production-title]")
+        expect(title).to_have_text("一块石头只是开始Zack261021-202-4")
+        expect(title.locator(".production-code-tag")).to_have_text("Zack261021-202-4")
+        expect(title).to_have_attribute("title", "Zack261021-202-4｜一块石头只是开始")
         page.route("**/api/content?*", lambda route: route.fulfill(status=200, content_type="application/json",
             body=json.dumps(queue.content_response(self.server.app, [job], route.request.url), ensure_ascii=False)))
         page.goto(f"http://127.0.0.1:{self.server.server_port}/#/202H/content?view=all")
         expect(page.locator(".flow-title")).to_have_text("一块石头只是开始｜视频方案 B")
         expect(page.locator(".flow-record-meta")).to_contain_text("Zack261021-202-4")
         page.locator(".flow-title").click()
-        expect(page.locator("[data-production-title]")).to_have_text(expected)
+        expect(page.locator("[data-production-title]")).to_have_text("一块石头只是开始Zack261021-202-4")
         self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 391)
 
     def test_detail_without_a_timeline_uses_english_when_chinese_is_missing(self):

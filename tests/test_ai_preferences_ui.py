@@ -25,7 +25,7 @@ class GlobalModelSettingsTests(unittest.TestCase):
             "/api/ai/preferences": {"preferences": preferences or {"model": "claude-default", "reasoning_effort": "max"}},
             **responses,
         })
-        page.wait_for_function("!document.querySelector('#settings-default-model').disabled")
+        page.wait_for_function("!document.querySelector('[data-settings-model-provider=auto]').disabled")
         return page
 
     def test_save_resets_effort_and_reload_preserves_saved_defaults(self):
@@ -33,7 +33,10 @@ class GlobalModelSettingsTests(unittest.TestCase):
         self.assertEqual(page.locator("#settings-default-model").input_value(), "claude-default")
         self.assertEqual(page.locator("#settings-default-effort").input_value(), "max")
         self.assertTrue(page.locator("#settings-default-save").is_disabled())
+        page.locator('[data-settings-model-provider="codex"]').click()
+        self.assertTrue(page.locator("#settings-default-save").is_disabled())
         page.locator("#settings-default-model").select_option("test-codex")
+        self.assertNotIn("请选择此服务的模型", page.locator("#settings-default-description").inner_text())
         self.assertEqual(page.locator("#settings-default-effort").input_value(), "")
         page.locator("#settings-default-effort").select_option("high")
         saved = {"model": "test-codex", "reasoning_effort": "high"}
@@ -42,7 +45,7 @@ class GlobalModelSettingsTests(unittest.TestCase):
         page.locator("#settings-default-status").get_by_text("全局默认已保存", exact=False).wait_for()
         self.assertEqual(page.evaluate("window.requests.filter(item => item.path === '/api/ai/preferences' && item.method === 'POST').map(item => item.body)"), [saved])
         self.assertEqual(page.evaluate("window.defaultUpdates"), [saved])
-        page.evaluate("WorkbenchSettings.render()")
+        page.evaluate("WorkbenchSettings.render();document.querySelectorAll('[data-settings-section]').forEach(s=>s.hidden=s.dataset.settingsSection==='overview')")
         page.wait_for_function("!document.querySelector('#settings-default-model').disabled")
         self.assertEqual(page.locator("#settings-default-model").input_value(), saved["model"])
         self.assertEqual(page.locator("#settings-default-effort").input_value(), saved["reasoning_effort"])
@@ -52,14 +55,15 @@ class GlobalModelSettingsTests(unittest.TestCase):
         self.assertEqual(page.locator("#settings-default-model").input_value(), "retired-model")
         self.assertIn("当前不在可用列表", page.locator("#settings-default-error").inner_text())
         self.assertTrue(page.locator("#settings-default-save").is_disabled())
-        page.locator("#settings-default-model").select_option("")
+        expect(page.locator('#settings-default-model option[value="offline-model"]')).to_have_attribute("disabled", "")
+        page.locator('[data-settings-model-provider="auto"]').click()
         self.assertEqual(page.locator("#settings-default-effort").input_value(), "")
         self.assertTrue(page.locator("#settings-default-effort").is_disabled())
         self.assertTrue(page.locator("#settings-default-save").is_enabled())
-        expect(page.locator('#settings-default-model option[value="offline-model"]')).to_have_attribute("disabled", "")
 
     def test_failed_save_keeps_draft_and_allows_retry(self):
         page = self.open_settings(**{"/api/ai/preferences#POST": {"error_fixture": "保存暂时失败"}})
+        page.locator('[data-settings-model-provider="codex"]').click()
         page.locator("#settings-default-model").select_option("test-codex")
         page.locator("#settings-default-save").click()
         page.get_by_text("保存暂时失败", exact=True).wait_for()
@@ -71,10 +75,11 @@ class GlobalModelSettingsTests(unittest.TestCase):
 
     def test_refresh_preserves_unsaved_selection(self):
         page = self.open_settings(**{"/api/ai/options?refresh=1": {"models": MODELS, "default_settings": {"model": "claude-default", "reasoning_effort": "max"}}})
+        page.locator('[data-settings-model-provider="codex"]').click()
         page.locator("#settings-default-model").select_option("test-codex")
         page.locator("#settings-default-effort").select_option("high")
         page.locator("#settings-default-refresh").click()
-        page.wait_for_function("!document.querySelector('#settings-default-model').disabled")
+        page.wait_for_function("!document.querySelector('[data-settings-model-provider=auto]').disabled")
         self.assertEqual(page.locator("#settings-default-model").input_value(), "test-codex")
         self.assertEqual(page.locator("#settings-default-effort").input_value(), "high")
         self.assertTrue(page.locator("#settings-default-save").is_enabled())
@@ -91,8 +96,22 @@ class GlobalModelSettingsTests(unittest.TestCase):
         self.assertTrue(page.locator("#settings-default-model").is_disabled())
         page.evaluate("window.responses['/api/ai/preferences'] = {preferences:{model:null,reasoning_effort:null}}")
         page.locator("#settings-default-refresh").click()
-        page.wait_for_function("!document.querySelector('#settings-default-model').disabled")
+        page.wait_for_function("!document.querySelector('[data-settings-model-provider=auto]').disabled")
         self.assertEqual(page.locator("#settings-default-model").input_value(), "")
+
+    def test_provider_filters_models_and_pending_choice_survives_refresh(self):
+        page = self.open_settings(**{"/api/ai/options?refresh=1": {"models": MODELS, "default_settings": {"model": "claude-default", "reasoning_effort": "max"}}})
+        expect(page.locator('[data-settings-model-provider="claude"]')).to_have_attribute("aria-pressed", "true")
+        self.assertEqual(page.locator('#settings-default-model option[value="test-codex"]').count(), 0)
+        page.locator('[data-settings-model-provider="codex"]').click()
+        expect(page.locator('[data-settings-model-provider="codex"]')).to_have_attribute("aria-pressed", "true")
+        self.assertEqual(page.locator('#settings-default-model option[value="claude-default"]').count(), 0)
+        self.assertTrue(page.locator("#settings-default-save").is_disabled())
+        page.locator("#settings-default-refresh").click()
+        page.wait_for_function("!document.querySelector('[data-settings-model-provider=auto]').disabled")
+        expect(page.locator('[data-settings-model-provider="codex"]')).to_have_attribute("aria-pressed", "true")
+        self.assertEqual(page.locator("#settings-default-model").input_value(), "")
+        self.assertTrue(page.locator("#settings-default-save").is_disabled())
 
     def test_narrow_screen_and_labels_remain_usable(self):
         page = self.open_settings()
@@ -112,6 +131,7 @@ class GlobalModelSettingsTests(unittest.TestCase):
     def test_corrupt_preferences_can_be_repaired_without_losing_model_catalog(self):
         page = self.open_settings(**{"/api/ai/options": {"models": MODELS, "default_settings": {"model": None, "reasoning_effort": None}, "defaults_configured": True, "defaults_error": "全局配置无法读取，请重新保存。"}})
         page.get_by_text("全局配置无法读取，请重新保存。", exact=True).wait_for()
+        page.locator('[data-settings-model-provider="codex"]').click()
         page.locator("#settings-default-model").select_option("test-codex")
         page.evaluate("window.responses['/api/ai/preferences#POST'] = {preferences:{model:'test-codex',reasoning_effort:null}}")
         page.locator("#settings-default-save").click()

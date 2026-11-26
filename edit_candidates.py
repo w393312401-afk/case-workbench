@@ -23,7 +23,7 @@ MIN_FREE_FRAMES = 8
 LONG_CLIP_FRAMES = 90
 GRID_LIMIT = 1560
 CAPTION_HEIGHT = 24
-NOTE_FIELDS = {"summary": 500, "subject": 120}
+NOTE_FIELDS = {"summary": 500, "subject": 120, "shot_size": 24, "angle": 24}
 CODE = re.compile(r"[A-Za-z]+\d+")
 UNSURE = "待核"
 # A clip name the labeling skill wrote, or the user kept in its format: words, then a stable code such as BK024 or LD114a.
@@ -49,6 +49,18 @@ def label_status(clip):
     if any(UNSURE in label for label in labels):
         return "unsure"
     return "verified" if verified or clip_name_label(clip) else "manual" if labels else "none"
+
+
+def stage_text(row):
+    """「；磨削阶段：600（第 3/18 段）」 for a clip inside one of its material timeline's stage ranges; empty otherwise."""
+    stage = row.get("stage") or {}
+    return f"；磨削阶段：{stage['name']}（第 {stage.get('index')}/{stage.get('count')} 段）" if stage.get("name") else ""
+
+
+STAGE_NOTE = ("「磨削阶段」是素材时间线上阶段区间的名称（磨板的目数和磨料，用户在达芬奇里填的照原样显示），片段落在哪一段就写哪一段："
+              "研磨类片段的目数以它为准，标签里的“目数待确认”只说明单看这个片段认不出；检查、测试、展示类片段落在某一段，表示它拍在这一阶段。"
+              "「目数待填 NN」是还没填的占位，只说明这些片段同属一段；段号按素材时间线先后排，同一块磨板可以在不同段重复出现。"
+              "没有这一项的片段不在任何阶段区间里。")
 
 
 def _identity(clip):
@@ -115,14 +127,16 @@ def build_candidates(listing, *, deduplicate_source_ranges=False, count_usage=Fa
             span = source_span(clip)
             if not span or clip["end"] <= clip["start"]:
                 continue
-            left, right = span
+            # The key stays on the reported range, so what was already described or exported for the clip is kept;
+            # the range handed to the editor is the one the clip really shows.
+            left, right = clip.get("true_source") or span
             spans = used.get(_identity(clip), []) + used.get(f"media:{clip.get('media_id')}", [])
             overlapping = [(a, b, name) for a, b, name in spans if max(a, left) < min(b, right)]
             free = ([list(span) for span in _intervals_uncovered([(a, b) for a, b, _ in overlapping], left, right)]
                     if deduplicate_source_ranges else [[left, right]])
             found.append({"key": candidate_key(clip), "label": " / ".join(clip_labels(clip)) or clip.get("name") or "",
                           "timeline": material["name"], "timeline_uid": material["unique_id"], "item_uid": clip.get("uid"),
-                          "actions": clip.get("actions") or [], "record": [clip["start"], clip["end"]], "source": [left, right], "frames": clip["end"] - clip["start"],
+                          "actions": clip.get("actions") or [], "stage": clip.get("stage"), "record": [clip["start"], clip["end"]], "source": [left, right], "frames": clip["end"] - clip["start"],
                           "free": free, "free_frames": sum(b - a for a, b in free),
                           "used_by": sorted({name for _, _, name in overlapping if name}),
                           "use_count": len({name for _, _, name in overlapping if name}),
@@ -334,6 +348,7 @@ def write_task_files(folder, found, index, entries, listing, *, deduplicate_sour
              "标签不说明动作在第几秒，只截取片段的一部分时，都要按技能「定入出点」看画面。"
              "画面描述列里的「动作区间」是看过画面记下的源帧范围（半开，略偏宽）：要这个动作就把这段代入技能「动作镜头公式」算入出点和速度，不用再抽静帧；"
              "标「不完整」的只有动作的一部分。没有动作区间的片段照常处理。",
+             *([STAGE_NOTE] if any(item.get("stage") for item in listed) else []),
              ("可用范围按实时工程里其他成片时间线算出，源帧坐标；已被用尽的片段没有列出。"
               if deduplicate_source_ranges else
               "按完整素材源区间提供候选；每行注明这个片段已被几条成片用过（同一成片里用几次都算 1 次），同一素材时间线内按用过次数从少到多排列。"
@@ -347,11 +362,16 @@ def write_task_files(folder, found, index, entries, listing, *, deduplicate_sour
             text = item["description"]["summary"] if item["description"] else ("—" if item["label_status"] == "verified" else "未描述，请看对照图")
             if item["description"] and item["description"].get("subject"):
                 text += f"；主体：{item['description']['subject']}"
+            if item["description"] and item["description"].get("shot_size"):
+                text += f"；景别：{item['description']['shot_size']}"
+            if item["description"] and item["description"].get("angle"):
+                text += f"；机位：{item['description']['angle']}"
             if item["description"] and item["description"].get("cta") is not None:
                 text += "；有号召手势" if item["description"]["cta"] else "；无号召手势"
             if item.get("actions"):
                 text += "；动作区间：" + "、".join(f"{action['name']} [{action['start']}, {action['end']})" + ("" if action.get("complete") else "（不完整）")
                                              for action in item["actions"])
+            text += stage_text(item)
             lines.append(f"- {item['key']}｜{item['label'] or '无标签'}｜{LABEL_STATUS[item['label_status']]}｜"
                          f"[{item['record'][0]}, {item['record'][1]})｜{item['frames']} 帧｜"
                          f"{_describe_free(item, count_usage)}｜{item['grid'] or '无对照图'}｜{text}")
@@ -362,6 +382,7 @@ def write_task_files(folder, found, index, entries, listing, *, deduplicate_sour
             "verified": sum(1 for item in listed if item["label_status"] == "verified"),
             "to_look": sum(1 for item in listed if item["label_status"] != "verified" and not item["description"]),
             "grids": sum(1 for item in listed if item["grid"]),
+            "staged": sum(1 for item in listed if item.get("stage")),
             "unused": sum(1 for item in listed if not item.get("use_count")) if count_usage else None}
 
 

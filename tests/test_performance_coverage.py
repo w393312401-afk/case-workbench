@@ -107,6 +107,49 @@ class PerformanceCoverageTests(unittest.TestCase):
         self.assertEqual((brief["posted_on"], brief["window_end"]), ("2026-08-31", "2026-09-13"))
         self.assertEqual((brief["posted_on"], brief["window_end"]), (full["posted_on"], full["window_end"]))
 
+    def test_case_library_recent_status_requires_each_videos_own_coverage(self):
+        days = self.days("2026-10-01", 28)
+        for video, used in (("selling", days), ("stopped", days), ("missing", days[:-1]), ("new", days[19:])):
+            posted = "2026-10-20" if video == "new" else "2026-08-01"
+            with closing(self.store.connect()) as connection:
+                connection.executemany("""INSERT INTO daily
+                    (video_id, date, posted_at, orders, items, gmv, source_file)
+                    VALUES (?, ?, ?, ?, ?, ?, 'fixture')""",
+                    [(video, day, posted, 1 if video == "selling" and day == "2026-10-15" else 0,
+                      2 if video == "selling" and day == "2026-10-15" else 0,
+                      40 if video == "selling" and day == "2026-10-15" else 0) for day in used])
+        with closing(self.store.connect()) as connection:
+            connection.execute("INSERT INTO daily (video_id,date,posted_at,orders,items,gmv) VALUES ('selling','2026-09-30','2026-08-01',99,99,999)")
+            connection.execute("INSERT INTO daily (video_id,date,posted_at,orders,items,gmv) VALUES ('selling','2026-10-29','2026-08-01',99,99,999)")
+        videos = {video: {"posted_on": "2026-10-20" if video == "new" else "2026-08-01"}
+                  for video in ("selling", "stopped", "missing", "new")}
+        data = self.store.case_library_insights(videos, [], date(2026, 10, 29))
+        self.assertEqual([data[v]["status"] for v in videos], ["selling", "stopped", "unknown", "new"])
+        self.assertEqual((data["selling"]["recent"]["start"], data["selling"]["recent"]["end"]), ("2026-10-01", "2026-10-28"))
+        self.assertEqual((data["selling"]["recent"]["items"]["value"], data["selling"]["recent"]["gmv"]["value"]), (2, 40))
+        self.assertFalse(data["missing"]["recent"]["orders"]["complete"])
+        self.assertTrue(data["new"]["recent"]["orders"]["complete"])
+        self.assertEqual(data["new"]["recent"]["required_days"], 9)
+
+    def test_case_library_campaign_share_never_splits_or_double_counts_a_week(self):
+        self.daily("target", self.days("2026-10-05", 7), posted="2026-08-01")
+        with closing(self.store.connect()) as connection:
+            connection.execute("UPDATE daily SET orders=2, items=2, gmv=20 WHERE video_id='target'")
+            connection.execute("""INSERT INTO periods (video_id,range_start,range_end,span_days,posted_at,orders,items,gmv)
+                VALUES ('target','2026-10-05','2026-10-11',7,'2026-08-01',7,7,70)""")
+        videos = {"target": {"posted_on": "2026-08-01"}}
+        campaigns = [{"start": "2026-10-06", "end": "2026-10-10", "confidence": "planning", "verified": False},
+                     {"start": "2026-10-08", "end": "2026-10-09", "confidence": "official", "verified": False}]
+        first = self.store.case_library_insights(videos, campaigns, date(2026, 10, 29))["target"]
+        self.assertEqual(first["recent"]["items"]["value"], 7)
+        self.assertIsNone(first["campaign"]["percent"])
+        self.assertIn("周表跨活动边界", first["campaign"]["reason"])
+        with closing(self.store.connect()) as connection:
+            connection.execute("UPDATE daily SET orders=1 WHERE video_id='target'")
+        second = self.store.case_library_insights(videos, campaigns, date(2026, 10, 29))["target"]
+        self.assertEqual(second["campaign"]["percent"], 71.4)
+        self.assertTrue(second["campaign"]["dates_unverified"])
+
 
 if __name__ == "__main__":
     unittest.main()

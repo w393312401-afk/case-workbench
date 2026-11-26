@@ -57,6 +57,7 @@ class Runner:
         self.audio_baseline = {"ok": True, "video_ids": [], "audio_ids": []}
         self.audio_result = {"ok": True, "status": "completed", "new_audio": 0, "processed": 0, "plugins_copied": 0,
                              "protected": 0, "issues": [], "parameters_unverified": False, "saved": True}
+        self.voice_tail = {"ok": True, "status": "covered", "voice_end": 400.0, "target": 400, "picture_end": 400, "extended": []}
 
     def __call__(self, args, input, **options):
         request = json.loads(input.decode("utf-8"))
@@ -70,6 +71,8 @@ class Runner:
             body = self.audio_baseline
         elif request["command"] == "inherit_edit_audio":
             body = self.audio_result
+        elif request["command"] == "cover_voice_tail":
+            body = self.voice_tail
         elif request["command"] == "build":
             body = {"ok": True, "name": request["prefix"] + "1", "unique_id": "uid-1", "start_frame": 0, "end_frame": 400,
                     "audio_items": [{"start": 0, "end": 400}], "markers": [{"frame": m["frame"]} for m in request["markers"]]}
@@ -106,7 +109,7 @@ class Editor:
 class EditBench(Bench, EditingWorkbenchMixin):
     def __init__(self, root, editor):
         super().__init__(root, FakeEleven())
-        self.ai = SimpleNamespace(resolve_default_settings=lambda body, effort_key: {
+        self.ai = SimpleNamespace(resolve_default_settings=lambda body, effort_key, kind=None: {
             "model": body.get("model", "claude-default"), effort_key: body.get(effort_key)})
         self.editor, self.runner = editor, Runner()
         self.resolve = ResolveBridge(runner=self.runner)
@@ -219,6 +222,28 @@ class EditingTests(unittest.TestCase):
         self.assertTrue(edit["audio_inheritance"]["parameters_unverified"])
         self.assertFalse(any("插件参数和动画" in question for question in edit["report"]["questions"]))
         self.assertIn("audio_overrides", self.editor.calls[0]["prompt"])
+
+    def test_picture_is_brought_to_the_voiceover_end_before_the_delivery_snapshot(self):
+        job = self.timeline_job()
+        self.bench.runner.voice_tail = {"ok": True, "status": "extended", "voice_end": 400.31, "target": 401, "picture_end": 400,
+                                        "extended": [{"track": 1, "clip": "cta.mov", "frames": 1, "how": "tail"}], "saved": True}
+        self.start(job)
+        edit = self.wait(job["id"])
+        commands = [call["command"] for call in self.bench.runner.calls]
+        self.assertLess(commands.index("inherit_edit_audio"), commands.index("cover_voice_tail"))
+        self.assertLess(commands.index("cover_voice_tail"), commands.index("inspect"))
+        self.assertEqual(edit["status"], "completed")
+        self.assertEqual(edit["voice_tail"]["target"], 401)
+
+    def test_picture_short_of_the_voiceover_end_needs_repair(self):
+        job = self.timeline_job()
+        self.bench.runner.voice_tail = {"ok": True, "status": "no_footage", "clip": "cta.mov", "voice_end": 400.31, "target": 401,
+                                        "picture_end": 400, "extended": []}
+        self.start(job)
+        edit = self.wait(job["id"])
+        self.assertEqual(edit["status"], "needs_repair")
+        self.assertIn("cta.mov", edit["error"])
+        self.assertTrue(any("cta.mov" in question for question in edit["report"]["questions"]))
 
     def test_audio_failure_is_visible_and_cannot_be_reported_as_complete(self):
         job = self.timeline_job()
@@ -501,6 +526,10 @@ class EditingTests(unittest.TestCase):
         self.assertEqual((request["unique_id"], request["name"]), ("uid-1", job["timelines"][-1]["name"]))
         # Taken right after the client's delivery, before usage marking rewrites the material timelines.
         self.assertLess(commands.index("inspect"), commands.index("mark_usage"))
+        # Counting and marking are told which timelines are material: the ones picked for this project's edits.
+        for command in ("candidates", "mark_usage"):
+            self.assertEqual({tuple(call["material_names"]) for call in self.bench.runner.calls if call["command"] == command},
+                             {("蓝点折刀成品素材",)})
         record = json.loads((self.bench.production.root / "edits" / started["id"] / "delivered-timeline.json").read_text(encoding="utf-8"))
         self.assertEqual((record["schema_version"], record["edit_id"], record["purpose"]), (1, started["id"], "record_only"))
         self.assertNotIn("ok", record["timeline"])
@@ -678,11 +707,12 @@ class EditingTests(unittest.TestCase):
         # The copy carries the 2026-10-16 素材防复用 section after the personal skill.
         self.assertTrue(first_copy.read_text(encoding="utf-8").startswith(source.read_text(encoding="utf-8")))
         self.assertIn("素材防复用", first_copy.read_text(encoding="utf-8"))
-        source.write_text("更新规则：完全按当前技能剪辑。", encoding="utf-8")
+        # A skill that states the rule itself is copied as it stands.
+        source.write_text('更新规则：完全按当前技能剪辑。<a id="少用优先"></a>', encoding="utf-8")
         self.start(job)
         self.wait(job["id"])
         second_copy = Path(self.editor.calls[-1]["cwd"]) / "skill" / "SKILL.md"
-        self.assertTrue(second_copy.read_text(encoding="utf-8").startswith(source.read_text(encoding="utf-8")))
+        self.assertEqual(second_copy.read_text(encoding="utf-8"), source.read_text(encoding="utf-8"))
         self.assertNotEqual(first_copy.read_text(encoding="utf-8"), second_copy.read_text(encoding="utf-8"))
 
     def test_explicit_unsaved_delivery_is_retained_without_engineering_readback(self):
@@ -803,10 +833,13 @@ class EditingTests(unittest.TestCase):
         self.assertEqual(len(self.editor.calls), 0)
         with self.assertRaises(VoiceError):
             self.start(job, mode="nope")
-        result = self.bench.edit_handoff(job["id"], {"timeline": job["timelines"][-1]["unique_id"], "materials": [], "mode": "sync"})
+        for retired in ("sync", "montage"):
+            with self.assertRaises(VoiceError):
+                self.start(job, mode=retired)
+        result = self.bench.edit_handoff(job["id"], {"timeline": job["timelines"][-1]["unique_id"], "materials": [], "mode": "explain"})
         self.assertTrue(Path(result["path"]).is_file())
         self.assertIn("$davinci-product-video-editing", result["prompt"])
-        self.assertIn("音画同步", result["prompt"])
+        self.assertIn("解释画面逻辑", result["prompt"])
         self.assertNotIn("核验", result["prompt"])
         self.assertNotIn("账本", Path(result["path"]).read_text(encoding="utf-8"))
 
@@ -1143,9 +1176,7 @@ class SummaryTests(unittest.TestCase):
 
     def test_each_mode_receives_its_execution_standard_and_explicit_instruction(self):
         for mode, expected, excluded in (
-                ("explain", "按完整意群解释原因", "在已有意群区间内确定关键动作的实际口播时点"),
-                ("sync", "在已有意群区间内确定关键动作的实际口播时点", "贴好保护纸的近景可说明隔层"),
-                ("montage", "可跨意群安排主题与信息推进", "贴好保护纸的近景可说明隔层")):
+                ("explain", "按完整意群解释原因", "原片镜头表是本次的主要依据"),):
             with self.subTest(mode=mode):
                 text = self.selection_handoff(mode, instruction="开头使用切纸结果")
                 standards = text.split("## 本次画面模式执行标准", 1)[1].split("## 完整口播", 1)[0]
@@ -1159,12 +1190,27 @@ class SummaryTests(unittest.TestCase):
         job = {"id": "PRD-0123456789ab", "lines": [{}, {}, {}]}
         reply = json.loads(json.dumps(inspect_reply(gaps=[(200, 300)], shots=((0, 40), (40, 200), (300, 380)))).replace("{job}", job["id"]))
         summary = edit_summary(reply, job, {"frames": 390}, "29.97")
-        self.assertEqual((summary["shots"], summary["long_shots"], summary["max_shot"], summary["frame_limit"]), (3, 3, 160, 29))
+        self.assertEqual((summary["shots"], summary["long_shots"], summary["max_shot"], summary["frame_limit"]), (3, 1, 160, 119))
         self.assertEqual([gap["seconds"] for gap in summary["gaps"]], [6.67])
         self.assertEqual(summary["uncovered"], [{"start": 380, "end": 400, "seconds": 12.68}])
         self.assertTrue(summary["voice_changed"])
         self.assertIsNone(final_report("no block"))
         self.assertEqual(final_report(REPORT)["shots"], 3)
+
+    def test_handoff_lists_word_frames_only_outside_replicas(self):
+        job = {"id": "PRD-0123456789ab", "title": "稿", "script_id": "SCR-0123456789ab", "script_version": 1, "direction_id": "",
+               "lines": [{"number": 1, "spoken": "Hi there", "zh": "你好", "proof": "", "tags": "", "evidence": ""}]}
+        take = {"model_id": "eleven_v4", "duration": 2.0, "groups": [{"number": 1, "start": 0.0, "end": 1.0, "coverage": 1.0}]}
+        config = {"project": "202H", "fps": "30", "width": 1080, "height": 1920}
+        timing = [("H", 0.0, 0.1), ("i", 0.1, 0.2), (" ", 0.2, 0.2), ("t", 0.5, 0.6), ("h", 0.6, 0.7), ("e", 0.7, 0.8), ("r", 0.8, 0.9), ("e", 0.9, 1.0)]
+        build = lambda **values: handoff_markdown(job, take, {"name": "Zack", "unique_id": "u", "frames": 60, "lead_frames": 6}, config,
+                                                  mode="explain", instruction="", materials=[], notes={}, voice_label="Zack", **values)
+        self.assertIn("- #1：6 Hi｜21 there", build(triples=timing))
+        self.assertNotIn("词起点", build())
+        # A voiceover the user cut in DaVinci no longer sits where the take's timing says.
+        moved = {"start_frame": 0, "markers": [], "tracks": {"video": [], "audio": [
+            {"index": 2, "name": "配音", "items": [{"start": 6, "end": 30}, {"start": 34, "end": 60}]}]}}
+        self.assertNotIn("词起点", build(triples=timing, baseline=moved))
 
     def test_handoff_keeps_table_cells_on_one_line(self):
         job = {"id": "PRD-0123456789ab", "title": "稿", "script_id": "SCR-0123456789ab", "script_version": 1, "direction_id": "",

@@ -1,6 +1,7 @@
 """A restartable gateway never owns the fake task host's workers or paid results."""
 from __future__ import annotations
 
+from email.message import Message
 import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,41 @@ import service_gateway as gateway
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN = "gateway-browser-test-token"
 SECRET = "gateway-test-secret-" + "x" * 40
+
+
+class GatewayUploadIdleTests(unittest.TestCase):
+    def setUp(self):
+        self.handler = gateway.GatewayHandler.__new__(gateway.GatewayHandler)
+        self.handler.connection = Mock()
+        self.handler.connection.gettimeout.return_value = None
+        self.handler.rfile = Mock()
+        self.handler._body_read = 0
+
+    def test_expired_upload_releases_the_write_admission(self):
+        handler = self.handler
+        handler.command, handler.path, handler.headers = "POST", "/api/data/upload", Message()
+        handler.headers["Content-Length"] = "4"
+        handler.rfile.read.side_effect = [b"hi", TimeoutError("fixture idle read")]
+        handler.server = Mock()
+        handler.server.host_manifest.return_value = {"port": 1, "proxy_secret": SECRET}
+        handler.output = Mock()
+        with patch.object(gateway.http.client, "HTTPConnection") as upstream:
+            handler.dispatch()
+        handler.server.begin_proxy_write.assert_called_once()
+        handler.server.end_proxy_write.assert_called_once()
+        upstream.return_value.send.assert_called_once_with(b"hi")
+        upstream.return_value.close.assert_called_once()
+        self.assertEqual(handler.output.call_args.args[0], 408)
+        self.assertTrue(handler.close_connection)
+        self.assertEqual([call.args[0] for call in handler.connection.settimeout.call_args_list],
+                         [gateway.UPLOAD_IDLE_TIMEOUT, None])
+
+    def test_active_upload_keeps_forwarding_until_the_body_is_complete(self):
+        handler, upstream = self.handler, Mock()
+        handler.rfile.read.side_effect = [b"one", b"two"]
+        handler.forward_body(upstream, 6)
+        self.assertEqual([call.args[0] for call in upstream.send.call_args_list], [b"one", b"two"])
+        self.assertEqual(handler._body_read, 6)
 
 
 class FakeHostHandler(BaseHTTPRequestHandler):
@@ -77,6 +113,21 @@ class FakeHostHandler(BaseHTTPRequestHandler):
             return self.out(202, {"id": data["id"]})
         if self.path == "/api/jobs" and self.command == "GET":
             return self.out(200, self.server.jobs)
+        if self.path == "/unknown-length":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"unframed fixture")
+            self.close_connection = True
+            return
+        if self.path == "/truncated":
+            self.send_response(200)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            self.wfile.write(b"short")
+            self.close_connection = True
+            return
         if self.path == "/stream":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -249,10 +300,76 @@ class ServiceGatewayTests(unittest.TestCase):
             self.assertEqual(response.read(len(b"data: first\n\n")), b"data: first\n\n")
             self.assertFalse(self.host.stream_release.is_set(), "The first event must arrive before the final event exists")
             self.assertIsNone(response.getheader("Transfer-Encoding"))
+            self.assertEqual(response.getheader("Connection"), "close")
+            # A stream waiting for more events owns only its own handler.
+            self.assertEqual(self.request(server.server_port, "/ordinary")[0], 200)
+            self.assertFalse(self.host.stream_release.is_set())
             self.host.stream_release.set()
             self.assertEqual(response.read(), b"data: second\n\n")
         finally:
             connection.close()
+
+    def test_fixed_length_reads_reuse_the_client_socket_and_respect_close(self):
+        server = self.start_gateway()
+        client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        try:
+            client.request("GET", "/ordinary")
+            first = client.getresponse()
+            self.assertEqual(first.read(), b"static fixture")
+            self.assertFalse(first.will_close)
+            connected = client.sock
+            self.assertIsNotNone(connected)
+            for method, path, headers in (("GET", "/video", {"Range": "bytes=2-5"}),
+                                           ("HEAD", "/ordinary", {}), ("GET", "/ordinary", {})):
+                client.request(method, path, headers=headers)
+                response = client.getresponse()
+                expected = self.host.video[2:6] if path == "/video" else b"" if method == "HEAD" else b"static fixture"
+                self.assertEqual(response.read(), expected)
+                self.assertFalse(response.will_close)
+                self.assertIs(client.sock, connected)
+            client.request("GET", "/ordinary", headers={"Connection": "close"})
+            closing = client.getresponse()
+            self.assertEqual(closing.getheader("Connection"), "close")
+            self.assertEqual(closing.read(), b"static fixture")
+            self.assertIsNone(client.sock)
+        finally:
+            client.close()
+
+    def test_unknown_and_incomplete_lengths_close_the_client_socket(self):
+        server = self.start_gateway()
+        client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        try:
+            client.request("GET", "/unknown-length")
+            response = client.getresponse()
+            self.assertEqual(response.getheader("Connection"), "close")
+            self.assertEqual(response.read(), b"unframed fixture")
+            self.assertIsNone(client.sock)
+            client.request("GET", "/truncated")
+            response = client.getresponse()
+            with self.assertRaises(http.client.IncompleteRead):
+                response.read()
+            # Incomplete content must be followed by EOF, never another response.
+            self.assertEqual(client.sock.recv(1), b"")
+        finally:
+            client.close()
+
+    def test_reused_socket_checks_internal_credentials_on_each_request(self):
+        server = self.start_gateway()
+        client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        try:
+            client.request("GET", "/ordinary")
+            first = client.getresponse()
+            self.assertEqual(first.read(), b"static fixture")
+            self.assertIsNotNone(client.sock)
+            before = list(self.host.seen)
+            client.request("GET", "/ordinary", headers={gateway.GATEWAY_HEADER: "spoof"})
+            rejected = client.getresponse()
+            self.assertEqual(rejected.status, 403)
+            self.assertNotIn(SECRET.encode(), rejected.read())
+            self.assertEqual(self.host.seen, before)
+            self.assertIsNone(client.sock)
+        finally:
+            client.close()
 
     def test_video_range_head_and_incremental_upload_keep_wire_behavior(self):
         server = self.start_gateway()

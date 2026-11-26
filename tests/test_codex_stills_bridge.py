@@ -370,5 +370,88 @@ class OwnedProcessTreeTests(unittest.TestCase):
                 stream.close()
 
 
+USER_FIELD = "computer_use.windows.always_allowed_app_ids"
+USER_REJECTION = (r"Error: C:\Users\someone\.codex\config.toml:481:23: unknown configuration field `"
+                  + USER_FIELD + "`" + chr(10)).encode()
+
+
+class RejectingProcess(ConfigProcess):
+    """--strict-config refusing the user's config.toml before the App Server answers anything."""
+    def __init__(self, scenario, config, stderr):
+        super().__init__(scenario, config)
+        self.stderr.put(stderr)
+        self.exit(1)
+
+    def receive(self, message):
+        self.received.append(message)
+
+
+class StrictConfigFallbackTests(unittest.TestCase):
+    """A field the Codex app wrote that this CLI does not know must not block the job; our overrides still must hold."""
+    setUp = CodexStillsBridgeTests.setUp
+    run_bridge = CodexStillsBridgeTests.run_bridge
+    requests = CodexStillsBridgeTests.requests
+    assert_closed = CodexStillsBridgeTests.assert_closed
+
+    def bridge(self, stderr=USER_REJECTION, *, lenient_transform=None):
+        def factory(arguments, **options):
+            config = copy.deepcopy(self.config)
+            for number, argument in enumerate(arguments):
+                if argument == "-c":
+                    merge(config, tomllib.loads(arguments[number + 1]))
+            if "--strict-config" in arguments:
+                process = RejectingProcess(complete, config, stderr)
+            else:
+                if lenient_transform:
+                    lenient_transform(config)
+                process = ConfigProcess(complete, config)
+            self.processes.append(process)
+            self.launches.append((arguments, options))
+            return process
+        return CodexStillsBridge(timeout=5, startup_timeout=1, popen_factory=factory)
+
+    def test_unknown_user_config_field_restarts_without_strict_and_runs_with_verified_overrides(self):
+        result = self.run_bridge(self.bridge())
+        self.assertIn("整理候选", result)
+        strict = ["--strict-config" in arguments for arguments, _ in self.launches]
+        self.assertEqual(strict, [True, False, True, False])
+        self.assertTrue(self.requests("config/read", self.processes[1]))
+        self.assertEqual(len(self.requests("thread/start")), 1)
+        self.assert_closed()
+
+    def test_override_not_in_effect_after_fallback_refuses_before_thread(self):
+        bridge = self.bridge(lenient_transform=lambda config: config.update(web_search="live"))
+        with self.assertRaises(BridgeError) as caught:
+            self.run_bridge(bridge)
+        self.assertEqual(caught.exception.code, "CODEX_CONFIG")
+        self.assertIn(USER_FIELD, str(caught.exception))
+        self.assertIn("web_search", str(caught.exception))
+        self.assertNotIn("someone", str(caught.exception))
+        self.assertFalse(any(self.requests("thread/start", process) for process in self.processes))
+        self.assert_closed()
+
+    def test_rejected_workbench_override_is_reported_and_never_retried_without_strict(self):
+        stderr = b"Error: unknown configuration field `features.shell_tool` in -c/--config override" + bytes([10])
+        with self.assertRaises(BridgeError) as caught:
+            self.run_bridge(self.bridge(stderr))
+        self.assertEqual(caught.exception.code, "CODEX_CONFIG")
+        self.assertIn("features.shell_tool", str(caught.exception))
+        self.assertEqual(len(self.launches), 1)
+        self.assert_closed()
+
+    def test_other_startup_failures_are_not_retried(self):
+        with self.assertRaises(BridgeError):
+            self.run_bridge(self.bridge(b"thread 'main' panicked" + bytes([10])))
+        self.assertEqual(len(self.launches), 1)
+        self.assert_closed()
+
+    def test_rejection_parser_keeps_only_a_sanitized_field_name(self):
+        from codex_bridge import config_rejection
+        self.assertEqual(config_rejection(USER_REJECTION.decode()), ("file", USER_FIELD))
+        self.assertEqual(config_rejection("Error: unknown configuration field `bogus` in -c/--config override"), ("override", "bogus"))
+        self.assertEqual(config_rejection(r"Error: D:\x\config.toml:1:2: unknown configuration field `a<b>; rm`")[1], "abrm")
+        self.assertIsNone(config_rejection("WARNING: token=secret" + chr(10) + "something else"))
+
+
 if __name__ == "__main__":
     unittest.main()

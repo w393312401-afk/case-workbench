@@ -22,6 +22,7 @@ def set_content_condition(page, field, values):
     """Edit a condition through the visible builder, retaining the other rules."""
     editor = page.locator("#content-flow-filter-editor")
     if not editor.is_visible():
+        page.locator(".flow-main-menu > summary").click()
         page.locator("#content-flow-filter-toggle").click()
     rows = editor.locator("[data-filter-row]")
     row = next((candidate for candidate in rows.all()
@@ -106,12 +107,14 @@ class ContentFlowBrowserTests(unittest.TestCase):
         page.route("**/api/content?**", lambda route: route.fulfill(json=snapshot))
         page.route("**/api/photo-overview?**", lambda route: route.fulfill(json={"items": [], "counts": {"pending": 7}}))
         page.route("**/api/needs-you?**", lambda route: route.fulfill(json={"counts": {"preview": 1}, "items": [
-            {"kind": "preview", "kind_label": "预览导出失败", "job_title": "新增待处理", "message": "等待重新导出", "hash": "#production/fixture", "product": "202H"}]}))
+            {"kind": "preview", "kind_label": "预览导出失败", "job_title": "新增待处理", "message": "等待重新导出", "hash": "#production/fixture", "product": "202H"}],
+            "made_today": {"date": "2026-11-19", "videos": 6, "photos": 1}}))
         page.evaluate("window.retainedFlowRow=document.querySelector('.flow-row')")
         page.clock.run_for(20001)
         page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
         expect(page.locator('[data-flow-view="carousel"]')).to_have_text("图文7")
         expect(page.locator("#content-flow-needs")).to_contain_text("需要你出手 1")
+        expect(page.locator("#content-flow-today")).to_have_text("今天进 Notion：成品视频 6 条 · 图文 1 条")
         self.assertTrue(page.evaluate("retainedFlowRow===document.querySelector('.flow-row')"))
         self.assertFalse(any(path.startswith("/api/content/views?") for path in page.evaluate("flowReadStarts")))
 
@@ -149,12 +152,12 @@ class ContentFlowBrowserTests(unittest.TestCase):
                 route.fulfill(json=latest)
 
         page.route("**/api/photo-overview?**", overview)
-        page.locator("#content-flow-refresh").click()
+        page.locator(".flow-main-menu > summary").click(); page.locator("#content-flow-refresh").click()
         page.wait_for_function("() => flowReadStarts.filter(path=>path.startsWith('/api/photo-overview?')).length === 1")
         page.locator('[data-flow-view="carousel"]').click()
         expect(page.locator("#content-flow-list")).to_have_attribute("aria-busy", "true")
         self.assertEqual(page.evaluate("flowReadStarts.filter(path=>path.startsWith('/api/photo-overview?')).length"), 1)
-        page.locator("#content-flow-refresh").click()
+        page.locator(".flow-main-menu > summary").click(); page.locator("#content-flow-refresh").click()
         expect(page.locator(".po-row")).to_contain_text("最新图文")
         self.assertEqual(page.evaluate("flowReadStarts.filter(path=>path.startsWith('/api/photo-overview?')).length"), 2)
         held[0].fulfill(json={"items": [], "counts": {"pending": 0}})
@@ -179,7 +182,7 @@ class ContentFlowBrowserTests(unittest.TestCase):
 
         page.route("**/api/photo-overview?**", auxiliary)
         page.route("**/api/needs-you?**", auxiliary)
-        page.locator("#content-flow-refresh").click()
+        page.locator(".flow-main-menu > summary").click(); page.locator("#content-flow-refresh").click()
         page.wait_for_function("() => flowReadStarts.filter(path=>path.startsWith('/api/photo-overview?') || path.startsWith('/api/needs-you?')).length === 2")
         page.evaluate("location.hash='#/129N/content'")
         expect(page.locator('[data-flow-view="carousel"]')).to_have_text("图文9")
@@ -363,9 +366,13 @@ class ContentFlowBrowserTests(unittest.TestCase):
         self.assertTrue(page.evaluate("document.activeElement.hasAttribute('data-adopted-copy')"))
 
     def script(self, title="目标内容", text="Temporary selected script."):
-        return self.server.app.creation.mutate("script", {"request_id": uuid4().hex,
+        """A filmed script: a saved draft without an order is not a to-do, and these rows must sit in 待处理."""
+        created = self.server.app.creation.mutate("script", {"request_id": uuid4().hex,
             "revision": self.server.app.creation.public()["revision"], "script": {
                 "title": title, "product": "202H", "text": text, "confirmed": True}})["script"]
+        self.server.app.creation.mutate("script_status", {"request_id": uuid4().hex, "revision": self.server.app.creation.current_revision(),
+                                                          "script_status": {"script_id": created["id"], "status": "filmed"}})
+        return created
 
     def finished_job(self, title):
         """A reviewed and approved order that has not been posted: it waits under 待发布."""
@@ -441,7 +448,7 @@ class ContentFlowBrowserTests(unittest.TestCase):
         expect(page.locator(".scripts-tabs")).to_have_count(0)
         self.assertEqual(page.locator("[data-flow-view]").all_text_contents(), ["待处理2", "待发布0", "图文0", "全部2"])
         page.locator(".flow-main-menu > summary").click()
-        self.assertEqual(page.locator(".flow-main-menu [role=menuitem]").all_inner_texts(), ["协作记录", "制作设置", "导入剪辑包", "批量管理"])
+        self.assertEqual(page.locator(".flow-main-menu [role=menuitem]").all_inner_texts(), ["刷新", "高级筛选规则", "保存视图", "协作记录", "制作设置", "导入剪辑包", "批量管理"])
         self.screenshot(page, "unified-content-desktop.png")
         page.locator(".flow-main-menu").get_by_role("menuitem", name="协作记录").click()
         page.locator("#ai-task-list").wait_for()
@@ -481,8 +488,8 @@ class ContentFlowBrowserTests(unittest.TestCase):
         page = self.content_page()
         row = page.locator(".flow-row")
         self.assertLessEqual(row.bounding_box()["height"], 48)
-        expect(row.locator(".flow-stage")).to_have_text("待制作")
-        expect(row.locator(".flow-next")).to_have_text("开始制作")
+        expect(row.locator(".flow-stage")).to_have_text("已拍摄")
+        expect(row.locator(".flow-next")).to_have_text("继续制作")
         expect(page.locator("[data-plan], #content-plan-dialog")).to_have_count(0)
         row.locator(".flow-menu > summary").click()
         expect(row.locator(".flow-menu [role=menuitem]")).to_have_text(["采用稿版本详情 · 第 1 版", "归档"])
@@ -514,18 +521,45 @@ class ContentFlowBrowserTests(unittest.TestCase):
         self.assertEqual(status, 200, response)
         script = response["script"]
         page = self.content_page()
+        # Saved without an order, so it waits in 全部 rather than 待处理.
+        expect(page.locator(f'[data-content-id="script:{script["family_id"]}"]')).to_have_count(0)
+        self.view(page, "all")
         row = page.locator(f'[data-content-id="script:{script["family_id"]}"]')
         expect(row.locator(".flow-kind")).to_have_text("采用稿")
         target = f"#/202H/ai/{task['task_id']}?round={task['rounds'][-1]['round_id']}&adopted={script['id']}"
-        expect(row.locator(".flow-next")).to_have_attribute("href", target)
+        expect(row.locator(".flow-title")).to_have_attribute("href", target)
         row.locator(".flow-menu > summary").click()
         expect(row.get_by_role("menuitem", name="采用稿版本详情 · 第 1 版", exact=True)).to_have_attribute(
             "href", f"#/202H/content/{script['id']}")
         row.locator(".flow-menu > summary").click()
-        row.locator(".flow-next").click()
+        row.locator(".flow-title").click()
         expect(page.locator(f'[data-task-adopted="{script["id"]}"]')).to_be_visible()
         expect(page.locator(f'[data-task-adopted="{script["id"]}"]')).to_contain_text(script["text"])
         expect(page.locator("#script-production-toggle")).to_have_count(0)
+
+    def test_adopted_copy_reads_like_the_desk_with_tabs_from_its_saved_draft(self):
+        candidate = chr(10).join(["## 变体 #1 · 价位对比", "**口播（配音用）**", "```", "Line one.", "```", "**补拍清单**", "- 补一个特写", "",
+                                  "## 变体 #2 · 先问价", "**口播（配音用）**", "```", "Line two.", "```"])
+        made = self.server.app.creation.mutate("script", {"request_id": uuid4().hex, "revision": self.server.app.creation.public()["revision"],
+            "script": {"title": "带完整原文的稿", "product": "202H", "text": "Line one, edited.", "translation_zh": "第一句，改过。", "confirmed": True}},
+            {"task_id": "AIT-0123456789ab", "round_id": "AIR-0123456789ab", "task_revision": 1, "product": "202H", "case_id": None,
+             "candidate_text": candidate, "candidate_sha256": "x", "snapshot": {}, "variant_index": 0})["script"]
+        bare = self.script("手动录入的稿", text="Typed by hand.")
+        page = self.content_page()
+        page.evaluate("id => {location.hash = `#/202H/content/${id}`}", made["id"])
+        copy = page.locator("#content-adopted-script .adopted-copy")
+        expect(copy.locator('[data-variant-tab="补拍清单"]')).to_have_count(1)
+        # 口播 shows the words as adopted, side by side, not the draft they started from.
+        expect(copy.locator('[data-variant-panel="口播"] .ai-variant-pairs')).to_contain_text("Line one, edited.")
+        expect(copy.locator('[data-variant-panel="口播"] .ai-variant-zh')).to_have_text("第一句，改过。")
+        expect(copy).not_to_contain_text("Line two.")
+        copy.locator('[data-variant-tab="补拍清单"]').click()
+        expect(copy.locator('[data-variant-panel="补拍清单"]')).to_contain_text("补一个特写")
+        expect(copy.locator('[data-variant-panel="口播"]')).to_be_hidden()
+        page.evaluate("id => {location.hash = `#/202H/content/${id}`}", bare["id"])
+        expect(page.locator("h1")).to_contain_text("手动录入的稿")
+        expect(page.locator("#content-adopted-script .adopted-copy .ai-variant-pairs")).to_contain_text("Typed by hand.")
+        expect(page.locator("#content-adopted-script .ai-variant-tabs")).to_have_count(0)
 
     def test_archive_restore_preserve_original_business_record(self):
         item = self.script("归档后仍保留正文和关联")
@@ -540,11 +574,39 @@ class ContentFlowBrowserTests(unittest.TestCase):
         page.locator(".flow-menu > summary").click()
         expect(page.locator('[data-archive]')).to_have_text("恢复")
         page.locator('[data-archive]').click()
-        expect(page.locator(".flow-row .flow-stage")).to_have_text("待制作")
+        expect(page.locator(".flow-row .flow-stage")).to_have_text("已拍摄")
         self.view(page, "attention")
         expect(page.locator(".flow-row")).to_have_count(1)
         self.assertEqual(self.server.app.creation.path.read_bytes(), business_bytes)
         self.assertEqual(self.server.app.creation.get_script(item["id"])["text"], item["text"])
+
+    def adopted(self, title, text="An adopted line."):
+        """An adopted script with no order yet: not a to-do, listed under 待处理's 积压."""
+        return self.server.app.creation.mutate("script", {"request_id": uuid4().hex,
+            "revision": self.server.app.creation.public()["revision"], "script": {
+                "title": title, "product": "202H", "text": text, "confirmed": True}})["script"]
+
+    def test_attention_lists_backlog_and_names_rows_by_shared_rules(self):
+        self.adopted("没开工的稿")
+        self.script("1:1 复刻｜Seven Plates")
+        self.script("变体 #1`；`main_difference：S")
+        self.assertEqual(self.flow("product=202H")["idle_scripts"]["total"], 1)
+        page = self.content_page()
+        titles = page.locator(".flow-row .flow-title")
+        # 「1:1 复刻」 becomes the row's tag; leaked field text is cut.
+        expect(titles.filter(has_text="1:1")).to_have_count(0)
+        expect(titles.filter(has_text="Seven Plates")).to_have_count(1)
+        expect(page.locator(".flow-row", has_text="Seven Plates").locator(".flow-kind")).to_have_text("1:1 复刻")
+        expect(titles.filter(has_text="main_difference")).to_have_count(0)
+        expect(titles.filter(has_text="变体 #1")).to_have_count(1)
+        # Adopted scripts nobody started wait under 积压, outside the to-do count.
+        backlog = page.locator("#content-flow-backlog")
+        expect(backlog).to_contain_text("采用了还没开工的稿 · 1 条")
+        expect(page.locator('[data-flow-view="attention"]')).to_have_text("待处理2")
+        backlog.get_by_role("button", name="在「全部」里看").click()
+        page.wait_for_function("location.hash.includes('view=all') && location.hash.includes('kind=script')")
+        expect(page.locator(".flow-row", has_text="没开工的稿")).to_have_count(1)
+        expect(backlog).to_be_hidden()
 
     def test_publish_view_holds_finished_orders_and_archives_a_selection(self):
         first, second = self.finished_job("已完成待发布 A"), self.finished_job("已完成待发布 B")
@@ -553,7 +615,7 @@ class ContentFlowBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator("[data-flow-view]").all_text_contents(), ["待处理1", "待发布2", "图文0", "全部3"])
         # The open preset tab already names its rule, so no chip repeats it.
         expect(page.locator(".flow-filter-chip")).to_have_count(0)
-        expect(page.locator("#content-flow-filter-toggle")).to_have_attribute("aria-label", "规则")
+        expect(page.locator("#content-flow-filter-toggle")).to_have_text("高级筛选规则")
         expect(page.locator(".flow-filter-add-quick small")).to_have_text("")
         expect(page.locator("#content-flow-select")).to_be_hidden()
         self.view(page, "publish")
@@ -676,13 +738,14 @@ class ContentFlowBrowserTests(unittest.TestCase):
             self.assertEqual([item["group"] for item in flow["items"]], ["review", "review", "produce"])
             self.assertEqual(self.flow()["groups"], [])
             page = self.content_page()
-            expect(page.locator("#content-flow-groups [data-flow-jump]")).to_have_text(["2待审查", "1待推进制作"])
-            expect(page.locator("#content-flow-list .flow-group")).to_have_count(2)
+            # The group headings carry the counts; the old strip of count cards stays hidden.
+            expect(page.locator("#content-flow-groups")).to_be_hidden()
+            expect(page.locator("#content-flow-list .flow-group-toggle")).to_have_text(["待审查2", "待推进制作1"])
             toggle = page.locator('[data-flow-group="review"] .flow-group-toggle')
             toggle.click()
             expect(toggle).to_have_attribute("aria-expanded", "false")
             expect(page.locator(".flow-row")).to_have_count(1)
-            page.locator('[data-flow-jump="review"]').click()
+            toggle.click()
             expect(page.locator(".flow-row")).to_have_count(3)
             self.view(page, "all")
             expect(page.locator("#content-flow-list .flow-group")).to_have_count(0)
@@ -721,7 +784,11 @@ class ContentFlowBrowserTests(unittest.TestCase):
         for item in scripts[:2]:
             self.manage("script:" + item["family_id"], {"archived": True})
         page = self.content_page()
+        # A 待处理 group shows two rows until 「还有 N 条」 is opened.
+        expect(page.locator(".flow-row")).to_have_count(2)
+        page.locator("[data-flow-more]").click()
         expect(page.locator(".flow-row")).to_have_count(30)
+        expect(page.locator("#content-flow-result-count")).to_contain_text("今天要动手 33 条")
         expect(page.locator("#content-flow-pages")).to_contain_text("第 1 / 2 页")
         page.locator('[data-flow-page="2"]').click()
         expect(page.locator(".flow-row")).to_have_count(3)

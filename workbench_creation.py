@@ -14,13 +14,29 @@ from review_store import NOTE_LIMIT
 from ai_tasks import MAX_PROMPT_CHARS, made_variants
 from case_replica import parse_transcript
 import markets
-from variant_parse import parse_variants
+import comment_sticker
+from variant_parse import parse_variants, variant_full
 from review_policy import review_context
 
 # The basket's input limits live here only; the page reads them from /api/materials.
 # prompt_chars is the whole writing task's context limit, which the page uses to size the selection.
 MATERIAL_LIMITS = {"note": NOTE_LIMIT, "hook_text": 6000, "prompt_chars": MAX_PROMPT_CHARS}
 VARIANT_IDENTITY_KEYS = ("main_difference", "concern", "closing", "variant_type", "execution_change")
+
+# What a writing prompt reads of a direction. The catalog entry also carries where each line came from (case and event
+# ids), old definitions and sales figures; frozen whole into the task they were most of the prompt and the AI used none.
+WRITING_DIRECTION_KEYS = ("direction_id", "product", "selling_point_id", "status", "main_difference", "audience",
+                          "concern", "closing", "notes", "lead_tier", "chain_issues")
+WRITING_VARIANT_KEYS = ("variant_type", "main_difference", "concern", "closing", "execution_change", "progression",
+                        "audience", "baseline", "conflict")
+
+
+def writing_direction(direction):
+    """The direction as a writing task freezes it: the chain, audience, notes and each variant, without bookkeeping."""
+    slim = {key: copy.deepcopy(direction[key]) for key in WRITING_DIRECTION_KEYS if key in direction}
+    slim["variants"] = [{key: copy.deepcopy(variant[key]) for key in WRITING_VARIANT_KEYS if key in variant}
+                        for variant in direction.get("variants") or []]
+    return slim
 
 
 def _check_note(value, label="备注"):
@@ -265,6 +281,15 @@ class CreationWorkbenchMixin:
         result["script_id"] = result["id"]
         return result
 
+    def script_draft(self, identifier):
+        """The draft this script was adopted from, as written; it stays readable after the writing task is deleted."""
+        item = self.creation.get_script(identifier)
+        frozen = item.get("source") or {}
+        # A production order that filled in this copy's script information wrote it here; it is the latest word.
+        if (item.get("filled") or {}).get("markdown"):
+            return {"markdown": item["filled"]["markdown"], "filled": True, "job_id": item["filled"].get("job_id", "")}
+        return {"markdown": variant_full(frozen.get("candidate_text") or "", frozen.get("variant_index"), item.get("text"), item.get("title"))}
+
     def script_detail(self, identifier):
         with self.lock:
             item = self.creation.get_script(identifier)
@@ -322,6 +347,16 @@ class CreationWorkbenchMixin:
                     if type(index) is not int or not any(item["index"] == index for item in variants):
                         raise CreationError(400, "所选变体编号无效，请重新选择候选变体。")
                     source["variant_index"] = index
+                if getattr(self, "reviews", None):
+                    task = self.ai.get(source["task_id"])
+                    comments = comment_sticker.adoption_comments(self, source, task)
+                    if "comment_review_id" in requested:
+                        selected = requested["comment_review_id"]
+                        allowed = {str(row["id"]) for row in comments["candidates"]}
+                        if not isinstance(selected, str) or (selected and selected not in allowed):
+                            raise CreationError(400, "所选评论不在本次写稿的评论中，请重新选择。")
+                        comments["selected_id"] = selected
+                    source["comment_sticker"] = comments
             result = self.creation.mutate("script", body, source)
             if source:
                 self.ai.note_adoption(source["task_id"])
@@ -504,7 +539,7 @@ class CreationWorkbenchMixin:
                 "product": product_key(review.get("product")), "note": (review.get("pick") or {}).get("note", ""),
                 "source_label": review.get("platform") or "评论", "source_url": review.get("url") or review.get("source_url") or "",
                 "author_name": review.get("author_name") or "", "author_handle": review.get("author_handle") or "",
-                "added": (review.get("pick") or {}).get("added"), "unverified": True}
+                "added": (review.get("pick") or {}).get("added"), "used": list((review.get("pick") or {}).get("used") or []), "unverified": True}
 
     def _material_sources(self):
         """What the basket is built from. In-process write counts catch writes that file times can miss within one
@@ -531,7 +566,14 @@ class CreationWorkbenchMixin:
                 items = [item for item in items if item["product"] == product_key(product)]
                 themes = [item for item in themes if item["product"] == product_key(product)]
             # Callers may add keys to what they get back, so the cache hands out copies.
-            return {**full, "items": [dict(item) for item in items], "theme_links": [dict(item) for item in themes], "limits": dict(full["limits"])}
+            copies = [dict(item) for item in items]
+            # Picked reviews carry their Chinese translation so the basket search finds them by Chinese words too.
+            translated = self.reviews.translations() if hasattr(self.reviews, "translations") else {}
+            for item in copies:
+                entry = translated.get(item.get("source_id")) if item.get("type") == "review" else None
+                if entry:
+                    item["zh"] = "\n\n".join(str(entry.get(key) or "") for key in ("title_zh", "zh") if entry.get(key))
+            return {**full, "items": copies, "theme_links": [dict(item) for item in themes], "limits": dict(full["limits"])}
 
     def _build_material_catalog(self):
         catalog = self.creation.public()
@@ -569,7 +611,7 @@ class CreationWorkbenchMixin:
     def save_material(self, body):
         with self.lock:
             value = body.get("item")
-            if not isinstance(value, dict) or value.get("type") not in {"review", "expression", "hook"}:
+            if not isinstance(value, dict) or value.get("type") not in {"review", "expression", "hook", "ai_comment"}:
                 raise CreationError(400, "素材类型无效。")
             operation = body.get("operation", "add")
             if operation not in {"add", "remove", "note"}:
@@ -620,9 +662,11 @@ class CreationWorkbenchMixin:
                 if operation in {"remove", "note"}:
                     material = {**old, "note": value.get("note", old["note"])}
                 else:
-                    source_id = text(value.get("source_id"), "素材来源", limit=100)
+                    source_id = text(value.get("source_id"), "素材来源", limit=100) if value["type"] != "ai_comment" else ""
                     quote = text(value.get("text"), "素材内容", limit=100000)
-                    if value["type"] == "expression":
+                    if value["type"] == "ai_comment":
+                        material = self._made_up_comment(value, quote)
+                    elif value["type"] == "expression":
                         case = self.store.read_case(source_id)
                         expressions = [entry.get("original") for entry in ((case.get("current") or {}).get("native_reference") or {}).get("entries", [])]
                         if quote not in expressions:
@@ -633,9 +677,10 @@ class CreationWorkbenchMixin:
                         if not video:
                             raise CreationError(404, "视频素材来源不存在。")
                         product, label = product_key(video.get("product")), video.get("title") or source_id
-                    if value.get("product") and product != product_key(value["product"]):
+                    if value["type"] != "ai_comment" and value.get("product") and product != product_key(value["product"]):
                         raise CreationError(409, "素材与产品不一致。")
-                    material = {"kind": "case" if value["type"] == "expression" else "video", "type": value["type"],
+                    if value["type"] != "ai_comment":
+                        material = {"kind": "case" if value["type"] == "expression" else "video", "type": value["type"],
                                 "ref_id": source_id + ":" + hashlib.sha256(quote.encode()).hexdigest()[:16], "source_id": source_id,
                                 "product": product, "title": label, "text": quote, "note": value.get("note", ""),
                                 "source_label": label, "source_url": value.get("source_url", "")}
@@ -649,6 +694,37 @@ class CreationWorkbenchMixin:
             receipt.pop("mapped", None)
             self.creation._replace(path, receipt)
             return self._material_result(receipt)
+
+    @staticmethod
+    def _made_up_comment(value, quote):
+        """A comment and commenter the AI made up, as a basket item. It is not a real comment: its number starts with AI-,
+        it never enters the comment library, and the writing request says it may only open a script as the sticker."""
+        product = product_key(text(value.get("product"), "产品", limit=200))
+        name = "@" + re.sub(r"[^A-Za-z0-9_.]", "", str(value.get("author_handle") or "").lstrip("@"))[:24]
+        row = comment_sticker.typed(name, quote)
+        if name == "@" or not comment_sticker.comment_lines(quote) or not comment_sticker.drawable(row) or len(quote) > 300:
+            raise CreationError(400, "AI 编的评论要有英文用户名和 300 字以内的英文评论。")
+        digest = hashlib.sha256(f"{name}\n{quote}".encode()).hexdigest()[:12]
+        return {"kind": "ai_comment", "type": "ai_comment", "ref_id": f"ai:{digest}", "source_id": f"AI-{digest}", "product": product,
+                "title": name, "text": quote, "author_handle": name, "zh": text(value.get("zh", ""), "中文意思", False, 600),
+                "note": value.get("note", ""), "source_label": "AI 编评论", "source_url": ""}
+
+    def compose_material_comment(self, body):
+        """Make up a viewer comment and commenter from a few hints, for the user to edit and put in the basket."""
+        if not isinstance(body, dict):
+            raise CreationError(400, "参数格式无效。")
+        hint = re.sub(r"\s+", " ", str(body.get("hint") or "")).strip()[:500]
+        if not hint:
+            raise CreationError(400, "先写几个字：评论的意思、语气或用户名。")
+        product = str(body.get("product") or "").strip()[:200]
+        import tempfile
+        from case_breakdown_runner import run_prompt
+        with tempfile.TemporaryDirectory() as workdir:
+            output = run_prompt(self, comment_sticker.compose_prompt(hint, product), workdir, timeout=120)
+        row = comment_sticker.parse_composed(output)
+        if not row:
+            raise CreationError(502, "AI 没编出能用的评论，换个说法再试一次。")
+        return row
 
     def _material_result(self, receipt):
         # A duplicate add leaves the stored item and its note unchanged; the page says so instead of "added".
@@ -844,6 +920,44 @@ class CreationWorkbenchMixin:
             result = self.creation.mutate("plan", body)
             return {**result, "catalog": self.creation_catalog()}
 
+    def judge_direction(self, body):
+        """Set a direction's current judgement in one step: 加码 / 换执行 keep one open plan of that kind, 观察 leaves
+        none, 停测 leaves none and pauses the direction. Open plans the new judgement replaces are settled (已开写的记
+        完成，没动的记取消); picking anything but 停测 on a paused direction resumes it. Test cards are not touched."""
+        if not isinstance(body, dict):
+            raise CreationError(400, "判断保存参数必须是对象。")
+        judgement, key = body.get("judgement"), body.get("request_id")
+        if judgement not in {"scale", "execution", "observe", "stop"}:
+            raise CreationError(400, "请选择加码、换执行、观察或停测。")
+        if not isinstance(key, str) or not re.fullmatch(r"[\w-]{10,90}", key):
+            raise CreationError(400, "缺少保存标识，请刷新后重试。")
+        with self.lock:
+            product = product_key(text(body.get("product"), "产品", limit=200))
+            direction = self._creation_direction(product, body.get("direction_id"), allow_archived=True)
+            if direction.get("status") == "archived":
+                raise CreationError(409, "该方向已归档，请先在「编辑方向」里恢复。")
+            opened = [plan for plan in self.creation.public()["plans"]
+                      if product_key(plan.get("product")) == product and plan.get("direction_id") == direction["direction_id"]
+                      and not plan.get("experiment") and plan.get("status") in {"pending", "working"}]
+            kept = next((plan for plan in reversed(opened) if plan["action"] == judgement), None) if judgement in {"scale", "execution"} else None
+            settled = 0
+            for index, plan in enumerate(opened):
+                if kept and plan["id"] == kept["id"]:
+                    continue
+                self.creation.mutate("plan", {"revision": self.creation.public()["revision"], "request_id": f"{key}-s{index}",
+                                              "plan": {"id": plan["id"], "status": "done" if plan["status"] == "working" else "cancelled"}})
+                settled += 1
+            if judgement in {"scale", "execution"} and not kept:
+                kept = self.creation.mutate("plan", {"revision": self.creation.public()["revision"], "request_id": f"{key}-new",
+                                                     "plan": {"product": product, "direction_id": direction["direction_id"],
+                                                              "action": judgement, "status": "pending", "note": ""}})["plan"]
+            status = "paused" if judgement == "stop" else "testing" if direction.get("status") == "paused" else direction.get("status")
+            if status != direction.get("status"):
+                self.directions.mutate("direction", {"revision": self.directions.revision(self.directions.read()), "request_id": f"{key}-st",
+                                                     "operation": "status", "direction": {"product": product, "direction_id": direction["direction_id"], "status": status}})
+                self.state_cache = None
+            return {"judgement": judgement, "plan": kept, "settled": settled, "status": status}
+
     def _link_task_plan(self, task):
         key = "task-plan-" + task["task_id"]
         if key in self.creation.read()["requests"]:
@@ -1008,10 +1122,20 @@ class CreationWorkbenchMixin:
             if plan:
                 context["writing_plan"] = plan
             mode = self._writing_mode(body, case, direction)
+            if mode and mode["mode"] == "replica" and hasattr(self, "replica_focus"):
+                focus = self.replica_focus(case)
+                if focus:
+                    mode["focus"] = focus
             if mode:
                 if plan:
                     raise CreationError(400, "原稿发散与按变体写稿不能同时使用。")
                 context["writing_mode"] = mode
+            if body.get("benchmark") is not None:
+                from benchmark import BenchmarkError
+                try:
+                    context["benchmark"] = self.benchmark_context(body, product)
+                except BenchmarkError as error:
+                    raise CreationError(error.status, str(error))
             if body.get("market") is not None:
                 if body.get("action") != "variants" or not isinstance(body["market"], str) or body["market"] not in markets.MARKETS:
                     raise CreationError(400, "目标市场无效，只有写稿可以选择市场。")
@@ -1090,6 +1214,8 @@ class CreationWorkbenchMixin:
                         product, (context.get("direction") or {}).get("direction_id") or "", limit=8))
                 except Exception as exc:
                     raise CreationError(503, "复盘经验暂时无法读取，本次任务未创建。请恢复经验库后重试。") from exc
+            if context.get("direction"):
+                context["direction"] = writing_direction(context["direction"])
             task = self.ai.create(identifier, body, context)
             self._link_task_plan(task)
             return task

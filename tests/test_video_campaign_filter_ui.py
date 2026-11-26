@@ -129,8 +129,9 @@ class VideoCampaignFilterTests(unittest.TestCase):
         self.assertEqual(page.locator("#perf-campaign").input_value(), "")
 
     def sales(self, page, name):
+        # Number columns: 累计播放, 点击率, CTOR, GPM, 售出, GMV, 互动; read 售出, GMV, CTOR (CTOR without its 样本小 note).
         return page.locator(f'[data-video-row="{IDS[name]}"] td.num').evaluate_all(
-            "cells => cells.slice(2, 5).map(cell => cell.textContent.trim())")
+            "cells => [cells[4], cells[5], cells[2]].map(cell => cell.firstChild.textContent.trim())")
 
     def headers(self, page):
         return [page.locator(f'[data-sort="{key}"]').text_content()[:-1] for key in ("items", "gmv", "ctor")]
@@ -146,7 +147,7 @@ class VideoCampaignFilterTests(unittest.TestCase):
         self.assertEqual(self.sales(page, "start"), ["5", "$50.00", "5.00%"])
         self.assertEqual(self.sales(page, "inside"), ["10", "$100.50", "5.00%"])
         self.assertEqual(self.sales(page, "end"), ["—", "—", "—"])
-        cell = page.locator(f'[data-video-row="{IDS["inside"]}"] td.num').nth(2)
+        cell = page.locator(f'[data-video-row="{IDS["inside"]}"] td.num').nth(4)
         self.assertEqual(cell.get_attribute("title"), "累计售出 999")
         page.locator('[data-sort="items"]').click()
         order = "rows => rows.map(row => row.dataset.videoRow)"
@@ -156,7 +157,7 @@ class VideoCampaignFilterTests(unittest.TestCase):
         self.wait_ids(page, ["before", "start", "inside", "end", "after", "unknown"])
         self.assertEqual(self.headers(page), ["售出", "GMV", "CTOR"])
         self.assertEqual(self.sales(page, "inside"), ["999", "$9,999", "50.00%"])
-        self.assertIsNone(page.locator(f'[data-video-row="{IDS["inside"]}"] td.num').nth(2).get_attribute("title"))
+        self.assertIsNone(page.locator(f'[data-video-row="{IDS["inside"]}"] td.num').nth(4).get_attribute("title"))
 
     def test_picked_date_sales_cover_exact_dates_while_videos_stay_by_publication_date(self):
         page = self.open_list(query="tab=list&period=2026-09-17~2026-09-20")
@@ -166,7 +167,7 @@ class VideoCampaignFilterTests(unittest.TestCase):
         self.assertIn("2026-09-17 至 2026-09-20", page.locator("#perf-date-note").inner_text())
         # The selected daily rows are counted; all following weeks are excluded.
         self.assertEqual(self.sales(page, "inside"), ["3", "$30.25", "4.00%"])
-        cell = page.locator(f'[data-video-row="{IDS["inside"]}"] td.num').nth(2)
+        cell = page.locator(f'[data-video-row="{IDS["inside"]}"] td.num').nth(4)
         self.assertEqual(cell.get_attribute("title"), "累计售出 999")
         # A wider date keeps the same columns; clearing it returns to totals with no note.
         page.locator("#perf-date-trigger").click()
@@ -277,6 +278,7 @@ class VideoCampaignFilterTests(unittest.TestCase):
         self.wait_ids(page, ["start", "inside", "end"])
         self.assertEqual(page.locator("[data-perf-campaign-retry]").count(), 0)
         page.locator("#perf-tab-board").click()
+        page.locator(".perf-calendar-fold > summary").click()
         page.locator("#perf-campaigns .campaign-past > summary").click()
         page.locator(f'[data-campaign-edit="{CAMPAIGN}"]').click()
         dialog = page.locator("dialog.campaign-dialog")

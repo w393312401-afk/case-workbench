@@ -249,6 +249,31 @@ class GuestSnapshotTests(unittest.TestCase):
         self.assertTrue(service.tick())
         self.assertEqual(len(calls), 2)
 
+    def test_rebuild_waits_for_saving_to_pause_but_never_longer_than_the_limit(self):
+        clock, calls = [0], []
+        scanner = Scanner()
+        def build(*args, **kwargs):
+            calls.append(clock[0])
+            return kwargs["expected_marks"]
+        service = guest.SnapshotService(self.root, scanner=scanner, builder=build, ready=lambda base: True,
+                                        clock=lambda: clock[0], quiet=90, max_wait=300)
+        self.assertTrue(service.tick())  # The first snapshot after start is never delayed.
+        for moment in (30, 60, 90, 120):  # Saving continues: every scan sees another change.
+            scanner.marks["fixture-business-record"] = guest.SYNC.FileMark(7, moment)
+            clock[0] = moment
+            self.assertFalse(service.tick())
+            self.assertEqual(service.state, "pending")
+        clock[0] = 180
+        self.assertFalse(service.tick())  # 60 s since the last change.
+        clock[0] = 210
+        self.assertTrue(service.tick())  # 90 s of quiet.
+        self.assertEqual(calls, [0, 210])
+        for moment in range(240, 541, 30):  # Saving never pauses: rebuild once the limit is reached.
+            scanner.marks["fixture-business-record"] = guest.SYNC.FileMark(8, moment)
+            clock[0] = moment
+            service.tick()
+        self.assertEqual(calls, [0, 210, 540])
+
     def test_unavailable_local_service_does_not_attempt_export(self):
         calls = []
         service = guest.SnapshotService(self.root, scanner=Scanner(), builder=lambda *a, **k: calls.append(1),

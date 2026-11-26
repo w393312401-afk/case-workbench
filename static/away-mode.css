@@ -1,0 +1,145 @@
+/* 「我去拍了」值守：顶栏按钮、出门弹窗、工作概览的「你不在时」卡片（away-mode.js） */
+.away-trigger.is-running{background:var(--surface-tint);color:var(--accent-text)}
+.away-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);display:inline-block;margin-right:6px;animation:away-pulse 1.6s ease-in-out infinite}
+@keyframes away-pulse{50%{opacity:.35}}
+/* 手机上顶栏已排满（产品选择固定在左上，按顶栏原有按钮留宽），这个按钮挪到工作概览标题旁（away-mode.js 的 homeButton） */
+.away-home-trigger{display:none}
+@media(max-width:760px){#away-open{display:none!important}.away-home-trigger{display:inline-flex;align-items:center}}
+@media (prefers-reduced-motion:reduce){.away-dot{animation:none}}
+
+.away-dialog{width:min(640px,95vw)}
+.away-body{padding:20px 28px;max-height:calc(92vh - 150px);overflow:auto;display:flex;flex-direction:column;gap:16px}
+.away-muted{color:var(--muted-soft);font-size:var(--font-micro);line-height:1.7}
+.away-label{font-size:var(--font-micro);color:var(--muted-soft);margin-bottom:6px}
+.away-block{display:flex;flex-direction:column;gap:6px}
+.away-product select{margin-left:6px;border:1px solid var(--line-strong);border-radius:7px;background:var(--surface);color:var(--ink);padding:4px 8px}
+.away-chips{display:flex;flex-wrap:wrap;gap:6px}
+.away-chip{border:1px solid var(--line-strong);border-radius:999px;padding:3px 14px;background:var(--surface);color:var(--ink);font-size:var(--font-meta)}
+.away-chip[aria-checked="true"]{background:var(--surface-tint);border-color:var(--accent);color:var(--accent-text);font-weight:600}
+.away-items,.away-status{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+.away-item{border-top:1px solid var(--line);padding:9px 0}
+.away-item:first-child{border-top:0}
+.away-item.is-off{opacity:.6}
+.away-item-main{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:10px;align-items:start;cursor:pointer}
+.away-item-main input{margin-top:4px}
+.away-item-main b,.away-status b{font-weight:600;font-size:var(--font-meta)}
+.away-item-main small,.away-status small{display:block;color:var(--muted-soft);font-size:var(--font-micro);line-height:1.6}
+.away-lane{font-size:11px;padding:1px 7px;border-radius:6px;white-space:nowrap;background:var(--fill);color:var(--muted)}
+.away-lane[data-lane="ai"]{background:var(--surface-tint);color:var(--accent-text)}
+.away-lane[data-lane="net"]{background:var(--surface-success);color:var(--success-ink)}
+.away-sub{margin:8px 0 0 28px;display:flex;flex-direction:column;gap:8px}
+.away-choices{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:var(--font-micro);color:var(--muted)}
+.away-choices label{display:inline-flex;gap:5px;align-items:center;cursor:pointer}
+.away-instruction{margin:0}
+.away-instruction textarea{min-height:52px}
+.away-budget{display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center;background:var(--surface-alt);border-radius:10px;padding:10px 12px;font-size:var(--font-meta)}
+.away-budget b{font-variant-numeric:tabular-nums}
+.away-budget b.is-over{color:var(--danger-ink)}
+.away-budget input{width:56px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink);padding:2px 6px}
+.away-never{font-size:var(--font-micro);color:var(--muted-soft);background:var(--surface-alt);border-radius:8px;padding:8px 10px}
+.away-error{color:var(--warm-ink);font-size:var(--font-micro)}
+.away-status li{display:grid;grid-template-columns:64px minmax(0,1fr) auto;gap:10px;align-items:start;padding:8px 0;border-top:1px solid var(--line)}
+.away-status li:first-child{border-top:0}
+.away-pill{font-size:11px;text-align:center;border-radius:999px;padding:1px 6px;background:var(--fill);color:var(--muted)}
+.away-pill[data-state="running"]{background:var(--surface-tint);color:var(--accent-text)}
+.away-pill[data-state="done"]{background:var(--surface-success);color:var(--success-ink)}
+.away-pill[data-state="failed"]{background:var(--surface-danger);color:var(--danger-ink)}
+.away-pill[data-state="skipped"],.away-pill[data-state="cancelled"]{background:var(--surface-warm);color:var(--warm-ink)}
+
+.away-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius,16px);padding:18px 20px;margin-bottom:22px;display:flex;flex-direction:column;gap:12px}
+.away-card-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.away-card-head h2{font-size:17px;font-weight:600}
+.away-counts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;max-width:520px}
+.away-counts span{border-radius:10px;padding:8px 10px;font-size:var(--font-micro)}
+.away-counts b{display:block;font-size:20px;font-weight:550;font-variant-numeric:tabular-nums}
+.away-counts [data-group="done"]{background:var(--surface-success);color:var(--success-ink)}
+.away-counts [data-group="waiting"]{background:var(--surface-warm);color:var(--warm-ink)}
+.away-counts [data-group="failed"]{background:var(--surface-danger);color:var(--danger-ink)}
+.away-group h3{font-size:var(--font-meta);font-weight:600;margin-bottom:2px}
+.away-group[data-group="waiting"] h3{color:var(--warm-ink)}
+.away-group[data-group="done"] h3{color:var(--success-ink)}
+.away-group[data-group="failed"] h3{color:var(--danger-ink)}
+.away-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--font-meta)}
+.away-row span{min-width:0}
+.away-row a{color:var(--accent-text);white-space:nowrap;font-size:var(--font-micro)}
+@media (max-width:720px){.away-body{padding:16px}.away-counts{max-width:none}}
+.away-list{flex-direction:column;align-items:flex-start;gap:4px}
+.away-list small{color:var(--muted-soft);margin-left:6px}
+.away-sub .away-label{margin:2px 0 0}
+.away-lane[data-lane="resolve"]{background:var(--surface-danger);color:var(--danger-ink)}
+.away-jobs{gap:10px}
+.away-job{display:flex;flex-direction:column;gap:4px;font-size:var(--font-micro);color:var(--muted)}
+.away-job>label{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;cursor:pointer}
+.away-job small{color:var(--muted-soft)}
+.away-job-fields{display:flex;flex-wrap:wrap;gap:6px 14px;margin-left:22px}
+.away-job-fields select,.away-job-fields input{border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink);padding:2px 6px;font-size:var(--font-micro)}
+.away-job-fields input{width:min(260px,60vw)}
+.away-pick{margin-left:22px;color:var(--muted-soft);font-size:11px;line-height:1.5}
+.away-pool{border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.away-pool .away-jobs{display:flex;flex-direction:column;gap:10px;margin-top:6px}
+.away-job .link-button,.away-waiting .link-button{margin-left:auto;border:0;background:none;color:var(--accent-text);font-size:var(--font-micro);cursor:pointer;padding:0}
+.away-waiting{display:flex;flex-direction:column;gap:4px;margin-top:8px;font-size:var(--font-micro);color:var(--muted)}
+.away-mats{display:flex;flex-wrap:wrap;gap:4px 12px;margin-left:22px;font-size:var(--font-micro);color:var(--ink)}
+.away-mats>label{display:inline-flex;gap:4px;align-items:center;cursor:pointer}
+.away-mats label small{color:var(--accent-text);font-size:10px}
+.away-mats .away-mats-other{color:var(--muted)}
+.away-mats .away-mats-other input{width:min(180px,40vw);border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--ink);padding:2px 6px;font-size:var(--font-micro)}
+.away-mats .away-pick{flex-basis:100%;margin-left:0}
+.away-script{margin-left:22px;font-size:var(--font-micro);color:var(--muted)}
+.away-script summary{cursor:pointer;color:var(--muted-soft)}
+.away-script ol{margin:4px 0 0;padding-left:18px;max-height:160px;overflow:auto;line-height:1.6;color:var(--ink)}
+.away-voice .away-slider{display:inline-flex;gap:4px;align-items:center}
+.away-voice .away-slider input{width:90px;padding:0;border:0}
+.away-voice .away-slider output{min-width:30px;color:var(--ink)}
+.away-ready{font-size:10px;padding:0 6px;border-radius:999px;border:1px solid var(--line-strong);color:var(--muted)}
+.away-ready.is-on{border-color:var(--green);background:var(--surface-success);color:var(--success-ink);font-weight:600}
+.away-ready-bar [data-away-ready]{background:var(--success-ink);border-color:var(--success-ink);color:var(--on-accent);font-weight:600}
+.away-ready-bar [data-away-ready]:hover{filter:brightness(1.08)}
+.away-ready-summary{display:flex;gap:10px;align-items:baseline;margin-left:22px;color:var(--ink)}
+.away-ready-summary .link-button{margin-left:auto}
+.away-ready-bar{display:flex;gap:10px;align-items:center;margin-left:22px;margin-top:4px}
+.away-script-table{display:grid;grid-template-columns:20px minmax(0,1fr) minmax(0,1fr);margin-top:6px;max-height:320px;overflow:auto;line-height:1.55;font-size:var(--font-micro)}
+.away-script-table>span{padding:5px 6px;border-bottom:1px solid var(--line)}
+.away-script-head{color:var(--muted-soft);position:sticky;top:0;background:var(--surface)}
+.away-script-no{color:var(--muted-soft);padding-left:0!important}
+.away-script-say{color:var(--ink)}
+.away-script-shot{color:var(--muted)}
+.away-shot-tag{display:inline-block;margin-right:6px;padding:0 7px;border-radius:999px;font-size:11px;font-weight:600;line-height:18px;white-space:nowrap;color:var(--muted);background:var(--surface-alt)}
+.away-shot-tag[data-kind="proof"]{color:var(--danger-ink);background:var(--surface-danger)}
+.away-shot-tag[data-kind="act"]{color:var(--blue);background:color-mix(in srgb,var(--blue) 18%,transparent)}
+.away-shot-tag[data-kind="show"]{color:var(--warm-ink);background:var(--surface-warm)}
+/* 执行池：一次展开一张单，其余一行 + 四步进度 */
+.away-pool .away-jobs{gap:6px}
+.away-pool .away-job{border:1px solid var(--line);border-radius:8px;padding:6px 10px;background:var(--surface)}
+.away-pool .away-job.is-open{border-color:var(--line-strong);padding-bottom:10px}
+.away-job-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.away-job-head .link-button{margin-left:0}
+.away-job-toggle{display:inline-flex;gap:6px;align-items:center;border:0;background:none;padding:0;color:var(--ink);font:inherit;font-size:var(--font-meta);cursor:pointer;text-align:left;flex:1 1 auto;min-width:0}
+.away-job-toggle b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.away-caret{width:0;height:0;border-left:5px solid var(--muted-soft);border-top:4px solid transparent;border-bottom:4px solid transparent;transition:transform .15s;flex:none}
+.away-job.is-open .away-caret{transform:rotate(90deg)}
+.away-job-brief{margin-left:22px;color:var(--muted-soft);font-size:var(--font-micro);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.away-job.is-open .away-job-brief{display:none}
+.away-job-body{display:none;flex-direction:column;gap:6px;margin-top:6px}
+.away-job.is-open .away-job-body{display:flex}
+.away-steps{display:inline-flex;gap:8px;font-size:11px;color:var(--muted-soft)}
+.away-step{display:inline-flex;gap:3px;align-items:center}
+.away-step i{width:8px;height:8px;border-radius:50%;border:1.5px solid var(--line-strong)}
+.away-step.is-done{color:var(--success-ink)}
+.away-step.is-done i{background:var(--green);border-color:var(--green)}
+/* 底部开始栏的数字 */
+.away-footer-sum{font-size:var(--font-meta);color:var(--muted)}
+.away-footer-sum b{color:var(--ink);font-variant-numeric:tabular-nums}
+/* 值守中：执行池每张单一行四步 */
+.away-flows{display:flex;flex-direction:column;gap:6px}
+.away-flow{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:var(--font-meta)}
+.away-flow b{flex:1 1 160px;min-width:0}
+.away-flow-steps{display:inline-flex;gap:2px;align-items:center}
+.away-flow-step{padding:1px 8px;font-size:11px;border-radius:999px;color:var(--muted-soft);background:var(--surface-alt)}
+.away-flow-step+.away-flow-step{margin-left:12px;position:relative}
+.away-flow-step+.away-flow-step::before{content:"›";position:absolute;left:-9px;color:var(--muted-soft)}
+.away-flow-step[data-state="done"]{color:var(--success-ink);background:var(--surface-success)}
+.away-flow-step[data-state="running"]{color:var(--blue);background:color-mix(in srgb,var(--blue) 18%,transparent);font-weight:600}
+.away-flow-step[data-state="failed"]{color:var(--danger-ink);background:var(--surface-danger);font-weight:600}
+.away-flow-step[data-state="skipped"],.away-flow-step[data-state="cancelled"]{text-decoration:line-through}
+.away-flow-error{flex-basis:100%;color:var(--danger-ink)}

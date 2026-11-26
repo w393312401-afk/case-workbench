@@ -62,6 +62,12 @@ window.TKCandidates = (() => {
       const processed = done.filter(item => item.status !== "dismissed").length;
       const dismissed = done.length - processed;
       if (!data.candidates.length) { slot.innerHTML = ""; return; }
+      // Nothing waiting: one quiet line instead of a whole card at the top of the page.
+      if (!pending.length && !showDone) {
+        slot.innerHTML = `<section class="dir-group tk-candidates is-quiet"><p class="tk-cand-line">插件候选方向没有待处理的 · <span class="tk-cand-footer">已处理 ${processed} · 已忽略 ${dismissed}</span> · <button type="button" class="subtle" data-tk-toggle>显示已处理</button></p></section>`;
+        slot.querySelector("[data-tk-toggle]").addEventListener("click", () => { showDone = true; slot.dataset.showDone = "1"; render(); });
+        return;
+      }
       slot.innerHTML = `<section class="dir-group tk-candidates"><h2>插件存来的候选方向<small>TK 看板 · ${pending.length - writing} 条待处理${writing ? ` · ${writing} 条写稿中` : ""}</small></h2>
         ${pending.length ? `<ul class="tk-cand-list">${pending.map(card).join("")}</ul>` : `<p class="context-note">没有待处理的候选方向。</p>`}
         ${done.length ? `<p class="tk-cand-footer">已处理 ${processed} · 已忽略 ${dismissed} · <button type="button" class="subtle" data-tk-toggle>${showDone ? "收起已处理" : "显示已处理"}</button></p>${showDone ? `<ul class="tk-cand-list">${done.map(card).join("")}</ul>` : ""}` : ""}</section>`;

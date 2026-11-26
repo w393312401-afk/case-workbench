@@ -10,7 +10,7 @@ sys.path.insert(0, str(APP))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import test_ai_tasks as base
-from variant_parse import (delivery_ready, looks_like_script, parse_variants, reformat_problems,
+from variant_parse import (variant_full, delivery_ready, looks_like_script, parse_variants, reformat_problems,
                            variant_directions, variant_notes, variant_script)
 
 
@@ -115,6 +115,30 @@ Now it's like this.
 现在是这样。
 ```
 """
+
+
+class FullVariantTests(unittest.TestCase):
+    TEXT = chr(10).join(["## 变体 #1 · 价位对比", "**开头**", "Hook one.", "**口播（配音用）**", "```", "Line one.", "```",
+                         "**中文对照**", "第一句。", "**意群表**", "| # | 口播 |", "|---|---|", "| 1 | Line one. |", "**补拍清单**", "- 补一个特写", "🔴 Title one #tag", "",
+                         "## 变体 #2 · 先问价", "**口播（配音用）**", "```", "Line two.", "```", "```json", '{"photo_carousel": []}', "```", "🔴 Title two", "",
+                         "## 发布前核对", "- 同批都要核对价格"])
+
+    def test_only_the_chosen_draft_comes_back_with_everything_written_for_it(self):
+        first = variant_full(self.TEXT, 0)
+        for wanted in ("Hook one.", "Line one.", "| 1 | Line one. |", "补一个特写", "🔴 Title one"):
+            self.assertIn(wanted, first)
+        self.assertNotIn("Line two.", first)
+        second = variant_full(self.TEXT, 1)
+        self.assertIn("🔴 Title two", second)
+        self.assertNotIn("photo_carousel", second)
+        self.assertNotIn("发布前核对", second)
+        self.assertEqual(variant_full(self.TEXT, 9), "")
+
+    def test_older_scripts_without_a_position_match_by_words_then_title_or_show_nothing(self):
+        self.assertIn("Hook one.", variant_full(self.TEXT, None, "Line one."))
+        self.assertIn("🔴 Title two", variant_full(self.TEXT, None, "Reworded later.", "202H-S2 变体 #2 · 先问价"))
+        self.assertEqual(variant_full(self.TEXT, None, "Reworded later.", "S2 #4 身份认同"), "")
+        self.assertEqual(variant_full("", None, "Line one."), "")
 
 
 class LooseParseTests(unittest.TestCase):
@@ -326,6 +350,17 @@ class FormatPassTests(unittest.TestCase):
         self.assertEqual(finished["rounds"][-1]["status"], "failed")
         self.assertIn("中文和原稿对不上", finished["rounds"][-1]["error"])
         self.assertEqual(finished["rounds"][-1]["output"], "")
+        retry_calls = self.scripted(FORMATTED)
+        queued = self.manager.continue_task(done["task_id"], {"request_id": uuid4().hex,
+                                             "task_revision": finished["revision"], "instruction": ""})
+        self.assertEqual(queued["rounds"][-1]["kind"], "format")
+        self.assertEqual(queued["rounds"][-1]["format_source"], done["rounds"][-1]["round_id"])
+        retried = self.wait(done["task_id"])
+        self.assertEqual(retried["status"], "completed", retried)
+        self.assertEqual(retried["rounds"][-1]["output"], FORMATTED.strip())
+        self.assertEqual(retried["rounds"][:-1], finished["rounds"])
+        self.assertEqual(len(retry_calls), 1)
+        self.assertEqual(retry_calls[0]["skills"], [])
 
     def test_format_round_needs_a_completed_variant_round(self):
         done = self.wait(self.manager.create(self.identifier, self.body("review"))["task_id"])

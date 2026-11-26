@@ -44,6 +44,21 @@ def _toml(value):
     raise BridgeError("找底图的配置格式无效。")
 
 
+def _override_mismatch(effective, expected, prefix=""):
+    """Name the first override that config/read does not report exactly as requested, else None."""
+    if not isinstance(effective, dict):
+        return prefix or "配置"
+    for key, value in expected.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            found = _override_mismatch(effective.get(key), value, path)
+            if found is not None:
+                return found
+        elif effective.get(key) != value:
+            return path
+    return None
+
+
 class _OwnedProcessTree:
     """A Windows job owns only this CLI and the MCP children it starts."""
     def __init__(self, process):
@@ -217,7 +232,7 @@ class CodexStillsBridge(CodexBridge):
         return _JobFiles(session, directory, settings["files"])
 
     @staticmethod
-    def _profile(profile):
+    def _profile(profile, *, resolve_tools=RESOLVE_TOOLS):
         if not isinstance(profile, dict) or not isinstance(profile.get("mcp"), dict) or set(profile["mcp"]) != {"resolve"}:
             raise BridgeError("找底图必须使用本次指定的达芬奇连接。")
         config = profile["mcp"]["resolve"]
@@ -234,7 +249,7 @@ class CodexStillsBridge(CodexBridge):
             if name in FILE_TOOLS:
                 if name not in denied:
                     files.add(name)
-            elif name.startswith("mcp__resolve__") and name[14:] in RESOLVE_TOOLS:
+            elif name.startswith("mcp__resolve__") and name[14:] in resolve_tools:
                 if name not in denied:
                     tools.add(name[14:])
             else:
@@ -249,22 +264,62 @@ class CodexStillsBridge(CodexBridge):
             raise BridgeError("找底图时限无效。")
         return {"command": str(Path(command).resolve()), "args": args, "tools": sorted(tools), "files": files, "rules": rules, "timeout": timeout}
 
-    def _restricted_session(self, directory, cancel, progress, on_event, overrides, guards, timeout):
-        def spawn(arguments, **options):
-            arguments = [*arguments, "--strict-config"]
-            for key, value in overrides.items():
-                arguments.extend(["-c", key + "=" + _toml(value)])
-            process = self.popen_factory(arguments, **options)
-            try:
-                guards.append(_OwnedProcessTree(process))
-            except Exception:
-                process.terminate()
-                process.wait(timeout=2)
+    def _restricted_session(self, directory, cancel, progress, on_event, overrides, guards, timeout, *, initialize=None):
+        """Start and initialize an App Server session whose overrides are known to be in effect.
+
+        --strict-config makes Codex reject a misspelled or outdated override instead of silently
+        ignoring it. It also rejects the user's own config.toml when the Codex app wrote a field
+        the bundled CLI does not know yet; only then is the session restarted without it, and
+        every override is read back through config/read before the session is handed out."""
+        initialize = initialize or CodexBridge._initialize
+        started = time.monotonic()
+        def open_session(strict, remaining):
+            def spawn(arguments, **options):
+                arguments = [*arguments, *(["--strict-config"] if strict else [])]
+                for key, value in overrides.items():
+                    arguments.extend(["-c", key + "=" + _toml(value)])
+                process = self.popen_factory(arguments, **options)
+                try:
+                    guards.append(_OwnedProcessTree(process))
+                except Exception:
+                    process.terminate()
+                    process.wait(timeout=2)
+                    raise
+                return process
+            # Reuse the ordinary bridge's launch and protocol without mutating its factory.
+            client = CodexBridge(self.executable, timeout=remaining, startup_timeout=self.startup_timeout, popen_factory=spawn)
+            return client._session(directory, cancel, progress, on_event)
+        session = open_session(True, timeout)
+        try:
+            initialize(session)
+            return session
+        except BridgeCancelled:
+            session.close()
+            raise
+        except BridgeError:
+            problem = session.startup_config_problem()
+            session.close()
+            if problem is None:
                 raise
-            return process
-        # Reuse the ordinary bridge's launch and protocol without mutating its factory.
-        client = CodexBridge(self.executable, timeout=timeout, startup_timeout=self.startup_timeout, popen_factory=spawn)
-        return client._session(directory, cancel, progress, on_event)
+        source, field = problem
+        if source != "file":
+            raise BridgeError(f"本机 Codex 不认识工作台传入的设置「{field}」，未启动；请更新 Codex 后重试。", code="CODEX_CONFIG") from None
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            raise BridgeError("本机 Codex 启动超时，请稍后重试。", code="CODEX_TIMEOUT")
+        session = open_session(False, remaining)
+        try:
+            initialize(session)
+            effective = session.request("config/read", {"cwd": str(directory), "includeLayers": False}).get("config")
+            mismatch = _override_mismatch(effective, overrides)
+            if mismatch is not None:
+                raise BridgeError(f"本机 Codex 配置里有当前版本不认识的设置「{field}」，且工作台的隔离设置「{mismatch}」没能核实生效，未启动。"
+                                  "请更新 Codex，或删掉 Codex 配置文件里的这项设置。", code="CODEX_CONFIG")
+        except BridgeError:
+            session.close()
+            raise
+        session.ignored_config_field = field
+        return session
 
     @staticmethod
     def _skill_text(selected):
@@ -313,7 +368,6 @@ class CodexStillsBridge(CodexBridge):
             # An empty mcp_servers table MERGES with user config. Discover names without a thread/turn, then disable each one explicitly.
             probe = self._restricted_session(directory, cancel_event, progress, None, base, guards, min(deadline - time.monotonic(), 60))
             sessions.append(probe)
-            self._initialize(probe)
             config = probe.request("config/read", {"cwd": str(directory), "includeLayers": False}).get("config")
             if not isinstance(config, dict) or not isinstance(config.get("mcp_servers", {}), dict):
                 raise BridgeError("无法核实本机工具配置，未启动找底图。")
@@ -329,11 +383,12 @@ class CodexStillsBridge(CodexBridge):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise BridgeError("找底图准备超时，本次未启动模型。")
-            session = self._restricted_session(directory, cancel_event, progress, on_event, overrides, guards, remaining)
+            def initialize(started):
+                # Dynamic job-only file tools are an experimental App Server capability.
+                started.request("initialize", {"clientInfo": {"name": "product_video_case_workbench", "title": "视频案例工作台", "version": "1.0"}, "capabilities": {"experimentalApi": True}})
+                started.send({"method": "initialized"})
+            session = self._restricted_session(directory, cancel_event, progress, on_event, overrides, guards, remaining, initialize=initialize)
             sessions.append(session)
-            # Dynamic job-only file tools are an experimental App Server capability.
-            session.request("initialize", {"clientInfo": {"name": "product_video_case_workbench", "title": "视频案例工作台", "version": "1.0"}, "capabilities": {"experimentalApi": True}})
-            session.send({"method": "initialized"})
             effective = session.request("config/read", {"cwd": str(directory), "includeLayers": False}).get("config") or {}
             effective_servers = effective.get("mcp_servers", {})
             if (not isinstance(effective_servers, dict) or any(value.get("enabled", True) is not False for name, value in effective_servers.items() if name != server_name) or

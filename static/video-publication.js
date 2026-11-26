@@ -125,14 +125,15 @@ window.VideoPublication = (() => {
   }
   // The video panel's copy is a short list in the order it is pasted at publish time: hook screen text, a title, then the text.
   // A line shows the foreign words with their Chinese under them; what gets copied is the foreign words alone.
+  const item = (attributes,main,under,hint) => `<button type="button" class="ai-title-line video-publish-copy-item" ${attributes} title="${esc(hint)}"><span><span class="video-publish-copy-main">${esc(main)}</span>${under}</span>${copyIcon()}</button>`;
+  const titleItems = copy => (copy.titles || []).map((line,index) => item(`data-copy-title="${esc(line)}"`,line,`<small data-title-zh="${index}">${esc(copy.titles_zh?.[index] || '中文生成中…')}</small>`,line)).join('');
   function copyRow(copy) {
-    if (!copy || !(copy.titles?.length || copy.zh || copy.en || copy.screen_en || copy.screen_zh)) return '';
+    if (!copy || !(copy.titles?.length || copy.titles_pending || copy.zh || copy.en || copy.screen_en || copy.screen_zh)) return '';
     const flat = value => String(value || '').replace(/\s*\n\s*/g,' ');
-    const item = (attributes,main,under,hint) => `<button type="button" class="ai-title-line video-publish-copy-item" ${attributes} title="${esc(hint)}"><span><span class="video-publish-copy-main">${esc(main)}</span>${under}</span>${copyIcon()}</button>`;
     const reading = value => value ? `<small>${esc(value)}</small>` : '';
     const screen = copy.screen_en ? item('data-copy-screen',copy.screen_en,reading(copy.screen_zh),'复制外文屏显')
       : copy.screen_zh ? `<p class="video-publish-copy-note">${esc(copy.screen_zh)} <small>没有外文屏显可复制</small></p>` : '';
-    const titles = (copy.titles || []).map((line,index) => item(`data-copy-title="${esc(line)}"`,line,`<small data-title-zh="${index}">${esc(copy.titles_zh?.[index] || '中文生成中…')}</small>`,line)).join('');
+    const titles = copy.titles_pending ? '<p class="video-publish-copy-note" data-replica-titles role="status">正在另写 3 条🔴标题…</p>' : titleItems(copy);
     const hasText = copy.zh || copy.en;
     const text = hasText ? `${item('data-copy-publish="text"',flat(copy.en || copy.zh),copy.en ? reading(flat(copy.zh)) : '','复制中文和外文文案')}<details class="video-publish-copy-fold"><summary>查看全文${copy.version ? ` · 脚本第 ${esc(copy.version)} 版` : ''}</summary><div class="video-publish-copy">${copy.zh ? `<p>${esc(copy.zh)}</p>` : ''}${copy.en ? `<p>${esc(copy.en)}</p>` : ''}</div></details>` : '';
     const line = (label,body) => body ? `<span class="video-publish-copy-label">${label}</span><div class="video-publish-copy-lines">${body}</div>` : '';
@@ -160,14 +161,32 @@ window.VideoPublication = (() => {
       else if (node.textContent === '中文生成中…') node.textContent = '中文对照暂时没生成';
     });
   }
+  // A 1:1 replica does not reuse the original's post title: its three lines are written on first opening, then kept.
+  const replicaRuns = new Map();
+  async function fillReplicaTitles(host,job,api,copy) {
+    const slot = host.querySelector('[data-replica-titles]');
+    if (!copy?.titles_pending || !slot) return;
+    const run = replicaRuns.get(job.id) || api(`${base(job.id)}/replica-titles`,{method:'POST',body:{}}).finally(() => replicaRuns.delete(job.id));
+    replicaRuns.set(job.id,run);
+    let titles = [];
+    try {titles = (await run).titles || [];} catch (error) {slot.textContent = error?.message || '3 条标题没写成功，可以稍后重新打开这张制作单再试。';return;}
+    if (!slot.isConnected) return;
+    Object.assign(copy,{titles,titles_pending:false,titles_zh:[]});
+    const lines = slot.parentElement;
+    slot.outerHTML = titleItems(copy);
+    bindTitles(lines);
+    void fillTitleChinese(host,job,api,copy);
+  }
+  const writeCopy = (button,text,message) => {
+    if (typeof copyText === 'function') copyText(text,message); else navigator.clipboard.writeText(text);
+    button.classList.add('copied');setTimeout(() => button.classList.remove('copied'),1200);
+  };
+  const bindTitles = scope => scope.querySelectorAll('[data-copy-title]').forEach(button => button.addEventListener('click',() => {
+    writeCopy(button,button.dataset.copyTitle,'标题与主题标签已复制');
+  }));
   function bindCopy(host,copy) {
-    const write = (button,text,message) => {
-      if (typeof copyText === 'function') copyText(text,message); else navigator.clipboard.writeText(text);
-      button.classList.add('copied');setTimeout(() => button.classList.remove('copied'),1200);
-    };
-    host.querySelectorAll('[data-copy-title]').forEach(button => button.addEventListener('click',() => {
-      write(button,button.dataset.copyTitle,'标题与主题标签已复制');
-    }));
+    const write = writeCopy;
+    bindTitles(host);
     host.querySelectorAll('[data-copy-publish]').forEach(button => button.addEventListener('click',() => {
       // One button for the copy pasted at publish time: Chinese, a blank line, then English.
       write(button,[copy.zh,copy.en].filter(Boolean).join('\n\n'),copy.zh && copy.en ? '中英文案已复制' : '文案已复制');
@@ -299,14 +318,21 @@ window.VideoPublication = (() => {
   const hookWords = value => String(value || '').trim().replace(/\s+\/\s*/g,' / ').replace(/ \/ $/,'');
   const hookTitle = (lock,text) => lock || (text ? `在开头 3 秒加上：${text}` : '这张制作单还没有开头屏显，可以选“自己写”。');
   const campaignTitle = (lock,text,campaign) => lock || `在结尾 3 秒加上：${text}。口播不动，${shortDay(campaign.end)} 活动结束后记得去掉。`;
-  // The campaign's end card as one more choice in the list, from a week before a trusted campaign starts.
-  function campaignOption(timeline,copy) {
-    const campaign = copy?.campaign;
-    if (!campaign) return {group:'',field:''};
-    const card = timeline.campaign_overlay, words = card && card.status !== 'removed' ? card.text : copy.card_text || '';
-    const label = campaign.card_open ? words : `${words}（${shortDay(campaign.card_from)} 起可加）`;
-    return {group:`<optgroup label="结尾 3 秒 · 活动"><option value="campaign" ${campaign.card_open ? '' : 'disabled'}>${esc(label)}</option></optgroup>`,
-      field:`<input type="text" maxlength="300" data-campaign-text aria-label="活动屏显文字" value="${esc(words)}" hidden>`};
+  // One card per thing on the opening (方案 A, 2026-11-18): where the words come from as tabs, the choices laid out with their Chinese.
+  const tabsMarkup = (attr,rows,off) => `<div class="vp-seg" role="tablist">${rows.map(row => `<button type="button" role="tab" ${attr}="${row.value}" aria-selected="${row.on}" ${row.disabled || off ? 'disabled' : ''}${row.title ? ` title="${esc(row.title)}"` : ''}>${esc(row.label)}</button>`).join('')}</div>`;
+  const radioMarkup = (attr,value,on,off,body) => `<button type="button" role="radio" class="vp-option" ${attr}="${value}" aria-checked="${on}" ${off}><span class="vp-radio" aria-hidden="true"></span>${body}</button>`;
+  // The hook for the first 3 seconds: the script's options, the campaign's end card (from a week before a trusted campaign starts) or own words.
+  function hookCard(timeline,copy,hookLock) {
+    const options = hookOptions(copy), onTimeline = timeline.hook_overlay?.text || '';
+    const picked = onTimeline ? options.findIndex(option => hookWords(option.en) === hookWords(onTimeline)) : options.length ? 0 : -1;
+    const hookText = picked < 0 ? onTimeline : options[picked].en, off = hookLock ? 'disabled' : '';
+    const campaign = copy?.campaign, card = timeline.campaign_overlay, words = card && card.status !== 'removed' ? card.text : copy?.card_text || '';
+    const tabs = [...(options.length ? [{value:'script',label:`稿子备选 ${options.length}`,on:picked >= 0}] : []),
+      ...(campaign ? [{value:'campaign',label:campaign.card_open ? '结尾活动' : `结尾活动 · ${shortDay(campaign.card_from)} 起可加`,on:false,disabled:!campaign.card_open}] : []),
+      {value:'custom',label:'自己写',on:picked < 0}];
+    const list = options.map((option,index) => radioMarkup('data-hook-option',index,index === picked,off,`<span><strong>${option.label ? `<em>${esc(option.label)}</em>` : ''}${esc(option.en)}</strong>${option.zh ? `<small>${esc(option.zh)}</small>` : ''}</span>`)).join('');
+    const pane = campaign ? `<div class="vp-pane" data-campaign-pane hidden><input type="text" maxlength="300" data-campaign-text aria-label="活动屏显文字" value="${esc(words)}" ${off}><small>放在结尾 3 秒，口播不动；${esc(shortDay(campaign.end))} 活动结束后记得去掉。</small></div>` : '';
+    return `<section class="vp-opening-card" data-hook-card><header><b>钩子屏显</b><small>开头 3 秒</small><span class="vp-state">${overlayState(timeline,hookLock) || '<span class="script-status">未加</span>'}</span></header>${tabsMarkup('data-hook-source',tabs,off)}<input type="hidden" data-hook-choice value="${picked < 0 ? 'custom' : picked}"><div class="vp-options" data-hook-list role="radiogroup" aria-label="稿子里的钩子屏显" ${picked < 0 ? 'hidden' : ''}>${list}</div>${pane}<input type="text" maxlength="300" data-hook-custom aria-label="自己写的钩子屏显" placeholder="第一行 / 第二行" value="${esc(picked < 0 ? onTimeline : '')}" ${picked < 0 ? '' : 'hidden'} ${off}><footer><button type="button" class="primary compact" data-add-hook data-hook-lock="${esc(hookLock)}" ${hookLock || !hookText ? 'disabled' : ''} title="${esc(hookTitle(hookLock,hookText))}">${timeline.hook_overlay ? '更新' : '加上'}</button><small data-hook-reading hidden>${esc(options[picked]?.zh || '')}</small></footer></section>`;
   }
   function timelineTools(job,uid,copy) {
     const timeline = (job.timelines || []).find(row => row.unique_id === uid);
@@ -314,22 +340,27 @@ window.VideoPublication = (() => {
     const running = (job.edits || []).some(edit => edit.timeline_uid === uid && edit.status === 'running');
     const lock = running ? 'AI 正在剪辑，结束后可核对字幕。' : job.archived ? '恢复制作单后可核对字幕。' : '';
     const hookLock = running ? 'AI 正在剪辑，结束后可加屏显。' : job.archived ? '恢复制作单后可加屏显。' : '';
-    const options = hookOptions(copy), onTimeline = timeline.hook_overlay?.text || '';
-    const picked = onTimeline ? options.findIndex(option => hookWords(option.en) === hookWords(onTimeline)) : options.length ? 0 : -1;
-    const hookText = picked < 0 ? onTimeline : options[picked].en;
-    const campaign = campaignOption(timeline,copy);
-    const hookGroup = options.length ? `<optgroup label="开头 3 秒 · 钩子">${options.map((option,index) => `<option value="${index}" ${index === picked ? 'selected' : ''}>${esc(option.label ? `${option.label}：` : '')}${esc(option.en)}</option>`).join('')}</optgroup>` : '';
-    return `<div class="video-publication-timeline" data-timeline-tools="${esc(uid)}"><div class="video-publication-timeline-bar"><span class="id-row"><strong>${esc(timeline.name)}</strong>${typeof copyIdButton === 'function' ? copyIdButton(timeline.name,'时间线名称',{icon:true}) : ''}</span><button type="button" class="secondary compact" data-open-timeline>在达芬奇打开</button><button type="button" class="secondary compact" data-check-subtitles ${lock ? 'disabled' : ''} title="${esc(lock || '和配音稿对比，用词错误直接改好，拿不准的列出来。')}">核对字幕</button><button type="button" class="secondary compact" data-download-timeline title="下载这条时间线的 .drt 和它用的配音（不含视频素材），在另一台有同样素材的电脑上接着剪。">下载时间线</button><button type="button" class="secondary compact" data-home-timeline ${lock ? 'disabled' : ''} title="${esc(lock ? lock.replace('核对字幕','替换') : '上传另一台电脑在达芬奇导出的 .drt，导入成新时间线并接上这台电脑的素材；原时间线归档保留，可恢复。')}">换成家里剪的</button><input type="file" accept=".drt" data-home-timeline-file hidden></div>${importNote(timeline)}<div class="video-publication-hook-choice"><span class="context-note">屏显</span><select data-hook-choice aria-label="选屏显文字" ${hookLock ? 'disabled' : ''}>${hookGroup}${campaign.group}<option value="custom" ${picked < 0 ? 'selected' : ''}>自己写…</option></select><input type="text" maxlength="300" data-hook-custom aria-label="自己写的屏显文字" placeholder="第一行 / 第二行" value="${esc(picked < 0 ? onTimeline : '')}" ${picked < 0 ? '' : 'hidden'} ${hookLock ? 'disabled' : ''}>${campaign.field}<button type="button" class="secondary compact" data-add-hook data-hook-lock="${esc(hookLock)}" ${hookLock || !hookText ? 'disabled' : ''} title="${esc(hookTitle(hookLock,hookText))}">${timeline.hook_overlay ? '更新' : '加上'}</button><small data-hook-reading>${esc(options[picked]?.zh || '')}</small></div>${overlayState(timeline,hookLock)}${commentStickerRow(timeline,copy,hookLock)}${subtitleResult(timeline)}${commentStickerResult(timeline)}<p class="ai-error" data-timeline-tools-error role="alert" hidden></p></div>`;
+    return `<div class="video-publication-timeline" data-timeline-tools="${esc(uid)}"><div class="video-publication-timeline-bar"><span class="id-row"><strong>${esc(timeline.name)}</strong>${typeof copyIdButton === 'function' ? copyIdButton(timeline.name,'时间线名称',{icon:true}) : ''}</span><button type="button" class="secondary compact" data-open-timeline>在达芬奇打开</button><button type="button" class="secondary compact" data-check-subtitles ${lock ? 'disabled' : ''} title="${esc(lock || '和配音稿对比，用词错误直接改好，拿不准的列出来。')}">核对字幕</button><button type="button" class="secondary compact" data-download-timeline title="下载这条时间线的 .drt 和它用的配音（不含视频素材），在另一台有同样素材的电脑上接着剪。">下载时间线</button><button type="button" class="secondary compact" data-home-timeline ${lock ? 'disabled' : ''} title="${esc(lock ? lock.replace('核对字幕','替换') : '上传另一台电脑在达芬奇导出的 .drt，导入成新时间线并接上这台电脑的素材；原时间线归档保留，可恢复。')}">换成家里剪的</button><input type="file" accept=".drt" data-home-timeline-file hidden></div>${importNote(timeline)}<div class="vp-opening">${hookCard(timeline,copy,hookLock)}${commentStickerRow(timeline,copy,hookLock)}</div>${subtitleResult(timeline)}<p class="ai-error" data-timeline-tools-error role="alert" hidden></p></div>`;
   }
-  // Offers the comments the script was written with; an order written without any (a 1:1 replica) can take one typed by hand.
+  // The comment sticker: the comments the script was written with, the whole comment library to search, one the AI makes up from a few hints, or one typed by hand.
   function commentStickerRow(timeline,copy,hookLock) {
     const options = copy?.comment_stickers || [], card = timeline.comment_sticker, lock = hookLock.replace('屏显','评论贴纸');
     const picked = card ? options.findIndex(row => String(row.id) === String(card.review_id)) : options.length ? 0 : -1;
-    const own = picked < 0 ? card || {} : {};
-    const off = lock ? 'disabled' : '', hide = picked < 0 ? '' : 'hidden';
-    const choice = options.length ? `<select data-comment-choice aria-label="选评论" ${off}>${options.map((row,index) => `<option value="${index}" ${index === picked ? 'selected' : ''}>${esc(row.username)}：${esc(row.text)}</option>`).join('')}<option value="custom" ${picked < 0 ? 'selected' : ''}>自己写…</option></select>` : '';
-    return `<div class="video-publication-comment-card"><span class="context-note">评论贴纸</span>${choice}<input type="text" maxlength="80" data-comment-name aria-label="评论用户名" placeholder="@用户名" value="${esc(own.username || '')}" ${hide} ${off}><input type="text" maxlength="1000" data-comment-text aria-label="评论内容" placeholder="评论原文" value="${esc(own.text || '')}" ${hide} ${off}><button type="button" class="secondary compact" data-add-comment-sticker data-comment-lock="${esc(lock)}" data-comment-again="${card ? '1' : ''}" disabled>${card ? '更新评论贴纸' : '加评论贴纸'}</button><small data-comment-reading></small></div>`;
+    // A card from the library search keeps showing as picked; one typed (or made up by the AI) comes back into the fields.
+    const mode = picked >= 0 ? String(picked) : card?.review_id || !card ? 'search' : 'custom';
+    const own = mode === 'custom' ? card || {} : {};
+    const off = lock ? 'disabled' : '', typing = mode === 'custom' ? '' : 'hidden';
+    const tabs = [...(options.length ? [{value:'script',label:`写稿时带的 ${options.length}`,on:picked >= 0}] : []),
+      {value:'search',label:'搜评论库',on:mode === 'search'},{value:'ai',label:'AI 编',on:false},{value:'custom',label:'自己写',on:mode === 'custom'}];
+    const list = options.map((row,index) => radioMarkup('data-comment-option',index,String(index) === mode,off,`${avatarFace(row)}<span><strong>${esc(row.username)}</strong> ${esc(row.text)}<small data-comment-zh="${index}">${esc(row.zh || '')}</small></span>`)).join('');
+    const chosen = mode === 'search' && card?.review_id ? `<p class="video-publication-comment-picked" data-comment-picked>${pickedMarkup({id:card.review_id,username:card.username,text:card.text,avatar:card.avatar || ''})}</p>` : '<p class="video-publication-comment-picked" data-comment-picked hidden></p>';
+    const search = `<div class="video-publication-comment-search" data-comment-search ${mode === 'search' ? '' : 'hidden'}><input type="text" enterkeyhint="search" maxlength="200" data-comment-query aria-label="搜索评论库" placeholder="🔍 搜整个评论库：英文原文或中文意思，回车搜索" ${off}>${chosen}<div class="video-publication-comment-results" data-comment-results role="listbox" aria-label="评论库搜索结果"></div></div>`;
+    const compose = `<div class="video-publication-comment-ai" data-comment-ai hidden><input type="text" maxlength="500" data-comment-hint aria-label="让 AI 编评论的要求" placeholder="意思、语气、用户名，给一部分就行，比如：怀疑能不能磨锯齿刀，半信半疑" ${off}><button type="button" class="secondary compact" data-comment-compose ${off}>AI 编一条</button></div>`;
+    const state = card ? `<span class="script-status${card.status === 'saved' ? ' published' : ''}">${card.status === 'saved' ? '已加' : '未保存'}</span>` : '<span class="script-status">未加</span>';
+    return `<section class="vp-opening-card video-publication-comment-card" data-comment-card><header><b>评论贴纸</b><small>到第一句口播说完</small><span class="vp-state">${state}</span></header>${tabsMarkup('data-comment-source',tabs,off)}<input type="hidden" data-comment-choice value="${mode}"><div class="vp-options" data-comment-list role="radiogroup" aria-label="写稿时带的评论" ${/^\d+$/.test(mode) ? '' : 'hidden'}>${list}<button type="button" class="subtle compact" data-comment-zh-retry hidden>中文没生成，点这里重试</button></div>${search}${compose}<div class="vp-typed" data-comment-typed ${typing}><input type="text" maxlength="80" data-comment-name aria-label="评论用户名" placeholder="@用户名" value="${esc(own.username || '')}" ${off}><input type="text" maxlength="1000" data-comment-text aria-label="评论内容" placeholder="评论原文（英文）" value="${esc(own.text || '')}" ${off}></div><footer><button type="button" class="primary compact" data-add-comment-sticker data-comment-lock="${esc(lock)}" data-comment-again="${card ? '1' : ''}" disabled>${card ? '更新评论贴纸' : '加评论贴纸'}</button><small data-comment-reading></small></footer>${commentStickerResult(timeline)}</section>`;
   }
+  const avatarFace = row => row.avatar ? `<img class="video-publication-comment-avatar" src="/api/reviews/avatar/${esc(row.avatar)}" alt="" loading="lazy">` : `<span class="video-publication-comment-avatar" aria-hidden="true">${esc((String(row.username || '').replace(/^@/,'')[0] || '?').toUpperCase())}</span>`;
+  const pickedMarkup = row => `${avatarFace(row)}<span><strong>${esc(row.username)}</strong> ${esc(row.text)}${row.zh ? `<small>${esc(row.zh)}</small>` : ''}</span>`;
   const commentRuns = new Map();
   function commentStickerResult(timeline) {
     const card = timeline.comment_sticker;
@@ -407,18 +438,30 @@ window.VideoPublication = (() => {
       try {await onTimelineChanged?.();} catch {}
     });
     const choice = tools.querySelector('[data-hook-choice]'), custom = tools.querySelector('[data-hook-custom]'), reading = tools.querySelector('[data-hook-reading]');
-    const options = hookOptions(copy), campaignText = tools.querySelector('[data-campaign-text]');
+    const options = hookOptions(copy), campaignText = tools.querySelector('[data-campaign-text]'), campaignPane = tools.querySelector('[data-campaign-pane]'), hookList = tools.querySelector('[data-hook-list]');
     const isCampaign = () => choice.value === 'campaign';
     const chosenText = () => isCampaign() ? campaignText.value.trim() : choice.value === 'custom' ? custom.value.trim() : options[Number(choice.value)].en;
+    let lastHook = /^\d+$/.test(choice.value) ? choice.value : '0';
     const chosen = () => {
-      const text = chosenText(), line = (job.timelines || []).find(row => row.unique_id === uid), card = line?.campaign_overlay;
+      const text = chosenText(), line = (job.timelines || []).find(row => row.unique_id === uid), card = line?.campaign_overlay, source = /^\d+$/.test(choice.value) ? 'script' : choice.value;
       custom.hidden = choice.value !== 'custom';
-      if (campaignText) campaignText.hidden = !isCampaign();
+      if (campaignPane) campaignPane.hidden = !isCampaign();
+      if (hookList) hookList.hidden = source !== 'script';
+      tools.querySelectorAll('[data-hook-source]').forEach(tab => tab.setAttribute('aria-selected',String(tab.dataset.hookSource === source)));
+      tools.querySelectorAll('[data-hook-option]').forEach(row => row.setAttribute('aria-checked',String(row.dataset.hookOption === choice.value)));
       reading.textContent = isCampaign() || choice.value === 'custom' ? '' : options[Number(choice.value)].zh || '';
       hook.disabled = Boolean(hook.dataset.hookLock) || !text;
       hook.textContent = (isCampaign() ? card && card.status !== 'removed' : line?.hook_overlay) ? '更新' : '加上';
       hook.title = isCampaign() ? campaignTitle(hook.dataset.hookLock,text,copy.campaign) : hookTitle(hook.dataset.hookLock,text);
     };
+    const setHook = value => {
+      choice.value = value;
+      if (/^\d+$/.test(value)) lastHook = value;
+      chosen();
+      (value === 'custom' ? custom : value === 'campaign' ? campaignText : null)?.focus();
+    };
+    tools.querySelectorAll('[data-hook-source]').forEach(tab => tab.addEventListener('click',() => setHook(tab.dataset.hookSource === 'script' ? lastHook : tab.dataset.hookSource)));
+    tools.querySelectorAll('[data-hook-option]').forEach(row => row.addEventListener('click',() => setHook(row.dataset.hookOption)));
     tools.querySelector('[data-campaign-remove]')?.addEventListener('click',async event => {
       const button = event.currentTarget;
       button.disabled = true;error.hidden = true;
@@ -429,7 +472,6 @@ window.VideoPublication = (() => {
       toast(outcome.message,outcome.status !== 'removed');
       await repaint(result.timeline);
     });
-    choice.addEventListener('change',() => {chosen();(custom.hidden ? isCampaign() ? campaignText : null : custom)?.focus();});
     custom.addEventListener('input',chosen);
     campaignText?.addEventListener('input',chosen);
     hook.addEventListener('click',async () => {
@@ -444,32 +486,117 @@ window.VideoPublication = (() => {
     });
     const sticker = tools.querySelector('[data-add-comment-sticker]'), stickers = copy?.comment_stickers || [];
     const commentChoice = tools.querySelector('[data-comment-choice]'), commentName = tools.querySelector('[data-comment-name]'), commentText = tools.querySelector('[data-comment-text]'), commentReading = tools.querySelector('[data-comment-reading]');
-    const commentLinked = () => commentChoice && commentChoice.value !== 'custom' ? stickers[Number(commentChoice.value)] : null;
-    const commentReady = () => Boolean(commentLinked() || (commentName.value.trim() && commentText.value.trim()));
+    const searchBox = tools.querySelector('[data-comment-search]'), searchQuery = tools.querySelector('[data-comment-query]'), searchResults = tools.querySelector('[data-comment-results]'), searchPicked = tools.querySelector('[data-comment-picked]');
+    const aiBox = tools.querySelector('[data-comment-ai]'), aiHint = tools.querySelector('[data-comment-hint]'), aiCompose = tools.querySelector('[data-comment-compose]');
+    const commentList = tools.querySelector('[data-comment-list]'), typedBox = tools.querySelector('[data-comment-typed]');
+    const saved = (job.timelines || []).find(row => row.unique_id === uid)?.comment_sticker;
+    // The comment picked from the library search; a card put on from the search before counts as picked.
+    let libraryPick = commentChoice.value === 'search' && saved?.review_id ? {id:saved.review_id,username:saved.username,text:saved.text,zh:''} : null, found = [];
+    const mode = () => commentChoice.value;
+    const commentLinked = () => /^\d+$/.test(mode()) ? stickers[Number(mode())] : mode() === 'search' ? libraryPick : null;
+    const typedMode = () => mode() === 'custom' || mode() === 'ai';
+    const commentReady = () => Boolean(commentLinked() || (typedMode() && commentName.value.trim() && commentText.value.trim()));
     const commentChosen = () => {
       const linked = commentLinked();
-      commentName.hidden = commentText.hidden = Boolean(linked);
+      const source = /^\d+$/.test(mode()) ? 'script' : mode();
+      typedBox.hidden = !typedMode();
+      commentList.hidden = source !== 'script';
+      tools.querySelectorAll('[data-comment-source]').forEach(tab => tab.setAttribute('aria-selected',String(tab.dataset.commentSource === source)));
+      tools.querySelectorAll('[data-comment-option]').forEach(row => row.setAttribute('aria-checked',String(row.dataset.commentOption === mode())));
+      searchBox.hidden = mode() !== 'search';
+      aiBox.hidden = mode() !== 'ai';
       sticker.disabled = Boolean(sticker.dataset.commentLock) || !commentReady();
-      sticker.title = sticker.dataset.commentLock || `在开头放这条评论，到第一句口播说完。${linked ? '' : '自己写的没有头像，用名字首字母代替。'}${sticker.dataset.commentAgain ? '再点会替换，手动调整不保留。' : ''}`;
+      sticker.title = sticker.dataset.commentLock || (mode() === 'search' && !linked ? '先在下面搜评论，点一条选中。' : `在开头放这条评论，到第一句口播说完。${linked?.avatar === '' || !linked ? '没有头像的用名字首字母代替。' : ''}${sticker.dataset.commentAgain ? '再点会替换，手动调整不保留。' : ''}`);
     };
     let readingFor = '';
     // Asked when a choice settles or the typed comment loses focus, not on every key: each new comment costs one AI call.
     const readComment = async () => {
-      const words = (commentLinked()?.text ?? commentText.value).trim();
+      const linked = commentLinked(), words = (linked ? linked.text : typedMode() ? commentText.value : '').trim();
       if (words === readingFor) return;
       readingFor = words;commentReading.textContent = words ? '中文生成中…' : '';
       if (!words) return;
+      if (linked?.zh) {commentReading.textContent = linked.zh;return;}
       if (!commentRuns.has(words)) commentRuns.set(words,api(`${url}/publication/comment-zh`,{method:'POST',body:{text:words}}).finally(() => commentRuns.delete(words)));
       let zh = '';
       try {zh = (await commentRuns.get(words)).zh || '';}
       catch {zh = '中文对照没生成成功';if (readingFor === words) readingFor = '';}
       if (readingFor === words || !readingFor) commentReading.textContent = zh;
     };
-    commentChoice?.addEventListener('change',() => {commentChosen();readComment();if (!commentLinked()) commentName.focus();});
+    let translationsPending = false;
+    const zhNode = index => tools.querySelector(`[data-comment-zh="${index}"]`), zhRetry = tools.querySelector('[data-comment-zh-retry]');
+    // The script's comments are on show, so their missing Chinese is asked for at once (one AI call for all of them).
+    const translateOptions = async () => {
+      if (translationsPending || stickers.every(row => row.zh)) return;
+      translationsPending = true;
+      stickers.forEach((row,index) => {if (!row.zh && zhNode(index)) zhNode(index).textContent = '中文生成中…';});
+      try {
+        const result = await api(`${url}/publication/comment-zh`,{method:'POST',body:{options:true}});
+        stickers.forEach((row,index) => {
+          row.zh = result.comments_zh?.[String(row.id)] || row.zh || '';
+          if (zhNode(index)) zhNode(index).textContent = row.zh || '中文暂不可用';
+        });
+        if (commentLinked()?.zh) {readingFor = commentLinked().text.trim();commentReading.textContent = commentLinked().zh;}
+      } catch {
+        stickers.forEach((row,index) => {if (!row.zh && zhNode(index)) zhNode(index).textContent = '中文暂不可用';});
+        zhRetry.hidden = false;
+      } finally {translationsPending = false;}
+    };
+    zhRetry.addEventListener('click',() => {zhRetry.hidden = true;translateOptions();});
+    // The whole library, searched in English or by its Chinese translation; only comments the card can draw come back.
+    let searchRun = 0, searchTimer = null;
+    const paintResults = (rows,note) => {
+      // The pick shows on its own only while no result list is there to highlight it.
+      if (libraryPick) {searchPicked.innerHTML = pickedMarkup(libraryPick);searchPicked.hidden = rows.length > 0;}
+      searchResults.innerHTML = note ? `<p class="context-note">${esc(note)}</p>` : rows.map((row,index) => `<button type="button" class="video-publication-comment-result" role="option" aria-selected="${String(libraryPick?.id === row.id)}" data-comment-result="${index}">${pickedMarkup(row)}<em>${esc([row.product,row.likes ? `${row.likes} 赞` : ''].filter(Boolean).join(' · '))}</em></button>`).join('');
+    };
+    const searchLibrary = async () => {
+      const words = searchQuery.value.trim(), run = ++searchRun;
+      if (!words) {found = [];paintResults([],'');return;}
+      paintResults([],'搜索中…');
+      let result;
+      try {result = await api(`${url}/publication/comment-search`,{method:'POST',body:{q:words}});}
+      catch (failure) {if (run === searchRun) paintResults([],failure.message || '评论库暂时搜不了，请重试。');return;}
+      if (run !== searchRun) return;
+      found = result.comments || [];
+      if (found.length) paintResults(found,'');
+      else paintResults([],'没有能放上贴纸的评论（贴纸只能显示英文等西文）。换个词，或者选「AI 编一条」。');
+    };
+    searchQuery.addEventListener('input',() => {clearTimeout(searchTimer);searchTimer = setTimeout(searchLibrary,400);});
+    searchQuery.addEventListener('keydown',event => {if (event.key === 'Enter') {event.preventDefault();clearTimeout(searchTimer);searchLibrary();}});
+    searchResults.addEventListener('click',event => {
+      const button = event.target.closest('[data-comment-result]');if (!button) return;
+      libraryPick = found[Number(button.dataset.commentResult)];
+      searchResults.querySelectorAll('[data-comment-result]').forEach(node => node.setAttribute('aria-selected',String(node === button)));
+      commentChosen();readComment();
+    });
+    aiCompose.addEventListener('click',async () => {
+      const hint = aiHint.value.trim();
+      if (!hint) {aiHint.focus();toast('先写几个字：评论的意思、语气或用户名。',true);return;}
+      aiCompose.disabled = true;aiCompose.textContent = 'AI 编写中…';error.hidden = true;
+      try {
+        const made = await api(`${url}/publication/comment-compose`,{method:'POST',body:{hint}});
+        commentName.value = made.username || '';commentText.value = made.text || '';
+        readingFor = commentText.value.trim();commentReading.textContent = made.zh || '';
+        toast('AI 编好了，可以改一改再加评论贴纸。');
+      } catch (failure) {problem(failure);}
+      finally {aiCompose.disabled = Boolean(sticker.dataset.commentLock);aiCompose.textContent = 'AI 编一条';commentChosen();}
+    });
+    aiHint.addEventListener('keydown',event => {if (event.key === 'Enter') {event.preventDefault();aiCompose.click();}});
+    let lastComment = /^\d+$/.test(mode()) ? mode() : '0';
+    const setComment = value => {
+      commentChoice.value = value;
+      if (/^\d+$/.test(value)) lastComment = value;
+      commentChosen();readComment();
+    };
+    tools.querySelectorAll('[data-comment-source]').forEach(tab => tab.addEventListener('click',() => {
+      setComment(tab.dataset.commentSource === 'script' ? lastComment : tab.dataset.commentSource);
+      ({search:searchQuery,ai:aiHint,custom:commentName})[mode()]?.focus();
+    }));
+    tools.querySelectorAll('[data-comment-option]').forEach(row => row.addEventListener('click',() => setComment(row.dataset.commentOption)));
     commentName.addEventListener('input',commentChosen);
     commentText.addEventListener('input',commentChosen);
     commentText.addEventListener('change',readComment);
-    commentChosen();readComment();
+    commentChosen();readComment();translateOptions();
     sticker.addEventListener('click',async () => {
       const label = sticker.textContent, linked = commentLinked();
       sticker.disabled = true;sticker.textContent = '处理中…';error.hidden = true;
@@ -481,7 +608,7 @@ window.VideoPublication = (() => {
       await repaint(result.timeline);
     });
   }
-  const previewMarkup = uid => `<section class="timeline-preview" data-timeline-preview="${esc(uid)}"><div class="timeline-preview-heading"><h3>视频预览</h3><button type="button" class="secondary compact" data-preview-import>从达芬奇更新预览</button><span class="context-note" data-preview-progress role="status"></span><button type="button" class="secondary compact" data-preview-reveal hidden title="在资源管理器中选中这条时间线的高清视频">定位本地文件</button></div><p class="timeline-preview-hint" data-preview-empty>人工确认完成后自动导出成片，也可手动更新半成品预览；保留字幕、屏显和声音。</p><div data-preview-video hidden><p class="timeline-preview-caption"><strong data-preview-kind></strong><span data-preview-name></span><time data-preview-time></time><a data-preview-download download>下载高清视频</a></p><video controls playsinline preload="auto" aria-label="半成品或成片视频预览"></video></div><p class="ai-error" data-preview-error role="alert" hidden></p></section>`;
+  const previewMarkup = uid => `<section class="timeline-preview" data-timeline-preview="${esc(uid)}"><div class="timeline-preview-heading"><h3>视频预览</h3><button type="button" class="secondary compact" data-preview-import>从达芬奇更新预览</button><span class="context-note" data-preview-progress role="status"></span><button type="button" class="secondary compact" data-preview-reveal hidden title="在资源管理器中选中这条时间线的高清视频">定位本地文件</button></div><p class="timeline-preview-hint" data-preview-empty>人工确认完成后自动导出成片，也可手动更新半成品预览；保留字幕、屏显和声音。</p><div data-preview-video hidden><p class="timeline-preview-caption"><strong data-preview-kind></strong><span data-preview-name></span><time data-preview-time></time><a data-preview-download download>下载高清视频</a></p><video controls playsinline preload="none" aria-label="半成品或成片视频预览"></video></div><p class="ai-error" data-preview-error role="alert" hidden></p></section>`;
   async function bindPreview(host,job,api,uid) {
     const root = host.querySelector('[data-timeline-preview]');if (!root) return;
     const button = root.querySelector('[data-preview-import]'), progress = root.querySelector('[data-preview-progress]');
@@ -512,6 +639,9 @@ window.VideoPublication = (() => {
             player.currentTime = Math.min(position,Number.isFinite(player.duration) ? player.duration : position);
             if (playing) void player.play().catch(() => {});
           },{once:true});
+          // A viewer who already loaded this video keeps their position when
+          // the optimized copy arrives. Untouched/hidden previews stay idle.
+          player.preload = resume ? 'metadata' : 'none';
           player.src = video.url;
         }
         root.querySelector('[data-preview-kind]').textContent = video.kind || '视频预览';
@@ -580,14 +710,18 @@ window.VideoPublication = (() => {
       <details class="video-publication-more" ${draft.file_path || item?.file ? 'open' : ''}><summary>账号、帖子链接、备注与成片文件</summary><div class="form-row"><label class="field"><span>发布账号</span><input name="account" maxlength="200" list="video-publication-accounts" value="${esc(draft.account || '')}" autocomplete="off"><datalist id="video-publication-accounts"></datalist></label><label class="field"><span>帖子链接（不填按账号和 ID 生成）</span><input name="post_url" type="url" maxlength="2000" value="${esc(draft.post_url || '')}"></label></div><label class="field"><span>备注</span><textarea name="note" rows="2" maxlength="2000">${esc(draft.note || '')}</textarea></label>
       <label class="field"><span>绑定成片文件：本地完整路径</span><input name="file_path" maxlength="2000" placeholder="C:\Videos\最终成片.mp4" value="${esc(draft.file_path || item?.file?.original_path || '')}"></label>
       <label class="video-publication-confirm"><input name="file_confirmed" type="checkbox">我已核对：该文件就是以上审查版本实际发布的成片。</label></details></form>`;
-    host.innerHTML = `<h2>成片与发布<details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">登记发布后的视频 ID，并保存对应脚本、配音和人工审查版本。导入或同步销售视频表时，能唯一匹配的帖子会自动登记；匹配结果不唯一的帖子会列在这里，点一下登记。自动登记可以撤销。发布后在浏览器打开自己账号的主页，TK 看板也会把新帖推给工作台。成片文件可选绑定，绑定后会复制到工作台，随完整备份保存。</div></details></h2>
+    host.innerHTML = `<h2><span class="vp-heading-both">成片与发布</span><span class="vp-heading-cut">成片</span><span class="vp-heading-publish">发布</span><details class="production-hint"><summary title="说明" aria-label="说明"></summary><div class="production-hint-body">登记发布后的视频 ID，并保存对应脚本、配音和人工审查版本。导入或同步销售视频表时，能唯一匹配的帖子会自动登记；匹配结果不唯一的帖子会列在这里，点一下登记。自动登记可以撤销。发布后在浏览器打开自己账号的主页，TK 看板也会把新帖推给工作台。成片文件可选绑定，绑定后会复制到工作台，随完整备份保存。</div></details></h2>
       ${host._videoPublicationPicker === false ? '' : timelinePicker(lines,data.timeline_uid)}
+      <section class="vp-part vp-cut" aria-label="成片"><h3 class="vp-part-title">成片 <small>在达芬奇里收尾</small></h3>
       ${lines.some(line => line.unique_id === data.timeline_uid) ? timelineTools(job,data.timeline_uid,data.copy) : ''}
       ${data.timeline_uid ? previewMarkup(data.timeline_uid) : ''}
       ${data.timeline_uid && window.VideoPreview ? '<details class="portable-preview"><summary>轻量 MP4 预览</summary>' + window.VideoPreview.markup(data.timeline_uid) + '</details>' : ''}
-      ${data.timeline_uid && window.NotionUpload ? window.NotionUpload.markup(data.timeline_uid) : ''}
       ${data.timeline_uid && window.PhotoCarousel ? window.PhotoCarousel.markup(data.timeline_uid) : ''}
-      ${item ? receipt(job,item,true) + copyRow(data.copy) : canEdit ? candidateRows(data.candidates) + copyRow(data.copy) + formMarkup(calendarPlanMarkup()) : `<div class="video-publication-bar">${calendarPlanMarkup()}<span class="context-note">${esc(data.blocked_reason)}</span></div>${copyRow(data.copy)}`}
+      </section>
+      <section class="vp-part vp-publish" aria-label="发布"><h3 class="vp-part-title">发布 <small>发出去要用的字</small></h3>
+      ${data.timeline_uid && window.NotionUpload ? window.NotionUpload.markup(data.timeline_uid) : ''}
+      ${item ? receipt(job,item,true) + copyRow(data.copy) : canEdit ? candidateRows(data.candidates) + copyRow(data.copy) + formMarkup(calendarPlanMarkup()) : `<details class="vp-publish-wait"><summary><span class="script-status">还不能登记</span><span>${esc(data.blocked_reason)} 发布日期、标题、文案和置顶评论都已备好。</span><span class="vp-publish-peek">先看看文案</span></summary><div class="video-publication-bar">${calendarPlanMarkup()}</div>${copyRow(data.copy)}</details>`}
+      </section>
       <div class="video-publication-folds">
       ${item && !canEdit ? `<p class="context-note">${esc(data.blocked_reason)}</p>` : ''}
       ${historyFold(job,data.history,item)}
@@ -599,6 +733,7 @@ window.VideoPublication = (() => {
     if (window.NotionUpload && data.timeline_uid) void window.NotionUpload.bind(host,{job,api,uid:data.timeline_uid});
     if (window.PhotoCarousel && data.timeline_uid) void window.PhotoCarousel.bind(host,{job,api,uid:data.timeline_uid});
     void fillTitleChinese(host,job,api,data.copy);
+    void fillReplicaTitles(host,job,api,data.copy);
     host.querySelectorAll('[data-publication-timeline]').forEach(button => button.addEventListener('click',() => {
       if (button.classList.contains('is-current')) return;
       host._videoPublicationTimeline = button.dataset.publicationTimeline;

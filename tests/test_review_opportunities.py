@@ -26,13 +26,15 @@ class ReviewOpportunityTests(unittest.TestCase):
         self.today = date.today().isoformat()
 
     def review(self, identifier, text, *, topic="clamp", product="202H", platform="amazon", seen=None,
-               role="verified_buyer", relevant=1):
+               role="verified_buyer", relevant=1, nature=""):
         with closing(self.reviews.connect()) as connection:
             connection.execute("""INSERT INTO reviews
                 (id, platform, product, role, text, relevant, first_seen, url) VALUES (?,?,?,?,?,?,?,?)""",
                 (identifier, platform, product, role, text, relevant, self.today if seen is None else seen, "https://example.test/review"))
             if topic:
                 connection.execute("INSERT INTO review_tags VALUES (?,?,?)", (identifier,"topic",topic))
+            if nature:
+                connection.execute("INSERT INTO review_tags VALUES (?,?,?)", (identifier,"nature",nature))
 
     def test_empty_or_all_product_never_creates_database(self):
         for selected in ("", "all", "202H"):
@@ -94,6 +96,33 @@ class ReviewOpportunityTests(unittest.TestCase):
         self.assertEqual((first["total"],first["items"][0]["topic"],first["items"][0]["manual_reviews"]),(2,"clamp",1))
         self.assertEqual(opportunity_catalog(self.app,"202H",limit=1,offset=1)["items"][0]["topic"],"price")
         self.assertEqual(before,{path:path.read_bytes() for path in self.reviews.root.rglob("*") if path.is_file()})
+
+    def test_after_sales_topics_are_not_opportunities(self):
+        self.review("late","It shipped two weeks late.",topic="shipping")
+        self.review("both","Shipping was slow and the clamp slips.",topic="shipping")
+        with closing(self.reviews.connect()) as connection:
+            connection.execute("INSERT INTO review_tags VALUES ('both','topic','clamp')")
+        self.review("plain","Nice.",topic="")
+        self.review("linked","The manual is unclear.",topic="instructions")
+        self.creation["theme_links"]=[{"product":"202H","review_id":"linked","role":"concern","target_id":"202H-S1","target_label":"上手顾虑"}]
+        items={row["id"]:row for row in opportunity_catalog(self.app,"202H")["items"]}
+        self.assertEqual(set(items),{"topic:clamp","topic:unclassified","linked:concern:202H-S1"})
+        self.assertEqual([row["id"] for row in items["topic:clamp"]["evidence"]],["both"])
+        self.assertEqual([row["id"] for row in items["topic:unclassified"]["evidence"]],["plain"])
+
+    def test_buying_signals_rank_before_recent_volume(self):
+        old=(date.today()-timedelta(days=30)).isoformat()
+        self.review("ask","Where can I buy this?",topic="price",seen=old,nature="buy_info",role="viewer")
+        self.review("ask-again","WHERE CAN I BUY THIS?",topic="price",seen=old,nature="buy_info",role="viewer",platform="reddit")
+        self.review("fresh-one","Clamp works.",topic="clamp")
+        self.review("fresh-two","Clamp holds well.",topic="clamp",nature="praise")
+        items=opportunity_catalog(self.app,"202H")["items"]
+        self.assertEqual([(row["topic"],row["intent_reviews"]) for row in items],[("price",1),("clamp",0)])
+        self.assertIn("想买但卡住",items[0]["priority_reasons"][0])
+        self.review("doubt","Is the clamp worth it?",topic="clamp",nature="objection",role="viewer",seen=old)
+        clamp=next(row for row in opportunity_catalog(self.app,"202H")["items"] if row["topic"]=="clamp")
+        self.assertEqual([(row["id"],row["intent"]) for row in clamp["evidence"]][0],("doubt",True))
+        self.assertFalse(any("想买但卡住" in reason for reason in items[1]["priority_reasons"]))
 
     def test_invalid_pagination_is_rejected(self):
         with self.assertRaises(ReviewError):

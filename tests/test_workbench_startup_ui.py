@@ -100,12 +100,12 @@ class WorkbenchStartupTests(unittest.TestCase):
                 if any(request.url.startswith(self.base + path) for path in work_paths) else None)
         self.hold_read(page, "**/api/state", held, "state")
         page.goto(f"{self.base}/#/202H/home")
-        page.wait_for_function("""() => ['tasks', 'due', 'plans'].every(key => {
+        page.wait_for_function("""() => ['due', 'plans'].every(key => {
           const node = document.querySelector(`[data-home-tab=${key}] .home-tab-count`);
           return node && node.textContent !== '—';
         })""")
         self.assertEqual(len(held), 1)
-        self.assertEqual(len(work_reads), 5)
+        self.assertEqual(len(work_reads), 4)
         self.assertEqual(page.evaluate("state.token"), "")
         self.assertEqual(page.locator('[data-home-tab=cases] .home-tab-count').inner_text(), "—")
         page.locator('[data-home-tab=cases]').click()
@@ -116,7 +116,7 @@ class WorkbenchStartupTests(unittest.TestCase):
         self.assertNotEqual(page.locator('[data-home-tab=cases] .home-tab-count').inner_text(), "—")
         self.assertEqual(page.locator('[data-home-tab=cases]').get_attribute('aria-selected'), 'true')
         self.assertTrue(page.evaluate("homeNode === document.querySelector('#home-page')"))
-        self.assertEqual(len(work_reads), 5, "The library result reuses the five already loaded work lists")
+        self.assertEqual(len(work_reads), 4, "The library result reuses the four already loaded work lists")
 
     def test_home_keeps_work_visible_when_the_library_fails_and_can_retry(self):
         page, held = self.page(), []

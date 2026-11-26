@@ -37,7 +37,7 @@ class PhaseThreeIntegrationTests(unittest.TestCase):
         result = page.locator('.global-search-result[href="#/202H/directions/202H-S3?archive=all"]')
         result.wait_for()
         result.click()
-        page.locator('.dir-meta').get_by_text('202H-S3', exact=True).wait_for()  # the heading is the selling point; the id sits above it
+        page.locator('#direction-definition h2 small').get_by_text('202H-S3', exact=True).wait_for()  # the heading is the selling point; the id sits beside it
         page.locator('#global-product').select_option('129N')
         page.locator('#direction-filters').wait_for()
         self.assertTrue(page.url.endswith('#/129N/directions?archive=all'), page.url)

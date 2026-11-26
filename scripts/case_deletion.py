@@ -1,7 +1,7 @@
 """Preview and permanently remove one archived local case, with bounded file scope.
 
-The caller must serialize writers (the workbench already holds its lock). No
-content backup or recycle bin is created. Only explicitly registered evidence
+The caller must serialize writers (the workbench already holds its lock).
+Files are staged until deletion commits. Only explicitly registered evidence
 files are considered; paths embedded in case prose are never deletion targets.
 """
 from __future__ import annotations
@@ -11,11 +11,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import tempfile
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from case_store import CaseStore, StoreError, case_id, load_json
+from production_operations import durable_json
 from render_case_library import render_library
 
 
@@ -102,6 +105,69 @@ class DeletionManager:
         elif source_handler is None and (Path(__file__).parent / "legacy_case_deletion.py").is_file():
             from legacy_case_deletion import LegacySourceDeletion
             self.source_handler = LegacySourceDeletion()
+        self._recover_deletions()
+
+    @property
+    def _delete_work(self):
+        return self.root / ".case-delete-staging"
+
+    def _delete_locations(self, work, identifier, number, kind, relative):
+        roots = {"record": self.root / "cases" / identifier, "reading": self.library / identifier,
+                 "evidence": self.evidence}
+        path = Path(relative)
+        if kind not in roots or path.is_absolute() or not path.parts or ".." in path.parts:
+            raise DeletionError("案例删除恢复记录包含无法识别的路径。", 500)
+        saved_root = work if kind == "record" else self.runtime / "data-transfer" / "case-delete-staging" / work.name
+        boundary = self._delete_work if kind == "record" else self.runtime
+        return _safe_path(roots[kind] / path, roots[kind]), _safe_path(saved_root / str(number), boundary)
+
+    def _discard_deletion(self, work):
+        media = self.runtime / "data-transfer" / "case-delete-staging" / work.name
+        for path, parent in ((media, self.runtime / "data-transfer" / "case-delete-staging"), (work, self._delete_work)):
+            _safe_path(path, parent)
+            if path.resolve().parent != parent.resolve() or not re.fullmatch(r"[a-f0-9]{32}", path.name):
+                raise DeletionError("案例删除暂存目录超出范围。", 500)
+            if path.is_dir():
+                shutil.rmtree(path)
+
+    def _rollback_deletion(self, work, transaction):
+        identifier = case_id(transaction["case_id"])
+        for number, (kind, relative) in reversed(list(enumerate(transaction["files"]))):
+            path, saved = self._delete_locations(work, identifier, number, kind, relative)
+            if saved.is_file():
+                if path.exists() or path.is_symlink():
+                    raise DeletionError(f"案例删除恢复遇到同名文件，请保留暂存目录：{path}", 500)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(saved, path)
+        marker = _safe_path(self.root / "deleted_case_sources.json", self.root)
+        old_marker, new_marker = work / "original-markers", work / "new-markers"
+        if transaction.get("new_marker_digest"):
+            if old_marker.is_file() or not new_marker.is_file():
+                if marker.exists() and hashlib.sha256(marker.read_bytes()).hexdigest() != transaction["new_marker_digest"]:
+                    # A completed rollback already restored the exact old bytes.
+                    if hashlib.sha256(marker.read_bytes()).hexdigest() != transaction.get("original_marker_digest"):
+                        raise DeletionError("案例删除恢复时发现来源登记有新的修改，请保留暂存目录。", 500)
+                elif old_marker.is_file():
+                    os.replace(old_marker, marker)
+                elif not transaction.get("original_marker_digest"):
+                    marker.unlink(missing_ok=True)
+
+    def _recover_deletions(self):
+        journals = sorted(self._delete_work.glob("*/transaction.json"))
+        if not journals:
+            return
+        for journal in journals:
+            _safe_path(journal, self._delete_work)
+            transaction = load_json(journal)
+            if (not isinstance(transaction, dict) or transaction.get("runtime") != str(self.runtime)
+                    or transaction.get("state") not in {"applying", "committed", "rolled_back"}):
+                raise DeletionError(f"请先核对未完成的案例删除记录：{journal.parent.name}", 500)
+            if transaction["state"] == "applying":
+                self._rollback_deletion(journal.parent, transaction)
+                durable_json(journal, {**transaction, "state": "rolled_back"})
+            self.store.rebuild_index()
+            render_library(self.root, self.library)
+            self._discard_deletion(journal.parent)
 
     def _markers(self):
         path = _safe_path(self.root / "deleted_case_sources.json", self.root)
@@ -127,7 +193,7 @@ class DeletionManager:
             keys.add(key)
         return data, _stamp(path, content=True)
 
-    def _write_markers(self, source_ids, expected_stamp):
+    def _write_markers(self, source_ids, expected_stamp, destination=None):
         if not source_ids:
             return
         data, stamp = self._markers()
@@ -141,8 +207,8 @@ class DeletionManager:
                 data["sources"].append({"library_id": library_id, "source_root": str(self.source_root),
                                         "case_id": identifier, "deleted_at": now})
                 known.add(key)
-        destination = _safe_path(self.root / "deleted_case_sources.json", self.root)
-        descriptor, temporary = tempfile.mkstemp(prefix=".deleted-sources-", suffix=".tmp", dir=self.root)
+        destination = _safe_path(destination or self.root / "deleted_case_sources.json", self.root)
+        descriptor, temporary = tempfile.mkstemp(prefix=".deleted-sources-", suffix=".tmp", dir=destination.parent)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
                 json.dump(data, stream, ensure_ascii=False, indent=2)
@@ -288,13 +354,13 @@ class DeletionManager:
     def preview(self, case_id, include_source=False):
         return self._plan(case_id, include_source)[0]
 
-    def _unlink(self, file):
+    def _deletion_path(self, file):
         path = _safe_path(Path(file["path"]), Path(file["root"]))
         if _stamp(path, content=file["kind"] in {"record", "reading"}) != file["stamp"]:
             raise DeletionError("删除期间文件已变化，请重新查看删除范围：" + str(path), 409)
         if not path.is_file() or path.stat().st_nlink != 1:
             raise DeletionError("删除期间文件类型或链接数量发生变化：" + str(path), 409)
-        path.unlink()
+        return path
 
     def _empty_dirs(self, directories, root):
         for entry in sorted(directories, key=lambda item: len(Path(item["path"]).parts), reverse=True):
@@ -307,52 +373,51 @@ class DeletionManager:
         public, plan = self._plan(case_id, include_source)
         if revision != public["revision"] or plan_token != public["plan_token"]:
             raise DeletionError("案例或删除范围已变化，请重新查看删除清单后确认。", 409)
-        records = [file for file in plan["files"] if file["kind"] == "record"]
+        work = _safe_path(self._delete_work / uuid4().hex, self.root)
+        work.mkdir(parents=True)
+        journal = work / "transaction.json"
+        roots = {"record": self.store.folder(case_id), "reading": self.library / case_id, "evidence": self.evidence}
+        files = [(file["kind"], str(Path(file["path"]).relative_to(roots[file["kind"]]))) for file in plan["files"]]
+        transaction = {"case_id": case_id, "runtime": str(self.runtime), "state": "applying", "files": files}
+        marker = _safe_path(self.root / "deleted_case_sources.json", self.root)
+        marker_new = work / "new-markers"
         count = 0
-        # Evidence and generated documents go first. If one is locked, the
-        # complete case record is still present and can be retried safely.
         try:
-            self._write_markers(plan["source_ids"], plan["marker_stamp"])
-            for file in plan["files"]:
-                if file["kind"] != "record":
-                    self._unlink(file)
-                    count += 1
+            if plan["source_ids"]:
+                self._write_markers(plan["source_ids"], plan["marker_stamp"], marker_new)
+                transaction["new_marker_digest"] = hashlib.sha256(marker_new.read_bytes()).hexdigest()
+                if marker.exists():
+                    transaction["original_marker_digest"] = hashlib.sha256(marker.read_bytes()).hexdigest()
+            durable_json(journal, transaction)
+            for number, (file, (kind, relative)) in enumerate(zip(plan["files"], files)):
+                path, saved = self._delete_locations(work, case_id, number, kind, relative)
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                if self._deletion_path(file) != path:
+                    raise DeletionError("案例删除目标在校验期间发生变化。", 409)
+                os.replace(path, saved)
+                count += 1
             self._empty_dirs(plan["reading_dirs"], self.library)
+            self._empty_dirs(plan["record_dirs"], self.root / "cases")
+            if plan["source_ids"]:
+                if self._markers()[1] != plan["marker_stamp"]:
+                    raise DeletionError("删除登记已发生变化，请重新预览。", 409)
+                if marker.exists():
+                    os.replace(marker, work / "original-markers")
+                os.replace(marker_new, marker)
             if self.source_handler:
                 source_result = self.source_handler.execute(plan["source"])
                 count += (source_result or {}).get("deleted_file_count", len(plan["source"].get("files", [])))
-        except (OSError, StoreError) as exc:
-            status = exc.status if isinstance(exc, DeletionError) else 500
-            raise DeletionError(f"尚未删除案例记录；已清理 {count} 个资料文件。请处理问题后重新预览：{exc}", status) from exc
-        # Retain record bytes only in memory for rollback of an unlink failure;
-        # no content backup, trash directory or retained history is written.
-        memory = {file["path"]: Path(file["path"]).read_bytes() for file in records}
-        try:
-            for file in records:
-                self._unlink(file)
-                count += 1
-            self._empty_dirs(plan["record_dirs"], self.root / "cases")
-        except (OSError, StoreError) as exc:
-            restored = True
-            for raw, content in memory.items():
-                try:
-                    path = _safe_path(Path(raw), self.root / "cases" / case_id)
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    if not path.exists():
-                        with path.open("xb") as stream:
-                            stream.write(content)
-                            stream.flush()
-                            os.fsync(stream.fileno())
-                except (OSError, StoreError):
-                    restored = False
+            durable_json(journal, {**transaction, "state": "committed"})
+        except Exception as exc:
             try:
-                self.store.rebuild_index()
-            except (OSError, StoreError):
-                restored = False
-            message = "案例记录已恢复，请重新预览后重试。" if restored else "案例记录未能完整恢复，请先检查本地记录并修复目录。"
-            raise DeletionError(f"删除未完成，{message} 原因：{exc}", 500) from exc
-        finally:
-            memory.clear()
+                if journal.is_file():
+                    self._rollback_deletion(work, transaction)
+                    durable_json(journal, {**transaction, "state": "rolled_back"})
+                self._discard_deletion(work)
+            except (OSError, StoreError) as rollback_error:
+                raise DeletionError(f"案例删除未完成，请保留恢复目录 {work.name}：{rollback_error}", 500) from exc
+            status = exc.status if isinstance(exc, DeletionError) else 500
+            raise DeletionError(f"案例记录及附件已恢复，请重新预览后重试：{exc}", status) from exc
         warnings = []
         try:
             self.store.rebuild_index()
@@ -363,5 +428,10 @@ class DeletionManager:
                 render_library(self.root, self.library)
             except Exception:
                 warnings.append("原始记录与列出的附件已删除，但阅读目录中仍有残留内容，请重新同步完成清理。")
+        if not warnings:
+            try:
+                self._discard_deletion(work)
+            except (OSError, StoreError) as exc:
+                warnings.append(f"案例已删除，暂存文件清理将在下次启动时重试：{exc}")
         return {"deleted": True, "case_id": case_id, "deleted_file_count": count,
                 "retained": public["retained"], "warning": " ".join(warnings) or None}

@@ -1,0 +1,251 @@
+{
+	Tools = ordered() {
+		TikTokReplyComment = MacroOperator {
+			CtrlWZoom = false,
+			NameSet = true,
+			CustomData = {
+				HelpPage = "TikTok 回复评论贴纸（匿名版）：上面一行灰字，下面加粗评论。卡片宽高跟着文字自动变；评论要换行时在评论原文里按回车。",
+			},
+			Inputs = ordered() {
+				Label = InstanceInput {
+					SourceOp = "Username",
+					Source = "StyledText",
+					Name = "上面一行（灰字）",
+					Default = "Reply to a viewer's comment",
+				},
+				CommentText = InstanceInput {
+					SourceOp = "Comment",
+					Source = "StyledText",
+					Name = "评论原文",
+					Default = "Does this really work?",
+				},
+				CommentSize = InstanceInput {
+					SourceOp = "Comment",
+					Source = "Size",
+					Name = "评论字号",
+					Default = 0.032,
+				},
+				Position = InstanceInput {
+					SourceOp = "Place",
+					Source = "Center",
+					Name = "整体位置",
+				},
+				Scale = InstanceInput {
+					SourceOp = "Place",
+					Source = "Size",
+					Name = "整体大小",
+					Default = 1,
+				},
+			},
+			Outputs = {
+				MainOutput1 = InstanceOutput {
+					SourceOp = "Place",
+					Source = "Output",
+				}
+			},
+			ViewInfo = GroupInfo { Pos = { 0, 0 } },
+			Tools = ordered() {
+				CardShape = RectangleMask {
+					Inputs = {
+						Filter = Input { Value = FuID { "Fast Gaussian" }, },
+						MaskWidth = Input { Value = 1080, },
+						MaskHeight = Input { Value = 1920, },
+						PixelAspect = Input { Value = { 1, 1 }, },
+						UseFrameFormatSettings = Input { Value = 1, },
+						ClippingMode = Input { Value = FuID { "None" }, },
+						Center = Input { Value = { 0.5, 0.64 }, Expression = "Point(0.16 + CardShape.Width / 2, 0.64 - (CardShape.Height - 0.087) / 2)", },
+						Width = Input { Value = 0.68, Expression = ":local function widest(s, k) local m = 0 for l in (s .. \"\\n\"):gmatch(\"(.-)\\n\") do m = math.max(m, #l) end return m * k end local c = widest(Comment.StyledText.Value, 0.5 * Comment.Size * 0.7065) + 0.03 local u = widest(Username.StyledText.Value, 0.47 * Username.Size * 0.7065) + 0.059 return math.min(0.68, math.max(c, u) + 0.03)", },
+						Height = Input { Value = 0.087, Expression = ":local _, n = Comment.StyledText.Value:gsub(\"\\n\", \"\") return 0.087 + n * 0.015625 * Comment.Size / 0.034", },
+						CornerRadius = Input { Value = 0.2, }
+					},
+					ViewInfo = OperatorInfo { Pos = { 165, 16.5 } },
+				},
+				Card = Background {
+					Inputs = {
+						Width = Input { Value = 1080, },
+						Height = Input { Value = 1920, },
+						UseFrameFormatSettings = Input { Value = 1, },
+						TopLeftRed = Input { Value = 0.98, },
+						TopLeftGreen = Input { Value = 0.98, },
+						TopLeftBlue = Input { Value = 0.98, },
+						EffectMask = Input {
+							SourceOp = "CardShape",
+							Source = "Mask",
+						}
+					},
+					ViewInfo = OperatorInfo { Pos = { 55, 16.5 } },
+				},
+				MessageTailShape = TriangleMask {
+					Inputs = {
+						Filter = Input { Value = FuID { "Fast Gaussian" }, },
+						MaskWidth = Input { Value = 1080, },
+						MaskHeight = Input { Value = 1920, },
+						PixelAspect = Input { Value = { 1, 1 }, },
+						UseFrameFormatSettings = Input { Value = 1, },
+						ClippingMode = Input { Value = FuID { "None" }, },
+						Point1 = Input { Value = { 0.171, 0.615 }, Expression = "Point(0.171, 0.615 - (CardShape.Height - 0.087))", },
+						Point2 = Input { Value = { 0.16, 0.59 }, Expression = "Point(0.16, 0.59 - (CardShape.Height - 0.087))", },
+						Point3 = Input { Value = { 0.207, 0.598 }, Expression = "Point(0.207, 0.598 - (CardShape.Height - 0.087))", }
+					},
+					ViewInfo = OperatorInfo { Pos = { 275, 148.5 } },
+				},
+				MessageTail = Background {
+					Inputs = {
+						Width = Input { Value = 1080, },
+						Height = Input { Value = 1920, },
+						UseFrameFormatSettings = Input { Value = 1, },
+						TopLeftRed = Input { Value = 0.98, },
+						TopLeftGreen = Input { Value = 0.98, },
+						TopLeftBlue = Input { Value = 0.98, },
+						EffectMask = Input {
+							SourceOp = "MessageTailShape",
+							Source = "Mask",
+						}
+					},
+					ViewInfo = OperatorInfo { Pos = { 55, 181.5 } },
+				},
+				BubbleWithTail = Merge {
+					Inputs = {
+						Background = Input {
+							SourceOp = "Card",
+							Source = "Output",
+						},
+						Foreground = Input {
+							SourceOp = "MessageTail",
+							Source = "Output",
+						},
+						PerformDepthMerge = Input { Value = 0, }
+					},
+					ViewInfo = OperatorInfo { Pos = { 165, 181.5 } },
+				},
+				AvatarCircle = EllipseMask {
+					Inputs = {
+						Filter = Input { Value = FuID { "Fast Gaussian" }, },
+						MaskWidth = Input { Value = 1080, },
+						MaskHeight = Input { Value = 1920, },
+						PixelAspect = Input { Value = { 1, 1 }, },
+						UseFrameFormatSettings = Input { Value = 1, },
+						ClippingMode = Input { Value = FuID { "None" }, },
+						Center = Input { Value = { 0.197, 0.654 }, },
+						Width = Input { Value = 0.03, },
+						Height = Input { Value = 0.03, }
+					},
+					ViewInfo = OperatorInfo { Pos = { 165, 49.5 } },
+				},
+				AvatarColor = Background {
+					Inputs = {
+						Width = Input { Value = 1080, },
+						Height = Input { Value = 1920, },
+						UseFrameFormatSettings = Input { Value = 1, },
+						TopLeftRed = Input { Value = 0.8, },
+						TopLeftGreen = Input { Value = 0.8, },
+						TopLeftBlue = Input { Value = 0.8, },
+						EffectMask = Input {
+							SourceOp = "AvatarCircle",
+							Source = "Mask",
+						}
+					},
+					ViewInfo = OperatorInfo { Pos = { 55, 49.5 } },
+				},
+				Merge1 = Merge {
+					Inputs = {
+						Background = Input {
+							SourceOp = "BubbleWithTail",
+							Source = "Output",
+						},
+						Foreground = Input {
+							SourceOp = "AvatarColor",
+							Source = "Output",
+						},
+						PerformDepthMerge = Input { Value = 0, }
+					},
+					ViewInfo = OperatorInfo { Pos = { 275, 49.5 } },
+				},
+				Username = TextPlus {
+					Inputs = {
+						Width = Input { Value = 1080, },
+						Height = Input { Value = 1920, },
+						UseFrameFormatSettings = Input { Value = 1, },
+						Wrap = Input { Value = 1, },
+						Center = Input { Value = { 0.219, 0.654 }, },
+						LayoutRotation = Input { Value = 1, },
+						TransformRotation = Input { Value = 1, },
+						Red1 = Input { Value = 0.54, },
+						Green1 = Input { Value = 0.54, },
+						Blue1 = Input { Value = 0.55, },
+						Softness1 = Input { Value = 1, },
+						StyledText = Input { Value = "Reply to a viewer's comment", },
+						Font = Input { Value = "Arial", },
+						Style = Input { Value = "Regular", },
+						Size = Input { Value = 0.021, },
+						VerticalJustificationNew = Input { Value = 3, },
+						HorizontalLeftCenterRight = Input { Value = -1, },
+						HorizontalJustificationNew = Input { Value = 3, }
+					},
+					ViewInfo = OperatorInfo { Pos = { 55, 115.5 } },
+				},
+				Merge3 = Merge {
+					Inputs = {
+						Background = Input {
+							SourceOp = "Merge1",
+							Source = "Output",
+						},
+						Foreground = Input {
+							SourceOp = "Username",
+							Source = "Output",
+						},
+						PerformDepthMerge = Input { Value = 0, }
+					},
+					ViewInfo = OperatorInfo { Pos = { 165, 115.5 } },
+				},
+				Comment = TextPlus {
+					Inputs = {
+						Width = Input { Value = 1080, },
+						Height = Input { Value = 1920, },
+						UseFrameFormatSettings = Input { Value = 1, },
+						Wrap = Input { Value = 1, },
+						Center = Input { Value = { 0.19, 0.627 }, Expression = "Point(0.19, 0.627 - (CardShape.Height - 0.087) / 2)", },
+						LayoutRotation = Input { Value = 1, },
+						TransformRotation = Input { Value = 1, },
+						Red1 = Input { Value = 0.08, },
+						Green1 = Input { Value = 0.08, },
+						Blue1 = Input { Value = 0.09, },
+						Softness1 = Input { Value = 1, },
+						StyledText = Input { Value = "Does this really work?", },
+						Font = Input { Value = "Arial", },
+						Style = Input { Value = "Bold", },
+						Size = Input { Value = 0.032, },
+						VerticalJustificationNew = Input { Value = 3, },
+						HorizontalLeftCenterRight = Input { Value = -1, },
+						HorizontalJustificationNew = Input { Value = 3, }
+					},
+					ViewInfo = OperatorInfo { Pos = { 55, 148.5 } },
+				},
+				Merge4 = Merge {
+					Inputs = {
+						Background = Input {
+							SourceOp = "Merge3",
+							Source = "Output",
+						},
+						Foreground = Input {
+							SourceOp = "Comment",
+							Source = "Output",
+						},
+						PerformDepthMerge = Input { Value = 0, }
+					},
+					ViewInfo = OperatorInfo { Pos = { 165, 148.5 } },
+				},
+				Place = Transform {
+					Inputs = {
+						Input = Input {
+							SourceOp = "Merge4",
+							Source = "Output",
+						},
+					},
+					ViewInfo = OperatorInfo { Pos = { 275, 148.5 } },
+				}
+			},
+		}
+	},
+	ActiveTool = "TikTokReplyComment"
+}

@@ -52,7 +52,13 @@ MAX_PICKS = 500
 # The longest note a picked quote can carry; the material basket uses the same limit for every note.
 NOTE_LIMIT = 2000
 PLATFORMS = tuple(PLATFORM_LABELS)
+# Says something about a product: tied to one, and tagged by the rules (or by hand) with anything but 无信息.
+_INFORMATIVE = ("(COALESCE(r.product, '') != '' AND EXISTS (SELECT 1 FROM review_tags t WHERE t.review_id = r.id "
+                "AND t.kind IN ('nature', 'topic') AND NOT (t.kind = 'nature' AND t.tag = 'noise')))")
 SORTS = {
+    # The page's default: what is about a product and says something comes first, then by likes. Sorting only by
+    # likes put viral jokes under other people's videos ahead of every product comment.
+    "useful": f"{_INFORMATIVE} DESC, r.likes IS NULL, r.likes DESC, r.posted_on DESC",
     "likes": "r.likes IS NULL, r.likes DESC, r.posted_on DESC",
     "newest": "r.posted_on IS NULL, r.posted_on DESC",
     "oldest": "r.posted_on IS NULL, r.posted_on ASC",
@@ -77,7 +83,7 @@ DIGEST_NOTES = {
     "unanswered_questions": "TikTok 观众的提问，库里没有任何回复（含修辞性质疑）；能用真实画面回答的可作选题。",
     "buyer_results": "买家怎么描述结果和使用场景，只作语言参照。",
     "learning_curve": "买家写到的上手节奏和学习曲线。",
-    "user_picks": "用户亲手从评论库里摘出来的评论；note 是用户自己写的备注，不是评论内容。比自动挑出来的更值得看。",
+    "user_picks": "用户亲手从评论库里摘出来的评论（含用户选来做过图文评论贴纸的，used_as 写着用在哪）；note 是用户自己写的备注，不是评论内容。比自动挑出来的更值得看。",
 }
 
 SCHEMA = """
@@ -132,12 +138,21 @@ CODE_SIGNATURE = _code_signature()
 TAG_KINDS = {"nature": NATURE, "topic": TOPIC, "competitor": COMPETITOR}
 
 
+def _used(pick):
+    """Where a picked quote went out as a comment sticker (a fresh list; bad entries left out)."""
+    used = (pick or {}).get("used") if isinstance(pick, dict) else None
+    return [dict(item) for item in used if isinstance(item, dict) and item.get("key")] if isinstance(used, list) else []
+
+
 class ReviewState:
     """What people have done to the library, kept in its own file because the database is rebuilt from the sources and
     may be deleted at any time:
       seen   review id -> the day a sync first saw it ("" for reviews that were already there when tracking began)
       tags   review id -> kind -> tag -> True (added by hand) / False (removed by hand)
-      picks  review id -> {"note": ..., "added": ...}: quotes picked for a script
+      picks  review id -> {"note": ..., "added": ..., "used": [...]}: quotes picked for a script; "used" lists where a
+             quote went out as a comment sticker (see note_used), added on its own when a 图文 is finalized
+      video_products  TikTok video id -> product: what a video with no product in the sources is about, set by hand
+      used_handed  place key -> review ids already put in the basket from that place, so one taken out by hand stays out
     """
 
     def __init__(self, path):
@@ -147,7 +162,7 @@ class ReviewState:
 
     @staticmethod
     def empty():
-        return {"version": 1, "seen": {}, "tags": {}, "picks": {}}
+        return {"version": 1, "seen": {}, "tags": {}, "picks": {}, "video_products": {}, "used_handed": {}}
 
     def exists(self):
         return self.path.is_file()
@@ -162,7 +177,7 @@ class ReviewState:
         if not isinstance(data, dict):
             raise ReviewError(f"手动记录文件格式不对：{self.path}")
         state = self.empty()
-        for key in ("seen", "tags", "picks"):
+        for key in ("seen", "tags", "picks", "video_products", "used_handed"):
             if isinstance(data.get(key), dict):
                 state[key] = data[key]
         return state
@@ -237,6 +252,12 @@ def describe_query(text):
     return {"expanded": expanded, "unmapped": [t["term"] for t in terms if t["chinese"] and not t["groups"]]}
 
 
+def _fingerprint(row):
+    """Same as review_translations.fingerprint: which source text a translation belongs to."""
+    source = {key: row.get(key) or "" for key in ("text", "title")}
+    return hashlib.sha256(json.dumps(source, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def _like(value):
     return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
@@ -249,8 +270,16 @@ def _contains(value):
     return "(r.text LIKE ? ESCAPE '\\' OR COALESCE(r.title,'') LIKE ? ESCAPE '\\')", [like, like]
 
 
-def _term_sql(term):
-    """WHERE fragment and parameters for one search term."""
+def _term_sql(term, zh_ids=None):
+    """WHERE fragment and parameters for one search term. A Chinese term also finds reviews whose Chinese
+    translation contains it (zh_ids, from reviews/translations.json)."""
+    sql, params = _term_sql_source(term)
+    if zh_ids is None:
+        return sql, params
+    return f"({sql} OR r.id IN (SELECT value FROM json_each(?)))", params + [json.dumps(zh_ids)]
+
+
+def _term_sql_source(term):
     literal = _contains(term["term"])
     if not term["groups"]:
         return literal
@@ -388,6 +417,28 @@ class ReviewStore:
         self.lock = threading.Lock()
         self.avatars = ReviewAvatars(self.root)
         self.avatar_downloads = False  # the running workbench turns this on; tests and scripts never touch the network
+        self._zh = (None, {})  # (file signature, id -> {"fingerprint", "zh", "title_zh"}) read from translations.json
+
+    def translations(self):
+        """The Chinese translations kept by review_translations.py, re-read only when the file changes."""
+        path = self.root / "translations.json"
+        try:
+            stat = path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return {}
+        if self._zh[0] != signature:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+            self._zh = (signature, {key: value for key, value in data.items() if isinstance(value, dict)} if isinstance(data, dict) else {})
+        return self._zh[1]
+
+    def _zh_ids(self, term):
+        """Reviews whose Chinese translation (title or body) contains this text."""
+        return [identifier for identifier, entry in self.translations().items()
+                if term in str(entry.get("zh") or "") or term in str(entry.get("title_zh") or "")]
 
     def refresh_avatars(self):
         if self.avatar_downloads:
@@ -543,7 +594,18 @@ class ReviewStore:
         except (OSError, ValueError):
             return {}
 
+    on_added = None  # called (outside the lock) when a sync brings in new reviews; the workbench translates them
+
     def sync(self, force=False):
+        result = self._sync(force)
+        if result.get("added") and self.on_added:
+            try:
+                self.on_added()
+            except Exception:
+                pass  # translating is a convenience; the sync itself has already succeeded
+        return result
+
+    def _sync(self, force=False):
         """Rebuild the library from the raw exports and apply again what people did to it (see ReviewState).
         Never raises for a bad file."""
         files = self.source_files()
@@ -576,14 +638,19 @@ class ReviewStore:
                         fts = True
                     except sqlite3.OperationalError:
                         fts = False
+                    video_products = state.get("video_products") or {}
                     for identifier, (platform, path, record) in merged.items():
                         parent = review_id(platform, record["parent_native"]) if record["parent_native"] else None
+                        product = record.get("product", PRODUCT)
+                        if platform == "tiktok_video" and not product and isinstance(video_products.get(record["source_ref"]), str):
+                            # The sources did not say which product this video is about; somebody did, by hand.
+                            product = video_products[record["source_ref"]]
                         nature, topics, language = classify(record["text"], title=record["title"] or "", rating=record["rating"],
                                                             role=record["role"], is_reply=bool(record["is_reply"]))
                         cursor = connection.execute(
                             "INSERT INTO reviews (id, platform, product, role, posted_on, rating, title, text, language, likes, is_reply, parent_id, sku, verified, incentivized, media_count, relevant, source_ref, context, url, source_file, first_seen, author_name, author_handle) "
                             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            (identifier, platform, record.get("product", PRODUCT), record["role"], record["posted_on"], record["rating"], record["title"], record["text"], language,
+                            (identifier, platform, product, record["role"], record["posted_on"], record["rating"], record["title"], record["text"], language,
                              record["likes"], record["is_reply"], parent, record["sku"], record["verified"], record["incentivized"], record["media_count"],
                              record["relevant"], record["source_ref"], record["context"], record["url"], path.name, seen.get(identifier) or None,
                              record.get("author_name") or "", record.get("author_handle") or ""))
@@ -666,8 +733,16 @@ class ReviewStore:
             where.append("r.sku = ?")
             params.append(query["sku"])
         if query.get("product"):
-            where.append("product_key(r.product) = ?")
+            # Comments under videos no product is known for (mostly benchmark videos) count for every product (2026-11-19),
+            # unless the page asks to fold them away.
+            if query.get("exclude_unlinked") and not query.get("video"):
+                where.append("product_key(r.product) = ?")
+            else:
+                where.append("(product_key(r.product) = ? OR COALESCE(r.product, '') = '')")
             params.append(_product_key(query["product"]))
+        elif query.get("exclude_unlinked") and not query.get("video"):
+            # Folded away only when asked for; one video's comments always show.
+            where.append("COALESCE(r.product, '') != ''")
         for kind, valid in TAG_KINDS.items():
             for tag in many(kind):
                 if tag == "none":  # not tagged at all: the rules found nothing to say about it
@@ -697,7 +772,7 @@ class ReviewStore:
             # Only TikTok video comments record who answered whom, so the filter is limited to those.
             where.append(f"(r.platform = 'tiktok_video' AND r.is_reply = 0 AND {'' if replied == 'yes' else 'NOT '}EXISTS (SELECT 1 FROM reviews c WHERE c.parent_id = r.id))")
         for term in parse_query((query.get("q") or "").strip()):
-            sql, values = _term_sql(term)
+            sql, values = _term_sql(term, self._zh_ids(term["term"]) if term["chinese"] else None)
             where.append(sql)
             params += values
         return " AND ".join(where), params
@@ -720,9 +795,14 @@ class ReviewStore:
                 replies[row["parent_id"]] = {"total": row["n"], "brand": row["brand"] or 0}
         top_ids = set(tops)
         avatars = self.avatars.keys_with_files()
+        translated = self.translations()
         result = []
         for r in rows:
             item = dict(r)
+            # The Chinese translation, when it was made from this exact text (an edited source drops it until retranslated).
+            zh = translated.get(r["id"])
+            if zh and "text" in item and zh.get("fingerprint") == _fingerprint(item):
+                item["zh"], item["title_zh"] = str(zh.get("zh") or ""), str(zh.get("title_zh") or "")
             key = author_key(r["platform"], r["author_handle"], r["author_name"]) if "author_handle" in r.keys() else None
             item["avatar"] = key if key in avatars else None
             item["tags"] = tags.get(r["id"], {kind: [] for kind in TAG_KINDS})
@@ -730,7 +810,7 @@ class ReviewStore:
             # tag -> True / False for the tags somebody added / removed by hand on this review
             item["manual"] = {kind: dict(changes) for kind, changes in (state["tags"].get(r["id"]) or {}).items() if isinstance(changes, dict) and changes}
             pick = state["picks"].get(r["id"])
-            item["pick"] = {"note": str(pick.get("note") or ""), "added": pick.get("added")} if isinstance(pick, dict) else None
+            item["pick"] = {"note": str(pick.get("note") or ""), "added": pick.get("added"), "used": _used(pick)} if isinstance(pick, dict) else None
             result.append(item)
         return result
 
@@ -760,8 +840,12 @@ class ReviewStore:
                             f"SELECT COUNT(*) FROM reviews r WHERE {where} AND NOT EXISTS (SELECT 1 FROM review_tags t WHERE t.review_id = r.id AND t.kind = ?)", params + [kind]).fetchone()[0]
                         if untagged:
                             facets[kind]["none"] = untagged
+                hidden = 0
+                if query.get("exclude_unlinked") and not query.get("video"):
+                    where_all, params_all = self._filters({**query, "exclude_unlinked": False})
+                    hidden = connection.execute(f"SELECT COUNT(*) FROM reviews r WHERE {where_all}", params_all).fetchone()[0] - total
                 return {"total": total, "offset": offset, "limit": limit, "reviews": self._hydrate(connection, rows), "facets": facets,
-                        "query": describe_query(query.get("q"))}
+                        "query": describe_query(query.get("q")), "unlinked_hidden": hidden}
             finally:
                 connection.close()
 
@@ -821,10 +905,13 @@ class ReviewStore:
         counts them, without brand replies) and how many questions nobody answered."""
         base = "r.relevant = 1 AND r.role != 'brand_account' AND LENGTH(r.text) > 0"
         rows = connection.execute(
-            "SELECT r.source_ref AS video_id, COUNT(*) AS comments, MAX(r.posted_on) AS last_comment, "
+            "SELECT r.source_ref AS video_id, COUNT(*) AS comments, MAX(r.posted_on) AS last_comment, MAX(r.url) AS url, "
             f"SUM(CASE WHEN r.is_reply = 0 AND {_tagged('nature', ('question',))} AND NOT EXISTS (SELECT 1 FROM reviews c WHERE c.parent_id = r.id) THEN 1 ELSE 0 END) AS open_questions "
             f"FROM reviews r WHERE r.platform = 'tiktok_video' AND r.source_ref IS NOT NULL AND {base} GROUP BY r.source_ref ORDER BY comments DESC, r.source_ref")
-        return [{"video_id": r["video_id"], "comments": r["comments"], "open_questions": r["open_questions"] or 0, "last_comment": r["last_comment"]} for r in rows]
+        # The account that posted the video, read off its comment links, names a video the sales data does not know.
+        handle = lambda url: (re.search(r"tiktok\.com/@([^/?#]+)/video/", url or "") or [None, ""])[1]
+        return [{"video_id": r["video_id"], "comments": r["comments"], "open_questions": r["open_questions"] or 0, "last_comment": r["last_comment"],
+                 "handle": handle(r["url"])} for r in rows]
 
     def video_counts(self):
         """video id -> comment counts, for pages that list videos. Brings the library up to date first, the way the review pages
@@ -882,6 +969,27 @@ class ReviewStore:
             finally:
                 connection.close()
 
+    def set_video_product(self, video, product):
+        """Say which product a TikTok video with no known product is about ("" to undo). Kept in the records file and
+        applied on every rebuild; comments the sources already tie to a product keep theirs."""
+        video = str(video or "")
+        if not re.fullmatch(r"\d{6,25}", video):
+            raise ReviewError("视频编号无效")
+        if not isinstance(product, str) or len(product.strip()) > 80:
+            raise ReviewError("产品名无效")
+        product = product.strip()
+
+        def change(data):
+            mapping = data.setdefault("video_products", {})
+            if product:
+                mapping[video] = product
+            else:
+                mapping.pop(video, None)
+        with self.lock:
+            self._edit_state(change)
+        self.sync(force=True)
+        return {"video": video, "product": product}
+
     def tag_edits(self):
         """Every tag changed by hand, with the review's text: what the rules got wrong, for tuning them."""
         with self.lock:
@@ -929,7 +1037,8 @@ class ReviewStore:
                     raise ReviewError(f"素材篮里的评论摘录最多 {MAX_PICKS} 条")
                 current = picks.get(identifier) if isinstance(picks.get(identifier), dict) else {}
                 picks[identifier] = {"note": str(current.get("note") or "") if note is None else note.strip(),
-                                     "added": current.get("added") or datetime.now().isoformat(timespec="microseconds")}
+                                     "added": current.get("added") or datetime.now().isoformat(timespec="microseconds"),
+                                     **({"used": _used(current)} if _used(current) else {})}
                 outcome["pick"] = picks[identifier]
             data = self._edit_state(change)
             return {"pick": outcome["pick"], "picks": len(data["picks"])}
@@ -958,8 +1067,65 @@ class ReviewStore:
                         if len(picks) >= MAX_PICKS:
                             raise ReviewError(f"素材篮里的评论摘录最多 {MAX_PICKS} 条")
                         picks[identifier] = {"note": str(pick.get("note") or ""),
-                                             "added": pick.get("added") or datetime.now().isoformat(timespec="microseconds")}
+                                             "added": pick.get("added") or datetime.now().isoformat(timespec="microseconds"),
+                                             **({"used": _used(pick)} if _used(pick) else {})}
             self._edit_state(change)
+
+    def note_used(self, uses):
+        """Put quotes that went out as comment stickers into the basket, remembering where each was used. uses is a list
+        of (review id, source dict with a "key" that names the place, e.g. one 图文 version). A quote already in the basket
+        keeps its note and time and only gains the new place; the same place is never listed twice. Reviews no longer in
+        the library, and new quotes once the basket is full, are left out; a quote this place already handed over and
+        that was taken out by hand is not brought back ("handed"). Returns the ids added, the ids that were already
+        there, the ids handed over before, and the ids left out."""
+        uses = [(str(identifier), dict(source)) for identifier, source in uses if identifier and isinstance(source, dict) and source.get("key")]
+        outcome = {"added": [], "kept": [], "handed": [], "skipped": []}
+        if not uses:
+            return outcome
+        with self.lock:
+            ids = list(dict.fromkeys(identifier for identifier, _ in uses))
+            known = set()
+            if self.database.is_file():
+                connection = self.connect()
+                try:
+                    for i in range(0, len(ids), 500):
+                        chunk = ids[i:i + 500]
+                        known.update(row[0] for row in connection.execute(f"SELECT id FROM reviews WHERE id IN ({','.join('?' * len(chunk))})", chunk))
+                finally:
+                    connection.close()
+
+            def change(data):
+                picks = data["picks"]
+                handed = data.setdefault("used_handed", {})
+                for identifier, source in uses:
+                    if identifier not in known:
+                        outcome["skipped"].append(identifier)
+                        continue
+                    pick = picks.get(identifier) if isinstance(picks.get(identifier), dict) else None
+                    given = handed.get(source["key"]) if isinstance(handed.get(source["key"]), list) else []
+                    if pick is None and identifier in given:
+                        outcome["handed"].append(identifier)
+                        continue
+                    if identifier not in given:
+                        handed[source["key"]] = [*given, identifier]
+                    if pick is None:
+                        if len(picks) >= MAX_PICKS:
+                            outcome["skipped"].append(identifier)
+                            continue
+                        pick = picks[identifier] = {"note": "", "added": datetime.now().isoformat(timespec="microseconds")}
+                        outcome["added"].append(identifier)
+                    elif identifier not in outcome["added"]:
+                        outcome["kept"].append(identifier)
+                    used = _used(pick)
+                    if not any(item.get("key") == source["key"] for item in used):
+                        used.append(source)
+                    pick["used"] = used
+            if known:
+                self._edit_state(change)
+            else:
+                outcome["skipped"] = ids
+        outcome = {name: list(dict.fromkeys(values)) for name, values in outcome.items()}
+        return outcome
 
     def set_pick_notes(self, notes):
         """Set the notes of several picked quotes in one write; quotes no longer picked are left out."""
@@ -1086,7 +1252,9 @@ class ReviewStore:
         if picked:
             by_id = picked_rows
             digest["user_picks"] = [{"id": i, "source": PLATFORM_LABELS[by_id[i]["platform"]], "who": ROLE_LABELS[by_id[i]["role"]], "date": by_id[i]["posted_on"],
-                                     "quote": excerpt(by_id[i]["text"], limit=260), "note": str(picks[i].get("note") or "")} for i in picked if i in by_id]
+                                     "quote": excerpt(by_id[i]["text"], limit=260), "note": str(picks[i].get("note") or ""),
+                                     **({"used_as": [item.get("label") for item in _used(picks[i]) if item.get("label")][:3]} if _used(picks[i]) else {})}
+                                    for i in picked if i in by_id]
         digest["read_me"] = DIGEST_NOTES
         # Stay inside the size a prompt can carry: drop the tail of the longest list, keeping at least two in each.
         while len(json.dumps(digest, ensure_ascii=False)) > max_chars:

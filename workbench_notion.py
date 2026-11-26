@@ -16,14 +16,18 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from uuid import uuid4
 
 from direction_store import fingerprint, now
 from elevenlabs_client import VoiceError
-from notion_bridge import NotionBridge, UPLOAD_LIMIT, notion_id, page_properties, send_video
+from feishu_sync import FeishuError, FeishuSync
+from file_identity import file_identity
+from notion_bridge import NotionBridge, UPLOAD_LIMIT, notion_id, page_properties, query_allowance_message, send_video
 from production_operations import file_lock
 from production_store import active_timelines, timeline_running
+from release_naming import release_filename, release_name
 from workbench_video_publish import VideoPublicationStore
 
 
@@ -57,7 +61,9 @@ def photo_markdown(source):
         return f"{fence}text\n{value}\n{fence}"
     parts = []
     if source.get("caption_en"):
-        parts += ["## 英文文案", block(source["caption_en"])]
+        # 德语、西语图文的正文也放在 caption_en；copy.json 的 market 说是哪种语言（2026-11-23）。
+        heading = {"DE": "德语文案", "ES": "西语文案"}.get(str(source.get("market") or "").upper(), "英文文案")
+        parts += [f"## {heading}", block(source["caption_en"])]
     if source.get("caption_zh"):
         parts += ["## 中文文案", block(source["caption_zh"])]
     slides = source.get("slides") or []
@@ -112,6 +118,33 @@ class NotionUploadStore(VideoPublicationStore):
         self.path = self.root / "catalog.json"
 
     def read(self):
+        """Validated receipts, parsed once per file version.
+
+        Checking every managed video path resolves each one on disk; on Windows
+        that is several handle opens per receipt and made every task list,
+        content view and upload dialog wait on it. A changed file identity
+        (size, write or change time) re-reads and re-validates; the upload
+        itself still re-checks its file through managed_path.
+        """
+        try:
+            identity = file_identity(self.path)
+        except FileNotFoundError:
+            return {"schema_version": 1, "uploads": {}}
+        except OSError:
+            raise VoiceError(500, "Notion 上传记录无法读取，请保留资料并核对备份。") from None
+        cached = getattr(self, "_parsed", None)
+        if cached is None or cached[0] != identity:
+            data = self._read_validated()
+            try:
+                if file_identity(self.path) == identity:
+                    self._parsed = cached = (identity, data)
+                else:
+                    return data
+            except OSError:
+                return data
+        return copy.deepcopy(cached[1])
+
+    def _read_validated(self):
         if not self.path.exists():
             return {"schema_version": 1, "uploads": {}}
         try:
@@ -135,7 +168,7 @@ class PhotoNotionStore(NotionUploadStore):
         self.root = Path(production_root) / "notion-uploads"
         self.path = self.root / "photo-catalog.json"
 
-    def read(self):
+    def _read_validated(self):
         if not self.path.exists():
             return {"schema_version": 1, "uploads": {}}
         try:
@@ -153,9 +186,12 @@ class PhotoNotionStore(NotionUploadStore):
 
 
 class NotionUploads:
-    def __init__(self, workbench, settings=None, bridge=None):
+    def __init__(self, workbench, settings=None, bridge=None, feishu=None):
         self.app = workbench
         self.settings = copy.deepcopy(settings or {})
+        # 上传 Notion 成功后顺带写飞书多维表格（config.local.json 的 feishu_sync）；没配就不碰飞书。
+        self.feishu = feishu if feishu is not None else (
+            FeishuSync(self.settings["feishu_sync"]) if self.settings.get("feishu_sync") else None)
         self.store = NotionUploadStore(workbench.production.root)
         self.photo_store = PhotoNotionStore(workbench.production.root)
         self.bridge = bridge or NotionBridge(cache_path=self.store.root / "connection.json")
@@ -190,7 +226,8 @@ class NotionUploads:
     @staticmethod
     def public(row):
         return {key: copy.deepcopy(row[key]) for key in ("id", "job_id", "timeline_uid", "status", "progress", "error",
-            "page_url", "page_id", "name", "published_on", "account", "title", "updated_at", "warning") if key in row}
+            "page_url", "page_id", "name", "published_on", "account", "title", "updated_at", "warning",
+            "feishu_status", "feishu_error", "feishu_record_id") if key in row}
 
     def latest(self, job_id, uid):
         rows = [row for row in self.store.read()["uploads"].values() if row["job_id"] == job_id and row["timeline_uid"] == uid]
@@ -235,7 +272,9 @@ class NotionUploads:
         primary = (list(reversed(active_timelines(job))) or [{}])[0].get("unique_id")
         content_id = "video:" + job_id + ("_tl_" + re.sub(r"[^A-Za-z0-9-]", "", uid)[:120] if uid != primary else "")
         calendar = self.app.content_calendar({"id": [content_id]})
-        return {"timeline_uid": uid, "name": timeline.get("name", ""), "copy": source,
+        naming = (timeline.get("name", ""), job.get("market"))
+        return {"timeline_uid": uid, "name": release_name(*naming, "video", creator=timeline.get("creator", "")),
+            "file_name": release_filename(*naming, creator=timeline.get("creator", "")), "legacy_name": timeline.get("name", ""), "copy": source,
             "published_on": calendar.get("calendar_date") or previous.get("published_on") or date.today().isoformat(),
             # An account Notion said it could not find is not offered again.
             "account": ((previous.get("account") if "发布账号" not in str(previous.get("error") or "") else "")
@@ -284,12 +323,14 @@ class NotionUploads:
             if not row:
                 previous = self.latest(job_id, uid)
                 row = {"id": "NUP-" + uuid4().hex[:12], "job_id": job_id, "timeline_uid": uid,
-                    "request_id": request, "request_hash": digest, "name": detail["name"], "published_on": day,
+                    "request_id": request, "request_hash": digest, "name": detail["name"], "file_name": detail["file_name"],
+                    "legacy_name": detail["legacy_name"], "published_on": day,
                     **values, "source": {**detail["copy"], "screen_en": values["screen_en"], "screen_zh": values["screen_zh"]},
                     "destination_id": notion_id(self.settings["data_source_id"]), "file_path": body.get("file_path"),
-                    "page_id": previous.get("page_id", ""), "page_url": previous.get("page_url", "")}
+                    "page_id": previous.get("page_id", ""), "page_url": previous.get("page_url", ""),
+                    "feishu_record_id": previous.get("feishu_record_id", "")}
                 data["uploads"][row["id"]] = row
-            row.update(status="running", progress="正在准备成片和 Notion 连接。", error="", updated_at=now())
+            row.update(status="running", progress="正在准备成片和 Notion 连接。", error="", feishu_status="", feishu_error="", updated_at=now())
             self.running.add(key)
             result = self.public(row)
         threading.Thread(target=self._run, args=(row["id"],), daemon=True, name="notion-upload").start()
@@ -308,7 +349,7 @@ class NotionUploads:
             path = upload_video(self.store.managed_path(media), self.store.root / "previews" / (identifier + ".mp4"), progress)
             progress("正在连接 Notion 并核对发布账号。")
             mime = {".mov": "video/quicktime", ".webm": "video/webm"}.get(path.suffix.lower(), "video/mp4")
-            filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["name"]) + path.suffix.lower()
+            filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row.get("file_name") or row["name"]) + path.suffix.lower()
             texts = [row["source"].get(key, "") for key in ("en", "zh", "screen_en")]
             with self.bridge.client() as client:
                 self._publish(client, row, [(path, mime, filename)], body_markdown(row["source"]), texts, progress)
@@ -326,7 +367,8 @@ class NotionUploads:
                     self.app.set_video_calendar_status(row["job_id"], {"publication_id": current["id"], "calendar_uploaded": True})
             except Exception:
                 warning = "；".join(filter(None, [warning, "Notion 已上传，本地发布日历标记未更新，可手动点为已上传。"]))
-            self._save(identifier, status="completed", progress="已上传到 Notion。", warning=warning)
+            feishu = self._feishu_sync(identifier, "video", row, [(path, filename)])
+            self._save(identifier, status="completed", progress="已上传到 Notion。", warning=warning, **feishu)
         except Exception as exc:
             message = str(exc) if isinstance(exc, VoiceError) else "上传未完成，已有 Notion 页面会保留，重试不会主动新建副本。"
             self._save(identifier, status="failed", error=message, progress="")
@@ -395,10 +437,12 @@ class NotionUploads:
         from photo_carousel import fallback_titles
         # Exports made before titles existed get the same caption-derived line the carousel window shows.
         titles = frozen.get("titles") or fallback_titles(frozen.get("caption_en"))
+        naming = (timeline.get("name") or data.get("timeline_name") or data["job_id"], work.get("market") or data.get("market"))
         blocked = ("制作单已归档。" if job.get("archived") else "先定稿导出这一版，再上传到 Notion。" if not export
                    else "这一版的成品文件夹不在了，请再导出一次。" if not pictures or not frozen else "")
         return {"set_id": set_id, "work": work["key"], "work_name": work.get("name_zh", ""),
-            "name": f"{timeline.get('name') or data.get('timeline_name') or data['job_id']} 图文{work['key']}",
+            "name": release_name(*naming, "photo", work["key"], creator), "file_name": release_filename(*naming, work["key"], creator),
+            "legacy_name": f"{naming[0]} 图文{work['key']}",
             "export_name": (export or {}).get("name", ""), "pictures": len(pictures),
             "copy": {"titles": titles, "titles_zh": frozen.get("titles_zh") or [], "caption_en": frozen.get("caption_en", ""), "caption_zh": frozen.get("caption_zh", "")},
             "published_on": previous.get("published_on") or video.get("published_on") or date.today().isoformat(),
@@ -417,7 +461,7 @@ class NotionUploads:
         if not re.fullmatch(r"[A-Za-z0-9_-]{8,120}", request):
             raise VoiceError(400, "上传请求标识无效，请刷新后重试。")
         work_key = body.get("work")
-        if not isinstance(work_key, str) or not re.fullmatch(r"[A-Z]", work_key):
+        if not isinstance(work_key, str) or not re.fullmatch(r"[A-Z](?:-[A-Z]{2})?", work_key):  # A-DE：外语版
             raise VoiceError(400, "请选择要上传的图文版本。")
         self.app.photo_sets.ensure_open(set_id)
         detail = self.photo_detail(set_id, work_key)
@@ -456,12 +500,14 @@ class NotionUploads:
                 previous = self.photo_latest(set_id, work_key)
                 row = {"id": "NPH-" + uuid4().hex[:12], "job_id": data["job_id"], "timeline_uid": data.get("timeline_uid", ""),
                     "set_id": set_id, "work": work_key, "request_id": request, "request_hash": digest, "name": detail["name"],
+                    "file_name": detail["file_name"], "legacy_name": detail["legacy_name"],
                     "published_on": day, **values, "export_name": export["name"], "folder": export["folder"],
-                    "source": {key: frozen.get(key) for key in ("caption_en", "caption_zh", "titles", "slides")},
+                    "source": {key: frozen.get(key) for key in ("caption_en", "caption_zh", "titles", "slides", "market")},
                     "destination_id": notion_id(self.settings["data_source_id"]),
-                    "page_id": previous.get("page_id", ""), "page_url": previous.get("page_url", "")}
+                    "page_id": previous.get("page_id", ""), "page_url": previous.get("page_url", ""),
+                    "feishu_record_id": previous.get("feishu_record_id", "")}
                 catalog["uploads"][row["id"]] = row
-            row.update(status="running", progress="正在准备图片和 Notion 连接。", error="", updated_at=now())
+            row.update(status="running", progress="正在准备图片和 Notion 连接。", error="", feishu_status="", feishu_error="", updated_at=now())
             self.running.add(key)
             result = self.public(row) | {"export_name": row["export_name"]}
         threading.Thread(target=self._photo_run, args=(row["id"],), daemon=True, name="notion-photo-upload").start()
@@ -474,19 +520,38 @@ class NotionUploads:
             pictures = sorted((Path(row["folder"]) / "发布JPG").glob("*.jpg"))
             if not pictures:
                 raise VoiceError(409, "这一版的成品文件夹不在了，请再导出一次。")
-            safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row["name"])
+            safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", row.get("file_name") or row["name"])
             files = [(path, "image/jpeg", f"{safe}-{index:02d}.jpg") for index, path in enumerate(pictures, 1)]
             progress("正在连接 Notion 并核对发布账号。")
             with self.bridge.client() as client:
                 self._publish(client, row, files, photo_markdown(row["source"]), [row["source"].get("caption_en", ""), row["source"].get("caption_zh", "")], progress)
                 warning = "；".join(getattr(client, "warnings", []))
-            self._save(identifier, status="completed", progress="已上传到 Notion。", warning=warning)
+            feishu = self._feishu_sync(identifier, "photo", row, [(path, name) for path, _mime, name in files])
+            self._save(identifier, status="completed", progress="已上传到 Notion。", warning=warning, **feishu)
         except Exception as exc:
             message = str(exc) if isinstance(exc, VoiceError) else "上传未完成，已有 Notion 页面会保留，重试不会主动新建副本。"
             self._save(identifier, status="failed", error=message, progress="")
         finally:
             with self.lock:
                 self.running.discard((row["job_id"], f"photo:{row['set_id']}:{row['work']}"))
+
+    def _feishu_sync(self, identifier, kind, row, files):
+        """Notion 已成功后写飞书；返回要存进上传记录的 feishu_* 字段。飞书出什么错都不改 Notion 的结果。"""
+        if not self.feishu or not self.feishu.enabled:
+            return {}
+        self._save(identifier, progress="Notion 已上传，正在同步到飞书。")
+        try:
+            job = self.app.production.job(row["job_id"])
+            timeline = next((line for line in job.get("timelines") or [] if line.get("unique_id") == row.get("timeline_uid")), {})
+            saved = self._store_of(identifier).read()["uploads"].get(identifier, {})
+            current = {**row, "feishu_record_id": saved.get("feishu_record_id") or row.get("feishu_record_id", "")}
+            result = self.feishu.sync(kind, current, files, creator=timeline.get("creator") or job.get("creator", ""),
+                                      product=job.get("product", ""),
+                                      on_record=lambda record_id: self._save(identifier, feishu_record_id=record_id))
+            return {"feishu_status": result["status"], "feishu_record_id": result["record_id"], "feishu_error": result["warning"]}
+        except Exception as exc:
+            return {"feishu_status": "failed",
+                    "feishu_error": str(exc) if isinstance(exc, FeishuError) else "飞书同步没完成，重新上传会再试。"}
 
     # Account pages rarely change, so a confirmed match is kept locally and reused without a SQL query.
     def _last_account(self, creator):
@@ -551,7 +616,7 @@ class NotionUploads:
         except Exception as exc:
             # A remembered account may have been removed or renamed in Notion; the next try looks it up again.
             # An exhausted quota or a dropped connection says nothing about the account, so it stays.
-            if used.get("key") and getattr(exc, "status", None) not in {429, 503}:
+            if used.get("key") and not used.get("keep") and getattr(exc, "status", None) not in {429, 503}:
                 self._forget_account(*used["key"])
             raise
 
@@ -578,8 +643,14 @@ class NotionUploads:
             # SQL queries draw on a small hourly Notion allowance, so they run only when needed.
             if not checked:
                 access = client.call("get_tool_access", {"tool_names": ["query_data_sources"]})
-                if access.get("current_tool_access", {}).get("query_data_sources", {}).get("status") not in {"available", "available_with_limit"}:
-                    raise VoiceError(409, "Notion 连接暂不能查询账号，请检查连接权限。")
+                status = str(access.get("current_tool_access", {}).get("query_data_sources", {}).get("status") or "")
+                if status not in {"available", "available_with_limit"}:
+                    # A failed precheck says nothing about the remembered account, so it is kept.
+                    used["keep"] = True
+                    print(f"Notion 查询预检未通过：status={status or '空'}", file=sys.stderr, flush=True)
+                    if not status or "limit" in status.casefold() or "usage" in status.casefold() or "quota" in status.casefold():
+                        raise VoiceError(429, query_allowance_message())
+                    raise VoiceError(409, f"Notion 连接暂不能查询账号（Notion 返回：{status}），请检查连接权限。")
                 checked.append(True)
         account_key = (notion_id(account_source), row["account"].strip().lstrip("@").casefold())
         remembered = self._known_account(*account_key)
@@ -603,7 +674,8 @@ class NotionUploads:
         if not row.get("page_id"):
             can_query()
             found = client.call("query_data_sources", {"data": {"mode": "sql", "data_source_urls": [table],
-                "query": f'SELECT url, "名称" FROM "{table}" WHERE "名称" = ? LIMIT 3', "params": [row["name"]]}}).get("results", [])
+                "query": f'SELECT url, "名称" FROM "{table}" WHERE "名称" IN (?, ?) LIMIT 3',
+                "params": [row["name"], row.get("legacy_name") or row["name"]]}}).get("results", [])
             if len(found) > 1:
                 raise VoiceError(409, "Notion 中有多条同名成片，请先保留唯一的对应记录再上传。")
             if found:

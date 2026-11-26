@@ -268,7 +268,14 @@ class TaskTests(unittest.TestCase):
         self.assertIn("按已加载写作参考“成稿后的独立复核”逐条执行", review_prompt)
         for prompt in (draft_prompt, review_prompt):
             self.assertIn("AI 三段骨架是可调整的选题建议", prompt)
-            self.assertIn("不能先作承诺再让发布前核对", prompt)
+            # Verified reasons (warranty, returns) close the script; only prices and offers wait for the listing.
+            self.assertIn("不能因此不带下单理由", prompt)
+            self.assertIn("没核对发布当天的挂车页时不写进口播或屏显", prompt)
+            self.assertIn("初稿与复核统一采用当前已确认的口播说法", prompt)
+            self.assertIn("不据此补回用户已明确省略的口播条件", prompt)
+            self.assertIn("包含活动开始前五天的 upcoming 状态，正文最后催现在买", prompt)
+            self.assertIn("不能因 status 是 upcoming 或生成时活动尚未开始而改成等活动开始再买", prompt)
+            self.assertIn("body_cta 为假时按窗口外规则处理", prompt)
             self.assertIn("不向评论者断言其拥有某物或经历过某事", prompt)
             self.assertIn("保留并回答原评论的顾虑，不强制逐字引用", prompt)
             self.assertIn("以其原文为写作参考", prompt)
@@ -817,6 +824,27 @@ class TaskTests(unittest.TestCase):
                 self.assertFalse(any(Path(r["path"]).name.endswith("-selling-point-grading.md") for r in refs))
                 self.assertFalse(any(r.get("error") for r in refs))
 
+    def test_case_learning_follows_each_matched_sku(self):
+        install_review_fixture(self.skill)
+        product_root = self.skill / "references" / "products"
+        for name in ("198H.md", "202H.md", "202H_universal_stone_holder.md"):
+            (product_root / name).write_text("# 产品资料\n", encoding="utf-8")
+        learning = product_root / "198H_case_learning.md"
+        learning.write_text("# 198H 案例经验\n出单口播直接推荐。\n", encoding="utf-8")
+        (product_root / "source-map.json").write_text(json.dumps({"sku_to_reference": {
+            "198H": "198H.md", "202H": "202H.md", "202H-拓展配件": "202H_universal_stone_holder.md",
+        }}), encoding="utf-8")
+        refs = self.manager._resources({"product": "SHARPAL 198h Electric Knife Sharpener"})
+        attached = next(r for r in refs if Path(r["path"]) == learning)
+        self.assertEqual(attached["label"], "产品资料 · 198H 案例经验")
+        self.assertEqual(attached["sha256"], hashlib.sha256(learning.read_bytes()).hexdigest())
+        # Another SKU's learning never rides along, and a SKU without the file reports no error.
+        for product in ("SHARPAL 202H", "202H-拓展配件"):
+            with self.subTest(product=product):
+                refs = self.manager._resources({"product": product})
+                self.assertFalse(any(Path(r["path"]).name.endswith("_case_learning.md") for r in refs))
+                self.assertFalse(any(r.get("error") for r in refs))
+
     def test_editing_marker_list_is_a_trusted_resource_for_its_sku(self):
         install_review_fixture(self.skill)
         product_root = self.skill / "references" / "products"
@@ -966,6 +994,41 @@ class TaskTests(unittest.TestCase):
         self.assertFalse(self.manager.active_for_case(self.identifier))
         self.assertEqual(stopped["rounds"][0]["output"], "")
 
+    def test_running_counts_include_queue_and_stopping_work_by_product(self):
+        bridge = FakeBridge(blocked=True, ignore_cancel=True)
+        manager = self.new_manager(bridge, max_parallel=1)
+        first = manager.create(self.identifier, self.body())
+        self.assertTrue(bridge.started.wait(2))
+        second = manager.create(self.identifier, self.body())
+        other = manager.create(None, {"request_id": uuid4().hex, "action": "review", "instruction": "核对其他产品"},
+                               {"kind": "direction", "product": "SHARPAL 129N", "title": "其他产品",
+                                "direction": {"direction_id": "129N-S1"}, "materials": []})
+        with patch.object(manager, "_detail", side_effect=AssertionError("Counts must not build task cards")):
+            self.assertEqual(manager.running_counts(), {"active": 3, "by_product": {"202H": 2, "129N": 1}})
+            self.assertEqual(manager.running_counts(self.identifier), {"active": 2, "by_product": {"202H": 2}})
+            self.assertEqual(manager.running_counts(product="SHARPAL 129N", direction_id="129N-S1"),
+                             {"active": 1, "by_product": {"129N": 1}})
+        manager.cancel(first["task_id"])
+        manager.cancel(second["task_id"])
+        self.assertEqual(manager.running_counts(), {"active": 2, "by_product": {"202H": 1, "129N": 1}})
+        bridge.gate.set()
+        self.wait(first["task_id"], manager)
+        self.wait(other["task_id"], manager)
+        self.assertEqual(manager.running_counts(), {"active": 0, "by_product": {}})
+
+    def test_running_counts_recheck_external_task_changes(self):
+        task = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        path = self.path(task["task_id"])
+        before = path.read_bytes()
+        changed = json.loads(before)
+        changed["status"] = changed["rounds"][-1]["status"] = "queued"
+        try:
+            path.write_text(json.dumps(changed, ensure_ascii=False), encoding="utf-8")
+            self.assertEqual(self.manager.running_counts(), {"active": 1, "by_product": {"202H": 1}})
+        finally:
+            path.write_bytes(before)
+        self.assertEqual(self.manager.running_counts(), {"active": 0, "by_product": {}})
+
     def test_replayed_cancellation_cannot_cancel_a_later_round(self):
         bridge = self.bridges[0]
         bridge.gate.clear()
@@ -1035,6 +1098,76 @@ class TaskTests(unittest.TestCase):
         self.manager.continue_task(result["task_id"], {"request_id": uuid4().hex,
                                    "task_revision": result["revision"], "instruction": "恢复后继续"})
         self.assertEqual(self.wait(result["task_id"])["status"], "completed")
+
+    def test_blank_retry_reuses_the_latest_request_and_snapshot_once(self):
+        first = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        self.bridges[0].error = RuntimeError("测试连接中断")
+        self.manager.continue_task(first["task_id"], {"request_id": uuid4().hex,
+                                   "task_revision": first["revision"], "instruction": "只核对最后一句。"})
+        failed = self.wait(first["task_id"])
+        before = json.loads(self.path(first["task_id"]).read_text(encoding="utf-8"))
+        self.source.write_text("重试前变动的来源，不能代替冻结版本。", encoding="utf-8")
+        self.bridges[0].error = None
+        request = {"request_id": uuid4().hex, "task_revision": failed["revision"], "instruction": " \n\t "}
+        queued = self.manager.continue_task(first["task_id"], request)
+        self.assertEqual(queued["rounds"][-1]["instruction"], "只核对最后一句。")
+        self.assertEqual(queued["rounds"][:-1], failed["rounds"])
+        done = self.wait(first["task_id"])
+        self.assertEqual(done["status"], "completed")
+        self.assertIn("当前用户要求：\n只核对最后一句。", self.bridges[0].calls[-1]["prompt"])
+        self.assertNotIn("重试前变动的来源", self.bridges[0].calls[-1]["prompt"])
+        self.assertEqual(json.loads(self.path(first["task_id"]).read_text(encoding="utf-8"))["snapshot"], before["snapshot"])
+        calls = len(self.bridges[0].calls)
+        replay = self.manager.continue_task(first["task_id"], request)
+        self.assertEqual((len(replay["rounds"]), replay["revision"], len(self.bridges[0].calls)), (3, done["revision"], calls))
+
+    def test_empty_retry_accepts_missing_input_but_rejects_completed_or_stale_requests(self):
+        for instruction in ({}, {"instruction": ""}):
+            with self.subTest(instruction=instruction):
+                self.bridges[0].error = RuntimeError("临时失败")
+                failed = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+                request = {"request_id": uuid4().hex, "task_revision": failed["revision"], **instruction}
+                with self.assertRaises(AITaskError) as stale:
+                    self.manager.continue_task(failed["task_id"], {**request, "task_revision": failed["revision"] - 1})
+                self.assertEqual(stale.exception.status, 409)
+                self.bridges[0].error = None
+                self.manager.continue_task(failed["task_id"], request)
+                done = self.wait(failed["task_id"])
+                self.assertEqual(done["status"], "completed")
+                self.assertEqual(done["rounds"][-1]["instruction"], failed["rounds"][-1]["instruction"])
+                with self.assertRaises(AITaskError):
+                    self.manager.continue_task(done["task_id"], {"request_id": uuid4().hex,
+                                               "task_revision": done["revision"], **instruction})
+                self.assertEqual(len(self.manager.get(done["task_id"])["rounds"]), 2)
+
+    def test_cancelled_or_interrupted_round_can_be_retried_without_new_instructions(self):
+        bridge = self.bridges[0]
+        bridge.gate.clear()
+        bridge.ignore_cancel = True
+        running = self.manager.create(self.identifier, self.body())
+        self.assertTrue(bridge.started.wait(2))
+        cancelled = self.manager.cancel(running["task_id"])
+        with self.assertRaises(AITaskError) as busy:
+            self.manager.continue_task(running["task_id"], {"request_id": uuid4().hex,
+                                       "task_revision": cancelled["revision"], "instruction": ""})
+        self.assertEqual(busy.exception.status, 409)
+        bridge.gate.set()
+        stopped = self.wait(running["task_id"])
+        self.manager.continue_task(running["task_id"], {"request_id": uuid4().hex,
+                                   "task_revision": stopped["revision"], "instruction": ""})
+        done = self.wait(running["task_id"])
+        self.assertEqual(done["status"], "completed")
+        self.manager.shutdown()
+        path = self.path(done["task_id"])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw["status"] = raw["rounds"][-1]["status"] = "running"
+        path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        restarted = self.new_manager()
+        interrupted = restarted.get(done["task_id"])
+        self.assertEqual(interrupted["status"], "interrupted")
+        self.assertEqual(self.bridges[-1].calls, [])
+        restarted.continue_task(done["task_id"], {"request_id": uuid4().hex, "task_revision": interrupted["revision"]})
+        self.assertEqual(self.wait(done["task_id"], restarted)["status"], "completed")
 
     # ---- digest of the user-review library -------------------------------------------------
     DIGEST = {"product": "202H", "synced_at": "2026-10-06T16:00:00", "reviews": 587,
@@ -1186,6 +1319,29 @@ class TaskTests(unittest.TestCase):
             mark(5, "skip")
         with self.assertRaises(ai_tasks.AITaskError):
             mark(0, "maybe")
+
+    def test_every_draft_marked_finishes_a_task_left_at_continue_but_a_hand_finish_stays(self):
+        task = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        path = self.path(task["task_id"])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        block = lambda number: "".join([f"## 变体 #{number}", chr(10), "**口播（配音用）**", chr(10), "```", chr(10), f"Line {number}.", chr(10), "```", chr(10)])
+        raw["rounds"][-1]["output"] = block(1) + block(2)
+        raw["management_state"] = "needs_revision"
+        path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        round_id = raw["rounds"][-1]["round_id"]
+        mark = lambda index, choice: self.manager.set_variant_choice(task["task_id"], {"round_id": round_id, "variant_index": index, "choice": choice})
+        settle = lambda: self.manager.settle_variant_choices(task["task_id"], {})
+        mark(0, "skip")
+        self.assertEqual(settle()["management_state"], "needs_revision")
+        mark(1, "skip")
+        self.assertEqual(settle()["management_state"], "finished")
+        mark(1, "")
+        self.assertEqual(settle()["management_state"], "pending_selection")
+        # Finished by hand from the state menu: clearing or changing a mark afterwards does not reopen it.
+        current = self.manager.get(task["task_id"])
+        self.manager.manage_tasks({"request_id": uuid4().hex, "items": [{"task_id": task["task_id"], "revision": current["revision"]}], "management_state": "finished"})
+        mark(0, "")
+        self.assertEqual(settle()["management_state"], "finished")
 
     def test_losing_the_last_script_takes_back_only_the_adopted_label(self):
         task = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
@@ -1350,6 +1506,8 @@ class TaskTests(unittest.TestCase):
             with self.assertRaises(AITaskError):
                 self.manager.get(result["task_id"])
             with self.assertRaises(AITaskError):
+                self.manager.running_counts()
+            with self.assertRaises(AITaskError):
                 self.manager.cancel(result["task_id"])
             self.assertEqual(alias.read_bytes(), before)
         finally:
@@ -1382,6 +1540,30 @@ class TaskTests(unittest.TestCase):
         one_task = folder_calls()
         self.wait(self.manager.create(self.identifier, self.body())["task_id"])
         self.assertEqual(folder_calls(), one_task)
+
+    def test_task_reads_validate_only_their_own_case_once_per_request(self):
+        first = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        second = self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        unrelated = self.store.add({"title": "没有协作任务的案例", "original": {"text": "Unrelated case."},
+                                    "feedback": {"kind": "editorial", "text": "不应在读取任务时加载"}})
+        # A task list has no need for the all-case index or unrelated event history.
+        with patch.object(self.store, "read_index", side_effect=AssertionError("No full-library index read")), \
+                patch.object(self.store, "read_case", wraps=self.store.read_case) as read:
+            tasks = self.manager.list_tasks()
+            self.assertEqual({item["task_id"] for item in tasks}, {first["task_id"], second["task_id"]})
+            self.assertEqual(read.call_args_list, [unittest.mock.call(self.identifier)])
+            self.assertNotEqual(unrelated["case_id"], self.identifier)
+            for fetch in (self.manager.get, lambda task_id: self.manager.stream_snapshot(task_id)["task"]):
+                read.reset_mock()
+                self.assertEqual(fetch(first["task_id"]), first)
+                self.assertEqual(read.call_args_list, [unittest.mock.call(self.identifier)])
+
+    def test_task_list_rejects_invalid_case_entries_without_reading_the_index(self):
+        self.wait(self.manager.create(self.identifier, self.body())["task_id"])
+        invalid = self.store.root / "cases" / "unexpected.txt"
+        invalid.write_text("unexpected", encoding="utf-8")
+        with self.assertRaises(AITaskError):
+            self.manager.list_tasks()
 
     @unittest.skipUnless(os.name == "nt", "Windows junction validation")
     def test_collaboration_junction_is_rejected_without_touching_target(self):
@@ -1451,6 +1633,40 @@ class TaskTests(unittest.TestCase):
         self.manager._queue.join()
         self.assertFalse(folder.exists())
         self.assertEqual(self.manager.list_tasks(), [])
+
+
+
+class ReplyMustCheckTests(unittest.TestCase):
+    """Objection-reply scripts hand in a 必查 line; the workbench reports what it leaves out."""
+    HEAD = "开头（质疑类评论）：干活的刀不用镜面"
+
+    @staticmethod
+    def draft(must):
+        return "测试方向\n" + must + "\n**口播（配音用）**\n```text\na\n```\n"
+
+    def test_only_objection_rounds_with_scripts_are_checked(self):
+        from ai_tasks import reply_must_check
+        self.assertIsNone(reply_must_check("普通任务", self.draft("")))
+        self.assertIsNone(reply_must_check(self.HEAD, "没有口播"))
+        self.assertEqual(reply_must_check(self.HEAD, self.draft("必查：经历 第2行｜变化 第5行｜代价 第2行｜下单理由 B3 第7行")), {"status": "ok"})
+
+    def test_missing_items_and_missing_lines_are_named_per_draft(self):
+        from ai_tasks import reply_must_check
+        output = "\n---\n".join([self.draft("**必查**：经历 无，出镜人没有这段经历｜变化 第5行｜代价 第2行｜下单理由 无"),
+                                  self.draft(""), self.draft("必查：不适用（提问类）")])
+        result = reply_must_check(self.HEAD, output)
+        self.assertEqual(result["status"], "missing")
+        self.assertIn("第 1 条缺经历、下单理由", result["reason"])
+        self.assertIn("第 2 条没有交", result["reason"])
+        self.assertNotIn("第 3", result["reason"])
+
+    def test_question_rounds_are_checked_on_the_question_items(self):
+        from ai_tasks import reply_must_check
+        head = "开头（提问类评论）：小折刀能不能磨"
+        self.assertEqual(reply_must_check(head, self.draft("必查：回答 第1行｜结果 第4行｜下单理由 B11 第6行")), {"status": "ok"})
+        result = reply_must_check(head, "\n---\n".join([self.draft("必查：回答 第1行｜结果 无｜下单理由 无：未核实"), self.draft("")]))
+        self.assertIn("第 1 条缺结果、下单理由", result["reason"])
+        self.assertIn("第 2 条没有交", result["reason"])
 
 
 if __name__ == "__main__":

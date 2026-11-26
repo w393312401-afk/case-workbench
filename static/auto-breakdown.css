@@ -26,6 +26,7 @@
 .case-insight-tags li span{display:inline-block;min-width:64px;color:var(--muted-soft)}
 .perf-batch-collect{margin-left:auto}
 .auto-breakdown-run{margin-top:10px;display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+.auto-breakdown-provider{display:flex;flex-direction:column;gap:2px;min-width:0;max-width:100%}.auto-breakdown-provider>span{color:var(--muted-soft)}.auto-breakdown-provider .seg{flex-wrap:wrap}
 .auto-breakdown-run label{display:flex;flex-direction:column;gap:2px;min-width:0;flex:0 1 260px;margin:0}
 .auto-breakdown-run label span{color:var(--muted-soft)}
 .auto-breakdown-run select{width:100%;min-width:0}

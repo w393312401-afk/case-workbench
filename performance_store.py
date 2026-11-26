@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import copy
+import marshal
 import math
 import statistics
 import re
@@ -146,6 +147,71 @@ def _memory_size(value):
         elif isinstance(item, (list, tuple, set, frozenset)):
             pending.extend(item)
     return total
+
+
+def _library_recent(rows, daily, posted, today):
+    """Use whole export intervals; a boundary-crossing week needs its own daily rows."""
+    end = today - timedelta(days=1)
+    start = end - timedelta(days=27)
+    first = max(start, posted) if posted else start
+    required = max(0, (end - first).days + 1)
+    values = {field: [] for field in ("orders", "items", "gmv")}
+    covered = {field: set() for field in values}
+    for row in rows:
+        row_start, row_end = date.fromisoformat(row["start"]), date.fromisoformat(row["end"])
+        if row_end < first or row_start > end:
+            continue
+        # Dates before the video was posted cannot contain sales for that video.
+        effective_start = max(row_start, posted) if posted else row_start
+        if effective_start >= first and row_end <= end:
+            intervals = [(effective_start, row_end, row)]
+        else:
+            intervals = [(day, day, daily[day]) for day in daily
+                         if max(first, row_start) <= day <= min(end, row_end)]
+        for left, right, record in intervals:
+            for field in values:
+                value = record.get(field)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                    values[field].append(value)
+                    covered[field].update(left + timedelta(days=i) for i in range((right - left).days + 1))
+    result = {"start": start.isoformat(), "end": end.isoformat(), "required_days": required}
+    for field in values:
+        result[field] = {"value": sum(values[field]) if values[field] else None,
+                         "covered_days": len(covered[field]),
+                         "complete": required > 0 and len(covered[field]) == required}
+    return result
+
+
+def _library_campaign_share(rows, daily, campaigns):
+    """Attribute orders only where whole intervals can be assigned to calendar days."""
+    if campaigns is None:
+        return {"percent": None, "reason": "活动日历暂不可用"}
+    windows = [(date.fromisoformat(row["start"]), date.fromisoformat(row["end"]),
+                not row.get("verified") and row.get("confidence") != "official") for row in campaigns]
+    total = campaign_orders = 0
+    uncertain = False
+    for row in rows:
+        orders = row.get("orders")
+        if not isinstance(orders, (int, float)) or not math.isfinite(orders) or orders < 0:
+            return {"percent": None, "reason": "销售表中有出单数缺失"}
+        start, end = date.fromisoformat(row["start"]), date.fromisoformat(row["end"])
+        days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
+        flags = [any(left <= day <= right for left, right, _ in windows) for day in days]
+        total += orders
+        if not any(flags) or not orders:
+            continue
+        if all(flags):
+            campaign_orders += orders
+        else:
+            parts = [daily.get(day, {}).get("orders") for day in days]
+            if any(not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 for value in parts) or not math.isclose(sum(parts), orders, abs_tol=0.0001):
+                return {"percent": None, "reason": "周表跨活动边界，缺少可核对的每日出单数"}
+            campaign_orders += sum(value for value, flag in zip(parts, flags) if flag)
+        uncertain = uncertain or any(unsure and left <= end and right >= start for left, right, unsure in windows)
+    if not total:
+        return {"percent": None, "reason": "已导入数据没有可计算的出单"}
+    return {"percent": round(campaign_orders * 100 / total, 1), "orders": total,
+            "campaign_orders": campaign_orders, "dates_unverified": uncertain}
 
 def _totals_table(name="totals_daily"):
     return (f"CREATE TABLE IF NOT EXISTS {name} (shop TEXT NOT NULL DEFAULT 'local', date TEXT, "
@@ -289,6 +355,18 @@ def _period_labels(periods):
     return [label if labels.count(label) == 1 else f"{s[5:]} 至 {e[5:]}" for (s, e), label in zip(periods, labels)]
 
 
+def clone_records(value):
+    """A detached copy of plain records (dicts, lists, text, numbers), several times faster than deepcopy.
+
+    The sales lists hold thousands of rows and every reader gets its own copy; anything marshal cannot
+    carry falls back to the general copy.
+    """
+    try:
+        return marshal.loads(marshal.dumps(value))
+    except ValueError:
+        return copy.deepcopy(value)
+
+
 class PerformanceStore:
     def __init__(self, runtime_root, sources=()):
         self.root = Path(runtime_root) / "performance"
@@ -379,7 +457,8 @@ class PerformanceStore:
         self._cache[key] = (value, weight)
         self._cache_bytes += weight
 
-    def _read_cached(self, key, loader, clone=copy.deepcopy):
+    def _read_cached(self, key, loader, clone=None):
+        clone = clone or clone_records
         # One lock coalesces identical misses and lets the different dashboard
         # queries reuse the normalized facts from this database generation.
         with self.lock:
@@ -863,6 +942,47 @@ class PerformanceStore:
                             item["metric_coverage"][field]["provided_rows"] == len(rows) for field in ("orders", "clicks")) else None
             finally:
                 connection.close()
+        return result
+
+    def case_library_insights(self, videos, campaigns, today):
+        """Recent and campaign measures for case videos, without changing imported data."""
+        ids = sorted(videos)
+        facts, daily = {video_id: [] for video_id in ids}, {video_id: {} for video_id in ids}
+        if ids and self.database.is_file():
+            with self.lock:
+                connection, generation = self._query_connection()
+                try:
+                    self._facts(connection, generation)
+                    for offset in range(0, len(ids), 300):
+                        chunk = ids[offset:offset + 300]
+                        marks = ",".join("?" * len(chunk))
+                        for row in connection.execute(f"SELECT video_id, start, end, orders, items, gmv FROM facts WHERE video_id IN ({marks}) ORDER BY start, end", chunk):
+                            facts[row["video_id"]].append(dict(row))
+                        for row in connection.execute(f"SELECT video_id, date, orders, items, gmv FROM daily WHERE video_id IN ({marks})", chunk):
+                            daily[row["video_id"]][date.fromisoformat(row["date"])] = dict(row)
+                finally:
+                    connection.close()
+        result = {}
+        for video_id, video in videos.items():
+            try:
+                posted = date.fromisoformat(video.get("posted_on") or "")
+            except (TypeError, ValueError):
+                posted = None
+            age = (today - posted).days if posted else None
+            if age is not None and age < 0:
+                age, posted = None, None
+            recent = _library_recent(facts[video_id], daily[video_id], posted, today)
+            orders = recent["orders"]
+            if age is not None and age <= 28:
+                status = "new"
+            elif orders["value"] is not None and orders["value"] > 0:
+                status = "selling"
+            elif age is not None and orders["complete"] and orders["value"] == 0:
+                status = "stopped"
+            else:
+                status = "unknown"
+            result[video_id] = {"age_days": age, "status": status, "recent": recent,
+                                "campaign": _library_campaign_share(facts[video_id], daily[video_id], campaigns)}
         return result
 
     def signature(self):

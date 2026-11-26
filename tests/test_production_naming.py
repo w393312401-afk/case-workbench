@@ -23,6 +23,15 @@ class ProductionNamingTests(unittest.TestCase):
                 self.assertEqual(production_topic({**job, "lines": [{"zh": " ", "spoken": "Start with a complete kit."}]}),
                                  "Start with a complete kit.")
 
+    def test_direction_chain_notes_and_replica_label_are_not_topics(self):
+        # 「变体 #5。方向链：…」 describes the plan, so the order is named by its own opening line.
+        chained = {"title": "变体 #5。方向链：S1 定角不用猜 → 每次补磨", "timelines": [{"name": "diamond261113-202-1"}],
+                   "lines": [{"zh": "这样的刃口要多少钱？"}]}
+        self.assertEqual(production_title(chained), "diamond261113-202-1｜这样的刃口要多少钱？")
+        # 「1:1 复刻」 is how it was made; without it an English title keeps its full length.
+        replica = {"title": "1:1 复刻｜Seven Plates for One Sharpener? Overkill or Not", "lines": [{"zh": "七块磨板"}]}
+        self.assertEqual(production_title(replica), "Seven Plates for One Sharpener? Overkill or Not")
+
     def test_archived_timeline_does_not_name_the_active_order(self):
         job = {"title": "当前正文", "selected_take": "T1", "timelines": [
             {"name": "保留时间线", "take_id": "T1"},

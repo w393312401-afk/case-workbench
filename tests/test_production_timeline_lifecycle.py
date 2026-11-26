@@ -237,6 +237,10 @@ class TimelineLifecycleHTTPTests(unittest.TestCase):
         completed = self.request("POST", f"/api/production/jobs/{identifier}/completion", {
             "request_id": uuid4().hex, "completed": True, "timeline_uid": "uid-1", "note": ""})
         self.assertEqual(completed[0], 200, completed)
+        # Marking a timeline complete starts its preview export, and deletion waits for that to end.
+        from test_timeline_preview import wait
+        wait(lambda: not self.server.app.video_previews.busy())
+        resolve_calls = list(self.runner.calls)
         preview = self.request("POST", base, {"preview": True, "timeline_uid": "uid-1"})
         self.assertEqual((preview[0], preview[2]["edits"], preview[2]["files"]), (200, 1, 2), preview)
         self.assertTrue((production.root / "edits" / "EDT-0123456789ab").exists())
@@ -253,7 +257,7 @@ class TimelineLifecycleHTTPTests(unittest.TestCase):
         self.assertEqual([path.name for path in (production.root / "handoffs").glob("*.md")], [f"{identifier}-20261103-0000t.md"])
         self.assertEqual(self.request("POST", base, body)[2]["edit_ids"], ["EDT-0123456789ab"])
         self.assertEqual(self.request("POST", base, {"request_id": uuid4().hex, "timeline_uid": "uid-1"})[0], 404)
-        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(self.runner.calls, resolve_calls, "Deleting a timeline never touches DaVinci")
 
     def test_delete_refuses_running_edit_published_timeline_and_bad_requests(self):
         identifier = self.seed_two_timelines()

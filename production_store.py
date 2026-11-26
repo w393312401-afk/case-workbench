@@ -32,7 +32,7 @@ JOB_STATUSES = {"draft", "voiced", "timeline", "editing", "awaiting_review", "ap
                 "needs_verification", "verification_failed", "unverified", "failed", "cancelled", "interrupted"}
 TIMELINE_TASK_STATUSES = {"pending", "in_progress", "completed"}
 # Finished voiceovers and timelines are appended whatever else changed while they were being made.
-REVISION_FREE = {"take", "job_fill_start", "job_fill_finish", "job_uk_start", "job_uk_result", "job_uk_link", "timeline", "timeline_location", "timeline_subtitles", "timeline_hook", "timeline_campaign", "timeline_comment_sticker", "timeline_import", "job_completion", "edit_start", "edit_bind_timeline", "edit_finish", "edit_recheck", "edit_audio_repair", "edit_approve", "edit_baseline", "edit_delete", "timeline_delete", "job_delete"}
+REVISION_FREE = {"take", "job_captions","job_fill_start", "job_fill_finish", "job_uk_start", "job_uk_result", "job_uk_link", "timeline", "timeline_location", "timeline_subtitles", "timeline_hook", "timeline_campaign", "timeline_comment_sticker", "timeline_import", "job_completion", "edit_start", "edit_bind_timeline", "edit_finish", "edit_recheck", "edit_audio_repair", "edit_approve", "edit_baseline", "edit_delete", "timeline_delete", "job_delete"}
 EDIT_ID = re.compile(r"EDT-[0-9a-f]{12}")
 PUBLICATION_ID = re.compile(r"PUB-[0-9a-f]{12}")
 # Timeline frame rates as exact ratios; names are what DaVinci Resolve shows.
@@ -600,6 +600,49 @@ class ProductionStore:
                 result["product_settings"] = copy.deepcopy(self.product_settings(data, key))
             return result
 
+    def material_picks(self):
+        """Every edit's picked material timelines with the project and creator of the timeline it cut, newest first.
+
+        Opening an order uses this when DaVinci cannot list the timeline's project, so it reads the cached catalog
+        without cloning it."""
+        with self.lock:
+            catalog = self._read_catalog()
+            products = (catalog.get("settings") or {}).get("products") or {}
+            rows = []
+            for job in catalog.get("jobs", []):
+                by_uid = {item.get("unique_id"): item for item in job.get("timelines", []) if isinstance(item, dict)}
+                for edit in job.get("edits", []):
+                    timeline = by_uid.get(edit.get("timeline_uid")) if isinstance(edit, dict) else None
+                    names = [name for name in edit.get("materials") or [] if isinstance(name, str) and name] if timeline else []
+                    if names:
+                        rows.append({"project": str(timeline.get("project") or (products.get(job.get("product")) or {}).get("project") or ""),
+                                     "creator": str(timeline.get("creator") or ""),
+                                     "at": str(edit.get("started_at") or edit.get("created_at") or ""), "materials": names})
+        rows.sort(key=lambda row: row["at"], reverse=True)
+        return rows
+
+    def job_context(self, identifier):
+        """One order and its editing options from one fresh catalog snapshot.
+
+        Opening an order must not clone every other order's takes, reports and
+        edit history. Aggregate options still use the complete catalog.
+        """
+        with self.lock:
+            data = self._read_catalog()
+            found = next((item for item in data["jobs"] if item["id"] == identifier), None)
+            if not found:
+                raise VoiceError(404, "这张制作单不存在。")
+            product = found["product"]
+            return {"job": public_job(found, self.root / "edits"),
+                    "revision": self._snapshot_revision(data),
+                    "known_job_ids": frozenset(item["id"] for item in data["jobs"]),
+                    "voices": copy.deepcopy(data["voices"]),
+                    "defaults": copy.deepcopy(data["defaults"]),
+                    "readings": copy.deepcopy([item for item in data["readings"] if item["product"] == product]),
+                    "creators": copy.deepcopy(data["settings"]["creators"]),
+                    "product_settings": copy.deepcopy(self.product_settings(data, product)),
+                    "material_combos": self.material_combos(data, product)}
+
     def script_usage(self, product=None):
         """Small provenance projection for script lists, without voice or edit readback."""
         with self.lock:
@@ -724,9 +767,9 @@ class ProductionStore:
                 return self._replayed(data, prior, self.root)
             if kind not in REVISION_FREE and body.get("revision") != self.revision(data):
                 raise VoiceError(409, "制作资料已更新，请读取最新记录后重新保存。")
-            handlers = {"voice": self._voice, "reading": self._reading, "job": self._job, "job_lines": self._job_lines, "job_fill_start": self._job_fill_start, "job_fill_finish": self._job_fill_finish,
+            handlers = {"voice": self._voice, "reading": self._reading, "job": self._job, "job_lines": self._job_lines, "job_captions": self._job_captions,"job_fill_start": self._job_fill_start, "job_fill_finish": self._job_fill_finish,
                         "job_uk_start": self._job_uk_start, "job_uk_result": self._job_uk_result, "job_uk_link": self._job_uk_link,
-                        "job_archive": self._job_archive, "take": self._take, "select_take": self._select_take,
+                        "job_archive": self._job_archive, "take": self._take, "take_delete": self._take_delete, "select_take": self._select_take,
                         "settings": self._settings, "timeline": self._timeline, "timeline_location": self._timeline_location,
                         "timeline_subtitles": self._timeline_subtitles, "timeline_hook": self._timeline_hook, "timeline_campaign": self._timeline_campaign, "timeline_comment_sticker": self._timeline_comment_sticker, "timeline_import": self._timeline_import, "job_completion": self._job_completion,
                         "timeline_archive": self._timeline_archive, "timeline_delete": self._timeline_delete,
@@ -870,6 +913,22 @@ class ProductionStore:
         job["history"].append({"at": job["updated_at"], "event": "lines", "note": note})
         return {"job": copy.deepcopy(job)}
 
+    def _job_captions(self, data, body, extra):
+        """A replica job's own 🔴 title lines, written once; a second writer finds them there and keeps them."""
+        job = self._find_job(data, body.get("job_id"))
+        if not job.get("replica"):
+            raise VoiceError(409, "只有照原片做的制作单需要另写标题。")
+        if job["replica"].get("titles_written"):
+            return {"captions": list((job.get("supplement") or {}).get("captions", []))}
+        captions = body.get("captions")
+        if not isinstance(captions, list) or not captions or len(captions) > 3:
+            raise VoiceError(400, "发布文案须为 1–3 行。")
+        job["supplement"] = {**(job.get("supplement") or {}), "captions": [text(item, "发布文案", True, 600) for item in captions]}
+        job["replica"]["titles_written"] = True
+        job["updated_at"] = now()
+        job["history"].append({"at": job["updated_at"], "event": "lines", "note": "另写 3 条发布标题"})
+        return {"captions": list(job["supplement"]["captions"])}
+
     def _job_fill_start(self, data, body, extra):
         """An AI 写稿 round is filling this job's script information; the job remembers which one."""
         job = self._find_job(data, body.get("job_id"))
@@ -971,6 +1030,8 @@ class ProductionStore:
         job = self._find_job(data, body.get("job_id"))
         if not isinstance(take, dict) or not TAKE_ID.fullmatch(str(take.get("id"))):
             raise VoiceError(500, "配音结果未完成核对，未保存。")
+        if take["id"] in job.get("deleted_take_ids", []):
+            raise VoiceError(409, "这版配音已删除，不能恢复或重复登记。")
         voice = self._touch_voice(data, take["voice_id"], take.get("lookup"))
         voice.update(use_count=voice["use_count"] + 1, last_used_at=take["created_at"], updated_at=take["created_at"])
         record = {key: value for key, value in take.items() if key != "lookup"}
@@ -979,6 +1040,27 @@ class ProductionStore:
         job["updated_at"] = take["created_at"]
         job["history"].append({"at": take["created_at"], "event": "take", "note": f"生成配音 {record['id']}"})
         return {"job": copy.deepcopy(job), "take": copy.deepcopy(record)}
+
+    def _take_delete(self, data, body, extra):
+        job = self._find_job(data, body.get("job_id"))
+        take_id = body.get("take_id")
+        take = next((item for item in job.get("takes", []) if item.get("id") == take_id), None)
+        if not take:
+            raise VoiceError(404, "这版配音不存在。")
+        if any(item.get("take_id") == take_id for item in job.get("timelines", [])):
+            raise VoiceError(409, "这版配音已被时间线引用，请先处理关联时间线。")
+        if any(item.get("take_id") == take_id for item in job.get("edits", [])):
+            raise VoiceError(409, "这版配音已被剪辑引用，请先处理关联剪辑。")
+        job["takes"] = [item for item in job["takes"] if item.get("id") != take_id]
+        deleted = job.setdefault("deleted_take_ids", [])
+        if take_id not in deleted:
+            deleted.append(take_id)
+        if job.get("selected_take") == take_id:
+            job["selected_take"] = ""
+        job["updated_at"] = now()
+        job["status"] = job_status(job)
+        job["history"].append({"at": job["updated_at"], "event": "take_deleted", "note": f"删除配音 {take_id} 及本地文件"})
+        return {"job": public_job(job), "deleted_take": take_id}
 
     def _select_take(self, data, body, extra):
         job = self._find_job(data, body.get("job_id"))

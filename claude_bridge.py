@@ -30,7 +30,10 @@ DEFAULT_MODEL = "claude-default"
 DEFAULT_EFFORT = None
 EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 MODEL_ALIASES = {"claude-default": None, "claude-opus": "opus", "claude-sonnet": "sonnet", "claude-haiku": "haiku"}
-MODEL_ID = re.compile(r"claude-[a-z]+-[0-9][a-z0-9.-]{0,100}(?:\[1m\])?")
+MODEL_ID = re.compile(r"claude-[a-z][a-z0-9]*-[0-9][a-z0-9.-]{0,100}(?:\[1m\])?")
+MODEL_ALIAS_PREFIX = "claude-alias:"
+# Preserve picker aliases without allowing arbitrary arguments or unbounded IDs.
+MODEL_PICKER_ALIAS = re.compile(r"[a-z][a-z0-9]{0,39}(?:[-.][0-9]{1,3}){0,2}(?:\[1m\])?")
 MODELS = [
     {"id": "claude-default", "name": "Claude 客户端默认", "description": "沿用本机调用的模型与思考强度，使用已连接 Claude 账户的订阅额度。"},
     {"id": "claude-opus", "name": "Claude Opus", "description": "使用客户端当前提供的 Opus 模型。"},
@@ -182,8 +185,16 @@ def _send_local_callback(url):
             raise OSError() from None
 
 
+class CacheMarkerRejected(BridgeError):
+    """The client refused the cache point on the shared material; the same run is repeated without it."""
+
+
 class ClaudeBridge:
     accepts_video = True
+    # Callers may pass cache_split=(a, b): prompt[:a] is fixed reference text, prompt[a:b] material that later calls
+    # repeat word for word, prompt[b:] what only this call says. Later calls then read the first two from the cache.
+    accepts_cache_split = True
+    supports_subscription_auth = True
 
     def __init__(self, runtime_root=None, *, executable=None, timeout=20 * 60, startup_timeout=20, login_timeout=300,
                  process_factory=None, command_runner=None, frame_extractor=None, callback_port_checker=None, callback_sender=None):
@@ -195,6 +206,8 @@ class ClaudeBridge:
         self.command_runner = command_runner or subprocess.run
         self.frame_extractor = frame_extractor or extract_frames
         self._lock = threading.Lock()
+        self._auth_lock = threading.RLock()
+        self._auth_changing, self._active_runs = False, 0
         self._status_cache, self._status_until = None, 0.0
         self._model_lock = threading.Lock()
         self._model_cache, self._model_cache_key, self._model_cache_until = None, None, 0.0
@@ -236,7 +249,7 @@ class ClaudeBridge:
                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                     )
                     auth = json.loads(result.stdout)
-                    if not isinstance(auth, dict):
+                    if not isinstance(auth, dict) or type(auth.get("loggedIn")) is not bool:
                         raise ValueError()
                     method = auth.get("authMethod")
                     logged_in = auth.get("loggedIn") is True
@@ -317,6 +330,14 @@ class ClaudeBridge:
             pass  # Raw diagnostics are never retained or exposed.
 
     def start_login(self):
+        with self._auth_lock:
+            if not self.supports_subscription_auth:
+                raise LoginFlowError("当前连接不使用 Claude 订阅授权，请管理对应 API 服务。")
+            if self._auth_changing:
+                raise LoginFlowError("正在断开 Claude 授权，请完成后再连接。", 409)
+            return self._start_login()
+
+    def _start_login(self):
         """Use the official client's auth flow; keep recovery data only in memory."""
         state = self.status(refresh=True)
         if state["available"]:
@@ -474,6 +495,65 @@ class ClaudeBridge:
                 self._login_error = "已取消本次授权，可重新连接。"
         return self.status(refresh=True)
 
+    def _clear_auth_caches(self):
+        with self._lock:
+            self._status_cache, self._status_until, self._login_error = None, 0.0, None
+        with self._model_lock:
+            self._model_cache, self._model_cache_key, self._model_cache_until = None, None, 0.0
+
+    def disconnect(self):
+        """Revoke only this native client's authorization through its official command."""
+        if not self.supports_subscription_auth:
+            raise LoginFlowError("当前连接不使用 Claude 订阅授权，不能在这里断开 API 服务。")
+        with self._auth_lock:
+            if self._auth_changing or self._active_runs:
+                raise LoginFlowError("Claude 任务正在运行或授权正在变更，请完成后再断开。", 409)
+            if self._closing.is_set():
+                raise LoginFlowError("服务正在关闭，请重新打开工作台后再断开授权。", 503)
+            self._auth_changing = True
+        try:
+            executable = locate_claude(self.executable)
+            if not executable:
+                raise LoginFlowError("尚未找到本机 Claude Code，无法断开授权。", 503)
+            with self._lock:
+                attempt, process = self._login_attempt, self._login_process
+                if attempt:
+                    attempt.update(cancelled=True, url=None, state=None, redirect=None,
+                                   callback_submitted=False, callback_error=None)
+                # Retire the attempt before stopping it so its watcher cannot restore login state.
+                self._login_attempt = None
+            if process is not None:
+                try:
+                    self._stop_login_process(process)
+                    self._close_login_pipes(process)
+                except (OSError, subprocess.TimeoutExpired):
+                    raise LoginFlowError("未能停止正在进行的 Claude 授权，请关闭授权窗口后重试。", 503) from None
+                with self._lock:
+                    if self._login_process is process:
+                        self._login_process = None
+            self._clear_auth_caches()
+            try:
+                result = self.command_runner(
+                    [executable, "--safe-mode", "--restricted", "auth", "logout"],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=self.startup_timeout, env=client_environment(),
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+            except subprocess.TimeoutExpired:
+                raise LoginFlowError("Claude 官方客户端断开授权超时，尚未确认断开，请重新检查后重试。", 503) from None
+            except OSError:
+                raise LoginFlowError("无法运行 Claude 官方客户端的断开授权命令，请检查客户端后重试。", 503) from None
+            if result.returncode != 0:
+                raise LoginFlowError("Claude 官方客户端未完成断开授权，请检查客户端后重试。", 503)
+            state = self.status(refresh=True)
+            if state.get("logged_in") is not False or state.get("login_pending"):
+                raise LoginFlowError("尚未确认 Claude 授权已断开，请重新检查客户端状态。", 503)
+            return state
+        finally:
+            self._clear_auth_caches()
+            with self._auth_lock:
+                self._auth_changing = False
+
     @staticmethod
     def _close_login_pipes(process):
         for pipe in (process.stdin, process.stdout, process.stderr):
@@ -543,14 +623,16 @@ class ClaudeBridge:
                                "is_default": model["id"] == DEFAULT_MODEL, "resolved_model": row["resolved_model"] if row else None,
                                "default_reasoning_effort": None, "reasoning_efforts": row["efforts"] if row else list(EFFORTS)})
                 seen.add(alias)
-            # Keep the client's exact explicit picker value (including context modifiers).
+            # Preserve each client's picker value, including alias and context modifiers.
             for row in catalog:
-                if row["value"] in seen or not MODEL_ID.fullmatch(row["value"]):
+                value = row["value"]
+                if value in seen or value == "default":
                     continue
-                models.append({"id": row["value"], "name": row["name"], "description": "使用客户端提供的此版本模型与订阅额度。",
+                identifier = value if MODEL_ID.fullmatch(value) else MODEL_ALIAS_PREFIX + value
+                models.append({"id": identifier, "name": row["name"], "description": "使用客户端提供的此版本模型与订阅额度。",
                                "provider": "claude", "available": state["available"], "is_default": False,
                                "resolved_model": row["resolved_model"], "default_reasoning_effort": None, "reasoning_efforts": row["efforts"]})
-                seen.add(row["value"])
+                seen.add(value)
             result = {"available": state["available"], "error": error if state["available"] else state.get("error"), "models": models}
             self._model_cache, self._model_cache_key = copy.deepcopy(result), key
             self._model_cache_until = time.monotonic() + (45 if catalog else 5)
@@ -589,11 +671,14 @@ class ClaudeBridge:
                 value, resolved = row.get("value"), row.get("resolvedModel")
                 if not isinstance(value, str) or value in seen or not isinstance(resolved, str) or not MODEL_ID.fullmatch(resolved):
                     continue
-                if value not in {"default", "opus", "sonnet", "haiku"} and not MODEL_ID.fullmatch(value):
-                    continue
-                match = re.fullmatch(r"claude-([a-z]+)-(\d{1,3})(?:-(\d{1,3}))?(?:-\d{8})?(?:\[1m\])?", resolved)
+                match = re.fullmatch(r"claude-([a-z][a-z0-9]*)-(\d{1,3})(?:[-.](\d{1,3}))?(?:-\d{8})?(?:\[1m\])?", resolved)
                 if not match:
                     continue
+                if value not in {"default", "opus", "sonnet", "haiku"} and not MODEL_ID.fullmatch(value):
+                    # A new short picker alias must refer to the same family as its
+                    # resolved model; do not expose arbitrary response text as an ID.
+                    if not MODEL_PICKER_ALIAS.fullmatch(value) or re.split(r"[-.\[]", value, maxsplit=1)[0] != match[1]:
+                        continue
                 name = f"Claude {match[1].capitalize()} {match[2]}" + (f".{match[3]}" if match[3] else "")
                 if value.endswith("[1m]") or resolved.endswith("[1m]"):
                     name += "（1M 上下文）"
@@ -655,8 +740,60 @@ class ClaudeBridge:
     def _system(skill_texts, rules=SYSTEM_RULES):
         return "\n\n".join([rules, *(f'<skill name="{name}">\n{text}\n</skill>' for name, text in skill_texts)])
 
+    def _run_configuration(self, model, reasoning_effort):
+        """Keep native subscription defaults separate from alternative CLI transports."""
+        model = model or DEFAULT_MODEL
+        if model in MODEL_ALIASES:
+            cli_model = MODEL_ALIASES[model]
+        elif isinstance(model, str) and model.startswith(MODEL_ALIAS_PREFIX):
+            # Only aliases currently supplied by this client may become CLI args.
+            row = next((item for item in self.models()["models"]
+                        if item.get("id") == model and item.get("available")), None)
+            if not row:
+                raise BridgeError("所选 Claude 模型当前不在客户端目录中，请刷新模型列表后重试。")
+            cli_model = model[len(MODEL_ALIAS_PREFIX):]
+        elif isinstance(model, str) and MODEL_ID.fullmatch(model):
+            cli_model = model
+        else:
+            raise BridgeError("所选 Claude 模型无效，请重新选择。")
+        if reasoning_effort is not None and reasoning_effort not in EFFORTS:
+            raise BridgeError("思考强度选择无效，请重新选择。")
+        effective = self._client_defaults()
+        child_env = client_environment()
+        env_effort = child_env.get("CLAUDE_CODE_EFFORT_LEVEL")
+        if env_effort in EFFORTS and reasoning_effort is None:
+            effective["effortLevel"] = env_effort
+        if cli_model:
+            effective["model"] = cli_model
+        if reasoning_effort:
+            effective["effortLevel"] = reasoning_effort
+            child_env["CLAUDE_CODE_EFFORT_LEVEL"] = reasoning_effort
+        return {"model": model, "cli_model": cli_model, "effective": effective, "child_env": child_env,
+                "actual_model": effective.get("model") or model, "actual_effort": effective.get("effortLevel"),
+                "env_effort": env_effort, "start_message": "正在连接本机 Claude Code，使用客户端额度。"}
+
     def run(self, prompt, *, cwd, on_progress, cancel_event, model=None, reasoning_effort=None, skills=None,
-            on_event=None, require_image_view=False, video_path=None, profile=None, images=None):
+            on_event=None, require_image_view=False, video_path=None, profile=None, images=None, cache_split=None):
+        with self._auth_lock:
+            if self._auth_changing:
+                raise LoginFlowError("正在断开 Claude 授权，请完成后再发起任务。", 409)
+            self._active_runs += 1
+        try:
+            options = dict(cwd=cwd, on_progress=on_progress, cancel_event=cancel_event,
+                           model=model, reasoning_effort=reasoning_effort, skills=skills, on_event=on_event,
+                           require_image_view=require_image_view, video_path=video_path, profile=profile, images=images)
+            try:
+                return self._run(prompt, **options, cache_split=cache_split)
+            except CacheMarkerRejected:
+                # Nothing was generated yet. The split stays, so the fixed reference text is still shared.
+                return self._run(prompt, **options, cache_split=cache_split, cache_marker=False)
+        finally:
+            with self._auth_lock:
+                self._active_runs -= 1
+
+    def _run(self, prompt, *, cwd, on_progress, cancel_event, model=None, reasoning_effort=None, skills=None,
+             on_event=None, require_image_view=False, video_path=None, profile=None, images=None,
+             cache_split=None, cache_marker=True):
         """`profile` runs a tool-using task instead of read-only writing: its own system rules, built-in tools,
         allowed tools, MCP servers, working directory (the process cwd), extra directories and time limit.
         `images` is [(label, jpeg path)] the caller prepared; they are attached before the prompt."""
@@ -667,15 +804,8 @@ class ClaudeBridge:
         directory = Path(cwd)
         if not directory.is_absolute() or not directory.is_dir():
             raise BridgeError("本次分析的本地资料目录不可用。")
-        model = model or DEFAULT_MODEL
-        if model in MODEL_ALIASES:
-            cli_model = MODEL_ALIASES[model]
-        elif isinstance(model, str) and MODEL_ID.fullmatch(model):
-            cli_model = model  # Historical explicit model selections stay explicit.
-        else:
-            raise BridgeError("所选 Claude 模型无效，请重新选择。")
-        if reasoning_effort is not None and reasoning_effort not in EFFORTS:
-            raise BridgeError("思考强度选择无效，请重新选择。")
+        configuration = self._run_configuration(model, reasoning_effort)
+        model, cli_model = configuration["model"], configuration["cli_model"]
         skill_texts = self._skill_texts(skills)
         state = self.status(refresh=True)
         if not state["available"]:
@@ -688,7 +818,18 @@ class ClaudeBridge:
             except Exception:
                 pass
 
+        fixed, shared = "", ""
+        if cache_split and not profile:
+            first, second = cache_split
+            if not (isinstance(first, int) and isinstance(second, int) and 0 <= first <= second < len(prompt)):
+                raise BridgeError("本轮提示的分段位置无效，本轮已停止。")
+            fixed, shared, prompt = prompt[:first], prompt[first:second], prompt[second:]
+        marked = bool(shared.strip()) and cache_marker
         content = []
+        if shared.strip():
+            # The client writes its own cache points for an hour; a shorter one in front of them is refused.
+            content.append({"type": "text", "text": shared,
+                            **({"cache_control": {"type": "ephemeral", "ttl": "1h"}} if marked else {})})
         if require_image_view:
             progress("正在从原片抽取画面。")
             frames = self.frame_extractor(video_path, cancel_event) if video_path else []
@@ -712,19 +853,10 @@ class ClaudeBridge:
         closing = threading.Event()
         blocks, message_number, final, writer_error = {}, 0, None, []
         active_index = None
-        effective = self._client_defaults()
-        child_env = client_environment()
-        env_effort = child_env.get("CLAUDE_CODE_EFFORT_LEVEL")
-        if env_effort in EFFORTS and reasoning_effort is None:
-            effective["effortLevel"] = env_effort
-        if cli_model:
-            effective["model"] = cli_model
-        if reasoning_effort:
-            effective["effortLevel"] = reasoning_effort
-            child_env["CLAUDE_CODE_EFFORT_LEVEL"] = reasoning_effort
+        effective, child_env = configuration["effective"], configuration["child_env"]
+        env_effort = configuration["env_effort"]
         selected_skills = [{"name": skill["name"], "path": skill["path"]} for skill in skills or []]
-        actual_model = effective.get("model") or model
-        actual_effort = effective.get("effortLevel")
+        actual_model, actual_effort = configuration["actual_model"], configuration["actual_effort"]
 
         def session():
             emit({"type": "session", "model": actual_model, "reasoning_effort": actual_effort, "skills": selected_skills})
@@ -792,8 +924,13 @@ class ClaudeBridge:
 
         with tempfile.TemporaryDirectory(prefix="pvr-claude-", ignore_cleanup_errors=True) as scratch:
             root = Path(scratch)
+            if configuration.get("isolate_client_config"):
+                client_config = root / "client-config"
+                client_config.mkdir()
+                child_env["CLAUDE_CONFIG_DIR"] = str(client_config)
             rules_file = root / "system.txt"
-            rules_file.write_text(self._system(skill_texts, *([profile["rules"]] if profile else [])), encoding="utf-8")
+            rules_file.write_text(self._system(skill_texts, *([profile["rules"]] if profile else []))
+                                  + ("\n\n" + fixed.strip() if fixed.strip() else ""), encoding="utf-8")
             settings = {**effective, "disableAllHooks": True, "permissions": {"allow": profile["allowed"] if profile else ["Read"]}}
             settings_file = root / "settings.json"
             settings_file.write_text(json.dumps(settings), encoding="utf-8")
@@ -827,7 +964,7 @@ class ClaudeBridge:
                 args.extend(["--effort", reasoning_effort])
             try:
                 check()
-                progress("正在连接本机 Claude Code，使用客户端额度。")
+                progress(configuration["start_message"])
                 process = self.process_factory(args, cwd=str(directory) if profile else scratch, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                                stderr=subprocess.PIPE, env=child_env,
                                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -895,6 +1032,8 @@ class ClaudeBridge:
                     elif event_type == "assistant":
                         message = event.get("message") or {}
                         if event.get("error"):
+                            if marked and "cache_control" in str(message):
+                                raise CacheMarkerRejected("本机 Claude Code 未接受共用资料的缓存点。")
                             raise BridgeError(_friendly(str(event["error"]) + " " + str(message)))
                         if message.get("stop_reason") in {"max_tokens", "refusal"}:
                             raise BridgeError(_friendly(message["stop_reason"]))
@@ -917,6 +1056,8 @@ class ClaudeBridge:
                             pass  # Usage is bookkeeping; it never fails the run.
                 check()
                 if final.get("is_error") or final.get("subtype") != "success":
+                    if marked and "cache_control" in str(final.get("errors") or final.get("result")):
+                        raise CacheMarkerRejected("本机 Claude Code 未接受共用资料的缓存点。")
                     raise BridgeError(_friendly(str(final.get("errors") or final.get("result") or final.get("subtype"))))
                 while process.poll() is None:
                     check()
@@ -997,29 +1138,38 @@ def extract_frames(video_path, cancel_event=None, count=MAX_FRAMES):
 
 
 class ModelRouter:
-    """One bridge for AITaskManager: Codex models keep their ids, Claude ids start with "claude-"."""
+    """Keep native client ids and explicitly namespace HTTP service models."""
     accepts_video = True
+    accepts_cache_split = True
 
-    def __init__(self, codex, claude):
-        self.codex, self.claude = codex, claude
+    def __init__(self, codex, claude, antigravity=None):
+        self.codex, self.claude, self.antigravity = codex, claude, antigravity
 
     def close(self):
-        close = getattr(self.claude, "close", None)
-        if callable(close):
-            close()
+        for bridge in (self.claude, self.antigravity):
+            close = getattr(bridge, "close", None)
+            if callable(close):
+                close()
 
     @staticmethod
     def is_claude(model):
         return isinstance(model, str) and model.startswith("claude-")
 
+    @staticmethod
+    def is_antigravity(model):
+        return isinstance(model, str) and model.startswith("antigravity:")
+
     def status(self):
         codex, claude = self.codex.status(), self.claude.status()
-        available = bool(codex.get("available")) or bool(claude.get("available"))
-        labels = [state["label"] for state in (codex, claude) if state.get("available") and state.get("label")]
+        providers = {"codex": codex, "claude": claude}
+        if self.antigravity is not None:
+            providers["antigravity"] = self.antigravity.status()
+        available = any(bool(state.get("available")) for state in providers.values())
+        labels = [state["label"] for state in providers.values() if state.get("available") and state.get("label")]
         result = {"available": available, "label": "；".join(labels) or "AI 暂不可用",
-                  "providers": {"codex": codex, "claude": claude}}
+                  "providers": providers}
         if not available:
-            result["error"] = claude.get("error") or codex.get("error")
+            result["error"] = "；".join(state["error"] for state in providers.values() if state.get("error")) or None
         return result
 
     def models(self):
@@ -1032,16 +1182,30 @@ class ModelRouter:
         models += claude["models"]
         errors = [codex.get("error") if not codex.get("models") else None,
                   claude.get("error") if claude.get("available") else None]
+        antigravity = {}
+        if self.antigravity is not None:
+            try:
+                antigravity = self.antigravity.models()
+            except Exception:
+                antigravity = {"models": [], "error": "Antigravity 模型配置暂时不可用。"}
+            models += [{**model, "provider": "antigravity"} for model in antigravity.get("models", [])]
+            if antigravity.get("available"):
+                errors.append(antigravity.get("error"))
         return {"available": bool(models), "models": models, "error": "；".join(error for error in errors if error) or None,
-                "codex_error": codex.get("error"), "claude_error": claude.get("error")}
+                "codex_error": codex.get("error"), "claude_error": claude.get("error"),
+                "antigravity_error": antigravity.get("error")}
 
     def refresh_models(self):
-        for bridge in (self.codex, self.claude):
+        for bridge in (self.codex, self.claude, self.antigravity):
             refresh = getattr(bridge, "refresh_models", None)
             if callable(refresh):
                 refresh()
 
     def _target(self, model):
+        if self.is_antigravity(model):
+            if self.antigravity is None:
+                raise BridgeUnavailable("Antigravity 尚未接入，请到「设置」配置服务。")
+            return self.antigravity
         if self.is_claude(model):
             return self.claude
         if model is None and not self.codex.status().get("available") and self.claude.status().get("available"):
@@ -1050,6 +1214,10 @@ class ModelRouter:
 
     def run(self, prompt, *, video_path=None, **options):
         target = self._target(options.get("model"))
+        if target is not self.claude or not getattr(target, "accepts_cache_split", False):
+            options.pop("cache_split", None)  # the other services take the prompt as one text
+        if target is self.antigravity:
+            return target.run(prompt, video_path=video_path, **options)
         if target is self.claude:
             return self.claude.run(prompt, video_path=video_path, **options)
         if getattr(self.codex, "accepts_video", False):

@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 
-from data_backup import BackupError, BackupManager
+from data_backup import BackupError, BackupManager, RestoreRecoveryError
 from task_activity import record_activity, safe_error
 
 
@@ -125,6 +125,7 @@ class DataTransfer:
         self.operation_kind = None
         self.started_at = None
         self.progress = ""
+        self.restore_error = ""
         self.manager.on_progress = self._progress
         self._imports = {}
         self._downloads = {}
@@ -189,9 +190,9 @@ class DataTransfer:
     def status(self):
         with self.lock:
             history = [item for item in self.config.get("history", []) if Path(item["path"]).is_file()]
-            error = self.config.get("last_error", "")
+            error = self.restore_error or self.config.get("last_error", "")
             worker_error = self.root / "worker-error.log"
-            if worker_error.is_file():
+            if not self.restore_error and worker_error.is_file():
                 error = worker_error.read_text(encoding="utf-8")[:2000].strip() or error
             return {"settings": dict(self.config["settings"]), "last_backup": history[-1] if history else None,
                     "last_error": error, "next_backup": self._next(datetime.now()),
@@ -294,6 +295,9 @@ class DataTransfer:
         if self._stop.is_set():
             self.operation.release()
             raise TransferError("工作台正在关闭，请重新打开后再操作总数据。", 409)
+        if self.restore_error:
+            self.operation.release()
+            raise TransferError(self.restore_error, 503)
         with self.lock:
             self.busy = True
             self.operation_kind = kind
@@ -323,14 +327,16 @@ class DataTransfer:
                 self._run = None
             self.operation.release()
 
-    def backup(self, *, automatic=False):
+    def backup(self, *, automatic=False, only_if_due=False):
         self._begin("backup")
-        self._start_run("自动备份" if automatic else "总数据备份")
         try:
             with self.lock:
                 settings = dict(self.config["settings"])
                 saved_preferences = dict(self.config.get("preferences", {}))
                 automatic_slot = self._slot(datetime.now()) if automatic else None
+                if only_if_due and not self._slot_is_due(automatic_slot):
+                    return None
+            self._start_run("自动备份" if automatic else "总数据备份")
             destination = self._directory(settings["directory"])
             self.ensure_idle()
             archive = self.manager.create_archive(destination, kind="auto" if automatic else "backup", preferences=saved_preferences)
@@ -341,7 +347,8 @@ class DataTransfer:
                 if automatic_slot:
                     self.config["last_auto_slot"] = automatic_slot.isoformat()
                 self._save()
-                self._prune(destination, settings["keep"])
+                if automatic:
+                    self._prune(destination, settings["keep"])
             self._finish_run(message=f"已保存 {archive.get('name', '备份文件')}（{archive.get('bytes', 0) / 1048576:.1f} MB）")
         except Exception as exc:
             with self.lock:
@@ -357,16 +364,26 @@ class DataTransfer:
         if not keep:
             return
         history = self.config.get("history", [])
-        current = [item for item in history if Path(item["path"]).resolve().parent == directory and Path(item["path"]).is_file()]
-        for item in current[:-keep]:
-            path = Path(item["path"])
-            # Delete only successfully registered archives from this manager's destination.
-            if path.resolve().parent != directory or path.name != item.get("name") or path.suffix != ".zip" or path.is_symlink():
-                continue
+        automatic = []
+        for item in history:
+            path = Path(item.get("path") or "")
             try:
-                self.manager.inspect_archive(path)
-                path.unlink()
-                history.remove(item)
+                if (path.name != item.get("name") or path.suffix != ".zip" or path.is_symlink()
+                        or path.resolve().parent != directory or not path.is_file()):
+                    continue
+                kind = item.get("kind")
+                if kind is None:
+                    kind = self.manager.inspect_archive(path).get("kind")
+                    item["kind"] = kind
+                if kind == "auto":
+                    automatic.append((item, path))
+            except (OSError, ValueError):
+                continue
+        for item, path in automatic[:-keep]:
+            try:
+                if self.manager.inspect_archive(path).get("kind") == "auto":
+                    path.unlink()
+                    history.remove(item)
             except (OSError, ValueError):
                 continue
         self._save()
@@ -451,16 +468,21 @@ class DataTransfer:
             self._imports.pop(body["import_id"], None)
             item[0].unlink(missing_ok=True)
             return {**result, "message": "总数据已导入；导入前的数据已保存为恢复备份。" + (result.get("warning", ""))}
+        except RestoreRecoveryError as exc:
+            self.restore_error = str(exc)
+            raise
         finally:
             self._end()
 
+    def _slot_is_due(self, slot):
+        done = self.config.get("last_auto_slot")
+        return slot is not None and (not done or datetime.fromisoformat(done) < slot)
+
     def due_backup(self):
         with self.lock:
-            slot = self._slot(datetime.now())
-            done = self.config.get("last_auto_slot")
-            if not slot or (done and datetime.fromisoformat(done) >= slot):
+            if not self._slot_is_due(self._slot(datetime.now())):
                 return None
-        return self.backup(automatic=True)
+        return self.backup(automatic=True, only_if_due=True)
 
     def _loop(self):
         while not self._stop.wait(30):

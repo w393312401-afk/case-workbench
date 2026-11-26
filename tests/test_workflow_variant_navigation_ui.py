@@ -59,7 +59,7 @@ class WorkflowVariantNavigationBrowserTests(unittest.TestCase):
         self.assertIsNotNone(details.get_attribute("open"))
         self.assertEqual(details.get_attribute("data-variant-key"), key)
         self.assertEqual(page.locator("details.dir-variant[open]").count(), 1)
-        self.assertTrue(details.locator('[data-variant-records="2"]').is_visible())
+        self.assertTrue(page.locator('[data-variant-orders="2"]').is_visible())
         self.assertTrue(details.locator(":scope > summary").evaluate("node => node === document.activeElement"))
         self.assertFalse(page.locator("#direction-workflow-target-note").is_visible())
         self.assertFalse(page.evaluate("document.documentElement.scrollWidth>document.documentElement.clientWidth"))
@@ -103,7 +103,8 @@ class WorkflowVariantNavigationBrowserTests(unittest.TestCase):
                 self.assertTrue(notice.is_visible())
                 self.assertIn("核对", notice.inner_text())
 
-    def test_plan_link_reveals_exact_historical_test_card_without_opening_editor(self):
+    def test_old_plan_link_opens_the_direction_without_opening_an_editor(self):
+        # Test cards left the direction page on 2026-11-22; an old ?plan= link just lands on the direction.
         page = self.open_page()
         data, progress = self.workflow_data()
         data["plans"] = [{"id": "PLN-workflow-ui", "product": "202H", "direction_id": "202H-S1",
@@ -113,12 +114,8 @@ class WorkflowVariantNavigationBrowserTests(unittest.TestCase):
                               "window_start": "2026-10-01", "window_end": "2026-10-02", "decision": "observe"}}]
         self.show_link(page, data, "plan=PLN-workflow-ui", progress)
         self.wait_for_progress(page)
-        self.assertIsNotNone(page.locator("details.direction-tests-history").get_attribute("open"))
-        target = page.locator('[data-test-result="PLN-workflow-ui"]')
-        self.assertTrue(target.is_visible())
-        self.assertTrue(target.evaluate("node => node === document.activeElement"))
-        self.assertEqual(page.locator("#direction-plan-dialog[open]").count(), 0)
-        self.assertFalse(page.locator("#direction-workflow-target-note").is_visible())
+        self.assertEqual(page.locator("details.dir-variant[open]").count(), 0)
+        self.assertEqual(page.locator("#direction-plan-dialog[open], [data-test-result]").count(), 0)
 
 
 if __name__ == "__main__":

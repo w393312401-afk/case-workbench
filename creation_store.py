@@ -234,6 +234,8 @@ class CreationStore:
             # rather than spending most of a list read copying snapshots it immediately discards.
             item = {**item, "source": {key: value for key, value in item["source"].items()
                                      if key not in {"snapshot", "candidate_text"}}}
+        if not include_frozen_source and isinstance(item.get("filled"), dict):
+            item = {**item, "filled": {key: value for key, value in item["filled"].items() if key != "markdown"}}
         item = copy.deepcopy(item)
         status = item.get("status", "draft")
         if status == "archived":
@@ -253,6 +255,26 @@ class CreationStore:
             if not item:
                 raise CreationError(404, "这条文案版本不存在。")
             return self.script_lifecycle(item)
+
+    def script_context(self, identifier):
+        """One adopted script and its version family, from the same fresh snapshot.
+
+        Production needs the frozen candidate internally to build its script
+        view. The browser's family catalog excludes those large frozen inputs.
+        """
+        with self.lock:
+            data = self._read_catalog()
+            item = next((item for item in data["scripts"] if item["id"] == identifier), None)
+            if not item:
+                raise CreationError(404, "这条文案版本不存在。")
+            family = item.get("family_id") or item["id"]
+            rows = [self.script_lifecycle(row, include_frozen_source=False) for row in data["scripts"]
+                    if (row.get("family_id") or row["id"]) == family and row["product"] == item["product"]]
+            ids = {row["id"] for row in rows}
+            return {"script": self.script_lifecycle(item),
+                    "catalog": {"revision": self._snapshot_revision(data), "scripts": rows,
+                                "variant_links": copy.deepcopy([link for link in data["variant_links"]
+                                    if link.get("kind") == "script" and link.get("record_id") in ids])}}
 
     @staticmethod
     def _candidate_association(candidate_id, product, direction_id, variant_ref, *, script_id=None):
@@ -419,8 +441,8 @@ class CreationStore:
             return {"removed": identifier}
         if identifier and not old:
             raise CreationError(404, "素材不存在。")
-        # Case expressions and video hooks only; reviews stay in the review store's picks.
-        if value.get("kind") not in {"case", "video"}:
+        # Case expressions, video hooks and comments the AI made up (2026-11-18); reviews stay in the review store's picks.
+        if value.get("kind") not in {"case", "video", "ai_comment"}:
             raise CreationError(400, "素材类型无效；素材篮只收案例表达和视频钩子，评论继续使用原摘录夹。")
         product = self._product(value.get("product"))
         if old and old["product"] != product:
@@ -431,7 +453,7 @@ class CreationStore:
                 "ref_id": text(value.get("ref_id", ""), "来源编号", False, 200),
                 "note": text(value.get("note", ""), "备注", False, 5000),
                 "created_at": old["created_at"] if old else now(), "updated_at": now()}
-        for key in ("type", "source_id", "source_label", "source_url"):
+        for key in ("type", "source_id", "source_label", "source_url", "author_handle", "zh"):
             if key in value:
                 item[key] = text(value[key], key, False, 2000)
         if old:
@@ -702,6 +724,16 @@ class CreationStore:
                          if not item.get("archived") and item.get("status") != "archived" and item["product"] == product
                          and all((item.get("source") or {}).get(key) == source[key] for key in keys)
                          and item["text"] == body_text and item.get("translation_zh", "") == translation), None)
+            if same:
+                frozen = source.get("comment_sticker") if not replica else None
+                old = (same.get("source") or {}).get("comment_sticker")
+                if frozen is not None and old is not None and frozen.get("selected_id") != old.get("selected_id"):
+                    same = None
+                elif frozen is not None and old is None:
+                    same["source"]["comment_sticker"] = copy.deepcopy(frozen)
+                    same["updated_at"] = now()
+                    same.setdefault("history", []).append({"status": same["status"], "at": same["updated_at"],
+                        "event": "comment_source", "note": "补存本稿确认的开头评论。"})
             if same:
                 return {"script": copy.deepcopy(same), "reused": True}
         identifier = "SCR-" + uuid4().hex[:12]

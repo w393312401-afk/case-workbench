@@ -206,3 +206,7 @@ details.structure-chip.is-bad { display: inline-block; color: var(--warm-ink); b
 .detail-empty-edit-host:empty{display:none}.detail-empty-edit-host.is-editing-inline{display:block}
 
 .history-list>.history-item>summary::before{content:"▸";color:var(--muted-soft);flex:none}.history-list>.history-item[open]>summary::before{content:"▾"}.comparison-note>summary{cursor:pointer;font-size:12px;color:var(--muted-soft)}
+/* TikTok 官方播放器：竖屏 9:16，高度跟本地视频一样随停靠位置调整。 */
+#content:has(.detail-heading) .player-wrap .tiktok-player{display:flex;justify-content:center;width:100%}
+#content:has(.detail-heading) .player-wrap .tiktok-player iframe{display:block;border:0;height:min(var(--detail-video-height,52dvh),52dvh);min-height:320px;aspect-ratio:9/16;width:auto;max-width:100%;background:var(--media-bg)}
+.video-mode-switch .video-source-toggle{flex:0 0 auto}

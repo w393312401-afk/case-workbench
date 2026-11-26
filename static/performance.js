@@ -16,6 +16,25 @@
     const key = video?.review_status?.key;
     return statusOrder.includes(key) ? {key,label:statusNames[key]} : {key:"pending",label:statusNames.pending};
   };
+  // Most pending videos never sold and barely played; reviewing them teaches little. These are the ones worth a look.
+  const worthReview = video => (video.orders || 0) > 0 || (video.views || 0) >= 10000;
+  const worthHint = "待复盘里有出单或累计播放过万的视频";
+  const statusMatches = (video, status) => status === "worth" ? reviewStatus(video).key === "pending" && worthReview(video)
+    : status === "thin" ? reviewStatus(video).key === "pending" && !worthReview(video) : reviewStatus(video).key === status;
+  // A long list opens on the videos worth reviewing, once; choosing 全部 afterwards sticks.
+  const WORTH_DEFAULT_MIN = 200;
+  function applyWorthDefault() {
+    if (perf.filters.tab !== "list" || !Array.isArray(perf.videos) || perf.videos.length <= WORTH_DEFAULT_MIN || perf.filters.status) return;
+    try {
+      if (localStorage.getItem("workbench-video-worth-default") === "1") return;
+      localStorage.setItem("workbench-video-worth-default", "1");
+    } catch { return; }
+    perf.filters.status = "worth";
+    saveFilters();
+  }
+  // CTOR from a handful of clicks swings wildly; the case library uses the same 100-click floor.
+  const CTOR_MIN_CLICKS = 100;
+  const ctorSmall = sales => typeof sales.clicks === "number" && sales.clicks < CTOR_MIN_CLICKS && sales.ctor_pct != null;
   // Sortable table columns: [header label, sort value (null sorts last), first-click direction].
   const sortColumns = {
     posted: ["发布", (v) => v.posted_at || null, "desc"],
@@ -26,13 +45,16 @@
     gmv: ["GMV", (v) => listSalesRange() ? salesOf(v).gmv : v.gmv || 0, "desc"],
     ctor: ["CTOR", (v) => salesOf(v).ctor_pct, "desc"],
     week: ["本周 GMV", (v) => v.this_week_gmv || 0, "desc"],
+    ctr: ["点击率", (v) => salesOf(v).ctr_pct, "desc"],
+    gpm: ["GPM", (v) => salesOf(v).gpm, "desc"],
+    engagement: ["互动", (v) => engagementOf(v), "desc"],
     likes: ["点赞", (v) => v.likes, "desc"],
     comments: ["评论", (v) => v.comments, "desc"],
     shares: ["转发", (v) => v.shares, "desc"],
     saves: ["收藏", (v) => v.saves, "desc"],
     reviews: ["评论库已收录", (v) => v.review_comments || 0, "desc"],
   };
-  const tabs = [["board", "数据看板"], ["list", "自制视频"], ["photos", "自制图文"], ["creators", "海外达人"]];
+  const tabs = [["board", "数据看板"], ["list", "自制视频"], ["photos", "自制图文"], ["creators", "海外达人"], ["negative", "反面素材"]];
   // The shop is the first level: every read below asks for one shop, and switching it reloads them all.
   const shopNames = { local: "本土店", cross: "跨境店" };
   const filterDefaults = { shop: "local", q: "", account: "", product: "", status: "", campaign: "", board_campaign: "", sort: "posted", dir: "desc", tab: "board", period: "all", metric: "gmv", ...window.PerfCreators.defaults };
@@ -96,12 +118,32 @@
     if (next !== location.hash) history.replaceState(null, "", next);
   }
 
-  const money = (v) => (v == null ? "—" : "$" + Math.round(v).toLocaleString("en-US"));
-  const money2 = (v) => (v == null ? "—" : "$" + v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
-  const count = (v) => (v == null ? "—" : Math.round(v).toLocaleString("en-US"));
+  // One formatter for the page: toLocaleString builds a new one on every call, and the boards format tens of thousands of numbers.
+  const usWhole = new Intl.NumberFormat("en-US");
+  const usCents = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = (v) => (v == null ? "—" : "$" + usWhole.format(Math.round(v)));
+  const money2 = (v) => (v == null ? "—" : "$" + usCents.format(v));
+  const count = (v) => (v == null ? "—" : usWhole.format(Math.round(v)));
   const pct = (v) => (v == null ? "—" : v.toFixed(2) + "%");
   const badge = (v) => {const status = reviewStatus(v);return `<span class="perf-status perf-review-${status.key}" title="${esc(statusHints[status.key])}">${esc(status.label)}</span>`;};
   const videoStatusMarkup = (v) => `<section class="perf-video-status"><h3>复盘</h3>${badge(v)}</section>`;
+  // Day rows are read only when a date or an activity narrows the figures; until then the board uses the weekly rows.
+  const needsDaily = () => { const f = perf.filters; return !!(PerfDashboard.rangeOf(f.period) || f.campaign || f.board_campaign); };
+  let dailyLoading = null;
+  function ensureDaily() {
+    if (!perf.analytics?.daily_omitted || dailyLoading) return dailyLoading;
+    const sequence = perf.loadSequence;
+    perf.analyticsLoading = true;
+    dailyLoading = api(`/api/performance/analytics?${shopQuery()}`).then(data => {
+      if (sequence === perf.loadSequence) perf.analytics = data;
+    }).catch(() => {}).finally(() => {
+      dailyLoading = null;
+      if (sequence !== perf.loadSequence) return;
+      perf.analyticsLoading = false;
+      if (pageHash().startsWith("#videos") && $("#content .perf-nav")) render();
+    });
+    return dailyLoading;
+  }
   function load(force = false) {
     if (perf.loading && !force) return perf.loading;
     if (force) Object.assign(perf, { creators: null, creatorsLoading: null, creatorsError: "", creatorsSequence: perf.creatorsSequence + 1,
@@ -111,7 +153,7 @@
     perf.requestedShop = perf.filters.shop;
     perf.analyticsLoading = true;
     perf.catalogLoading = true;
-    // Sales reads share a server lock. Finish the table's reads before giving charts that lock.
+    // Sales reads share a server lock, taken in the order the requests arrive: the table's two reads go first.
     const core = Promise.all([api(`/api/performance/summary?${query}`), api(`/api/performance/videos?${query}`)]).then(async ([summary, data]) => {
       // A plugin push can arrive while the first table read is still in flight.
       while (sequence === perf.loadSequence && publicSequence !== publicRefreshSequence) {
@@ -122,19 +164,23 @@
       perf.summary = summary;
       perf.videos = data.videos;
     });
+    // The chart rows and the direction catalog are requested right behind them instead of after the table has
+    // answered: over the public link that wait was a whole extra round trip. They are still applied after the table.
+    const analyticsRead = api(`/api/performance/analytics?${query}${needsDaily() ? "" : "&daily=0"}`).catch(() => null);
+    const catalogRead = window.CaseDirectionPicker.fetchCatalog().catch(() => null);
     const supplements = core.then(async () => {
-      // The route renders the table/toolbar in the same turn; yield before optional requests begin.
+      // The route renders the table/toolbar in the same turn; yield before the optional data is applied.
       await new Promise(resolve => setTimeout(resolve,0));
       return sequence === perf.loadSequence && pageHash().startsWith("#videos");
     });
-    const analytics = supplements.then(active => active ? api(`/api/performance/analytics?${query}`).catch(() => null) : undefined).then(data => {
+    const analytics = supplements.then(active => active ? analyticsRead : undefined).then(data => {
       if (sequence !== perf.loadSequence) return;
       if (data !== undefined) perf.analytics = data;
       perf.analyticsLoading = false;
       // The table paints before these weekly rows arrive; the sales columns for a picked date or activity switch over now.
       if (listSalesRange() && $("#perf-results") && !window.CaseDirectionPicker.hasVideoEdits?.()) {drawCampaignFilter();rerenderResults();}
     });
-    const catalog = supplements.then(active => active ? window.CaseDirectionPicker.fetchCatalog().catch(() => null) : undefined).then(data => {
+    const catalog = supplements.then(active => active ? catalogRead : undefined).then(data => {
       if (sequence !== perf.loadSequence) return;
       if (data !== undefined) perf.catalog = data;
       perf.catalogLoading = false;
@@ -171,34 +217,48 @@
     const cache = weekSalesCache, [first, last] = range;
     if (cache.analytics === analytics && cache.first === first && cache.last === last) return cache.videos;
     const videos = new Map();
-    for (const [index, , , , clicks, orders, items, gmv] of PerfDashboard.rangeRows(analytics, range).totalRows) {
-      const id = analytics.videos[index][0], row = videos.get(id) || { clicks: 0, orders: 0, items: 0, gmv: 0 };
+    for (const [index, , views, , clicks, orders, items, gmv] of PerfDashboard.rangeRows(analytics, range).totalRows) {
+      const id = analytics.videos[index][0], row = videos.get(id) || { views: 0, clicks: 0, orders: 0, items: 0, gmv: 0 };
+      row.views += views;
       row.clicks += clicks;
       row.orders += orders;
       row.items += items;
       row.gmv += gmv;
       videos.set(id, row);
     }
-    for (const row of videos.values()) row.ctor_pct = row.clicks ? Math.round(row.orders * 10000 / row.clicks) / 100 : null;
+    for (const row of videos.values()) {
+      row.ctor_pct = row.clicks ? Math.round(row.orders * 10000 / row.clicks) / 100 : null;
+      row.ctr_pct = row.views ? Math.round(row.clicks * 10000 / row.views) / 100 : null;
+      row.gpm = row.views ? Math.round(row.gmv * 100000 / row.views) / 100 : null;
+    }
     weekSalesCache = { analytics, first, last, videos };
     return videos;
   }
-  const noWeekSales = { items: null, gmv: null, ctor_pct: null };
+  const noWeekSales = { items: null, gmv: null, ctor_pct: null, ctr_pct: null, gpm: null };
+  const engagementParts = (v) => [["点赞", v.likes], ["评论", v.comments], ["转发", v.shares], ["收藏", v.saves]];
+  const engagementOf = (v) => { const known = engagementParts(v).filter(([, n]) => typeof n === "number"); return known.length ? known.reduce((sum, [, n]) => sum + n, 0) : null; };
   const salesOf = (v) => listSalesRange() ? weekSales()?.get(v.video_id) || noWeekSales : v;
-  const weekSalesLabels = { items: "售出", gmv: " GMV", ctor: " CTOR" };
+  const weekSalesLabels = { items: "售出", gmv: " GMV", ctor: " CTOR", ctr: "点击率", gpm: " GPM" };
   const weekSalesLabel = (key) => listSalesRange() && weekSalesLabels[key] ? `${perf.filters.campaign ? "活动期" : "所选日期"}${weekSalesLabels[key]}` : sortColumns[key][0];
   function weekSalesNote() {
     const range = listSalesRange();
     if (!range) return "";
     if (perf.analytics) {
       const selected = PerfDashboard.rangeRows(perf.analytics, range), missing = selected.missing;
-      return `售出、GMV、CTOR 按 ${range.join(" 至 ")} 统计，不包含范围外日期；${selected.exact ? "使用完整区间报表，不与日报或周报相加。" : missing.length ? `数据不全，缺少 ${PerfDashboard.missingDates(missing)} 的逐日报表，仅显示已覆盖日期。` : "鼠标悬停可看累计值。"}${selected.invalidReport && !selected.exact ? "匹配的区间报表缺少必要指标，未用于汇总。" : ""}`;
+      return `点击率、CTOR、GPM、售出、GMV 按 ${range.join(" 至 ")} 统计，不包含范围外日期；${selected.exact ? "使用完整区间报表，不与日报或周报相加。" : missing.length ? `数据不全，缺少 ${PerfDashboard.missingDates(missing)} 的逐日报表，仅显示已覆盖日期。` : "鼠标悬停可看累计值。"}${selected.invalidReport && !selected.exact ? "匹配的区间报表缺少必要指标，未用于汇总。" : ""}`;
     }
-    return perf.analyticsLoading ? "所选日期数字读取中，售出、GMV、CTOR 暂不显示。" : "所选日期数字暂时读不到，售出、GMV、CTOR 暂不显示。";
+    return perf.analyticsLoading ? "所选日期数字读取中，点击率、CTOR、GPM、售出、GMV 暂不显示。" : "所选日期数字暂时读不到，点击率、CTOR、GPM、售出、GMV 暂不显示。";
   }
   function salesCells(v) {
-    const sales = salesOf(v), title = (text) => sales === v ? "" : ` title="${esc(text)}"`;
-    return `<td class="num"${title(`累计售出 ${count(v.items)}`)}>${count(sales.items)}</td><td class="num"${title(`累计 GMV ${money(v.gmv)}`)}>${(listSalesRange() ? money2 : money)(sales.gmv)}</td><td class="num"${title(`累计 CTOR ${pct(v.ctor_pct)}`)}>${pct(sales.ctor_pct)}</td>`;
+    const sales = salesOf(v), cumulative = (text) => sales === v ? "" : `累计${text}`;
+    const cell = (value, note = "", cls = "num") => `<td class="${cls}"${note ? ` title="${esc(note)}"` : ""}>${value}</td>`;
+    const small = ctorSmall(sales);
+    const ctorNote = [small ? `商品点击 ${count(sales.clicks)} 次，不足 ${CTOR_MIN_CLICKS} 次，CTOR 波动大，仅供参考` : "", cumulative(` CTOR ${pct(v.ctor_pct)}`)].filter(Boolean).join("；");
+    return cell(pct(sales.ctr_pct), cumulative(`点击率 ${pct(v.ctr_pct)}`))
+      + cell(`${pct(sales.ctor_pct)}${small ? "<small>样本小</small>" : ""}`, ctorNote, small ? "num perf-small-sample" : "num")
+      + cell(money2(sales.gpm), cumulative(` GPM ${money2(v.gpm)}`))
+      + cell(count(sales.items), cumulative(`售出 ${count(v.items)}`))
+      + cell((listSalesRange() ? money2 : money)(sales.gmv), cumulative(` GMV ${money(v.gmv)}`));
   }
   const resultCount = (rows) => {
     if (campaignPending()) return perf.campaignsError ? "活动读取失败" : "正在读取活动…";
@@ -218,7 +278,7 @@
       (!campaignId || (campaign && v.posted_on && v.window_end && v.posted_on <= campaign.end && v.window_end >= campaign.start)) &&
       PerfDashboard.accountMatches(f.account, v.account) &&
       (ignoreProduct || productMatches(v.product)) &&
-      (ignoreStatus || !f.status || reviewStatus(v).key === f.status) &&
+      (ignoreStatus || !f.status || statusMatches(v, f.status)) &&
       (!q || `${v.title} ${v.video_id}`.toLowerCase().includes(q)) &&
       (!emptyRow(v) || (q && v.video_id.includes(q)) || !++hidden));
     if (!ignoreStatus && !ignoreProduct) perf.hiddenEmpty = hidden;
@@ -227,6 +287,8 @@
     return rows.sort((a, b) => {
       const x = key(a), y = key(b);
       if (x == null || y == null) return x == null && y == null ? 0 : x == null ? 1 : -1;
+      // A CTOR from too few clicks ranks after every CTOR with enough clicks, in either direction.
+      if (f.sort === "ctor") { const tier = ctorSmall(salesOf(a)) - ctorSmall(salesOf(b)); if (tier) return tier; }
       return x > y ? sign : x < y ? -sign : (b.posted_at || "").localeCompare(a.posted_at || "");
     });
   }
@@ -241,22 +303,29 @@
     if (campaignPending()) return "";
     // Manual reference values first, followed by reviewed-but-unclassified and pending reviews.
     const tally = statusOrder.map((k) => [k, rows.filter((v) => reviewStatus(v).key === k).length]);
-    const total = rows.length, active = perf.filters.status;
+    const total = rows.length, active = perf.filters.status, worth = rows.filter((v) => statusMatches(v, "worth")).length;
+    const thin = rows.filter((v) => statusMatches(v, "thin")).length;
+    const activeName = active === "worth" ? "值得复盘" : active === "thin" ? "数据太少" : statusNames[active];
     const share = (n) => (total ? `${Math.round((n / total) * 100)}%` : "—");
-    const segments = tally.filter(([, n]) => n).map(([k, n]) => `<button type="button" class="perf-seg perf-review-swatch-${k}${active && active !== k ? " is-muted" : ""}" data-status-filter="${k}" data-count="${n}" title="${esc(statusNames[k])} ${n} 条（${share(n)}）：${esc(statusHints[k])}" aria-label="只看${esc(statusNames[k])}，${n} 条"></button>`).join("");
-    const legend = tally.map(([k, n]) => `<button type="button" class="perf-legend-item${active === k ? " is-active" : ""}${active && active !== k ? " is-muted" : ""}" data-status-filter="${k}" aria-pressed="${active === k}" title="${esc(statusHints[k])}"><i class="perf-swatch perf-review-swatch-${k}"></i><span>${esc(statusNames[k])}</span><strong>${n}</strong><small>${share(n)}</small></button>`).join("");
+    const legendItem = (k, n, name, hint, swatch = k) => `<button type="button" class="perf-legend-item${active === k ? " is-active" : ""}${active && active !== k ? " is-muted" : ""}" data-status-filter="${k}" aria-pressed="${active === k}" title="${esc(hint)}"><i class="perf-swatch perf-review-swatch-${swatch}"></i><span>${esc(name)}</span><strong>${n}</strong><small>${share(n)}</small></button>`;
+    // 值得复盘 is the part of 待复盘 that sold or played well; it sits right after 待复盘 as the place to start.
+    // 值得复盘 leads: it is where reviewing starts. Then every status, each a filter of its own.
+    const legend = (worth ? legendItem("worth", worth, "值得复盘", worthHint + "，先复盘这些") : "")
+      + (thin ? legendItem("thin", thin, "数据太少", "待复盘里没出单、累计播放不到一万的视频，复盘能学到的不多", "pending") : "")
+      + tally.map(([k, n]) => legendItem(k, n, statusNames[k], statusHints[k])).join("");
+    const classified = tally.filter(([k]) => ["high", "medium", "weak", "none"].includes(k)).reduce((sum, [, n]) => sum + n, 0);
     const matches = filtered(), batch = batchCandidates(matches).length;
     const draftCount = pendingDraftBatch?.videos.length ?? draftBatchCandidates(matches).length;
-    const draftLabel = draftBatchSubmitting ? '正在提交起草' : pendingDraftBatch ? '重试上一批起草' : 'AI 批量起草';
+    const draftLabel = draftBatchSubmitting ? '正在提交起草' : pendingDraftBatch ? '重试上一批起草' : perf.filters.status === "worth" ? 'AI 起草下 10 条值得复盘的' : 'AI 批量起草';
     const draftHint = pendingDraftBatch ? `继续处理上一批 ${draftCount} 条视频，保留原来的视频范围。`
-      : '按当前筛选和排序，起草前 10 条符合条件的待复盘视频；已有完成稿或正在起草的视频自动跳过。';
+      : '按当前筛选和排序，起草前 10 条符合条件的待复盘视频；先点「其中值得复盘」就只从有出单或累计播放过万的视频里挑。已有完成稿或正在起草的视频自动跳过。';
     const draftNote = pendingDraftBatch && !draftBatchSubmitting
       ? `上一批（${shopNames[pendingDraftBatch.shop]} · ${draftCount} 条）结果尚未确认，重试将继续处理原来的视频。`
       : !pendingDraftBatch && matches.some(video => video.review_draft?.unavailable === true)
         ? '起草任务状态暂时无法读取，批量起草暂不可用；请稍后刷新。' : '';
-    return `<section class="section-card perf-status-card"><div class="perf-card-head"><h2>参考价值</h2><span>当前筛选 ${total} 条视频${active ? ` · 表格只显示「${esc(statusNames[active])}」，再点一次取消` : " · 点击状态筛选表格"}</span><button type="button" class="secondary compact" data-batch-draft title="${esc(draftHint)}"${draftBatchSubmitting || !draftCount ? ' disabled' : ''}>${draftLabel} · ${draftCount} 条</button>${batch ? `<button type="button" class="secondary compact perf-batch-collect" data-batch-collect title="当前筛选里还没收为案例、订单最多的 ${batch} 条视频，保存后自动下载原视频并拆解">批量收为案例 · ${batch} 条</button>` : ""}</div>
+    return `<section class="section-card perf-status-card"><div class="perf-card-head"><h2>复盘进度</h2><span>当前筛选 ${total} 条视频 · 已分类 ${classified} 条${active ? ` · 表格只显示「${esc(activeName)}」，再点一次取消` : ""}</span><button type="button" class="secondary compact" data-batch-draft title="${esc(draftHint)}"${draftBatchSubmitting || !draftCount ? ' disabled' : ''}>${draftLabel} · ${draftCount} 条</button>${batch ? `<button type="button" class="secondary compact perf-batch-collect" data-batch-collect title="当前筛选里还没收为案例、订单最多的 ${batch} 条视频，保存后自动下载原视频并拆解">批量收为案例 · ${batch} 条</button>` : ""}</div>
       ${draftNote ? `<p class="context-note" role="status" data-batch-draft-note>${esc(draftNote)}</p>` : ''}
-      ${total ? `<div class="perf-status-bar" role="group" aria-label="参考价值分布">${segments}</div>` : ""}<div class="perf-status-legend">${legend}</div></section>`;
+      <div class="perf-status-legend" role="group" aria-label="按复盘状态筛选">${legend}</div></section>`;
   }
 
   function draftBatchCandidates(rows) {
@@ -350,11 +419,11 @@
       const active = perf.filters.sort === key, asc = perf.filters.dir === "asc", label = weekSalesLabel(key);
       return `<th class="${cls}" aria-sort="${active ? (asc ? "ascending" : "descending") : "none"}"><button type="button" class="perf-sort${active ? " is-active" : ""}" data-sort="${key}" title="按${esc(label)}排序">${esc(label)}<span class="perf-sort-arrow" aria-hidden="true">${active ? (asc ? "↑" : "↓") : "↕"}</span></button></th>`;
     };
-    return `<div class="perf-table-wrap"><table class="perf-table perf-video-table"><thead><tr>${th("posted", "perf-col-video")}<th>测试方向</th>${th("status")}${th("window", "num")}${th("views", "num")}${th("items", "num")}${th("gmv", "num")}${th("ctor", "num")}${th("likes", "num")}${th("comments", "num")}${th("shares", "num")}${th("saves", "num")}</tr></thead><tbody>${visible.map((v) => `<tr data-video-row="${esc(v.video_id)}" tabindex="0" aria-label="查看 ${esc(v.headline || v.video_id)} 的详情"${perf.openVideo === v.video_id ? ' class="is-open"' : ""}>
-      <td class="perf-title" title="${esc(v.title || "")}"><strong>${esc(v.headline || v.video_id)}</strong><small>${esc(v.account || "账号未记录")} · ${esc(v.posted_on || "—")}${v.case_id ? " · 已收为案例" : ""}${v.review_comments ? ` · 评论库已收录 ${count(v.review_comments)} 条` : ""}</small></td>
-      ${window.CaseDirectionPicker.videoCell(v, perf.catalog)}<td>${badge(v)}</td><td class="num">${v.window_views == null ? "—" : count(v.window_views)}</td>
-      <td class="num">${count(v.views)}</td>${salesCells(v)}
-      ${['likes','comments','shares','saves'].map(field => `<td class="num" data-stat="${field}" title="${v.public_stats ? 'TK 看板插件最新推送' : '销售数据表'}">${count(v[field])}</td>`).join('')}
+    return `<div class="perf-table-wrap"><table class="perf-table perf-video-table"><thead><tr>${th("posted", "perf-col-video")}<th>测试方向</th>${th("views", "num")}${th("ctr", "num")}${th("ctor", "num")}${th("gpm", "num")}${th("items", "num")}${th("gmv", "num")}${th("engagement", "num")}</tr></thead><tbody>${visible.map((v) => `<tr data-video-row="${esc(v.video_id)}" tabindex="0" aria-label="查看 ${esc(v.headline || v.video_id)} 的详情"${perf.openVideo === v.video_id ? ' class="is-open"' : ""}>
+      <td class="perf-title" title="${esc(v.title || "")}"><strong>${esc(v.headline || v.video_id)}</strong><small>${badge(v)} ${esc(v.account || "账号未记录")} · ${esc(v.posted_on || "—")}${v.product ? ` · ${esc(v.product)}` : ""}${v.case_id ? " · 已收为案例" : ""}${v.review_comments ? ` · 评论库已收录 ${count(v.review_comments)} 条` : ""}</small></td>
+      ${window.CaseDirectionPicker.videoCell(v, perf.catalog)}
+      <td class="num"${v.window_views == null ? "" : ` title="首两周播放 ${count(v.window_views)}"`}>${count(v.views)}</td>${salesCells(v)}
+      <td class="num" data-stat="engagement" title="${esc(engagementParts(v).map(([label, n]) => `${label} ${count(n)}`).join(" · ") + `（${v.public_stats ? "TK 看板插件最新推送" : "销售数据表"}）`)}">${count(engagementOf(v))}</td>
     </tr>`).join("")}</tbody></table></div>${rows.length > visible.length ? `<button type="button" class="secondary perf-more" id="perf-more">再显示 ${Math.min(200, rows.length - visible.length)} 条（共 ${rows.length} 条）</button>` : ""}`;
   }
 
@@ -791,32 +860,38 @@
 
   function render() {
     cancelSearch();
+    applyWorthDefault();
+    if (needsDaily() && perf.analytics?.daily_omitted) void ensureDaily();
     perf.filters.product = currentProduct();
     normalizeCampaignFilter();
     syncFilterURL(Boolean(perf.pendingVideo || perf.openVideo));
-    const s = perf.summary, f = perf.filters, board = f.tab === "board", creators = f.tab === "creators", photos = f.tab === "photos";
-    const rows = board || creators || photos ? [] : filtered();
+    const s = perf.summary, f = perf.filters, board = f.tab === "board", creators = f.tab === "creators", photos = f.tab === "photos", negative = f.tab === "negative";
+    const rows = board || creators || photos || negative ? [] : filtered();
     const shop = shopNames[f.shop], info = (s.shops || []).find((item) => item.id === f.shop);
     // A shop whose folder has no exports yet shows how to fill it, instead of empty charts.
     const bare = info && !info.files;
     const accounts = [...new Set([...perf.videos.map((v) => v.account).filter(Boolean), ...f.account.split(",").filter(Boolean)])].sort();
     const gaps = s.coverage.gaps.map(([a, b]) => (a === b ? a : `${a} 至 ${b}`)).join("、");
-    $("#breadcrumb").innerHTML = "带货数据";
-    $("#content").innerHTML = `<div class="page-heading perf-heading"><div><h1>带货数据</h1><p>${esc(shop)}：${s.coverage.first ? `视频导出覆盖 ${s.coverage.first} 至 ${s.coverage.last}${gaps ? `，缺 ${gaps}` : ""}。` : "还没有导入后台数据。"}参考价值以人工复盘分类为准。</p></div>
-      <div class="perf-actions"><button type="button" class="secondary" id="perf-sync" title="读取数据文件夹里所有店铺的新导出">${icon("refresh")}同步数据</button><button type="button" class="secondary" id="perf-upload" title="选的表格会算作${esc(shop)}的数据">${icon("plus")}导入表格</button><details class="perf-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" id="perf-copy">复制复盘材料</button></div></details><input type="file" id="perf-file" accept=".xlsx" multiple hidden></div></div>
-      ${shopBar(s)}
-      <details class="perf-about"><summary>数据来源与口径</summary><p>数据文件夹：${s.sources.length ? s.sources.map((p) => `<code>${esc(p)}</code>`).join("、") : "未设置"} · 已导入 ${s.imports.files} 个文件${s.imports.last ? `，最近一次 ${esc(s.imports.last.replace("T", " "))}` : ""}。</p><p>数据文件夹里按「店铺 / 内容类型（视频、销售、图文、达人）」分开放：放在「跨境店」文件夹里的算跨境店，其余算本土店。图文是另一份按商品汇总的导出，在「自制图文」标签单独看。</p><p>视频指标是后台导出里逐条视频的归因数据加总；店铺每日汇总来自另一份导出，口径更大，单独展示不与自制视频相加。点击率 = 商品点击 ÷ 播放，CTOR = 订单 ÷ 商品点击，GPM = 每千次播放的归因 GMV。${gaps ? `导出缺口：${esc(gaps)}，缺口所在周在走势里以短横表示。` : ""}</p></details>
-      <div id="perf-import-result" role="status"></div>
-      <div class="perf-tabs" role="tablist" aria-label="带货数据视图">${tabs.map(([k, label]) => `<button type="button" role="tab" id="perf-tab-${k}" data-perf-tab="${k}" aria-selected="${k === f.tab}" class="${k === f.tab ? "is-active" : ""}">${label}</button>`).join("")}</div>
-      <div class="toolbar perf-toolbar"${bare ? " hidden" : ""}>${PerfDatePicker.trigger(f.period, perf.summary)}${creators ? PerfCreators.toolbar(perf.creators, f) : board || photos ? ""
+    const stale = staleDays(info);
+    // One row says where you are: shop, view and, except on the video list (its search needs the width), the filters.
+    const about = `<details class="perf-about"><summary>数据来源与口径</summary><p>数据文件夹：${s.sources.length ? s.sources.map((p) => `<code>${esc(p)}</code>`).join("、") : "未设置"} · 已导入 ${s.imports.files} 个文件${s.imports.last ? `，最近一次 ${esc(s.imports.last.replace("T", " "))}` : ""}。</p><p>数据文件夹里按「店铺 / 内容类型（视频、销售、图文、达人）」分开放：放在「跨境店」文件夹里的算跨境店，其余算本土店。图文是另一份按商品汇总的导出，在「自制图文」标签单独看。</p><p>视频指标是后台导出里逐条视频的归因数据加总；店铺每日汇总来自另一份导出，口径更大，单独展示不与自制视频相加。点击率 = 商品点击 ÷ 播放，CTOR = 订单 ÷ 商品点击，GPM = 每千次播放的归因 GMV。${gaps ? `导出缺口：${esc(gaps)}，缺口所在周在走势里以短横表示。` : ""}</p></details>`;
+    const toolbar = `<div class="toolbar perf-toolbar"${bare || negative ? " hidden" : ""}><div class="perf-period-group">${PerfDatePicker.trigger(f.period, perf.summary, { campaign: campaignName() })}${!bare && window.Campaigns ? '<div class="perf-campaign-filter" id="perf-campaign-filter"></div>' : ""}</div>${creators ? PerfCreators.toolbar(perf.creators, f) : board || photos ? ""
         : `<label class="search">${icon("search")}<input id="perf-q" aria-label="搜索视频标题或 ID" placeholder="搜索标题或视频 ID…" value="${esc(f.q)}"></label>`}
         ${creators || photos ? "" : `<select id="perf-account" aria-label="账号" multiple size="1" data-multi-filter>${options(accounts, f.account, "全部账号")}</select>`}
         <button type="button" class="subtle perf-reset" id="perf-reset" hidden>清除筛选</button>
-        ${board || creators || photos ? "" : `<span class="result-count">${resultCount(rows)}</span><button type="button" class="secondary compact" id="perf-export" title="把当前筛选的视频导出为 Excel：后台累计播放与公开页播放并排，售出和 GMV 是累计值，原导出表不改">导出 Excel</button>`}</div>
-      ${!bare && window.Campaigns ? '<div class="perf-campaign-filter" id="perf-campaign-filter"></div>' : ""}
+        ${board || creators || photos ? "" : `<span class="result-count">${resultCount(rows)}</span><button type="button" class="secondary compact" id="perf-export" title="把当前筛选的视频导出为 Excel：后台累计播放与公开页播放并排，售出和 GMV 是累计值，原导出表不改">导出 Excel</button>`}</div>`;
+    $("#breadcrumb").innerHTML = "带货数据";
+    $("#content").innerHTML = `<div class="page-heading perf-heading"><div><h1>带货数据</h1><p>${esc(shop)}：${s.coverage.first ? `视频导出覆盖 ${s.coverage.first} 至 ${s.coverage.last}${gaps ? `，缺 ${gaps}` : ""}。` : "还没有导入后台数据。"}参考价值以人工复盘分类为准。</p>${stale ? `<div class="perf-stale" role="status"><span>数据停在 ${esc(info.last)} · ${stale} 天没有新导出</span>周走势里的最后一周是 ${esc(info.last)} 所在的那周，不是本周。</div>` : ""}</div>
+      <div class="perf-actions"><button type="button" class="${stale ? "primary" : "secondary"}" id="perf-sync" title="读取数据文件夹里所有店铺的新导出">${icon("refresh")}同步数据</button><button type="button" class="secondary" id="perf-upload" title="选的表格会算作${esc(shop)}的数据">${icon("plus")}导入表格</button><details class="perf-menu"><summary class="icon-button" aria-label="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg></summary><div role="menu"><button type="button" role="menuitem" id="perf-copy">复制复盘材料</button></div></details><input type="file" id="perf-file" accept=".xlsx" multiple hidden></div></div>
+      ${about}
+      <div id="perf-import-result" role="status"></div>
+      <div class="perf-nav">${shopBar(s)}<div class="perf-tabs" role="tablist" aria-label="带货数据视图">${tabs.map(([k, label]) => `<button type="button" role="tab" id="perf-tab-${k}" data-perf-tab="${k}" aria-selected="${k === f.tab}" class="${k === f.tab ? "is-active" : ""}">${label}</button>`).join("")}</div>${f.tab === "list" ? "" : toolbar}</div>
+      ${f.tab === "list" ? toolbar : ""}
+      ${!bare && !negative && window.Campaigns ? '<div class="perf-campaign-note" id="perf-campaign-note"></div>' : ""}
       ${bare ? `<div class="empty">${icon("chart")}<h3>${esc(shop)}还没有数据</h3><p>把${esc(shop)}的后台导出放进数据文件夹里的「${esc(shop)}」子文件夹（视频、销售、图文、达人分开放），再点「同步数据」；也可以直接点「导入表格」。</p></div>`
         : creators ? `<div id="perf-creators" class="perf-board" role="tabpanel" aria-labelledby="perf-tab-creators">${creatorsMarkup()}</div>`
         : photos ? `<div id="perf-photos" class="perf-board" role="tabpanel" aria-labelledby="perf-tab-photos">${photosMarkup()}</div>`
+        : negative ? '<div id="perf-negative" class="perf-board" role="tabpanel" aria-labelledby="perf-tab-negative"></div>'
         : board ? `<div id="perf-board" class="perf-board" role="tabpanel" aria-labelledby="perf-tab-board">${boardMarkup()}</div>`
         : `<div id="perf-status-slot">${statusMarkup(filtered(true))}</div><div id="perf-results" role="tabpanel" aria-labelledby="perf-tab-list">${tableMarkup(rows)}</div>`}
       <dialog id="perf-video-drawer" class="rev-drawer perf-video-drawer" aria-labelledby="perf-video-title"></dialog>`;
@@ -827,9 +902,23 @@
     if (!bare) ensureCampaigns();
     if (creators && !bare) ensureCreators();
     if (photos && !bare) ensurePhotos();
+    if (negative && !bare) PerfNegative.mount($("#perf-negative"), f.shop, productMatches);
     if (board && !bare && perf.analytics && !perf.analyticsLoading) ensureBoardExtras();
   }
 
+  // The picked activity's name, for the period button.
+  function campaignName() {
+    const f = perf.filters, id = f.tab === "list" ? f.campaign : f.board_campaign;
+    return id ? window.Campaigns?.current()?.campaigns.find(row => row.id === id)?.name || "" : "";
+  }
+  // Days between a shop's last exported day and today (Pacific, the exports' calendar). More than a week counts as
+  // stale: the newest week on the charts is then not this week, and the page says so.
+  const pacificDay = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" });
+  function staleDays(info) {
+    if (!info?.files || !/^\d{4}-\d{2}-\d{2}$/.test(info.last || "")) return 0;
+    const days = Math.round((new Date(pacificDay.format(new Date()) + "T00:00:00Z") - new Date(info.last + "T00:00:00Z")) / 86400000);
+    return days > 7 ? days : 0;
+  }
   // The first level of the page: one button per shop, each saying how far its exports reach.
   function shopBar(s) {
     const current = perf.filters.shop;
@@ -966,7 +1055,10 @@
       list: `观察窗与活动期有重叠的视频会计入，含起止日期。${weekSalesNote()}`,
     }[perf.filters.tab];
     const dateNote = campaign ? "" : weekSalesNote();
-    root.innerHTML = `<label for="perf-campaign">活动期</label><select id="perf-campaign" aria-label="活动期快速筛选" ${!data ? "disabled" : ""}><option value="">${data ? "全部活动期" : perf.campaignsError ? "活动读取失败" : "正在读取活动…"}</option>${rows.map(row => `<option value="${esc(row.id)}" ${row.id === selected ? "selected" : ""}>${esc(row.name)} · ${esc(row.start)} 至 ${esc(row.end)}${window.Campaigns.phase(row) === "next" ? " · 未开始" : ""}</option>`).join("")}</select>${perf.campaignsError ? '<span role="status">活动日历暂时无法读取。</span><button type="button" class="subtle compact" data-perf-campaign-retry>重试</button>' : data && !rows.length ? '<span>还没有登记活动。</span>' : ""}${campaign ? `<p id="perf-campaign-hint">${esc(campaign.name)} · ${esc(campaign.start)} 至 ${esc(campaign.end)}（太平洋时间）${campaign.verified ? " · 已核对" : ["planning","disputed"].includes(campaign.confidence) ? " · 日期待核对" : ""}。${basis}</p>` : dateNote ? `<p id="perf-date-note">${esc(dateNote)}</p>` : ""}`;
+    const md = (day) => `${Number(day.slice(5, 7))}/${Number(day.slice(8, 10))}`;
+    root.innerHTML = `<select id="perf-campaign" aria-label="活动期快速筛选" ${!data ? "disabled" : ""}><option value="">${data ? "全部活动期" : perf.campaignsError ? "活动读取失败" : "正在读取活动…"}</option>${rows.map(row => `<option value="${esc(row.id)}" ${row.id === selected ? "selected" : ""}>${esc(row.name)} · ${md(row.start)}–${md(row.end)}${window.Campaigns.phase(row) === "next" ? " · 未开始" : ""}</option>`).join("")}</select>${perf.campaignsError ? '<span role="status">活动日历暂时无法读取。</span><button type="button" class="subtle compact" data-perf-campaign-retry>重试</button>' : data && !rows.length ? '<span>还没有登记活动。</span>' : ""}`;
+    const note = $("#perf-campaign-note");
+    if (note) note.innerHTML = campaign ? `<p id="perf-campaign-hint">${esc(campaign.name)} · ${esc(campaign.start)} 至 ${esc(campaign.end)}（太平洋时间）${campaign.verified ? " · 已核对" : ["planning","disputed"].includes(campaign.confidence) ? " · 日期待核对" : ""}。${basis}</p>` : dateNote ? `<p id="perf-date-note">${esc(dateNote)}</p>` : "";
     $("#perf-campaign").onchange = event => {
       window.Campaigns.select(event.target.value);
       normalizeCampaignFilter();
@@ -1022,10 +1114,25 @@
   // The campaign calendar reads this page's loaded sales data to size a campaign for one product.
   const campaignContext = () => perf.analytics && perf.summary && perf.videos
     ? {analytics: perf.analytics, weeks: perf.summary.weeks, videos: perf.videos, product: currentProduct(), matches: productMatches} : null;
+  // The editable calendar folds into one line that names the live and the next activity, so the figures lead the
+  // first screen; the top bar's runway opens it when it sends someone here.
+  function calendarFold() {
+    const card = window.Campaigns?.card() || "";
+    if (!card) return "";
+    const data = window.Campaigns.current(), rows = data?.campaigns || [];
+    const md = (day) => `${Number(day.slice(5, 7))}/${Number(day.slice(8, 10))}`;
+    const live = rows.find((row) => window.Campaigns.phase(row) === "live");
+    const next = rows.filter((row) => window.Campaigns.phase(row) === "next").sort((a, b) => a.start.localeCompare(b.start))[0];
+    const line = !data ? "正在读取…" : [
+      live ? `进行中：${live.name} ${md(live.start)}–${md(live.end)}` : "",
+      next ? `下一个：${next.name} ${md(next.start)} 起` : "",
+    ].filter(Boolean).join(" · ") || "没有进行中或即将开始的活动";
+    return `<details class="perf-fold section-card perf-calendar-fold"${perf.calendarOpen ? " open" : ""}><summary><span>平台活动日历</span><small>${esc(line)}</small></summary><div class="perf-fold-body">${card}</div></details>`;
+  }
   function boardMarkup() {
     if (periodCampaignPending()) return campaignLoadingMarkup();
     if (perf.analyticsLoading) return '<p class="context-note" role="status">正在读取看板数据…</p>';
-    const calendar = window.Campaigns?.card() || "", dashboard = PerfDashboard.board(boardContext());
+    const calendar = calendarFold(), dashboard = PerfDashboard.board(boardContext());
     // Once an activity is picked, its figures lead; the editable calendar remains available below them.
     return perf.filters.board_campaign ? dashboard + calendar : calendar + dashboard;
   }
@@ -1038,6 +1145,7 @@
     }
     if (perf.filters.tab === "creators") rerenderCreators();
     else if (perf.filters.tab === "photos") rerenderPhotos();
+    else if (perf.filters.tab === "negative") { if ($("#perf-negative")) PerfNegative.mount($("#perf-negative"), perf.filters.shop, productMatches); }
     else if (perf.filters.tab === "board") {
       const board = $("#perf-board");
       if (!board) return;
@@ -1064,6 +1172,7 @@
     $$("#perf-board [data-perf-metric]").forEach((button) => (button.onclick = () => { perf.filters.metric = button.dataset.perfMetric; saveFilters(); refresh(); }));
     $$("#perf-board [data-perf-video]").forEach((button) => (button.onclick = () => openVideo(button.dataset.perfVideo)));
     if (window.Campaigns && $("#perf-board")) window.Campaigns.bind($("#perf-board"), refresh);
+    $("#perf-board .perf-calendar-fold")?.addEventListener("toggle", (event) => { perf.calendarOpen = event.currentTarget.open; });
   }
 
   // Controls that narrow the table are outlined, and one button puts everything back.
@@ -1071,7 +1180,7 @@
     const f = perf.filters, q = f.q.trim(), board = f.tab === "board", creators = f.tab === "creators", photos = f.tab === "photos";
     const set = (selector, on) => $(selector)?.classList.toggle("is-set", on);
     set("#perf-cshow", f.cshow !== "sold");
-    PerfDatePicker.sync(f.period, perf.summary);
+    PerfDatePicker.sync(f.period, perf.summary, { campaign: campaignName() });
     set("#perf-account", !!f.account);
     set("#perf-campaign", !!(f.tab !== "list" ? f.board_campaign : f.campaign));
     if ($("#perf-export")) $("#perf-export").disabled = Boolean(campaignPending());
@@ -1129,8 +1238,6 @@
     }));
     const more = $("#perf-more");
     if (more) more.onclick = () => { perf.shown += 200; rerenderResults(); };
-    // The page CSP blocks inline style attributes; segment sizes go through the CSSOM.
-    $$(".perf-seg[data-count]").forEach((segment) => (segment.style.flexGrow = segment.dataset.count));
     const batchButton = $("[data-batch-collect]");
     if (batchButton) batchButton.onclick = () => void batchCollect(batchButton);
     const draftButton = $("[data-batch-draft]");
@@ -1157,7 +1264,13 @@
         rerenderResults();
       }, 150);
     });
-    PerfDatePicker.bind({ period: () => perf.filters.period, summary: () => perf.summary, choose: (value) => {
+    PerfDatePicker.bind({ period: () => perf.filters.period, summary: () => perf.summary,
+      // The activity list in the picker drives the same dropdown, so both paths share one selection.
+      campaigns: () => (window.Campaigns?.current()?.campaigns || []).map(row => ({ id: row.id, name: row.name, start: row.start, end: row.end,
+        selected: row.id === (perf.filters.tab === "list" ? perf.filters.campaign : perf.filters.board_campaign), upcoming: window.Campaigns.phase(row) === "next" }))
+        .sort((a, b) => b.start.localeCompare(a.start)),
+      chooseCampaign: (id) => { const select = $("#perf-campaign"); if (!select) return; select.value = id; select.dispatchEvent(new Event("change", { bubbles: true })); },
+      choose: (value) => {
       const f = perf.filters;
       f.period = value;
       window.Campaigns?.select?.("");
@@ -1219,7 +1332,7 @@
       bindBoardLinks();
     } else if (perf.filters.tab === "creators") bindCreators();
     else if (perf.filters.tab === "photos") { if ($("#perf-photos")) PerfDashboard.bind($("#perf-photos")); }
-    else bindResults();
+    else if (perf.filters.tab !== "negative") bindResults();
   }
 
   async function uploadExports(files) {
@@ -1244,6 +1357,8 @@
     box.textContent = "正在导入…";
     try {
       const result = await action();
+      // The 反面素材 tab reads the same sales rows; it reloads when next drawn.
+      PerfNegative.reload();
       await load(true);
       if (pageHash() !== hash) return;
       render();
